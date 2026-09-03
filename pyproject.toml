@@ -12,6 +12,10 @@ dependencies = []
 [project.optional-dependencies]
 test = ["pytest>=8"]
 detectors = ["transformers"]
+# Only needed to run mcp/server.py (the stdio MCP wrapper, Task 13). Not a
+# hard dependency of the daemon, the hook client, or any pure privacy_hud
+# module -- see mcp/server.py's own docstring for the tradeoff.
+mcp = ["mcp"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
