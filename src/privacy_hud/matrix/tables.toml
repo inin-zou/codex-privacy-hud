@@ -1,0 +1,71 @@
+version = "1"
+budget_cap = 120.0
+
+# data_type -> severity weight
+[severity]
+credential = 40.0
+financial  = 12.0
+health     = 12.0
+email      = 6.0
+phone      = 6.0
+person     = 6.0
+address    = 6.0
+ssn        = 6.0
+account    = 6.0
+url        = 2.0
+date       = 2.0
+hostname   = 2.0
+path       = 2.0
+ip         = 2.0
+repo       = 2.0
+
+# trust boundary -> disclosure multiplier
+[boundary_multiplier]
+B0 = 0.0
+B1 = 1.0
+B2 = 0.3
+B3 = 1.5
+B4 = 2.0
+
+# destination kind -> boundary
+[destination_boundary]
+local          = "B0"
+model_context  = "B1"
+subagent       = "B2"
+mcp_tool       = "B3"
+external_net   = "B4"
+
+# "<hook_event>/<direction>" -> event kind
+[taxonomy]
+"UserPromptSubmit/ingress" = "exposed"
+"PostToolUse/ingress"      = "exposed"
+"SubagentStart/propagate"  = "exposed"
+"PreToolUse/egress"        = "exposed"
+"PreToolUse/blocked"       = "prevented"
+"PreToolUse/rewritten"     = "prevented"
+"PostToolUse/local"        = "local_access"
+"SessionStart/none"        = "detected"
+"PreCompact/none"          = "retention"
+"SessionEnd/none"          = "retention"
+
+[[bands]]
+lo = 0
+hi = 33
+name = "safe"
+
+[[bands]]
+lo = 34
+hi = 66
+name = "warn"
+
+[[bands]]
+lo = 67
+hi = 100
+name = "danger"
+
+# default policy: destination kind -> action when a credential is present
+[policy_defaults]
+model_context = "mask"
+subagent      = "mask"
+mcp_tool      = "block"
+external_net  = "block"
