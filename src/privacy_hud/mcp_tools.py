@@ -15,22 +15,21 @@ that claim, run against a JSON dump of every function's return value.
 
 **`apply_policy` and enforcement — read before wiring UI actions to this.**
 `apply_policy` writes a row to the `policy` table (schema from ledger.py /
-architecture.md §5) exactly as `Engine.observe` would need to read it to
-make "Block this source" / "Protect future occurrences" real. As of this
-task, `Engine.observe` (src/privacy_hud/engine.py) does **not** query the
-`policy` table at all — it only consults `Matrix.default_action()` (the
-static mask/block table in tables.toml) and single-use consent tokens
-(`policy_tokens`, via `minimize.consume_token`). Grep confirms it: the only
-place the string "policy" appears as a table name anywhere in
-src/privacy_hud is this table's `CREATE TABLE` in ledger.py itself. So a
-rule written by `apply_policy` is durable and correctly shaped, but is
-**not currently consulted on the next call** — "Block this source" and
-"Protect future occurrences" are, today, cosmetic: they record the user's
-intent truthfully (no false claim is made by this module) but do not yet
-change what the engine allows. Wiring `Engine.observe` to read this table
-is out of this task's file list (`engine.py` is not one of the four
-deliverables) and is flagged prominently in task-13-report.md rather than
-silently patched around here.
+architecture.md §5) exactly as `Engine.observe` needs to read it to make
+"Block this source" / "Protect future occurrences" real. As of commit
+`2387e40`, `Engine.observe` (src/privacy_hud/engine.py) DOES query the
+`policy` table on every egress observation, before falling back to
+`Matrix.default_action()` (the static mask/block table in tables.toml) —
+a user-written `block_source`/`mask` rule outranks the matrix defaults in
+`Engine.observe`'s precedence chain. So a rule written by `apply_policy`
+is durable, correctly shaped, and **enforced on the next matching call** —
+"Block this source" and "Protect future occurrences" are genuinely real,
+not cosmetic: a `block_source` rule denies a later call from that source,
+a `mask` rule forces a rewrite for that data type. This still does not
+apply retroactively (design.md P4): data already disclosed before the
+rule was written stays disclosed — the rule only changes what happens on
+the *next* call, not what already happened, and no caller of this module
+should claim otherwise.
 
 `get_exposure_detail`'s selector: the `events` table already has a stable,
 unique, integer `id` primary key (see ledger.py's SCHEMA), and every row
@@ -167,11 +166,12 @@ def apply_policy(ledger, session_id: str, *, rule_type: str, selector: str) -> N
     match is worse than an error: it looks like protection was applied
     when nothing was.
 
-    See this module's top-level docstring: as of this task, a rule
-    written here is NOT YET consulted by `Engine.observe` on a later
-    call. This function's contract is limited to "durably and correctly
-    record the user's stated intent" -- it makes no claim about
-    enforcement, and neither should any caller of it.
+    See this module's top-level docstring: `Engine.observe` now consults
+    this table (ahead of its own matrix defaults) on every subsequent
+    egress observation, so a rule written here is genuinely enforced on
+    the *next* matching call -- not merely recorded. It still does not
+    apply retroactively: data already disclosed before the rule was
+    written stays disclosed (design.md P4).
     """
     if rule_type not in _POLICY_RULE_TYPES:
         raise ValueError(

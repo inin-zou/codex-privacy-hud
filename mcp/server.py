@@ -48,12 +48,13 @@ same path means this process reads the SAME on-disk database the daemon is
 writing to (SQLite WAL mode makes that safe for a second, mostly-reading
 connection); it does not open a second, divergent ledger.
 
-**Enforcement caveat, repeated where a deployer will actually see it:** see
+**Enforcement, repeated where a deployer will actually see it:** see
 `mcp_tools.py`'s module docstring. `privacy.update_policy` writes a real,
-durable rule, but `Engine.observe` does not yet read the `policy` table on
-its next call -- "Block this source" / "Protect future occurrences" are, as
-of this task, not yet enforced. This is not a bug in this file; it is a real
-gap upstream, documented loudly rather than papered over here.
+durable rule, and `Engine.observe` reads the `policy` table (ahead of its
+own matrix defaults) on every subsequent egress call -- "Block this
+source" / "Protect future occurrences" are genuinely enforced on the
+*next* matching call. This does not apply retroactively: data already
+disclosed before the rule was written stays disclosed (design.md P4).
 """
 from __future__ import annotations
 
@@ -121,8 +122,8 @@ def build_app():
     def update_policy(session_id: str, rule_type: str, selector: str) -> dict:
         """Write a "Protect future occurrences" (`rule_type="mask"`) or
         "Block this source" (`rule_type="block_source"`) rule (design.md
-        §6). See this file's module docstring: not yet enforced by the
-        engine as of this task."""
+        §6). See this file's module docstring: `Engine.observe` enforces
+        this rule starting with the next matching call, not retroactively."""
         mcp_tools.apply_policy(ledger, session_id, rule_type=rule_type,
                                 selector=selector)
         return {"applied": True, "rule_type": rule_type, "selector": selector}

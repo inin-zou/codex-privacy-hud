@@ -37,7 +37,7 @@ import threading
 import time
 from pathlib import Path
 
-from .dispatch import State, dispatch, new_state
+from .dispatch import State, _deny, dispatch, new_state
 
 # Brief: "Idle-exit after 30 minutes with no connections."
 IDLE_TIMEOUT = 30 * 60  # seconds
@@ -52,6 +52,31 @@ IDLE_TIMEOUT = 30 * 60  # seconds
 ACCEPT_POLL = 5.0  # seconds
 
 
+def _deny_for_internal_failure(payload: dict) -> dict:
+    """Fail-closed reply for a `PreToolUse` payload that `dispatch()`
+    raised on, for any reason (a `Matrix.boundary_for()` `UnknownKey`, a
+    sqlite error, any other bug).
+
+    Deliberately does NOT re-run `dispatch.py`'s classification logic
+    (`_build_observation`'s destination/tool-name derivation) to produce a
+    more specific reason: that classification is itself part of the code
+    path that just raised inside `dispatch()`, and calling it again here,
+    inside an exception handler whose entire job is to be a safe last
+    resort, would risk a second exception before any reply is written at
+    all. `dispatch._deny()` is a plain dict literal — no lookups, no
+    exceptions possible — so it is safe to call directly. Precision is not
+    the goal here; not silently allowing an egress call through on an
+    internal bug is (I6: fail closed on egress, even when the daemon
+    itself is what's failing).
+    """
+    tool_name = payload.get("tool_name")
+    detail = f" ({tool_name})" if isinstance(tool_name, str) and tool_name else ""
+    return _deny(
+        "Privacy HUD hit an internal error while checking this call"
+        f"{detail} and is denying it to fail closed."
+    )
+
+
 class _Handler(socketserver.StreamRequestHandler):
     """Reads exactly one newline-delimited JSON request, dispatches it,
     and writes exactly one newline-delimited JSON reply.
@@ -59,9 +84,20 @@ class _Handler(socketserver.StreamRequestHandler):
     Never lets an exception escape to the thread's default handler (which
     would just print a traceback to stderr — acceptable, but pointless
     when the client already has fail-open/fail-closed defaults for
-    "the daemon gave me nothing useful"). Any failure here degrades to no
-    reply at all, which is exactly the "daemon crash mid-request" row in
+    "the daemon gave me nothing useful"). A failure before `dispatch()` is
+    even reached (bad JSON, a non-dict payload, ...) degrades to no reply
+    at all, which is exactly the "daemon crash mid-request" row in
     architecture.md §2's failure table and is handled by the client.
+
+    A failure INSIDE `dispatch()` is different: the client's fail-open/
+    fail-closed logic only ever triggers on the CLIENT's own exception
+    (connection refused, timeout, malformed JSON) — a reply that arrives
+    cleanly, `{}` included, always reads as "proceed" (`{}` is exactly
+    `dispatch._allow()`'s own shape). So for a `PreToolUse` payload — the
+    only event that can ever be egress — `handle()` does not let a
+    `dispatch()` exception degrade to `{}`; see `_deny_for_internal_failure`
+    below and I6 ("fail closed on egress", CLAUDE.md §3, which applies to
+    our own crashes, not just timeouts).
     """
 
     # Codex's own hook timeout is 5s (hooks.json) and the client's socket
@@ -99,9 +135,23 @@ class _Handler(socketserver.StreamRequestHandler):
             reply = dispatch(self.server.state, payload)
         except Exception:
             # A bug in one event must not take the daemon down for every
-            # other session; the client's own fail-open/fail-closed
-            # default takes over for THIS call when it gets no reply.
-            reply = {}
+            # other session -- this per-request exception boundary stays.
+            # But what we substitute for the failed reply must not be
+            # `{}`: that is `dispatch._allow()`'s own shape, and the
+            # client (hooks/handler.py) has no way to distinguish "the
+            # daemon deliberately allowed this" from "the daemon crashed
+            # and we defaulted to allow" -- its fail-open/fail-closed
+            # logic only fires on the CLIENT's own exception, never on a
+            # cleanly-received reply's content. Only `PreToolUse` can ever
+            # be egress (SessionStart/PostToolUse/SessionEnd/SubagentStart
+            # are ingress/propagate/lifecycle by construction — see
+            # dispatch.py's mapping table), so that cheap, exception-proof
+            # check is the gate: fail closed there (I6), fail open
+            # everywhere else exactly as before.
+            if payload.get("hook_event_name") == "PreToolUse":
+                reply = _deny_for_internal_failure(payload)
+            else:
+                reply = {}
 
         try:
             self.wfile.write((json.dumps(reply) + "\n").encode("utf-8"))
