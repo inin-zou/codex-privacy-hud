@@ -137,7 +137,7 @@ budget_cap:    120 points (policy-configurable)
 - Prevented events contribute **zero**.
 - The budget is monotonic within a session — it never decreases, because disclosure is irreversible.
 - Re-disclosing the *same* value to the *same* destination does not double-count; a *new destination* does.
-- A single leaked credential alone should push the HUD into the red band (40 × 1.0 / 120 = 33%; to an external host, 67%).
+- A single leaked credential alone must never read as safe: reaching model context it lands in amber (50 × 1.0 / 120 = 42%); reaching an external host it lands in red (50 × 2.0 / 120 = 83%).
 
 **Bands:** 0–33 green · 34–66 amber · 67–100 red.
 

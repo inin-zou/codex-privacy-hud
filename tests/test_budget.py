@@ -21,9 +21,9 @@ def test_invariant_prevented_contributes_zero():
     assert contribution(M, "credential", 99, "local") == 0.0
 
 
-def test_invariant_one_credential_to_model_lands_in_red_or_above_amber():
+def test_invariant_one_credential_never_reads_as_safe():
     pct = percent(contribution(M, "credential", 1, "model_context"), M.budget_cap)
-    assert pct >= 33
+    assert M.band(pct) != "safe"
     pct_external = percent(contribution(M, "credential", 1, "external_net"), M.budget_cap)
     assert M.band(pct_external) == "danger"
 

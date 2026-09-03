@@ -3,7 +3,7 @@ budget_cap = 120.0
 
 # data_type -> severity weight
 [severity]
-credential = 40.0
+credential = 50.0
 financial  = 12.0
 health     = 12.0
 email      = 6.0
