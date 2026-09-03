@@ -9,7 +9,9 @@ Token HUD:    How much context has been consumed?
 Privacy HUD:  How much sensitive context has been disclosed?
 ```
 
-**Status:** implementation complete (all 13 planned tasks + one post-hoc fix, 208 tests passing), pending final whole-branch review and a live self-audit against a real Codex session. See [`.claude/docs/plans/2026-09-03-implementation.md`](.claude/docs/plans/2026-09-03-implementation.md).
+![The Codex Privacy HUD user journey — from the ambient disclosure bar through the session audit, exposure detail, and minimizing a payload before it reaches an external tool](codex-privacy.png)
+
+**Status:** implementation complete (all 13 planned tasks + two post-hoc fixes, 208 tests passing) and whole-branch reviewed. The daemon does not yet auto-start — see [Known limits](#known-limits) — and a live self-audit against a real Codex session is blocked on an unrelated OpenAI backend outage, not a code defect. See [`.claude/docs/plans/2026-09-03-implementation.md`](.claude/docs/plans/2026-09-03-implementation.md).
 
 ---
 
