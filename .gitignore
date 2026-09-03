@@ -50,3 +50,6 @@ out/
 # ---- Test fixtures containing synthetic PII ----
 # Golden corpora are committed; anything captured from a real session is not.
 tests/fixtures/captured/
+
+# SDD scratch workspace
+.superpowers/
