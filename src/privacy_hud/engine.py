@@ -147,6 +147,19 @@ BLOCK_TEMPLATE = (
     "  Run $privacy to review, minimize, or allow once."
 )
 
+# Task 8 policy-fix: a *user-written* `block_source` rule (Ledger's `policy`
+# table, minted by mcp_tools.apply_policy's "Block this source" L3 action)
+# is a different reason for a deny than the built-in credential/default_action
+# path above, and copy must let the user tell them apart (see engine.py's
+# module docstring / task instructions) — hence a distinct template rather
+# than reusing BLOCK_TEMPLATE verbatim.
+POLICY_BLOCK_TEMPLATE = (
+    "PRIVACY HUD blocked a tool call\n\n"
+    "  {tool}  would send data from {source}\n"
+    "  to {destination} — a source-level block rule is in effect.\n\n"
+    "  Run $privacy to review or adjust policy."
+)
+
 REWRITE_TEMPLATE = (
     "PRIVACY HUD masked a tool call\n\n"
     "  {tool}  would send  {label}\n"
@@ -197,6 +210,32 @@ class Engine:
                 return _DETAIL_PREFIX_TO_KIND[prefix]
             raise
 
+    # -- Task 8 policy-fix: consult the user-written `policy` table --------
+    def _policy_selectors(self, session_id: str, rule_type: str) -> set[str]:
+        """Return the `selector`s of every `rule_type` row in the `policy`
+        table that applies to this session: rows scoped `"global"` plus
+        rows scoped `f"session:{session_id}"` (ledger.py SCHEMA's
+        `policy.scope` comment: `global|session:<id>`).
+
+        `mcp_tools.apply_policy` (the only writer today) always inserts
+        `scope=f"session:{session_id}"` — no caller currently mints a
+        `"global"` row — but the schema documents `global` as a first-class
+        scope, so a rule of that scope (however it eventually gets
+        written) must be honoured identically to a session-scoped one
+        rather than silently ignored because this query only checked one
+        of the two.
+
+        A plain `WHERE ... IN (?, ?)` equality query: a non-matching row
+        just doesn't come back, which is a normal empty result, not an
+        error to catch. No `except` around this query — a malformed
+        `policy` row must fail loud like anything else in this module
+        (I2's sibling constraint for the policy table)."""
+        rows = self.ledger.conn.execute(
+            "SELECT selector FROM policy WHERE rule_type=? AND scope IN (?, ?)",
+            (rule_type, "global", f"session:{session_id}"),
+        ).fetchall()
+        return {r["selector"] for r in rows}
+
     def _scan(self, obs: Observation, dest_kind: str, boundary: str) -> tuple[list, bool]:
         """Run tiers 0-2 unconditionally, then tier 3 only when it is
         gated on and the payload is small enough (Ruling 4). Returns
@@ -244,7 +283,30 @@ class Engine:
         has_credential = any(f.data_type == "credential" for f in findings)
 
         action = "allow"
-        if is_egress and has_credential:
+        policy_source_block = False
+
+        # Task 8 policy-fix: a user-written policy rule outranks the
+        # built-in default. Egress-only (Ruling 3's own logic extends
+        # unchanged to user-written policy — an ingress observation's
+        # bytes are already in context, so no policy check applies to it
+        # either). Checked in this precedence order:
+        #   1. block_source — denies regardless of what findings turned up
+        #      (a source-level block covers the whole call, not just
+        #      credential-shaped content).
+        #   2. mask — rewrites only when there is something matching to
+        #      mask.
+        # Only when neither matches does this fall through, unchanged, to
+        # the existing Matrix.default_action() logic below.
+        if is_egress:
+            if obs.source in self._policy_selectors(obs.session_id, "block_source"):
+                action = "deny"
+                policy_source_block = True
+            elif findings:
+                mask_selectors = self._policy_selectors(obs.session_id, "mask")
+                if mask_selectors & {f.data_type for f in findings}:
+                    action = "rewrite"
+
+        if action == "allow" and is_egress and has_credential:
             # Ruling 3: default_action is an egress-only policy. An ingress
             # observation never reaches this branch, no matter what it
             # contains — the bytes are already in context.
@@ -299,18 +361,24 @@ class Engine:
 
         if action in ("deny", "rewrite"):
             label = ", ".join(sorted({f.data_type for f in findings})) or "sensitive data"
-            template = BLOCK_TEMPLATE if action == "deny" else REWRITE_TEMPLATE
+            if action == "deny":
+                template = POLICY_BLOCK_TEMPLATE if policy_source_block else BLOCK_TEMPLATE
+            else:
+                template = REWRITE_TEMPLATE
             msg = template.format(tool=obs.tool_name or "tool", label=label,
                                    source=obs.source, destination=dest_kind)
             updated_input = None
             if action == "rewrite":
                 # Task 12: every "rewrite" Decision returned by this engine
                 # must carry a real, non-None updated_input — see the
-                # caveat on Decision.updated_input above. Reached from two
-                # places: the policy_defaults "mask" branch above, and the
-                # "minimize" token-consumption branch above; both leave
-                # `findings` non-empty (has_credential was required to
-                # reach either), so there is always something to rewrite.
+                # caveat on Decision.updated_input above. Reached from
+                # three places: the policy-table "mask" branch above, the
+                # policy_defaults "mask" branch below it, and the
+                # "minimize" token-consumption branch further below; all
+                # three leave `findings` non-empty (either a policy mask
+                # rule matched an existing finding's data_type, or
+                # has_credential was required to reach the other two), so
+                # there is always something to rewrite.
                 ti = obs.tool_input if obs.tool_input is not None else obs.text
                 # fix-round-1: pass obs.text straight through as the exact
                 # blob findings were scanned against, rather than letting
