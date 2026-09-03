@@ -1,0 +1,392 @@
+# src/privacy_hud/dispatch.py
+"""Maps a Codex hook payload to an `Observation` and dispatches it through
+the shared `Engine`, returning hook-output JSON.
+
+This is the seam between the wire protocol owned by `hooks/handler.py`
+(stdlib-only, already shipped and Codex-verified — see that file, not
+architecture.md §2's illustrative `{"v":1,"decision":...}` example, which is
+NOT what the client actually parses) and the Engine/Ledger/Matrix stack built
+in earlier tasks.
+
+Payload -> Observation mapping (architecture.md §10's dispatch table + the
+task-10 brief, both consistent with `hooks/handler.py`'s own
+`_looks_like_egress` — `tool_name.startswith("mcp")`, not `"mcp__"`):
+
+  hook_event_name    source          destination              direction   text
+  UserPromptSubmit   user prompt     model_context             ingress     prompt
+  PostToolUse        tool_name       model_context             ingress     tool_response
+  PreToolUse (Bash)  tool input      extract_destinations(cmd) egress      command
+  PreToolUse (mcp*)  tool input      mcp_tool                  egress      json.dumps(tool_input)
+  SubagentStart      main agent      subagent                  propagate   ""
+  SessionStart / SessionEnd -- not Engine observations; they drive the
+  ledger session lifecycle directly.
+
+  PreToolUse whose resolved destination is "local" (a Bash command
+  `extract_destinations` judges local, or any non-Bash/non-MCP tool) is
+  ALSO not an Engine observation, despite direction=="egress" in the
+  table above: tables.toml's taxonomy has no "PreToolUse/local" entry and
+  policy_defaults has no "local" entry (only "PostToolUse/local" exists,
+  because Ruling 1 in engine.py was written against local file reads, not
+  local Bash commands). Building an Observation there would make
+  `Engine.observe` raise `UnknownKey` for the ordinary case of a purely
+  local tool call — not a bug to work around with a caught exception
+  (Global Constraint I2), but a real signal that "nothing crosses a
+  boundary here" should short-circuit before Engine.observe is ever
+  called. See `_build_observation`'s early `return None`.
+
+`Observation.tool_input` (added by Task 12, running in parallel on the
+main tree while this task was in flight — see `src/privacy_hud/engine.py`
+and `src/privacy_hud/minimize.py`): every `PreToolUse` Observation this
+module builds carries the exact `tool_input` dict Codex sent, unmodified
+— NOT just the flattened `text` field. `Engine.observe`'s consent-token
+consumption (`consume_token`) hashes this dict via
+`canonical_json`/`sha256` to match a token minted elsewhere (the `$privacy`
+UI, Task 13) for exactly these arguments, and its minimization path
+(`minimize_tool_input`) needs the real dict shape to know whether to
+rewrite a Bash `command` string or an MCP arguments object. Leaving this
+unset (None) would silently fall back to `obs.text` inside the engine,
+which loses that shape distinction — `PreToolUse` is the only event
+mapping in this module that populates it; `PostToolUse`/
+`UserPromptSubmit`/`SubagentStart` are ingress/propagate observations the
+token/rewrite path never applies to, so they correctly leave it at the
+dataclass default (`None`).
+
+Session and salt lifecycle: one `Ledger` connection and one detector set are
+shared for the daemon's life; each `session_id` gets its own salt and its
+own `Engine` instance wrapping that salt, created on `SessionStart` and
+torn down (salt discarded, `Ledger.end_session` called) on `SessionEnd`.
+Nothing here ever passes one session's salt into another session's
+`Engine` — `State.salts`/`State.engines` are both keyed strictly by
+`session_id`, and dropped (not overwritten) at `SessionEnd`.
+
+No raw sensitive value is ever logged or printed anywhere in this module.
+"""
+from __future__ import annotations
+
+import json
+import sqlite3
+import threading
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from .detect.model import ModelDetector
+from .detect.paths import PathDetector
+from .detect.secrets import SecretDetector
+from .detect.shell import extract_destinations
+from .engine import Engine, Observation
+from .ledger import Ledger
+from .mask import new_salt
+from .matrix.loader import Matrix, load_matrix
+from .render import receipt as render_receipt
+
+# Events with a pinned Observation mapping. Anything else that reaches this
+# daemon (SubagentStop, PreCompact, ...) has no Observation defined by the
+# brief's table; we allow (empty hook output) and record nothing, rather
+# than guessing a mapping that was never specified.
+_KNOWN_EVENTS = {
+    "SessionStart", "SessionEnd", "UserPromptSubmit", "PostToolUse",
+    "PreToolUse", "SubagentStart",
+}
+
+
+@dataclass
+class State:
+    """All daemon-lifetime state. One instance per daemon process."""
+
+    data_dir: Path
+    matrix: Matrix
+    ledger: Ledger
+    detectors: list
+
+    # Guards every access to `ledger`/`engine` (a single shared sqlite3
+    # connection is not safe for unserialized concurrent use — see
+    # daemon.py / task-10-report.md for the full locking rationale) and
+    # every mutation of the per-session dicts below.
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    # Per-session state, keyed by session_id. Populated on SessionStart,
+    # discarded on SessionEnd. Never shared across session_ids.
+    salts: dict[str, bytes] = field(default_factory=dict)
+    engines: dict[str, Engine] = field(default_factory=dict)
+    started_at: dict[str, float] = field(default_factory=dict)
+
+
+def new_state(data_dir) -> State:
+    """Build the daemon's one-time-cost state: Matrix, Ledger (one sqlite
+    connection for the daemon's life), and the detector stack (tiers 0-3).
+
+    `ModelDetector` loads from the local HuggingFace cache only and
+    degrades to `available=False` on any failure (missing weights, missing
+    `transformers`) rather than raising — see detect/model.py. Building it
+    here, once, per daemon lifetime, is the entire point of Task 10: this
+    is the expensive step a per-hook-invocation client could never afford.
+    """
+    data_dir = Path(data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    matrix = load_matrix()
+    ledger = Ledger(data_dir / "ledger.db", matrix)
+    _allow_cross_thread_access(ledger, data_dir / "ledger.db")
+    detectors = [PathDetector(), SecretDetector(), ModelDetector()]
+    return State(data_dir=data_dir, matrix=matrix, ledger=ledger,
+                 detectors=detectors)
+
+
+def _allow_cross_thread_access(ledger: Ledger, db_path: Path) -> None:
+    """`Ledger.__init__` opens its sqlite3 connection with the default
+    `check_same_thread=True` — correct for a single-threaded caller (every
+    existing test), but wrong for this daemon:
+    `socketserver.ThreadingUnixStreamServer` hands each accepted
+    connection to its own worker thread, and Python's `sqlite3` module
+    raises `ProgrammingError` the instant a connection created on one
+    thread is touched from another. Left unfixed, every ledger-touching
+    dispatch() call from a worker thread would raise, be swallowed by
+    daemon.py's `_Handler.handle()` broad `except Exception`, and the
+    client would silently get `{}` back — indistinguishable from "nothing
+    to report" and very easy to mistake for a working daemon in a demo
+    that only ever tries one session at a time.
+
+    Reopen the SAME on-disk database with `check_same_thread=False` so
+    worker threads may use it, and rely on `State.lock` (a single
+    process-wide lock guarding every touch of `ledger`/`engine` — see
+    `daemon.Daemon`'s docstring) for the serialization sqlite3's own docs
+    say becomes the caller's responsibility once same-thread checking is
+    disabled. This is a workaround at the call site rather than a change
+    to `Ledger.__init__`'s signature, since `ledger.py` is outside this
+    task's file list (daemon.py/dispatch.py/tests/test_daemon.py) and its
+    existing single-threaded-by-default contract is correct for every
+    OTHER caller.
+    """
+    ledger.conn.close()
+    conn = sqlite3.connect(db_path, isolation_level=None, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    ledger.conn = conn
+
+
+# --------------------------------------------------------------------- #
+# hook-output builders
+#
+# These produce exactly the JSON hooks/handler.py relays verbatim to
+# Codex on stdout (it does `json.loads(buf.decode())` and writes that
+# straight out) -- NOT architecture.md §2's `{"v":1,"decision":...}`
+# sketch, which no code anywhere parses. `_deny`'s shape matches
+# `hooks/handler.py`'s own `_deny()` helper exactly, since a daemon reply
+# that used a different key name would be silently ignored by Codex and
+# read back as an unexplained "PreToolUse always allows".
+# --------------------------------------------------------------------- #
+
+def _allow() -> dict:
+    return {}
+
+
+def _deny(reason: str | None) -> dict:
+    return {"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": reason or "Privacy HUD blocked this call.",
+    }}
+
+
+def _allow_with_rewrite(updated_input, message: str | None) -> dict:
+    out = {"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "allow",
+        "updatedInput": updated_input,
+    }}
+    if message:
+        out["systemMessage"] = message
+    return out
+
+
+def _decision_to_output(decision) -> dict:
+    if decision.action == "deny":
+        return _deny(decision.reason or decision.system_message)
+    if decision.action == "rewrite":
+        if decision.updated_input is not None:
+            return _allow_with_rewrite(decision.updated_input,
+                                        decision.system_message)
+        # Ruling from engine.py's own REWRITE_TEMPLATE: automatic masking
+        # is not wired in yet (that is Task 12, explicitly out of scope
+        # here). With no `updated_input` to send, allowing the call through
+        # unmodified would silently defeat the mask policy — fail closed
+        # instead, same as a `deny`, using the message engine.py already
+        # crafted for exactly this case.
+        return _deny(decision.system_message or decision.reason)
+    # "allow" (and ingress observations, which Ruling 3 never denies):
+    # no hook-specific output needed, Codex proceeds normally.
+    return _allow()
+
+
+def _as_text(value) -> str:
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value)
+    except TypeError:
+        return str(value)
+
+
+def _looks_like_mcp(tool_name: str) -> bool:
+    # Mirrors hooks/handler.py's own `_looks_like_egress` predicate exactly
+    # (`.startswith("mcp")`, not `"mcp__"`) so the daemon's classification
+    # of "this is an MCP tool call" never disagrees with the client's.
+    return tool_name.startswith("mcp")
+
+
+def _get_or_start_engine(state: State, session_id: str, *, cwd: str = "",
+                          model: str = "") -> Engine:
+    """Return the Engine for `session_id`, creating one (with a fresh,
+    session-scoped salt) if `SessionStart` was never seen for it. Caller
+    must hold `state.lock`.
+    """
+    engine = state.engines.get(session_id)
+    if engine is not None:
+        return engine
+    salt = state.salts.setdefault(session_id, new_salt())
+    state.ledger.start_session(session_id, cwd=cwd, model=model)
+    state.started_at.setdefault(session_id, time.time())
+    engine = Engine(ledger=state.ledger, matrix=state.matrix, salt=salt,
+                     detectors=state.detectors)
+    state.engines[session_id] = engine
+    return engine
+
+
+def _build_observation(event: str, session_id: str, payload: dict) -> Observation | None:
+    turn_id = payload.get("turn_id")
+
+    if event == "UserPromptSubmit":
+        return Observation(
+            session_id=session_id, turn_id=turn_id, hook_event=event,
+            direction="ingress", source="user prompt",
+            destination="model_context", text=payload.get("prompt", "") or "",
+            tool_name=None)
+
+    if event == "PostToolUse":
+        tool_name = payload.get("tool_name") or "tool"
+        return Observation(
+            session_id=session_id, turn_id=turn_id, hook_event=event,
+            direction="ingress", source=tool_name,
+            destination="model_context",
+            text=_as_text(payload.get("tool_response", "")),
+            tool_name=tool_name)
+
+    if event == "PreToolUse":
+        tool_name = payload.get("tool_name") or ""
+        tool_input = payload.get("tool_input")
+        if not isinstance(tool_input, dict):
+            tool_input = {}
+        if tool_name == "Bash":
+            command = tool_input.get("command", "") or ""
+            dests = extract_destinations(command)
+            destination = dests[0] if dests else "external_net"
+            if destination == "local":
+                # No boundary is crossed. tables.toml's taxonomy has no
+                # "PreToolUse/local" entry and policy_defaults has no
+                # "local" entry either — by design, not omission: Ruling 1
+                # (local always classifies as local_access) was written
+                # against PostToolUse local reads (tables.toml only ever
+                # defines "PostToolUse/local"), and Engine.observe would
+                # raise UnknownKey (I2: never silently caught) if we built
+                # an Observation here anyway. A local Bash command has
+                # nothing for the engine to score — allow without an
+                # Engine.observe call, same as SessionStart/SessionEnd.
+                return None
+            text = command
+        elif _looks_like_mcp(tool_name):
+            destination = "mcp_tool"
+            text = json.dumps(tool_input)
+        else:
+            # Not pinned by the mapping table (a non-Bash, non-MCP tool,
+            # e.g. a local file Write/Edit): same "no PreToolUse/local
+            # taxonomy entry" situation as above — nothing crosses a
+            # boundary here, so there is no Engine.observe call to make.
+            return None
+        return Observation(
+            session_id=session_id, turn_id=turn_id, hook_event=event,
+            direction="egress", source="tool input", destination=destination,
+            text=text, tool_name=tool_name,
+            # Task 12: the engine's consent-token and minimization path
+            # (consume_token/minimize_tool_input) needs the STRUCTURED
+            # tool_input dict, not just the flattened `text` above — pass
+            # through exactly what Codex sent, so args_hash and any
+            # rewrite are computed against the real payload shape (a bare
+            # string for Bash would still work through minimize_tool_input,
+            # but would not match a token minted by the UI against the
+            # dict shape `{"command": ...}`, so the dict is what we pass).
+            tool_input=tool_input)
+
+    if event == "SubagentStart":
+        return Observation(
+            session_id=session_id, turn_id=turn_id, hook_event=event,
+            direction="propagate", source="main agent",
+            destination="subagent", text="", tool_name=None)
+
+    return None
+
+
+def _handle_session_start(state: State, session_id: str, payload: dict) -> dict:
+    with state.lock:
+        salt = new_salt()
+        state.salts[session_id] = salt
+        state.ledger.start_session(session_id, cwd=payload.get("cwd", "") or "",
+                                    model=payload.get("model", "") or "")
+        state.engines[session_id] = Engine(
+            ledger=state.ledger, matrix=state.matrix, salt=salt,
+            detectors=state.detectors)
+        state.started_at[session_id] = time.time()
+    return _allow()
+
+
+def _handle_session_end(state: State, session_id: str, payload: dict) -> dict:
+    with state.lock:
+        summary = state.ledger.summary(session_id)
+        rows = state.ledger.list_events(session_id, "exposed")
+        started = state.started_at.pop(session_id, None)
+        state.ledger.end_session(session_id)
+        # Discard the session's salt and Engine now — SessionEnd is the one
+        # place a salt is destroyed, per the session/salt lifecycle
+        # contract above. Any hook event for this session_id that arrives
+        # after this point gets a brand-new salt via
+        # `_get_or_start_engine`, never the old one.
+        state.salts.pop(session_id, None)
+        state.engines.pop(session_id, None)
+
+    minutes = 0
+    if started is not None:
+        minutes = max(0, int((time.time() - started) // 60))
+
+    message = render_receipt(session_id, summary, rows, minutes)
+    return {"systemMessage": message}
+
+
+def dispatch(state: State, payload: dict) -> dict:
+    """Route one hook payload to the right handler and return hook-output
+    JSON. Never raises `UnknownKey`/`KeyError` silently — an observation
+    whose destination the matrix cannot classify propagates, which is a
+    daemon-level bug worth crashing that one request over (the socket
+    handler in daemon.py is what turns that into a safe empty reply for
+    the client's own fail-open/fail-closed defaults; it is not swallowed
+    here).
+    """
+    event = payload.get("hook_event_name")
+    session_id = payload.get("session_id") or ""
+
+    if event == "SessionStart":
+        return _handle_session_start(state, session_id, payload)
+    if event == "SessionEnd":
+        return _handle_session_end(state, session_id, payload)
+    if event not in _KNOWN_EVENTS:
+        return _allow()
+
+    obs = _build_observation(event, session_id, payload)
+    if obs is None:
+        return _allow()
+
+    with state.lock:
+        engine = _get_or_start_engine(state, session_id,
+                                       cwd=payload.get("cwd", "") or "",
+                                       model=payload.get("model", "") or "")
+        decision = engine.observe(obs)
+
+    return _decision_to_output(decision)
