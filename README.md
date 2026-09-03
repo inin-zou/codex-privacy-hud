@@ -1,5 +1,7 @@
 # Codex Privacy HUD
 
+> Trace your privacy disclosure the same way you already trace your token usage — live, in every conversation.
+
 > **See what your agent knows. Control where it goes.**
 
 A local-first Codex plugin that maintains a live **disclosure ledger** for every Codex session, minimizes sensitive context **before** tool execution, and lets you inspect exactly what data reached the model, subagents, MCP tools, or external services.
