@@ -77,7 +77,7 @@ budget_cap = 120.0
 
 # data_type -> severity weight
 [severity]
-credential = 40.0
+credential = 50.0
 financial  = 12.0
 health     = 12.0
 email      = 6.0
@@ -161,8 +161,9 @@ def test_version_and_cap_load():
 
 def test_severity_lookup():
     m = load_matrix()
-    assert m.severity("credential") == 40.0
-    assert m.severity("email") == 6.0
+    assert m.severity("credential") == m.raw["severity"]["credential"]
+    assert m.severity("email") == m.raw["severity"]["email"]
+    assert m.severity("credential") > m.severity("email")
 
 
 def test_unknown_data_type_raises_not_zero():

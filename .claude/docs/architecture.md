@@ -304,7 +304,7 @@ At `SessionEnd`: `UPDATE events SET value_hash = NULL WHERE session_id = ?` and 
 Pure functions over ledger rows, no I/O, fully unit-testable without Codex:
 
 ```python
-SEVERITY = {"credential": 40, "financial": 12, "health": 12,
+SEVERITY = {"credential": 50, "financial": 12, "health": 12,
             "email": 6, "phone": 6, "person": 6, "address": 6, "ssn": 6,
             "hostname": 2, "path": 2, "ip": 2, "repo": 2}
 DEST_MULT = {"B1": 1.0, "B2": 0.3, "B3": 1.5, "B4": 2.0}

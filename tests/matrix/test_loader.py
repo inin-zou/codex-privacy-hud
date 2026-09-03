@@ -11,8 +11,13 @@ def test_version_and_cap_load():
 
 def test_severity_lookup():
     m = load_matrix()
-    assert m.severity("credential") == 40.0
-    assert m.severity("email") == 6.0
+    # Assert the loader reads what the table says, not a hardcoded number —
+    # this is a policy-tunable weight and will be recalibrated again.
+    assert m.severity("credential") == m.raw["severity"]["credential"]
+    assert m.severity("email") == m.raw["severity"]["email"]
+    # The semantic invariant that must survive any recalibration: a
+    # credential is always weighted above a direct PII value like email.
+    assert m.severity("credential") > m.severity("email")
 
 
 def test_unknown_data_type_raises_not_zero():
