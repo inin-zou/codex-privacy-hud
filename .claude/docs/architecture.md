@@ -329,18 +329,27 @@ The four invariants from `PRD.md` §5.3 are encoded as property tests. This modu
     "SessionStart":      [{ "hooks": [{ "type": "command", "command": "$PLUGIN_ROOT/hooks/handler.py", "timeout": 5 }] }],
     "UserPromptSubmit":  [{ "hooks": [{ "type": "command", "command": "$PLUGIN_ROOT/hooks/handler.py", "timeout": 5 }] }],
     "PreToolUse":        [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "$PLUGIN_ROOT/hooks/handler.py", "timeout": 5, "statusMessage": "privacy check" }] }],
-    "PostToolUse":       [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "$PLUGIN_ROOT/hooks/handler.py", "timeout": 5, "async": true }] }],
+    "PostToolUse":       [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "$PLUGIN_ROOT/hooks/handler.py", "timeout": 5 }] }],
     "SubagentStart":     [{ "hooks": [{ "type": "command", "command": "$PLUGIN_ROOT/hooks/handler.py", "timeout": 5 }] }],
     "SubagentStop":      [{ "hooks": [{ "type": "command", "command": "$PLUGIN_ROOT/hooks/handler.py", "timeout": 5 }] }],
-    "PreCompact":        [{ "hooks": [{ "type": "command", "command": "$PLUGIN_ROOT/hooks/handler.py", "timeout": 5, "async": true }] }],
+    "PreCompact":        [{ "hooks": [{ "type": "command", "command": "$PLUGIN_ROOT/hooks/handler.py", "timeout": 5 }] }],
     "SessionEnd":        [{ "hooks": [{ "type": "command", "command": "$PLUGIN_ROOT/hooks/handler.py", "timeout": 10 }] }]
   }
 }
 ```
 
-One entrypoint for all events; the daemon dispatches on `hook_event_name`. `PostToolUse` and `PreCompact` are `async: true` — they only record and can never block the agent. `PreToolUse` is synchronous because it must be able to deny.
+One entrypoint for all events; the daemon dispatches on `hook_event_name`. All hooks are synchronous — see the platform note below for why `PostToolUse`/`PreCompact` are no longer marked `async: true`, and §10 for the latency consequence and its mitigation. `PreToolUse` was always synchronous because it must be able to deny.
 
-Codex provides `PLUGIN_ROOT` and `PLUGIN_DATA` for plugin-bundled hooks; the ledger and socket live under `PLUGIN_DATA`.
+Codex provides `PLUGIN_ROOT` and `PLUGIN_DATA` for plugin-bundled hooks; the ledger and socket live under `PLUGIN_DATA`. (Observed in practice as aliases of `CLAUDE_PLUGIN_ROOT`/`CLAUDE_PLUGIN_DATA` — see the platform note.)
+
+**Plugin manifest location.** The plugin manifest lives at `.claude-plugin/plugin.json`, with a matching `.claude-plugin/marketplace.json` for local/dev installation (`codex plugin marketplace add <dir>` requires a marketplace manifest at the install root). There is exactly one manifest location — do not also ship a `.codex-plugin/` directory; a second manifest means one of them is stale and nobody can tell which by looking.
+
+> **Platform note (Task 9 smoke test, Codex CLI 0.145.0, observed 2026-09-03):** two things in this section were corrected after live testing against a real Codex install and are recorded here so they are not silently re-derived (and gotten wrong again) from an older draft of this doc or from first principles:
+>
+> 1. **Manifest directory.** An earlier draft of this doc, and the brief for Task 9, specified `.codex-plugin/plugin.json`. Against real Codex CLI 0.145.0, a directory containing only `.codex-plugin/plugin.json` is rejected by `codex plugin marketplace add` with `marketplace root does not contain a supported manifest`. Every plugin actually installed and working on the test machine (including OpenAI's own `openai-codex` plugin) uses `.claude-plugin/plugin.json` + `.claude-plugin/marketplace.json` — the same layout Claude Code plugins use. This doc and the shipped plugin now use `.claude-plugin/`.
+> 2. **`async: true` is not implemented.** Codex CLI 0.145.0 logs `skipping async hook ...: async hooks are not supported yet` for any hook entry marked `async: true`, and never executes it — confirmed by installing a `hooks.json` with `PostToolUse` marked async (it never ran, no error surfaced to the user) versus an identical fixture without the flag (it ran and completed on every tool call). `hooks.json` above no longer sets `async` anywhere; see §10 for what synchronous `PostToolUse` costs and how that cost is bounded.
+>
+> Both were reproduced directly (install failure / success, and hook-fired / hook-skipped) against a live Codex install, not inferred from documentation. If a future Codex release changes either behavior, update this note with the version observed rather than deleting it — the failure mode this note prevents is a future reader re-deriving the wrong answer from the official docs.
 
 ---
 
@@ -420,7 +429,33 @@ policy + ledger write     5 ms
                     38 / 78 ms
 ```
 
-Comfortably under the 150 ms target. `PostToolUse` is `async` and off the critical path entirely, which matters because tool responses are the largest payloads we scan.
+Comfortably under the 150 ms target.
+
+**`PostToolUse` is synchronous, and that is the honest cost.** §7's platform note explains why: Codex CLI 0.145.0 does not implement `async: true` on hooks — an event marked async is silently never executed, not deferred. So `PostToolUse` sits on the same critical path as `PreToolUse`, and it is the hook that scans the *largest* payloads in the system: tool results, meaning file contents, command output, and MCP responses — the primary ingress chokepoint described in §3.2. An unbounded synchronous scan of a large `tool_response` (a multi-hundred-KB file read, say) run through tier 3 (Presidio NER, superlinear-ish in practice) could blow past both the 150 ms budget and the hook's own 5 s hard timeout (`hooks.json`'s `"timeout": 5`), and a timed-out `PostToolUse` fails open per §2's table — meaning the largest disclosures would be exactly the ones most likely to go unrecorded if scanning were left unbounded.
+
+**Mitigation (binding on Task 10's implementation): bounded tier 3 on `PostToolUse`.**
+
+```text
+on PostToolUse(tool_response):
+  tiers 0-2 (path rules, regex+entropy, structural parse)  → always run on the FULL payload
+                                                               (cheap: ~8 ms combined per §4,
+                                                               roughly linear in size)
+  tier 3 (Presidio NER)                                     → runs only on the first 8 KB
+                                                               of the payload
+
+  if len(tool_response) > 8 KB:
+      record the event as usual, but mark it degraded (tier 3 did not see the full payload)
+      → same "fast-path results only" degraded state design.md §5 already defines for
+        deep-scanner timeout; a payload over the bound is treated identically to a scan
+        that timed out, because from the ledger's point of view the effect is the same:
+        tier 3 coverage is incomplete for that event.
+```
+
+**Why 8 KB.** It is sized to keep tier 3's synchronous cost close to the ~40 ms figure this budget already assumes (§4's Tier 3 estimate), which was measured against a typical small-to-medium chunk, not a large file read — capping the input size is what keeps that estimate honest at any payload size, rather than letting cost scale with whatever the tool happened to return. It also comfortably clears the 150 ms target with room for tiers 0-2, the socket round trip, and the ledger write, while leaving wide margin below the 5 s hook timeout even under a slow/cold-cache tier 3 run. This is a starting point, not a tuned constant — Task 10 should treat it as adjustable pending a real measurement of tier 3 latency vs. input size on this machine, but it must ship with *some* concrete bound rather than an unbounded scan, because unbounded is the failure mode this section exists to rule out.
+
+Tiers 0-2 are deliberately left unbounded (full payload, every time): they are cheap enough not to need a cap, and skipping them on the tail of a large payload would silently reintroduce the exact "large disclosure goes unrecorded" gap tier 3's bound is meant to close for the cheap, deterministic checks (credential patterns, path rules) that do not need a model to run.
+
+This connects directly to a piece of UI that already exists for a different reason: design.md §5's degraded-state banner (`⚠ Deep scan unavailable for N events — fast-path results only`) was designed for deep-scanner *timeout*. It now also covers deep-scanner *truncation* — same banner, same copy, same meaning to the user ("tier 3 did not fully cover this"), one fewer state for the UI layer to invent. Recording this connection here so it is not rediscovered as a "new" requirement later.
 
 ---
 

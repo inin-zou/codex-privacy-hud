@@ -1,0 +1,12 @@
+{
+  "name": "codex-privacy-hud",
+  "owner": { "name": "codex-privacy-hud" },
+  "plugins": [
+    {
+      "name": "codex-privacy-hud",
+      "source": "./",
+      "description": "Local-first disclosure ledger and privacy enforcement for Codex sessions",
+      "version": "0.1.0"
+    }
+  ]
+}
