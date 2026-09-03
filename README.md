@@ -101,13 +101,21 @@ codex plugin add codex-privacy-hud@codex-privacy-hud --json
 
 The manifest lives at `.claude-plugin/plugin.json` (not `.codex-plugin/` — the OpenAI docs describe that path, but real Codex CLI does not recognize it; `codex plugin marketplace add` fails outright against it. `.claude-plugin/` is what Codex actually loads, confirmed by installing both ways. See `.claude/docs/architecture.md` §7 for the divergence.)
 
-**2. Use Codex normally.** The plugin's hooks (`hooks/hooks.json`) fire on every `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SubagentStart`/`Stop`, and `SessionEnd` — no per-command action needed. A long-lived local daemon starts automatically on first use and keeps the disclosure ledger for the session.
+**2. Start the daemon once, before the session.** The daemon does not yet start itself — this is a known gap, not an oversight (see [Known limits](#known-limits) below). Start it manually, pointed at the same `PLUGIN_DATA` directory Codex passes to the plugin:
 
-**3. Run `$privacy` at any point** to see the session audit — the ASCII table always works; it also starts a local browser UI at a `127.0.0.1` URL it prints (never a link to anything else).
+```bash
+PLUGIN_DATA=<the plugin's data directory> PYTHONPATH=src python3 -m privacy_hud.daemon &
+```
 
-**4. When a call is blocked**, Codex surfaces the reason via `systemMessage`. Run `$privacy` to review the exposure, then choose to minimize and retry, allow once, or leave it blocked — see [`design.md` §8](.claude/docs/design.md) for the full consent flow.
+Leave it running for the session. Without it, hooks still fire but every call fails open (ingress) or closed (egress) to the default with no detection actually running.
 
-**5. Uninstall:**
+**3. Use Codex normally.** The plugin's hooks (`hooks/hooks.json`) fire on every `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SubagentStart`/`Stop`, and `SessionEnd` — no per-command action needed once the daemon from step 2 is running.
+
+**4. Run `$privacy` at any point** to see the session audit — the ASCII table always works; it also starts a local browser UI at a `127.0.0.1` URL it prints (never a link to anything else).
+
+**5. When a call is blocked**, Codex surfaces the reason via `systemMessage`. Run `$privacy` to review the exposure, then choose to minimize and retry, allow once, or leave it blocked — see [`design.md` §8](.claude/docs/design.md) for the full consent flow.
+
+**6. Uninstall** (also stop the daemon process from step 2):
 
 ```bash
 codex plugin remove codex-privacy-hud@codex-privacy-hud
@@ -118,11 +126,12 @@ codex plugin marketplace remove codex-privacy-hud
 
 Stated up front, because a privacy tool that overclaims is worse than none:
 
-1. **Hosted tools bypass hooks.** WebSearch and similar do not trigger local function-tool hook paths. This is a practical guardrail, not a complete enforcement boundary.
-2. **No `ask` decision in Codex hooks.** Interactive consent is a deny → review → one-shot-token → retry loop rather than a modal.
-3. **No custom status item.** `tui.status_line` accepts only built-in identifiers, so Level 1 ships as an optional terminal companion, not a native footer.
-4. **Detection is heuristic.** A determined adversary can encode around regex and NER.
-5. **Nothing recalls disclosed data.** Ever.
+1. **The daemon does not start itself yet.** `architecture.md` describes lazy auto-spawn from the hook client on first use; that piece was never built. Start it manually before a session — see [Using it in Codex](#using-it-in-codex) above. Without it, hooks still fire but every call falls through to the fail-open/fail-closed default with no detection running.
+2. **Hosted tools bypass hooks.** WebSearch and similar do not trigger local function-tool hook paths. This is a practical guardrail, not a complete enforcement boundary.
+3. **No `ask` decision in Codex hooks.** Interactive consent is a deny → review → one-shot-token → retry loop rather than a modal.
+4. **No custom status item.** `tui.status_line` accepts only built-in identifiers, so Level 1 ships as an optional terminal companion, not a native footer. (Confirmed by prior art: [`codex-hud`](https://github.com/anhannin/codex-hud) achieves a persistent inline status line only by patching the Codex binary itself — a path this project deliberately does not take.)
+5. **Detection is heuristic.** A determined adversary can encode around regex and NER.
+6. **Nothing recalls disclosed data.** Ever.
 
 ## Documentation
 

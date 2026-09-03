@@ -50,7 +50,10 @@ hooks/handler.py     ~40 lines, stdlib only, no imports beyond json/socket/sys
                      → reads stdin, writes to socket, reads reply, writes stdout
                      → cold start ≈ 25 ms
 
-daemon               started lazily by the first SessionStart hook
+daemon               [NOT IMPLEMENTED] designed to start lazily on first
+                     use; this build requires starting it manually — see
+                     README.md "Using it in Codex" §2. Accepted for this
+                     hackathon's scope rather than built.
                      → holds Presidio models, regex set, SQLite conn, policy cache
                      → one process per user, serves all concurrent sessions
                      → idle-exits after 30 min with no clients
@@ -69,7 +72,7 @@ The client is deliberately dumb: it forwards the hook payload unmodified and rel
 
 | Failure | Client behavior |
 |---|---|
-| Socket missing | Spawn daemon detached, then apply per-boundary default below |
+| Socket missing | Apply per-boundary default below. (Designed to also spawn the daemon detached at this point — **not implemented in this build**; the daemon must be started manually. See README.md "Known limits".) |
 | Daemon timeout (> 120 ms) | Ingress: allow + `systemMessage` "unverified". Egress (B3/B4): **deny** |
 | Daemon crash mid-request | Same as timeout |
 | Client itself throws | `exit 0` with empty stdout — never block Codex on our own bug |
