@@ -129,10 +129,14 @@ binding a new port.
   was chosen to satisfy design.md §9's copy rules (no "undo", no "your
   data is protected", no severity adjectives); a paraphrase can silently
   reintroduce exactly the claims those rules forbid.
-- Do not claim protection this tool cannot back up. In particular, a
+- Do not claim protection this tool cannot back up. A
   `[ Protect future occurrences ]` / `[ Block this source ]` action
-  writes a real, durable rule to the session's policy table, but as of
-  this build the detection engine does not yet consult that table on the
-  next call — say the rule was recorded, not that the source is now
-  blocked, unless you have independently verified enforcement lands
-  after this rule was written.
+  writes a real, durable rule to the session's policy table, and
+  `Engine.observe()` now consults that table before its own defaults on
+  every subsequent egress observation — a `block_source` rule denies a
+  later call from that source, a `mask` rule forces a rewrite for that
+  data type. It is correct to tell the user the rule is now enforced,
+  not merely recorded. This still does not apply retroactively: data
+  already disclosed before the rule was written stays disclosed (design.md
+  P4) — the rule only changes what happens on the *next* call, not what
+  already happened.

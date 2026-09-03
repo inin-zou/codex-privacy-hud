@@ -9,7 +9,7 @@ Token HUD:    How much context has been consumed?
 Privacy HUD:  How much sensitive context has been disclosed?
 ```
 
-**Status:** design phase. Specs are written; implementation has not started.
+**Status:** implementation complete (all 13 planned tasks + one post-hoc fix, 208 tests passing), pending final whole-branch review and a live self-audit against a real Codex session. See [`.claude/docs/plans/2026-09-03-implementation.md`](.claude/docs/plans/2026-09-03-implementation.md).
 
 ---
 
@@ -87,6 +87,32 @@ There is **no second LLM call to audit the first one.** That would re-transmit t
 - Value identity uses a session-scoped salted HMAC held in memory and destroyed at session end, so cross-session correlation is impossible by construction.
 - No telemetry. No analytics. No network calls except `127.0.0.1`.
 - Running Privacy HUD on its own development session must yield zero exposures. This is a test, not an aspiration.
+
+## Using it in Codex
+
+Verified end-to-end against a real Codex CLI install (Task 9's smoke test on 0.145.0; re-checked on 0.153.0).
+
+**1. Install the plugin from this repo.**
+
+```bash
+codex plugin marketplace add /path/to/codex-privacy-hud --json
+codex plugin add codex-privacy-hud@codex-privacy-hud --json
+```
+
+The manifest lives at `.claude-plugin/plugin.json` (not `.codex-plugin/` — the OpenAI docs describe that path, but real Codex CLI does not recognize it; `codex plugin marketplace add` fails outright against it. `.claude-plugin/` is what Codex actually loads, confirmed by installing both ways. See `.claude/docs/architecture.md` §7 for the divergence.)
+
+**2. Use Codex normally.** The plugin's hooks (`hooks/hooks.json`) fire on every `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SubagentStart`/`Stop`, and `SessionEnd` — no per-command action needed. A long-lived local daemon starts automatically on first use and keeps the disclosure ledger for the session.
+
+**3. Run `$privacy` at any point** to see the session audit — the ASCII table always works; it also starts a local browser UI at a `127.0.0.1` URL it prints (never a link to anything else).
+
+**4. When a call is blocked**, Codex surfaces the reason via `systemMessage`. Run `$privacy` to review the exposure, then choose to minimize and retry, allow once, or leave it blocked — see [`design.md` §8](.claude/docs/design.md) for the full consent flow.
+
+**5. Uninstall:**
+
+```bash
+codex plugin remove codex-privacy-hud@codex-privacy-hud
+codex plugin marketplace remove codex-privacy-hud
+```
 
 ## Known limits
 
