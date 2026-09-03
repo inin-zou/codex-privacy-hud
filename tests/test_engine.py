@@ -154,10 +154,17 @@ def test_unrecognized_destination_raises_unknown_key_rather_than_silently_scorin
 # ---------------------------------------------------------------------------
 
 def test_egress_credential_to_mask_policy_destination_rewrites(eng):
+    # The shared `eng` fixture's StubModelDetector is configured with a
+    # fixed finding at ("email", "jordan@acme.com", 8, 23) — it checks
+    # text[8:23] == "jordan@acme.com" (an exact offset match, not a
+    # substring search anywhere in the text), so this test's text must
+    # place that exact string at that exact span for the "tier 3 also
+    # finds something" half of what this test verifies to be real rather
+    # than assumed. "contact " is exactly 8 characters.
+    text = f"contact jordan@acme.com token: {CREDENTIAL_TEXT.split()[-1]}"
     d = eng.observe(_obs(hook_event="PreToolUse", direction="egress",
                          destination="subagent", source=".env",
-                         text=f"token: {CREDENTIAL_TEXT.split()[-1]}",
-                         tool_name="Task"))
+                         text=text, tool_name="Task"))
     assert d.action == "rewrite"
     # subagent (B2) is below B3/B4, so tier 3 also runs here and adds the
     # stub's email finding alongside the credential — both are recorded

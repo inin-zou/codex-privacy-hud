@@ -7,29 +7,44 @@ falling back to any remote service.
 """
 from __future__ import annotations
 
+import os
+
 from .base import Finding
 
+# Keys are the model's real entity_group values, uppercased (verified against
+# the shipped config.json's id2label — the model's BIOES taxonomy uses a
+# "private_"-prefixed scheme, e.g. "private_email", not a flat "EMAIL").
 LABEL_MAP = {
-    "NAME": "person",
-    "ADDRESS": "address",
-    "EMAIL": "email",
-    "PHONE": "phone",
-    "URL": "url",
-    "DATE": "date",
-    "ACCOUNT": "account",
+    "PRIVATE_PERSON": "person",
+    "PRIVATE_ADDRESS": "address",
+    "PRIVATE_EMAIL": "email",
+    "PRIVATE_PHONE": "phone",
+    "PRIVATE_URL": "url",
+    "PRIVATE_DATE": "date",
+    "ACCOUNT_NUMBER": "account",
     "SECRET": "credential",
 }
 
 
 class StubModelDetector:
-    """Test double: yields fixed findings without loading 1.5B parameters."""
+    """Test double: yields fixed findings without loading 1.5B parameters.
+
+    Only yields a finding when `text[start:end] == value` genuinely holds
+    for the `text` being scanned — the same offset invariant every real
+    detector must satisfy (Task 12 slices outbound payloads on these
+    offsets). Engine._scan() now runs tier 3 unconditionally on every
+    qualifying observation (no shape pre-filter), so a stub that returned
+    its configured findings regardless of input would fire on totally
+    unrelated text in every test using this fixture — exactly the kind of
+    fixture unrealism this project has hit before with offset bugs."""
 
     def __init__(self, findings: list[tuple[str, str, int, int]]):
         self._findings = findings
         self.available = True
 
     def scan(self, text: str, ctx: dict) -> list[Finding]:
-        return [Finding(t, v, s, e) for t, v, s, e in self._findings]
+        return [Finding(t, v, s, e) for t, v, s, e in self._findings
+                if text[s:e] == v]
 
 
 class ModelDetector:
@@ -40,13 +55,21 @@ class ModelDetector:
 
     def _load(self) -> bool:
         try:
+            # I2: never reach the network. `pipeline()`'s own
+            # `local_files_only` kwarg was removed upstream (it now raises
+            # TypeError from _sanitize_parameters); HF_HUB_OFFLINE is the
+            # current supported way to force the whole huggingface_hub /
+            # transformers stack offline. Set it here rather than requiring
+            # every caller to export it, and never override an operator's
+            # own choice if they already set it to something.
+            os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
             from transformers import pipeline
 
             self._pipe = pipeline(
                 "token-classification",
                 model=self.model_id,
                 aggregation_strategy="simple",
-                local_files_only=True,  # I2: never reach the network
             )
             return True
         except Exception:

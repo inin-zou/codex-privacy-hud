@@ -42,7 +42,6 @@ Global constraints this module must not violate:
 """
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 
 from .mask import mask, value_hash
@@ -67,22 +66,6 @@ from .minimize import consume_token, minimize_tool_input
 # byte count >= char count, so this bound is never looser than the 8 KB
 # byte figure it is modeled on).
 MAX_TIER3_CHARS = 8192
-
-# Cheap, deterministic heuristic for "this text looks like it might carry
-# PII that only a deep scan (tier 3) could type" — used to decide whether a
-# clean-looking, low-boundary observation is worth a deep scan at all, so a
-# StubModelDetector/ModelDetector isn't invoked on every allow-shaped event.
-_PII_SHAPE = re.compile(
-    r"[\w.+-]+@[\w-]+\.\w{2,}"            # email-shaped
-    r"|\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b"   # phone-shaped
-    r"|\b\d{3}-\d{2}-\d{4}\b",             # SSN-shaped
-    re.IGNORECASE,
-)
-
-
-def _looks_pii_shaped(text: str) -> bool:
-    return bool(_PII_SHAPE.search(text))
-
 
 def _is_tier3_detector(detector) -> bool:
     """Tier 3 (the model/NER detector) is the only detector kind that
@@ -257,19 +240,26 @@ class Engine:
         # — a redundant deep scan there only adds synchronous latency risk
         # (the exact thing Ruling 4 exists to bound) for no new signal.
         if tier3 and dest_kind != "local" and boundary not in ("B3", "B4"):
-            should_deep_scan = bool(findings) or _looks_pii_shaped(obs.text)
-            if should_deep_scan:
-                if len(obs.text) > MAX_TIER3_CHARS:
+            # Always deep-scan (no cheap-shape pre-filter): tier 3's whole
+            # purpose is catching categories tiers 0-2 cannot shape-match at
+            # all (address, person, date, account number) — gating its
+            # invocation on "does this already look PII-shaped by regex"
+            # would only ever admit the categories that needed it least
+            # (email/phone/SSN, which tiers 0-2 already have some coverage
+            # for) and permanently exclude the rest. The two guards already
+            # in this `if` (boundary, dest_kind) plus MAX_TIER3_CHARS below
+            # are the intended cost bound, not a shape heuristic on top.
+            if len(obs.text) > MAX_TIER3_CHARS:
+                degraded = True
+            else:
+                ran_any = False
+                for d in tier3:
+                    if not getattr(d, "available", True):
+                        continue
+                    findings.extend(d.scan(obs.text, {"source": obs.source}))
+                    ran_any = True
+                if not ran_any:
                     degraded = True
-                else:
-                    ran_any = False
-                    for d in tier3:
-                        if not getattr(d, "available", True):
-                            continue
-                        findings.extend(d.scan(obs.text, {"source": obs.source}))
-                        ran_any = True
-                    if not ran_any:
-                        degraded = True
         return findings, degraded
 
     def observe(self, obs: Observation) -> Decision:

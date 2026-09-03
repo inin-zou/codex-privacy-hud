@@ -219,9 +219,9 @@ def running_daemon(tmp_path):
     thread.join(timeout=2.0)
 
 
-def _raw_call(sock_path, payload: dict) -> dict:
+def _raw_call(sock_path, payload: dict, timeout: float = 2.0) -> dict:
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(2.0)
+    s.settimeout(timeout)
     s.connect(str(sock_path))
     s.sendall((json.dumps({"v": 1, "op": "event", "payload": payload}) + "\n").encode())
     buf = b""
@@ -370,10 +370,23 @@ def test_concurrent_calls_for_the_same_session_do_not_corrupt_the_ledger(running
             # always available, unlike ModelDetector which may not be
             # loadable in this test environment; see new_state()'s
             # docstring) so each thread's write is independently checkable.
+            #
+            # Engine._scan() now runs tier 3 unconditionally on every
+            # qualifying observation (the shape pre-filter that used to
+            # skip it was removed — see engine.py's `_scan` docstring), and
+            # the daemon holds one process-wide lock for the full duration
+            # of `Engine.observe()`, tier-3 inference included (Task 10's
+            # review flagged and accepted this as a latency/correctness
+            # tradeoff). On a machine where ModelDetector genuinely loads,
+            # 20 threads now serialize through real model inference one at
+            # a time, so both the socket read and the thread join need a
+            # budget sized for that — not the near-instant round trip this
+            # test could assume back when tier 3 never actually ran.
             key = f"sk-proj-{i:02d}Ab3xY9zQw1Er5Ty7Ui0OpAs2Df4Gh"
             _raw_call(sock_path, {
                 "hook_event_name": "PostToolUse", "session_id": "sockc",
-                "tool_name": "Read", "tool_response": f"key={key}"})
+                "tool_name": "Read", "tool_response": f"key={key}"},
+                timeout=30.0)
         except Exception as exc:  # pragma: no cover - failure path
             errors.append(exc)
 
@@ -381,11 +394,18 @@ def test_concurrent_calls_for_the_same_session_do_not_corrupt_the_ledger(running
     for t in threads:
         t.start()
     for t in threads:
-        t.join(timeout=5.0)
+        t.join(timeout=30.0)
 
     assert not errors
-    # 20 distinct credential values to the same destination -> 20 exposed
-    # rows, no corruption/lost writes from concurrent access to the shared
-    # sqlite connection.
+    # 20 distinct credential values to the same destination -> at least 20
+    # exposed rows (no corruption/lost writes from concurrent access to the
+    # shared sqlite connection). Not exactly 20: on a machine where
+    # ModelDetector genuinely loads, tier 3 now also runs on every call
+    # (Engine._scan()'s shape pre-filter was removed) and can independently
+    # flag the same credential-shaped text at a different span/value than
+    # SecretDetector's regex match, adding distinct (and legitimately
+    # separate, per Ledger's value_hash dedupe key) rows. What this test
+    # must not tolerate is fewer than 20 — that would mean a write was
+    # actually lost under concurrency, which is the property being tested.
     summary = daemon.state.ledger.summary("sockc")
-    assert summary["exposed_items"] == 20
+    assert summary["exposed_items"] >= 20
