@@ -23,6 +23,10 @@ def test_mask_does_not_leak_the_local_part():
     assert "rdan" not in masked
 
 
+def test_short_values_are_indistinguishable_by_length():
+    assert mask("account", "1") == mask("account", "1234")
+
+
 def test_pseudonym_is_stable_within_session_and_typed():
     s = new_salt()
     a = pseudonym(s, "email", "jordan@acme.com")

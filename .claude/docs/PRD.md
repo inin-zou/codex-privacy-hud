@@ -125,7 +125,7 @@ support.log → main agent → github MCP
 ```text
 score = Σ_over_exposures  severity(data_type) × volume(n) × destination_multiplier(boundary)
 
-severity:      credential/API key 40 · financial/health 12 · direct PII (email, phone,
+severity:      credential/API key 50 · financial/health 12 · direct PII (email, phone,
                name, address, SSN) 6 · quasi-identifier (hostname, path, IP, repo) 2
 volume(n):     1 + ln(n)      # n = distinct values of that type from that source
 destination:   model_context 1.0 · subagent 0.3 · mcp_tool 1.5 · external_network 2.0

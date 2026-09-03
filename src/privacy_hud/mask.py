@@ -33,7 +33,9 @@ def mask(data_type: str, value: str) -> str | None:
         local, _, domain = value.partition("@")
         return f"{local[:2]}{_DOT * 3}@{domain}"
     if len(value) <= 4:
-        return _DOT * len(value)
+        # Fixed width: a 1-char value and a 4-char value must render
+        # identically, or the mask becomes a length oracle.
+        return _DOT * 4
     return f"{value[:2]}{_DOT * 3}{value[-1]}"
 
 
