@@ -115,6 +115,10 @@ Leave it running for the session. Without it, hooks still fire but every call fa
 
 **4. Run `$privacy` at any point** to see the session audit — the ASCII table always works; it also starts a local browser UI at a `127.0.0.1` URL it prints (never a link to anything else).
 
+Real output from a live Codex session (not a mockup):
+
+![`$privacy` rendering a clean session's audit table inside a real Codex session](UI.png)
+
 **5. When a call is blocked**, Codex surfaces the reason via `systemMessage`. Run `$privacy` to review the exposure, then choose to minimize and retry, allow once, or leave it blocked — see [`design.md` §8](.claude/docs/design.md) for the full consent flow.
 
 **6. Uninstall** (also stop the daemon process from step 2):
