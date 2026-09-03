@@ -9,7 +9,7 @@ Token HUD:    How much context has been consumed?
 Privacy HUD:  How much sensitive context has been disclosed?
 ```
 
-![The Codex Privacy HUD user journey — from the ambient disclosure bar through the session audit, exposure detail, and minimizing a payload before it reaches an external tool](codex-privacy.png)
+![The Codex Privacy HUD user journey — from the ambient disclosure bar through the session audit, exposure detail, and minimizing a payload before it reaches an external tool](docs/images/user-journey-mockup.png)
 
 **Status:** implementation complete (all 13 planned tasks + post-hoc fixes, 211 tests passing) and whole-branch reviewed. **Verified end-to-end against a real Codex session** — including `codex exec` runs where sensitive text (e.g. a street address) is correctly detected by the real `openai/privacy-filter` model and recorded in the disclosure ledger. The daemon does not yet auto-start — see [Known limits](#known-limits). See [`.claude/docs/plans/2026-09-03-implementation.md`](.claude/docs/plans/2026-09-03-implementation.md).
 
@@ -115,9 +115,11 @@ Leave it running for the session. Without it, hooks still fire but every call fa
 
 **4. Run `$privacy` at any point** to see the session audit — the ASCII table always works; it also starts a local browser UI at a `127.0.0.1` URL it prints (never a link to anything else).
 
-Real output from a live Codex session (not a mockup):
+Real output from a live Codex session (not a mockup) — a fresh session with nothing yet disclosed, and the same audit after a few turns that sent addresses, names, URLs, and a credential to the model:
 
-![`$privacy` rendering a clean session's audit table inside a real Codex session](UI.png)
+![`$privacy` rendering a fresh session's audit table — 0% disclosure, nothing exposed yet](docs/images/dashboard-empty.png)
+
+![`$privacy` rendering the same session a few turns later — 100% disclosure, 12 exposed items across address, person, URL, and credential](docs/images/dashboard-exposed.png)
 
 **5. When a call is blocked**, Codex surfaces the reason via `systemMessage`. Run `$privacy` to review the exposure, then choose to minimize and retry, allow once, or leave it blocked — see [`design.md` §8](.claude/docs/design.md) for the full consent flow.
 
