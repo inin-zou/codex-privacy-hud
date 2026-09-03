@@ -1,0 +1,52 @@
+# ---- Privacy HUD runtime data (NEVER commit) ----
+# The ledger holds session metadata; the socket and salt are machine-local.
+*.db
+*.db-wal
+*.db-shm
+*.sock
+ledger.db*
+data/
+.plugin-data/
+receipts/
+
+# ---- Secrets ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa*
+credentials.json
+.aws/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# ---- Node ----
+node_modules/
+npm-debug.log*
+pnpm-debug.log*
+yarn-error.log*
+.next/
+out/
+
+# ---- Editors / OS ----
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# ---- Test fixtures containing synthetic PII ----
+# Golden corpora are committed; anything captured from a real session is not.
+tests/fixtures/captured/
