@@ -11,7 +11,7 @@ Privacy HUD:  How much sensitive context has been disclosed?
 
 ![The Codex Privacy HUD user journey — from the ambient disclosure bar through the session audit, exposure detail, and minimizing a payload before it reaches an external tool](codex-privacy.png)
 
-**Status:** implementation complete (all 13 planned tasks + two post-hoc fixes, 208 tests passing) and whole-branch reviewed. The daemon does not yet auto-start — see [Known limits](#known-limits) — and a live self-audit against a real Codex session is blocked on an unrelated OpenAI backend outage, not a code defect. See [`.claude/docs/plans/2026-09-03-implementation.md`](.claude/docs/plans/2026-09-03-implementation.md).
+**Status:** implementation complete (all 13 planned tasks + post-hoc fixes, 211 tests passing) and whole-branch reviewed. **Verified end-to-end against a real Codex session** — including `codex exec` runs where sensitive text (e.g. a street address) is correctly detected by the real `openai/privacy-filter` model and recorded in the disclosure ledger. The daemon does not yet auto-start — see [Known limits](#known-limits). See [`.claude/docs/plans/2026-09-03-implementation.md`](.claude/docs/plans/2026-09-03-implementation.md).
 
 ---
 
