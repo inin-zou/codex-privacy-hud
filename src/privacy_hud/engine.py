@@ -47,6 +47,7 @@ from dataclasses import dataclass
 
 from .mask import mask, value_hash
 from .matrix.loader import UnknownKey
+from .minimize import consume_token, minimize_tool_input
 
 # --- Ruling 4: bound the synchronous deep scan --------------------------
 #
@@ -111,6 +112,13 @@ class Observation:
     destination: str
     text: str
     tool_name: str | None
+    # Task 12: the actual tool_input dict (or bare command string) from the
+    # PreToolUse payload, when known. Needed to mint/consume single-use
+    # consent tokens (hashed via canonical_json) and to call
+    # minimize_tool_input with something structurally real to rewrite.
+    # Optional/defaulted for backward compatibility with callers (and
+    # existing tests) built before Task 12 that only ever passed `text`.
+    tool_input: dict | str | None = None
 
 
 @dataclass
@@ -119,6 +127,12 @@ class Decision:
     reason: str | None = None
     system_message: str | None = None
     budget_percent: int = 0
+    # Populated only for action="rewrite" (see minimize_tool_input). An
+    # unpopulated (None) updated_input on a rewrite decision must NEVER be
+    # forwarded to Codex as if it were safe to send unchanged — Task 12
+    # guarantees every "rewrite" Decision this engine returns carries a
+    # real, non-None value here; a caller that ever sees rewrite+None has
+    # found a bug, not a no-op.
     updated_input: str | dict | None = None
     # Ruling 4: True when tier 3 was skipped for size rather than run.
     # Renderer shows design.md §5's "Deep scan unavailable — fast-path
@@ -134,11 +148,11 @@ BLOCK_TEMPLATE = (
 )
 
 REWRITE_TEMPLATE = (
-    "PRIVACY HUD flagged a tool call for masking\n\n"
+    "PRIVACY HUD masked a tool call\n\n"
     "  {tool}  would send  {label}\n"
     "  from {source} to {destination}.\n\n"
-    "  Automatic masking is not wired in yet — run $privacy to review, "
-    "minimize, or allow once."
+    "  Sensitive values were replaced with stable pseudonyms before send. "
+    "Run $privacy to review or adjust policy."
 )
 
 
@@ -236,7 +250,22 @@ class Engine:
             # contains — the bytes are already in context.
             policy_action = self.matrix.default_action(dest_kind)
             if policy_action == "block":
-                action = "deny"
+                # Task 12: before finalizing a deny, honor a single-use
+                # consent token minted for exactly this call's arguments
+                # (mint_token/consume_token, architecture.md §8). A token
+                # never authorizes a different tool_input than it was
+                # minted for — consume_token re-hashes obs.tool_input and
+                # only matches an identical canonical JSON, so a retried
+                # call with different arguments still gets denied here.
+                ti = obs.tool_input if obs.tool_input is not None else obs.text
+                token_mode = consume_token(self.ledger, obs.session_id,
+                                            obs.tool_name or "", ti)
+                if token_mode == "allow_once":
+                    action = "allow"
+                elif token_mode == "minimize":
+                    action = "rewrite"
+                else:
+                    action = "deny"
             elif policy_action == "mask":
                 action = "rewrite"
 
@@ -273,7 +302,20 @@ class Engine:
             template = BLOCK_TEMPLATE if action == "deny" else REWRITE_TEMPLATE
             msg = template.format(tool=obs.tool_name or "tool", label=label,
                                    source=obs.source, destination=dest_kind)
+            updated_input = None
+            if action == "rewrite":
+                # Task 12: every "rewrite" Decision returned by this engine
+                # must carry a real, non-None updated_input — see the
+                # caveat on Decision.updated_input above. Reached from two
+                # places: the policy_defaults "mask" branch above, and the
+                # "minimize" token-consumption branch above; both leave
+                # `findings` non-empty (has_credential was required to
+                # reach either), so there is always something to rewrite.
+                ti = obs.tool_input if obs.tool_input is not None else obs.text
+                updated_input = minimize_tool_input(self.salt, obs.tool_name or "",
+                                                     ti, findings)
             return Decision(action, reason=msg, system_message=msg,
-                             budget_percent=pct, degraded=degraded)
+                             budget_percent=pct, updated_input=updated_input,
+                             degraded=degraded)
 
         return Decision("allow", budget_percent=pct, degraded=degraded)

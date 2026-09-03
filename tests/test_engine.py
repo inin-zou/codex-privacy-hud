@@ -7,6 +7,7 @@ from privacy_hud.detect.paths import PathDetector
 from privacy_hud.detect.secrets import SecretDetector
 from privacy_hud.detect.model import StubModelDetector
 from privacy_hud.engine import Engine, Observation
+from privacy_hud.minimize import mint_token, consume_token
 
 M = load_matrix()
 
@@ -226,3 +227,79 @@ def test_no_engine_copy_ever_contains_banned_words(eng):
         blob = " ".join(filter(None, [d.reason, d.system_message])).lower()
         for banned in BANNED:
             assert banned not in blob
+
+
+# ---------------------------------------------------------------------------
+# Task 12 — minimize.py wiring: tokens consulted before deny, and every
+# action="rewrite" Decision carries a real, non-None updated_input.
+# ---------------------------------------------------------------------------
+
+def test_rewrite_decision_always_carries_non_none_updated_input(eng):
+    d = eng.observe(_obs(hook_event="PreToolUse", direction="egress",
+                         destination="subagent", source=".env",
+                         text="token: " + CREDENTIAL_TEXT.split()[-1] + "Q",
+                         tool_name="Task"))
+    assert d.action == "rewrite"
+    assert d.updated_input is not None
+
+
+def test_valid_allow_once_token_allows_a_blocking_egress_call(eng):
+    ti = {"command": CREDENTIAL_TEXT}
+    mint_token(eng.ledger, "s1", "Bash", ti, "allow_once")
+    d = eng.observe(_obs(hook_event="PreToolUse", direction="egress",
+                         destination="external_net", source=".env",
+                         text=CREDENTIAL_TEXT, tool_name="Bash", tool_input=ti))
+    assert d.action == "allow"
+
+
+def test_allow_once_token_is_single_use_through_the_engine(eng):
+    ti = {"command": CREDENTIAL_TEXT}
+    mint_token(eng.ledger, "s1", "Bash", ti, "allow_once")
+    first = eng.observe(_obs(hook_event="PreToolUse", direction="egress",
+                             destination="external_net", source=".env",
+                             text=CREDENTIAL_TEXT, tool_name="Bash", tool_input=ti))
+    assert first.action == "allow"
+    second = eng.observe(_obs(hook_event="PreToolUse", direction="egress",
+                              destination="external_net", source=".env",
+                              text=CREDENTIAL_TEXT, tool_name="Bash", tool_input=ti))
+    assert second.action == "deny"
+
+
+def test_token_minted_for_different_arguments_does_not_authorize_this_call(eng):
+    # Security property, not a convenience: a token must never authorize a
+    # call with different arguments than it was minted for.
+    mint_token(eng.ledger, "s1", "Bash", {"command": "curl https://x.test"}, "allow_once")
+    d = eng.observe(_obs(hook_event="PreToolUse", direction="egress",
+                         destination="external_net", source=".env",
+                         text=CREDENTIAL_TEXT, tool_name="Bash",
+                         tool_input={"command": CREDENTIAL_TEXT}))
+    assert d.action == "deny"
+
+
+def test_valid_minimize_token_rewrites_a_blocking_egress_call(eng):
+    ti = {"command": CREDENTIAL_TEXT}
+    mint_token(eng.ledger, "s1", "Bash", ti, "minimize")
+    d = eng.observe(_obs(hook_event="PreToolUse", direction="egress",
+                         destination="external_net", source=".env",
+                         text=CREDENTIAL_TEXT, tool_name="Bash", tool_input=ti))
+    assert d.action == "rewrite"
+    assert isinstance(d.updated_input, str)
+    assert "sk-proj" not in d.updated_input
+
+
+def test_no_token_leaves_blocking_egress_call_denied(eng):
+    d = eng.observe(_obs(hook_event="PreToolUse", direction="egress",
+                         destination="external_net", source=".env",
+                         text=CREDENTIAL_TEXT, tool_name="Bash",
+                         tool_input={"command": CREDENTIAL_TEXT}))
+    assert d.action == "deny"
+
+
+def test_ingress_is_never_rewritten_only_recorded(eng):
+    # policy_defaults maps model_context -> mask, but ingress has already
+    # happened — the bytes are already in context, so a "rewrite" decision
+    # there would be a lie about what reached the model (Ruling 3).
+    d = eng.observe(_obs(hook_event="PostToolUse", direction="ingress",
+                         destination="model_context",
+                         text="key: " + CREDENTIAL_TEXT.split()[-1] + "Q"))
+    assert d.action != "rewrite"
