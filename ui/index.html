@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy Audit</title>
+<style>
+  /* Tokens: design.md §3 — terminal-native, dark-first. The mockup's
+     aesthetic is the spec; these are its literal values, not approximations. */
+  :root {
+    --bg: #0a0e14;
+    --surface: #111820;
+    --border: #1e2936;
+    --text: #c9d4e0;
+    --muted: #5c6b7f;
+    --accent: #22d3ee;
+    --safe: #4ade80;
+    --warn: #fbbf24;
+    --danger: #f87171;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: ui-monospace, SF Mono, Menlo, monospace;
+    font-size: 14px;
+  }
+
+  body { padding: 24px; max-width: 900px; margin: 0 auto; }
+
+  h1 {
+    font-size: 15px;
+    font-weight: 600;
+    margin: 0 0 2px 0;
+  }
+
+  .subtitle { color: var(--muted); margin: 0 0 20px 0; }
+
+  .label {
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    font-size: 11px;
+  }
+
+  /* Summary tiles — design.md §5: four, fixed, banded value. */
+  .tiles {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    margin-bottom: 20px;
+  }
+  .tile {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    border-radius: 4px;
+    padding: 12px 8px;
+    text-align: center;
+  }
+  .tile .value { font-size: 22px; font-weight: 600; }
+  .tile .label { margin-top: 4px; }
+  .tile .value.safe { color: var(--safe); }
+  .tile .value.warn { color: var(--warn); }
+  .tile .value.danger { color: var(--danger); }
+
+  /* Tabs — design.md §5. */
+  .tabs {
+    display: flex;
+    gap: 22px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 12px;
+  }
+  .tab {
+    background: none;
+    border: none;
+    color: var(--muted);
+    font-family: inherit;
+    font-size: 13px;
+    padding: 6px 0 10px 0;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+  }
+  .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+  .tab:focus-visible, .row:focus-visible, button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
+  /* Flow table — design.md §5. */
+  table { width: 100%; border-collapse: collapse; }
+  thead th {
+    text-align: left;
+    color: var(--muted);
+    font-weight: 500;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  tbody .row { cursor: pointer; }
+  tbody .row td {
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  tbody .row:hover, tbody .row.selected {
+    background: var(--surface);
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
+
+  /* Status chips — outlined, not filled (design.md §3). */
+  .chip {
+    display: inline-block;
+    border: 1px solid currentColor;
+    border-radius: 3px;
+    padding: 1px 6px;
+    font-size: 11px;
+    letter-spacing: 0.03em;
+  }
+  .chip.exposed { color: var(--danger); }
+  .chip.masked { color: var(--warn); }
+  .chip.prevented { color: var(--safe); }
+  .chip.local { color: var(--muted); }
+
+  .empty-state { color: var(--muted); padding: 20px 4px; }
+  .degraded-banner { color: var(--warn); margin-bottom: 10px; }
+
+  /* L3 detail panel — design.md §6. */
+  #detail {
+    display: none;
+    margin-top: 22px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    border-radius: 4px;
+    padding: 18px;
+  }
+  #detail .flow-title { font-size: 16px; font-weight: 600; }
+  #detail .flow-line { color: var(--accent); margin: 4px 0 16px 0; }
+  #detail .field-row { display: flex; gap: 10px; padding: 3px 0; }
+  #detail .field-row .field-label {
+    color: var(--muted); width: 130px; flex: none;
+  }
+  #detail .actions { margin-top: 16px; display: flex; gap: 10px; flex-wrap: wrap; }
+  #detail button.action {
+    background: none;
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    font-family: inherit;
+    font-size: 13px;
+    padding: 6px 12px;
+    border-radius: 3px;
+    cursor: pointer;
+  }
+  #detail button.action:hover { background: rgba(34, 211, 238, 0.08); }
+
+  /* The irreversibility notice — required, permanent, warn-colored, never
+     dismissible. design.md §6: "the single most honest element in the
+     product." */
+  .irreversibility-notice {
+    margin-top: 18px;
+    color: var(--warn);
+    border-top: 1px solid var(--border);
+    padding-top: 12px;
+  }
+
+  .rule-confirmation {
+    margin-top: 10px;
+    color: var(--safe);
+    font-size: 13px;
+    min-height: 1.2em;
+  }
+
+  .close-detail {
+    background: none;
+    border: none;
+    color: var(--muted);
+    font-family: inherit;
+    cursor: pointer;
+    float: right;
+  }
+
+  .toggle-ascii {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    font-family: inherit;
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 3px;
+    cursor: pointer;
+    margin-left: 8px;
+  }
+
+  pre.ascii {
+    display: none;
+    white-space: pre;
+    overflow-x: auto;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 12px;
+    margin-top: 12px;
+    font-size: 12.5px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; animation: none !important; }
+  }
+</style>
+</head>
+<body>
+  <h1>Privacy Audit</h1>
+  <p class="subtitle" id="subtitle">Current session</p>
+
+  <div class="tiles" id="tiles"></div>
+
+  <div class="tabs" id="tabs" role="tablist"></div>
+
+  <div id="degraded" class="degraded-banner" hidden></div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Sensitive data</th>
+        <th>Source</th>
+        <th>Destination</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div class="empty-state" id="empty" hidden></div>
+
+  <button class="toggle-ascii" id="toggleAscii" type="button">View as text</button>
+  <pre class="ascii" id="ascii"></pre>
+
+  <div id="detail">
+    <button class="close-detail" id="closeDetail" type="button">✕ close</button>
+    <div class="flow-title" id="detailTitle"></div>
+    <div class="flow-line" id="detailFlow"></div>
+    <div id="detailFields"></div>
+    <div class="actions" id="detailActions"></div>
+    <div class="rule-confirmation" id="ruleConfirmation"></div>
+    <div class="irreversibility-notice">
+      Already disclosed data cannot be recalled from this session.
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
