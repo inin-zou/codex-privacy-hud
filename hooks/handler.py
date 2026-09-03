@@ -11,7 +11,15 @@ import os
 import socket
 import sys
 
-TIMEOUT = 0.12  # seconds; see architecture.md §10 latency budget
+TIMEOUT = 2.0  # seconds
+# Was 0.12s under the assumption that tier 3 (the model detector) rarely
+# ran. Engine._scan() now runs tier 3 unconditionally on every qualifying
+# observation (see engine.py's fix commit) -- measured real round trip for
+# a short PostToolUse payload is ~280ms, not the sub-millisecond regex-only
+# cost 120ms was calibrated against. 2s leaves headroom under the tightest
+# observed Codex-side hook timeout (SessionEnd is clamped to 3s on newer
+# Codex builds -- see architecture.md's platform-drift note) while comfortably
+# covering slower/larger payloads up to MAX_TIER3_CHARS.
 EGRESS_EVENTS = {"PreToolUse"}
 
 

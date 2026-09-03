@@ -73,7 +73,7 @@ The client is deliberately dumb: it forwards the hook payload unmodified and rel
 | Failure | Client behavior |
 |---|---|
 | Socket missing | Apply per-boundary default below. (Designed to also spawn the daemon detached at this point — **not implemented in this build**; the daemon must be started manually. See README.md "Known limits".) |
-| Daemon timeout (> 120 ms) | Ingress: allow + `systemMessage` "unverified". Egress (B3/B4): **deny** |
+| Daemon timeout (> 2 s) | Ingress: allow + `systemMessage` "unverified". Egress (B3/B4): **deny** |
 | Daemon crash mid-request | Same as timeout |
 | Client itself throws | `exit 0` with empty stdout — never block Codex on our own bug |
 
@@ -420,19 +420,31 @@ The MCP tools return structured JSON regardless, so when Codex renders MCP UI th
 - **Writes serialized** through a single SQLite connection in WAL mode; the UI reads on a separate read-only connection.
 - **Chunk cache** is content-hash keyed and bounded (LRU, 64 MB), shared across sessions — safe because it maps content hash to *findings*, never to content.
 
-**Latency budget** (p99, `PreToolUse` on the critical path):
+**Latency budget** — the table below was a design-time estimate, never empirically verified until real weights actually loaded (every prior dev/CI environment had `ModelDetector.available == False`, so tier 3 silently never ran and this budget was never truly exercised):
 
 ```text
 client cold start        25 ms
 socket round trip         2 ms
-tier 0-2 scan             6 ms
-tier 3 (when it runs)    40 ms
+tier 0-2 scan              6 ms
+tier 3 (measured, real weights, short text)  ~280 ms
 policy + ledger write     5 ms
                         ──────
-                    38 / 78 ms
+                    ~40 / ~320 ms
 ```
 
-Comfortably under the 150 ms target.
+The original 40 ms tier-3 estimate was roughly 7x too low. The 150 ms
+target and `hooks/handler.py`'s original 120 ms client timeout were both
+calibrated against that estimate; the client timeout is now 2 s (see
+`hooks/handler.py`'s own comment for the measurement and reasoning), and
+the "comfortably under 150 ms" claim below no longer holds for any call
+that actually reaches tier 3 — those now cost several hundred ms, still
+comfortably inside Codex's own hook timeout ceiling but no longer
+imperceptible. `Engine._scan()`'s shape pre-filter (which used to skip
+tier 3 for text that didn't look email/phone/SSN-shaped) was removed
+because it silently prevented tier 3 from ever running on the categories
+it exists to catch (address, person, date, account number) — see engine.py's
+fix commit. That correctness fix is what makes this latency real rather
+than theoretical.
 
 **`PostToolUse` is synchronous, and that is the honest cost.** §7's platform note explains why: Codex CLI 0.145.0 does not implement `async: true` on hooks — an event marked async is silently never executed, not deferred. So `PostToolUse` sits on the same critical path as `PreToolUse`, and it is the hook that scans the *largest* payloads in the system: tool results, meaning file contents, command output, and MCP responses — the primary ingress chokepoint described in §3.2. An unbounded synchronous scan of a large `tool_response` (a multi-hundred-KB file read, say) run through tier 3 (Presidio NER, superlinear-ish in practice) could blow past both the 150 ms budget and the hook's own 5 s hard timeout (`hooks.json`'s `"timeout": 5`), and a timed-out `PostToolUse` fails open per §2's table — meaning the largest disclosures would be exactly the ones most likely to go unrecorded if scanning were left unbounded.
 
