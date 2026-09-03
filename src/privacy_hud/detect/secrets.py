@@ -49,6 +49,17 @@ PLACEHOLDERS = re.compile(
 
 ENTROPY_THRESHOLD = 3.5
 
+# Exact digest lengths for common hash functions (md5, sha1, sha256, sha512).
+# A pure-hex string at one of these lengths is treated as a checksum/git SHA,
+# not a credential, but ONLY when found by GENERIC_QUOTED — the name-agnostic,
+# no-context path. ASSIGNMENT (an explicit api_key/secret/token/... keyword
+# immediately to the left) is NOT exempted: an explicit keyword is stronger
+# evidence than shape, so `api_key = "<40 hex chars>"` still flags. See
+# task-5-report.md, fix round 2, for the length-allowlist-vs-variety-rule
+# reasoning.
+HEX_DIGEST_LENGTHS = {32, 40, 64, 128}
+_HEX_ONLY = re.compile(r"^[0-9a-fA-F]+$")
+
 
 def shannon(s: str) -> float:
     if not s:
@@ -60,6 +71,10 @@ def shannon(s: str) -> float:
 
 def _is_placeholder(candidate: str) -> bool:
     return bool(PLACEHOLDERS.match(candidate)) or "-here" in candidate.lower()
+
+
+def _is_hex_digest(candidate: str) -> bool:
+    return len(candidate) in HEX_DIGEST_LENGTHS and bool(_HEX_ONLY.match(candidate))
 
 
 def _overlaps_existing(out: list[Finding], start: int, end: int) -> bool:
@@ -76,6 +91,8 @@ class SecretDetector:
             for m in pat.finditer(text):
                 candidate = m.group(1)
                 if _is_placeholder(candidate):
+                    continue
+                if pat is GENERIC_QUOTED and _is_hex_digest(candidate):
                     continue
                 if shannon(candidate) < ENTROPY_THRESHOLD:
                     continue
