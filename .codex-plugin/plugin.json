@@ -1,0 +1,7 @@
+{
+  "name": "codex-privacy-hud",
+  "version": "0.1.0",
+  "description": "Local-first disclosure ledger and privacy enforcement for Codex sessions",
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json"
+}
