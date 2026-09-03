@@ -1,3 +1,4 @@
+import json
 import time
 
 import pytest
@@ -95,10 +96,25 @@ def test_right_to_left_replacement_keeps_earlier_offsets_valid():
 # minimize_tool_input — string for Bash/apply_patch, dict for MCP tools
 # ---------------------------------------------------------------------------
 
+def _blob_finding(tool_input: dict, data_type: str, value: str) -> Finding:
+    """Build a Finding the way the real pipeline does for an MCP tool call:
+    offsets into json.dumps(tool_input) (Task 10's documented contract for
+    how Observation.text is built for a PreToolUse MCP egress event), not
+    into any individual field's own string."""
+    blob = json.dumps(tool_input)
+    start = blob.index(value)
+    return Finding(data_type, value, start, start + len(value))
+
+
 def test_mcp_tool_input_is_rewritten_as_an_object():
-    out = minimize_tool_input(SALT, "mcp__github__create_issue",
-                               {"body": "contact jordan@acme.com"},
-                               [Finding("email", "jordan@acme.com", 8, 23)])
+    # fix-round-1 regression: this finding's offsets are relative to the
+    # JSON blob (json.dumps(tool_input)), not to the "body" field's own
+    # string — exercising minimize_tool_input's real MCP/blob code path
+    # rather than accidentally staying green through field-relative
+    # offsets that happened to also be valid (the bug fix-round-1 found).
+    tool_input = {"body": "contact jordan@acme.com"}
+    finding = _blob_finding(tool_input, "email", "jordan@acme.com")
+    out = minimize_tool_input(SALT, "mcp__github__create_issue", tool_input, [finding])
     assert isinstance(out, dict)
     assert "jordan@acme.com" not in out["body"]
 
@@ -117,10 +133,81 @@ def test_apply_patch_tool_input_is_rewritten_as_a_string():
 
 
 def test_mcp_tool_input_leaves_unrelated_fields_untouched():
-    out = minimize_tool_input(SALT, "mcp__github__create_issue",
-                               {"body": "contact jordan@acme.com", "repo": "acme/app"},
-                               [Finding("email", "jordan@acme.com", 8, 23)])
+    tool_input = {"body": "contact jordan@acme.com", "repo": "acme/app"}
+    finding = _blob_finding(tool_input, "email", "jordan@acme.com")
+    out = minimize_tool_input(SALT, "mcp__github__create_issue", tool_input, [finding])
     assert out["repo"] == "acme/app"
+
+
+def test_mcp_tool_input_accepts_caller_supplied_text_for_byte_fidelity():
+    # Mirrors how Engine.observe calls this: pass the exact text findings
+    # were scanned against (obs.text) rather than letting this function
+    # re-derive json.dumps(tool_input) itself.
+    tool_input = {"body": "contact jordan@acme.com"}
+    blob = json.dumps(tool_input)
+    start = blob.index("jordan@acme.com")
+    finding = Finding("email", "jordan@acme.com", start, start + len("jordan@acme.com"))
+    out = minimize_tool_input(SALT, "mcp__github__create_issue", tool_input, [finding],
+                               text=blob)
+    assert "jordan@acme.com" not in out["body"]
+
+
+# ---------------------------------------------------------------------------
+# fix-round-1 regression: the reviewer's exact end-to-end repro. The
+# original bug tried to re-map blob-relative offsets onto individual dict
+# field values; a span that crossed a JSON structural character (or simply
+# didn't line up with the field-splitting) silently failed to attribute,
+# so the credential and email shipped completely unredacted while the
+# caller (Engine.observe) still reported action="rewrite".
+# ---------------------------------------------------------------------------
+
+def test_mcp_minimize_actually_redacts_the_credential_and_email():
+    tool_input = {
+        "body": "contact jordan@acme.com token: sk-proj-Ab3xY9zQw1Er5Ty7Ui0OpAs2Df4Gh6Jk8Lm",
+        "title": "issue",
+    }
+    text = json.dumps(tool_input)  # Task 10's documented contract for MCP PreToolUse egress
+
+    # Findings the way the real pipeline would compute them: tier 1
+    # (SecretDetector) scanning the actual blob for the credential, plus
+    # an email finding at its real blob offset (email detection is a tier
+    # 3/model concern in production; here we pin its offset the same way
+    # a real detector would report it — against `text`, not a field).
+    findings = list(SecretDetector().scan(text, {"source": "test"}))
+    assert any(f.data_type == "credential" for f in findings), \
+        "sanity: SecretDetector must actually find the key in the blob"
+    email_start = text.index("jordan@acme.com")
+    findings.append(Finding("email", "jordan@acme.com", email_start,
+                             email_start + len("jordan@acme.com")))
+
+    out = minimize_tool_input(SALT, "mcp__github__create_issue", tool_input, findings,
+                               text=text)
+
+    serialized = json.dumps(out)
+    assert "jordan@acme.com" not in serialized
+    assert "sk-proj-" not in serialized
+    assert out["title"] == "issue"
+
+
+# ---------------------------------------------------------------------------
+# Pseudonym safety inside a JSON string literal — no quotes, backslashes,
+# or control characters that would require escaping when spliced directly
+# into minimize_text's blob-slicing.
+# ---------------------------------------------------------------------------
+
+_ALL_DATA_TYPES = ("credential", "financial", "health", "email", "phone",
+                    "person", "address", "ssn", "account", "url", "date",
+                    "hostname", "path", "ip", "repo")
+
+
+def test_every_pseudonym_survives_a_json_round_trip_unescaped():
+    for data_type in _ALL_DATA_TYPES:
+        p = pseudonym(SALT, data_type, "some-value")
+        # If json.dumps had to escape anything, the quoted form would be
+        # longer than the literal wrapped in a bare pair of quotes.
+        assert json.dumps(p) == f'"{p}"', (
+            f"pseudonym for {data_type!r} needs JSON escaping: {p!r}")
+        assert json.loads(json.dumps(p)) == p
 
 
 # ---------------------------------------------------------------------------

@@ -312,8 +312,13 @@ class Engine:
                 # `findings` non-empty (has_credential was required to
                 # reach either), so there is always something to rewrite.
                 ti = obs.tool_input if obs.tool_input is not None else obs.text
+                # fix-round-1: pass obs.text straight through as the exact
+                # blob findings were scanned against, rather than letting
+                # minimize_tool_input re-derive json.dumps(tool_input)
+                # itself and hope it byte-matches. See minimize.py's
+                # minimize_tool_input docstring for the full rationale.
                 updated_input = minimize_tool_input(self.salt, obs.tool_name or "",
-                                                     ti, findings)
+                                                     ti, findings, text=obs.text)
             return Decision(action, reason=msg, system_message=msg,
                              budget_percent=pct, updated_input=updated_input,
                              degraded=degraded)

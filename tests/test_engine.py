@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from privacy_hud.matrix.loader import UnknownKey, load_matrix
@@ -293,6 +295,29 @@ def test_no_token_leaves_blocking_egress_call_denied(eng):
                          text=CREDENTIAL_TEXT, tool_name="Bash",
                          tool_input={"command": CREDENTIAL_TEXT}))
     assert d.action == "deny"
+
+
+def test_engine_mcp_rewrite_actually_redacts_the_credential_end_to_end(eng):
+    # fix-round-1 regression at the Engine.observe level (not just
+    # minimize_tool_input in isolation): a "minimize" token against a real
+    # MCP dict tool_input, scanned the way Task 10's daemon actually would
+    # (text = json.dumps(tool_input)), must produce an updated_input whose
+    # serialized form genuinely no longer contains the credential — not
+    # merely a Decision that claims success.
+    tool_input = {
+        "body": "contact jordan@acme.com token: " + CREDENTIAL_TEXT.split()[-1],
+        "title": "issue",
+    }
+    text = json.dumps(tool_input)
+    mint_token(eng.ledger, "s1", "mcp__github__create_issue", tool_input, "minimize")
+    d = eng.observe(_obs(hook_event="PreToolUse", direction="egress",
+                         destination="mcp_tool", source=".env",
+                         text=text, tool_name="mcp__github__create_issue",
+                         tool_input=tool_input))
+    assert d.action == "rewrite"
+    serialized = json.dumps(d.updated_input)
+    assert CREDENTIAL_TEXT.split()[-1] not in serialized
+    assert d.updated_input["title"] == "issue"
 
 
 def test_ingress_is_never_rewritten_only_recorded(eng):
