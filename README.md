@@ -98,6 +98,34 @@ There is **no second LLM call to audit the first one.** That would re-transmit t
 
 Verified end-to-end against a real Codex CLI install (Task 9's smoke test on 0.145.0; re-checked on 0.153.0).
 
+### Prerequisites
+
+Tier 3 detection (person, address, date, account number — the categories no regex can shape-match) runs the `openai/privacy-filter` model locally. It is not optional equipment: without it the engine still runs, but only tiers 0–2, which means credentials and paths are still caught and **names and addresses are not**.
+
+- **Python 3.11+** (developed and verified on 3.12).
+- **`transformers >= 5.16`.** Earlier versions fail with `does not recognize this architecture` — the `openai_privacy_filter` model type was not yet known to them. This is a real wall, not a warning.
+- **`torch >= 2.5`** (what `transformers` 5.16 itself requires). Note that torch is one of *transformers'* optional extras, so installing `transformers` alone leaves you with no torch and a silently disabled tier 3 — the `[detectors]` extra below names both. If `torchvision` / `torchaudio` are also installed, they must be built against the same torch, or importing the pipeline dies with `operator torchvision::nms does not exist`.
+
+> **Use a dedicated virtualenv.** Upgrading torch inside a shared environment is how you break every other ML package in it — during development this took out `vllm`, `facenet-pytorch`, and `sentence-transformers` in one command. Isolate this install.
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[detectors]"
+```
+
+**Then fetch the model weights (~2.8 GB).** Download only the files the pipeline actually loads — the full repo is ~17 GB because it also ships ONNX export variants and a duplicate `original/` checkpoint, neither of which this project ever touches:
+
+```bash
+python3 -c "
+from huggingface_hub import snapshot_download
+snapshot_download('openai/privacy-filter', allow_patterns=[
+    'config.json', 'model.safetensors', 'tokenizer.json',
+    'tokenizer_config.json', 'viterbi_calibration.json'])
+"
+```
+
+That exact file set is verified sufficient. Everything afterwards runs offline: the plugin sets `HF_HUB_OFFLINE=1` before importing `transformers`, so nothing reaches the network once the weights are on disk (Global Constraint I2).
+
 **1. Install the plugin from this repo.**
 
 ```bash
@@ -107,10 +135,20 @@ codex plugin add codex-privacy-hud@codex-privacy-hud --json
 
 The manifest lives at `.claude-plugin/plugin.json` (not `.codex-plugin/` — the OpenAI docs describe that path, but real Codex CLI does not recognize it; `codex plugin marketplace add` fails outright against it. `.claude-plugin/` is what Codex actually loads, confirmed by installing both ways. See `.claude/docs/architecture.md` §7 for the divergence.)
 
-**2. Start the daemon once, before the session.** The daemon does not yet start itself — this is a known gap, not an oversight (see [Known limits](#known-limits) below). Start it manually, pointed at the same `PLUGIN_DATA` directory Codex passes to the plugin:
+**2. Start the daemon once, before the session.** The daemon does not yet start itself — this is a known gap, not an oversight (see [Known limits](#known-limits) below). Start it manually, pointed at the same `PLUGIN_DATA` directory Codex passes to the plugin.
+
+**Finding `PLUGIN_DATA`.** Codex assigns it; you do not choose it. The daemon and the hook client must agree on it or the hooks report `unavailable`, so read it off disk rather than guessing:
 
 ```bash
-PLUGIN_DATA=<the plugin's data directory> PYTHONPATH=src python3 -m privacy_hud.daemon &
+ls ~/.codex/plugins/data/
+# codex-privacy-hud-codex-privacy-hud
+```
+
+With the install commands from step 1, that resolves to:
+
+```bash
+export PLUGIN_DATA=~/.codex/plugins/data/codex-privacy-hud-codex-privacy-hud
+PYTHONPATH=src python3 -m privacy_hud.daemon &
 ```
 
 Leave it running for the session. Without it, hooks still fire but every call fails open (ingress) or closed (egress) to the default with no detection actually running.
@@ -118,10 +156,17 @@ Leave it running for the session. Without it, hooks still fire but every call fa
 **3. Optional — start the ambient Level 1 HUD in a second terminal pane.** It is a separate process, not a Codex status item: it polls `$PLUGIN_DATA/ledger.db` read-only and redraws one line in place, so give it its own pane or split beside the pane running Codex. It requires the daemon from step 2 to be running — without it nothing new is recorded, and the HUD shows either nothing at all (no ledger exists yet) or the last session's number, unchanging. It never reports 0% for a session that is simply unmonitored.
 
 ```bash
-PLUGIN_DATA=<the plugin's data directory> PYTHONPATH=src python3 -m privacy_hud.ambient --watch
+export PLUGIN_DATA=~/.codex/plugins/data/codex-privacy-hud-codex-privacy-hud
+PYTHONPATH=src python3 -m privacy_hud.ambient --watch
+```
+
+```text
+PRIVACY  Disclosure ███░░░░░░░ 30%  ›
 ```
 
 `--watch` redraws every 2 seconds; `--watch N` sets the interval. With no flags (or `--once`) it prints a single line and exits, which is what you want from a shell prompt or another status bar. `--session-id <id>` overrides session resolution. If the package is installed, the same entry point is available as `privacy-hud-ambient`.
+
+`--once` is also the quickest way to confirm the whole stack is live: if it prints a line, the daemon is recording and the ledger is readable. If it prints nothing, nothing has been recorded yet.
 
 **4. Use Codex normally.** The plugin's hooks (`hooks/hooks.json`) fire on every `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SubagentStart`/`Stop`, and `SessionEnd` — no per-command action needed once the daemon from step 2 is running.
 
