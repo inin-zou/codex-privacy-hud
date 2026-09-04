@@ -9,6 +9,13 @@ description = "Local-first privacy plugin for the Codex CLI: a session-level dis
 requires-python = ">=3.11"
 dependencies = []
 
+[project.scripts]
+# The Level 1 ambient HUD: a standalone reader you run yourself in a second
+# terminal pane. It polls $PLUGIN_DATA/ledger.db read-only and redraws one
+# line in place -- it is not a Codex status item and does not render inside
+# the Codex TUI. See src/privacy_hud/ambient.py.
+privacy-hud-ambient = "privacy_hud.ambient:main"
+
 [project.optional-dependencies]
 test = ["pytest>=8"]
 detectors = ["transformers"]

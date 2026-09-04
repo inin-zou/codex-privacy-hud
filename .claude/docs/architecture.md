@@ -407,7 +407,7 @@ privacy.start_clean_session   → wipe session state and salt
 **UI delivery.** Codex Desktop does not currently render MCP Apps inline iframe resources ([openai/codex#21019](https://github.com/openai/codex/issues/21019)), and `tui.status_line` accepts only built-in item identifiers. So:
 
 - **L2/L3** — daemon serves static HTML + vanilla JS on `127.0.0.1:<ephemeral>`; the `$privacy` skill prints the URL and an ASCII table fallback, so the demo works even with no browser.
-- **L1** — optional terminal companion renderer.
+- **L1** — `privacy_hud.ambient` (entry point `privacy_hud.ambient:main`, console script `privacy-hud-ambient`): a standalone process the user runs in a second terminal pane, which polls `$PLUGIN_DATA/ledger.db` read-only and redraws `render.hud_line()` in place. Not a Codex status item.
 - **Alerts** — hook `systemMessage`, which is native and always available.
 
 The MCP tools return structured JSON regardless, so when Codex renders MCP UI the same data powers it with no rework.

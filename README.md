@@ -36,7 +36,7 @@ Secret scanners are pre-commit, not pre-inference. DLP products are server-side 
 PRIVACY  Disclosure ███░░░░░░░ 28%  ›
 ```
 
-**Level 1 — Ambient.** One line. Never interrupts.
+**Level 1 — Ambient.** One line. Never interrupts. Codex has no plugin-owned status renderer, so this line does not live inside the Codex TUI — it is a companion process you run in a second terminal pane (`python -m privacy_hud.ambient --watch`, [step 3](#using-it-in-codex)), which polls the ledger and redraws in place.
 
 **Level 2 — Session audit** (`$privacy`). Summary tiles and a tabbed table of every flow:
 
@@ -115,9 +115,17 @@ PLUGIN_DATA=<the plugin's data directory> PYTHONPATH=src python3 -m privacy_hud.
 
 Leave it running for the session. Without it, hooks still fire but every call fails open (ingress) or closed (egress) to the default with no detection actually running.
 
-**3. Use Codex normally.** The plugin's hooks (`hooks/hooks.json`) fire on every `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SubagentStart`/`Stop`, and `SessionEnd` — no per-command action needed once the daemon from step 2 is running.
+**3. Optional — start the ambient Level 1 HUD in a second terminal pane.** It is a separate process, not a Codex status item: it polls `$PLUGIN_DATA/ledger.db` read-only and redraws one line in place, so give it its own pane or split beside the pane running Codex. It requires the daemon from step 2 to be running — without it nothing new is recorded, and the HUD shows either nothing at all (no ledger exists yet) or the last session's number, unchanging. It never reports 0% for a session that is simply unmonitored.
 
-**4. Run `$privacy` at any point** to see the session audit — the ASCII table always works; it also starts a local browser UI at a `127.0.0.1` URL it prints (never a link to anything else).
+```bash
+PLUGIN_DATA=<the plugin's data directory> PYTHONPATH=src python3 -m privacy_hud.ambient --watch
+```
+
+`--watch` redraws every 2 seconds; `--watch N` sets the interval. With no flags (or `--once`) it prints a single line and exits, which is what you want from a shell prompt or another status bar. `--session-id <id>` overrides session resolution. If the package is installed, the same entry point is available as `privacy-hud-ambient`.
+
+**4. Use Codex normally.** The plugin's hooks (`hooks/hooks.json`) fire on every `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SubagentStart`/`Stop`, and `SessionEnd` — no per-command action needed once the daemon from step 2 is running.
+
+**5. Run `$privacy` at any point** to see the session audit — the ASCII table always works; it also starts a local browser UI at a `127.0.0.1` URL it prints (never a link to anything else).
 
 Real output from a live Codex session (not a mockup) — a fresh session with nothing yet disclosed, and the same audit after a few turns that sent addresses, names, URLs, and a credential to the model:
 
@@ -125,9 +133,9 @@ Real output from a live Codex session (not a mockup) — a fresh session with no
 
 ![`$privacy` rendering the same session a few turns later — 100% disclosure, 12 exposed items across address, person, URL, and credential](docs/images/dashboard-exposed.png)
 
-**5. When a call is blocked**, Codex surfaces the reason via `systemMessage`. Run `$privacy` to review the exposure, then choose to minimize and retry, allow once, or leave it blocked — see [`design.md` §8](.claude/docs/design.md) for the full consent flow.
+**6. When a call is blocked**, Codex surfaces the reason via `systemMessage`. Run `$privacy` to review the exposure, then choose to minimize and retry, allow once, or leave it blocked — see [`design.md` §8](.claude/docs/design.md) for the full consent flow.
 
-**6. Uninstall** (also stop the daemon process from step 2):
+**7. Uninstall** (also stop the daemon process from step 2, and the ambient HUD from step 3 if you started it):
 
 ```bash
 codex plugin remove codex-privacy-hud@codex-privacy-hud
@@ -141,7 +149,7 @@ Stated up front, because a privacy tool that overclaims is worse than none:
 1. **The daemon does not start itself yet.** `architecture.md` describes lazy auto-spawn from the hook client on first use; that piece was never built. Start it manually before a session — see [Using it in Codex](#using-it-in-codex) above. Without it, hooks still fire but every call falls through to the fail-open/fail-closed default with no detection running.
 2. **Hosted tools bypass hooks.** WebSearch and similar do not trigger local function-tool hook paths. This is a practical guardrail, not a complete enforcement boundary.
 3. **No `ask` decision in Codex hooks.** Interactive consent is a deny → review → one-shot-token → retry loop rather than a modal.
-4. **No custom status item.** `tui.status_line` accepts only built-in identifiers, so Level 1 ships as an optional terminal companion, not a native footer. (Confirmed by prior art: [`codex-hud`](https://github.com/anhannin/codex-hud) achieves a persistent inline status line only by patching the Codex binary itself — a path this project deliberately does not take.)
+4. **No custom status item — Level 1 is not inside Codex.** `tui.status_line` accepts only built-in identifiers, and stock Codex has no plugin-owned renderer, so nothing this plugin produces can appear under the Codex input area. Level 1 is therefore a *separate process*: `privacy-hud-ambient` (`python -m privacy_hud.ambient --watch`), which you start yourself in a second terminal pane, and which polls the ledger and redraws one line in place there. It is a companion window next to Codex, not part of the Codex TUI — and if you do not start it, there is no ambient line at all. (Prior art confirms the cost of the alternative: both [`anhannin/codex-hud`](https://github.com/anhannin/codex-hud) and [`brandonwie/codex-hud`](https://github.com/brandonwie/codex-hud) get a real in-TUI footer only by patching Codex's own Rust source to add a `tui.status_line_command` config key, compiling a forked Codex, and installing that patched binary — which then goes stale on every upstream Codex release. Notably, `brandonwie/codex-hud`'s *default* mode avoids patching entirely and is exactly the second-pane companion pattern this project adopts.)
 5. **Detection is heuristic.** A determined adversary can encode around regex and NER.
 6. **Nothing recalls disclosed data.** Ever.
 
