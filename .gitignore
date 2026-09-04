@@ -54,3 +54,7 @@ tests/fixtures/captured/
 # SDD scratch workspace
 .superpowers/
 .gitnexus
+
+# gitnexus-generated agent instructions (local tooling preference, not project policy)
+AGENTS.md
+.claude/skills/gitnexus/
