@@ -126,7 +126,14 @@ snapshot_download('openai/privacy-filter', allow_patterns=[
 
 That exact file set is verified sufficient. Everything afterwards runs offline: the plugin sets `HF_HUB_OFFLINE=1` before importing `transformers`, so nothing reaches the network once the weights are on disk (Global Constraint I2).
 
-**1. Install the plugin from this repo.**
+**1. Install the plugin.** `codex plugin marketplace add` takes `owner/repo`, so no clone is needed for this half:
+
+```bash
+codex plugin marketplace add inin-zou/codex-privacy-hud
+codex plugin add codex-privacy-hud@codex-privacy-hud
+```
+
+From a local checkout instead (what you want if you are editing the plugin — note that Codex installs a *copy*, so re-run these after changing anything under `hooks/`):
 
 ```bash
 codex plugin marketplace add /path/to/codex-privacy-hud --json
