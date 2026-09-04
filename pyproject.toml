@@ -22,6 +22,14 @@ privacy-hud-ambient = "privacy_hud.ambient:main"
 # Exits 0 when the setup is usable (warnings included), 1 only when something
 # is genuinely broken. See src/privacy_hud/doctor.py.
 privacy-hud-doctor = "privacy_hud.doctor:main"
+# One-time setup: records which interpreter the daemon must be spawned with,
+# into the plugin-data directory Codex assigns. Must be run from the
+# environment that has transformers and torch -- hooks run against Codex's
+# minimal PATH, where `python3` is usually a system interpreter with no
+# transformers, and a daemon started there has no tier 3 and says nothing
+# about it. Without this receipt the hook client will not start a daemon at
+# all. See src/privacy_hud/runtime.py.
+privacy-hud-setup = "privacy_hud.runtime:main"
 
 [project.optional-dependencies]
 test = ["pytest>=8"]

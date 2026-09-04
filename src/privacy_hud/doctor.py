@@ -1,15 +1,23 @@
 # src/privacy_hud/doctor.py
 """`privacy-hud-doctor` — one command that answers "why did nothing happen?".
 
-**Why this exists.** This plugin has six independent moving parts and every
-one of them fails *silently*. The daemon must be started by hand (README's
-known limit 1) and if it is not running the hooks still fire, still exit 0,
-and still let Codex proceed — I6's fail-open is deliberately invisible.
-`PLUGIN_DATA` is assigned by Codex, not chosen by the operator, and the
-daemon and the hook client must agree on it or every call reports
-`unavailable`; finding that disagreement once cost a temporary diagnostic
-logger injected into `hooks/handler.py`, a plugin reinstall, and a live Codex
-session. Tier 3's weights are ~2.8 GB of optional download, and without them
+**Why this exists.** This plugin has seven independent moving parts and every
+one of them fails *silently*. If no daemon is running the hooks still fire,
+still exit 0, and still let Codex proceed — I6's fail-open is deliberately
+invisible. The hook client now starts the daemon itself, which removes the
+"you forgot to start it" failure and replaces it with a quieter one: the
+client can only do that from an interpreter recorded by `privacy-hud-setup`
+(`runtime.py`), because hooks run against Codex's minimal `PATH` where
+`python3` is typically a system interpreter with no `transformers` — and a
+daemon started there comes up with tier 3 dead while every other signal says
+it is healthy. `PLUGIN_DATA` is assigned by Codex, not chosen by the
+operator, and the daemon and the hook client must agree on it or every call
+reports `unavailable`; finding that disagreement once cost a temporary
+diagnostic logger injected into `hooks/handler.py`, a plugin reinstall, and a
+live Codex session (auto-spawn makes that particular disagreement
+impossible — the daemon inherits the hook's own `PLUGIN_DATA` — but a
+hand-started daemon can still be pointed anywhere, so the check stays).
+Tier 3's weights are ~2.8 GB of optional download, and without them
 `ModelDetector.available` is `False`, the engine keeps working, and person /
 address / date detection just stops. `transformers < 5.16` does not recognize
 the `openai_privacy_filter` architecture at all, and torch is one of
@@ -27,10 +35,12 @@ knows. `Check.fixes` is not decoration; a `FAIL` or `WARN` with an empty
 
 **Where the FAIL/WARN line is drawn.** `FAIL` (exit 1) means *nothing this
 plugin promises can happen*: the interpreter is too old, `PLUGIN_DATA` is
-unknown or missing so the daemon and hooks cannot meet, the daemon is absent
-or unresponsive, or Codex has no installed copy to fire hooks from. `WARN`
+unknown or missing so the daemon and hooks cannot meet, there is no usable
+runtime receipt so nothing will ever start a daemon, the daemon is
+unresponsive, or Codex has no installed copy to fire hooks from. `WARN`
 (exit 0) means *degraded but genuinely working*: no model weights, no torch,
-an old `transformers`, a stale installed copy, an empty ledger. Tiers 0-2
+an old `transformers`, a stale installed copy, an empty ledger, or no daemon
+running right now in a setup that starts one on the next hook. Tiers 0-2
 still catch credentials, paths and shell destinations in every one of those
 states, so a non-zero exit would be a lie about the product. Degradation is
 never reported as a bare "warning", though — every tier-3 warning states the
@@ -115,7 +125,15 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import runtime
 from .local_ui_server import _ledger_path
+
+# `runtime` is imported at module level, unlike `daemon` (see `_socket_path`
+# for why that one is deferred), because it is stdlib-only and imports nothing
+# else from this package: there is no chain through it that a broken detector
+# stack or a missing `transformers` could take down. It is also the module
+# whose literals this file must agree with, and a deferred import would make
+# that agreement conditional.
 
 # --------------------------------------------------------------------- #
 # Pinned floors
@@ -581,6 +599,251 @@ def check_ledger() -> Check:
     return Check("Ledger", OK, summary, details=details)
 
 
+def _setup_fixes() -> list[str]:
+    """The one remedy for every runtime-pin failure, said the same way twice
+    over rather than paraphrased per branch.
+
+    "Run it from the right environment" is the load-bearing half. Running
+    `privacy-hud-setup` from a shell whose `python3` has no `transformers`
+    does not silently pin a blind interpreter — the command refuses — but it
+    also does not get the user any closer, so the remedy names the activation
+    step first.
+    """
+    return [
+        "Record the interpreter, from the environment that has transformers "
+        "and torch installed:",
+        "  source .venv/bin/activate && privacy-hud-setup",
+        "  (from a bare checkout: PYTHONPATH=src <that python> -m "
+        "privacy_hud.runtime)",
+    ]
+
+
+def _probe_pinned_interpreter(receipt: dict, timeout: float
+                              ) -> tuple[dict | None, float, str]:
+    """Run `runtime.probe_interpreter` for a receipt.
+
+    A separate function for the same reason `_module_version` is one: the
+    real answer depends on which interpreter happens to be pinned on the
+    machine the suite runs on, and a test that asserted on "whatever is
+    installed here" would pass everywhere and prove nothing. Tests substitute
+    this.
+    """
+    return runtime.probe_interpreter(receipt["python"],
+                                     receipt.get("pythonpath"),
+                                     timeout=timeout)
+
+
+def _auto_spawn_configured(data_dir: Path) -> bool:
+    """Could a hook start the daemon right now?
+
+    Cheap on purpose — one read and one `stat`, no subprocess. It answers the
+    narrow question `check_daemon` needs ("is 'no daemon' expected to be
+    self-correcting?") and deliberately not the question
+    `check_runtime_pin` answers ("does that interpreter actually work?"). If
+    the two disagree the report says so: the pin check fails loudly while the
+    daemon check reports the absence as expected, which is exactly the pair of
+    statements the situation deserves.
+    """
+    receipt, problem = runtime.load_receipt(data_dir)
+    if receipt is None or problem:
+        return False
+    python = receipt["python"]
+    return os.access(python, os.X_OK) and not os.path.isdir(python)
+
+
+def check_runtime_pin(timeout: float = runtime.PROBE_TIMEOUT) -> Check:
+    """The receipt that lets the hook client start the daemon: present, still
+    pointing at a real interpreter, and that interpreter still able to import
+    the stack.
+
+    **Why this check has to exist.** Codex invokes `hooks/handler.py` through
+    its `#!/usr/bin/env python3` shebang against Codex's own minimal `PATH`.
+    On the machine this was developed on that is `/opt/homebrew/bin/python3`,
+    which has no `transformers`; the ML stack is in a different interpreter
+    entirely. A daemon spawned from the shebang interpreter would therefore
+    start *blind* — `ModelDetector.available` `False`, tier 3 off, no person
+    or address detection — while every other check in this report, the socket
+    round trip included, said the setup was healthy. That is strictly worse
+    than the "you forgot to start the daemon" it replaces, so the interpreter
+    is pinned at setup time and this check is what keeps the pin honest.
+
+    **Why absence is a `FAIL`.** Without a receipt no hook will start a
+    daemon, so a session records nothing unless someone remembered to start
+    one by hand — and even then the daemon idle-exits after 30 minutes with
+    nothing to bring it back. Nothing this plugin promises happens in that
+    state, which is this file's definition of `FAIL`.
+
+    **Why a dead tier 3 is a `WARN`.** Same line the `Detector deps` check
+    draws: tiers 0-2 still catch credentials, file paths and shell
+    destinations in a daemon with no model, so exiting non-zero would
+    misdescribe the product. The warning states the consequence in the user's
+    terms instead.
+
+    The probe is a real `import`, in a real subprocess, of the real pinned
+    interpreter (~1.4 s). `importlib.util.find_spec` would be nearly free and
+    would report this project's documented torch/torchvision ABI break —
+    `operator torchvision::nms does not exist` — as a healthy setup.
+    """
+    data_dir = _ledger_path().parent
+    receipt, problem = runtime.load_receipt(data_dir)
+
+    if receipt is None and problem == "absent":
+        return Check(
+            "Runtime pin", FAIL,
+            f"no {runtime.RECEIPT_NAME} in {_display_path(data_dir)}",
+            details=["Codex's hooks start the daemon themselves, but only "
+                     "from an interpreter recorded by the setup step — "
+                     "guessing one off Codex's PATH is how tier 3 ends up "
+                     "silently dead.",
+                     "Until this exists, no session records anything unless "
+                     "a daemon is started by hand."],
+            fixes=_setup_fixes(),
+        )
+    if receipt is None:
+        return Check(
+            "Runtime pin", FAIL, f"receipt is {problem}",
+            details=[f"{_display_path(runtime.receipt_path(data_dir))} exists "
+                     "but cannot be used, so no hook will start a daemon.",
+                     "A receipt this file does not understand is never "
+                     "guessed at: spawning the wrong interpreter is the "
+                     "failure this pin exists to prevent."],
+            fixes=_setup_fixes(),
+        )
+
+    python = receipt["python"]
+    shown = _display_path(python)
+    details: list[str] = []
+
+    # Same refusal `hooks/handler.py` makes, reported before anything else it
+    # would mask: a receipt anyone can write is a program anyone can choose
+    # for a hook to execute, so the client declines to spawn from one. This
+    # only arises where `PLUGIN_DATA` is unset and everything falls back to
+    # /tmp, which `check_plugin_data` already fails on -- but a FAIL there
+    # does not stop this check, and silence here would leave the user with a
+    # daemon that never starts and no line saying why.
+    receipt_file = runtime.receipt_path(data_dir)
+    try:
+        info = receipt_file.stat()
+        insecure = info.st_uid != os.getuid() or bool(info.st_mode & 0o022)
+    except OSError:
+        insecure = False
+    if insecure:
+        return Check(
+            "Runtime pin", FAIL,
+            f"{_display_path(receipt_file)} is writable by other users",
+            details=["It names an interpreter a hook process executes, so "
+                     "the hook client refuses to spawn from it and no daemon "
+                     "will start.",
+                     "This is what an unset PLUGIN_DATA looks like from here: "
+                     "every component falls back to /tmp, where anyone can "
+                     "plant one."],
+            fixes=[f"chmod 600 {_shell_path(receipt_file)}"] + _setup_fixes(),
+        )
+
+    recorded_at = receipt.get("recorded_at")
+    if isinstance(recorded_at, (int, float)):
+        details.append(f"Recorded {_humanize_age(time.time() - recorded_at)}.")
+
+    pinned_data = receipt.get("plugin_data")
+    stale_dir = (isinstance(pinned_data, str) and pinned_data
+                 and Path(pinned_data).resolve() != data_dir.resolve())
+
+    if os.path.isdir(python) or not os.access(python, os.X_OK):
+        return Check(
+            "Runtime pin", FAIL, f"{shown} is gone or not executable",
+            details=details + [
+                "The recorded interpreter no longer runs — a deleted "
+                "virtualenv, a removed conda environment, an upgraded "
+                "Homebrew formula.",
+                "No daemon will start, and this is reported loudly rather "
+                "than quietly retried against some other python: a fallback "
+                "would be a daemon with no tier 3 that looks healthy."],
+            fixes=_setup_fixes(),
+        )
+
+    probed, elapsed, error = _probe_pinned_interpreter(receipt, timeout)
+    if probed is None:
+        return Check(
+            "Runtime pin", FAIL,
+            f"{shown} could not be probed ({error or 'unknown error'})",
+            details=details + [
+                "The interpreter exists but would not answer an import "
+                "probe, so what a spawned daemon would do there is unknown."],
+            fixes=_setup_fixes(),
+        )
+
+    recorded = receipt.get("recorded") or {}
+    problems: list[str] = []
+    package = probed.get("privacy_hud")
+    transformers_version = probed.get("transformers")
+    torch_version = probed.get("torch")
+
+    if not package:
+        return Check(
+            "Runtime pin", FAIL,
+            f"{shown} cannot import privacy_hud",
+            details=details + [
+                "A daemon spawned there would exit immediately with an "
+                "ImportError, on every hook, forever.",
+                "The recorded sys.path entry is "
+                f"{_display_path(receipt.get('pythonpath') or '(none)')}."],
+            fixes=["Install the package into that interpreter: "
+                   "pip install -e \".[detectors]\""] + _setup_fixes(),
+        )
+
+    def _floor_problem(name: str, version, floor) -> str | None:
+        if version is None:
+            was = recorded.get(name)
+            if was:
+                return f"{name} is gone (was {was} at setup)"
+            return f"{name} missing"
+        parsed = _version_tuple(str(version))
+        if parsed and parsed[:2] < floor:
+            return f"{name} {version} < {_format_version(floor)}"
+        return None
+
+    for name, version, floor in (
+            ("transformers", transformers_version, MIN_TRANSFORMERS),
+            ("torch", torch_version, MIN_TORCH)):
+        found = _floor_problem(name, version, floor)
+        if found:
+            problems.append(found)
+        else:
+            details.append(f"{name}: {version}")
+
+    if stale_dir:
+        problems.append("recorded for another plugin-data directory")
+        details.append(
+            f"The receipt says it was recorded for "
+            f"{_display_path(str(pinned_data))}, not "
+            f"{_display_path(data_dir)} — a copied or moved setup.")
+
+    if problems:
+        details.append(TIER3_CONSEQUENCE)
+        return Check(
+            "Runtime pin", WARN, "; ".join(problems),
+            details=details + [
+                f"The pin itself is fine: {shown} runs and can import "
+                "privacy_hud, so the daemon will start.",
+                "What it cannot do is tier 3, and it will not say so at "
+                "runtime — which is why it is said here."],
+            fixes=["Install the floors into that interpreter: "
+                   "pip install -e \".[detectors]\""] + _setup_fixes(),
+        )
+
+    check = Check("Runtime pin", OK,
+                  f"{shown} ({elapsed:.1f}s import probe)", details=details)
+    check.details.append(
+        "Codex's hooks spawn this interpreter on the first tool call of a "
+        "session, inheriting PLUGIN_DATA from the hook, so the daemon and "
+        "the hooks cannot disagree about where to meet.")
+    check.details.append(
+        "The tier 3 load takes about 7s. Hooks that fire during it are "
+        "answered as unverified — the first few seconds of a session are "
+        "not monitored.")
+    return check
+
+
 def _probe_daemon(sock_path: Path, timeout: float) -> tuple[str, float, str]:
     """One round trip over the protocol `hooks/handler.py` owns.
 
@@ -636,7 +899,8 @@ def _probe_daemon(sock_path: Path, timeout: float) -> tuple[str, float, str]:
     return "responsive", elapsed, ""
 
 
-def check_daemon(timeout: float = DAEMON_TIMEOUT) -> Check:
+def check_daemon(timeout: float = DAEMON_TIMEOUT, *,
+                 pinned: bool | None = None) -> Check:
     """Is the daemon there, and does it *answer*?
 
     The socket file's existence is not the check. A unix socket file outlives
@@ -648,10 +912,18 @@ def check_daemon(timeout: float = DAEMON_TIMEOUT) -> Check:
     only used to tell "you never started it" apart from "it died and left its
     socket behind" — two identical-looking symptoms with different fixes.
 
-    Absence is a `FAIL`. README's known limit 1 is that the daemon does not
-    start itself, which makes "forgot to start it" the single most likely
-    reason a user is running this command at all, and with no daemon the
-    plugin records nothing whatsoever.
+    **Absence means different things now, and this check has to say which.**
+    The hook client starts the daemon itself when nothing answers, and the
+    daemon idle-exits after 30 minutes — so "no socket" between sessions is
+    the *correct* state of a healthy setup, not a fault, and reporting it as
+    `FAIL` would train the user to ignore this line. What decides the verdict
+    is therefore whether the auto-start is configured: with a usable runtime
+    receipt, absence is a `WARN` that says the next hook will fix it; with no
+    receipt, nothing will ever start a daemon and it stays a `FAIL`.
+
+    `pinned` exists so a caller (a test, mostly) can state that directly
+    instead of arranging a receipt on disk; left `None` it is read from the
+    same `PLUGIN_DATA` everything else here uses.
     """
     data_dir = _ledger_path().parent
     sock_path = _socket_path(data_dir)
@@ -661,6 +933,21 @@ def check_daemon(timeout: float = DAEMON_TIMEOUT) -> Check:
         f"export PLUGIN_DATA={_shell_path(data_dir)}",
         "PYTHONPATH=src python3 -m privacy_hud.daemon &",
     ]
+    if pinned is None:
+        pinned = _auto_spawn_configured(data_dir)
+    # Said wherever absence is reported: a daemon that starts itself needs
+    # ~7s to load tier 3 before it binds, and the hooks that fire in that
+    # window are answered without detection. CLAUDE.md §5 — the limitation
+    # goes next to the good news, not in a footnote.
+    autostart = ["Codex's hooks start it on the first tool call of a session "
+                 "(see the Runtime pin check).",
+                 "It takes about 7s to load the tier 3 model before it "
+                 "listens; hooks during that window are answered as "
+                 "unverified, so the start of a session is unmonitored."]
+    autostart_fix = ["Nothing to fix if you are between sessions — the next "
+                     "hook starts it.",
+                     "To have one running right now (for privacy-hud-ambient, "
+                     "say), start it by hand:"] + start_fix
 
     # The remedy above names the directory that was actually probed, which is
     # the only self-consistent thing it can name -- but if that is not the
@@ -677,13 +964,25 @@ def check_daemon(timeout: float = DAEMON_TIMEOUT) -> Check:
                     "started here will be unreachable from Codex's hooks."]
 
     if not sock_path.exists():
+        if pinned:
+            return Check(
+                "Daemon", WARN, f"not running (no socket at {shown})",
+                details=autostart + [
+                    "Until it is up, hooks still fire but every call falls "
+                    "through to fail-open on ingress and fail-closed on "
+                    "egress, with no detection running."] + mismatch,
+                fixes=autostart_fix,
+            )
         return Check(
             "Daemon", FAIL, f"no socket at {shown}",
-            details=["The daemon does not start itself (README known limit "
-                     "1). Without it, hooks still fire but every call falls "
+            details=["Nothing is running and nothing will start one: there "
+                     "is no runtime receipt for the hook client to spawn "
+                     "from (see the Runtime pin check).",
+                     "Without a daemon, hooks still fire but every call falls "
                      "through to fail-open on ingress and fail-closed on "
                      "egress, with no detection running."] + mismatch,
-            fixes=start_fix,
+            fixes=_setup_fixes() + ["Or start one by hand for this session:"]
+                  + start_fix,
         )
 
     try:
@@ -726,12 +1025,28 @@ def check_daemon(timeout: float = DAEMON_TIMEOUT) -> Check:
         return check
 
     if outcome == "refused":
+        stale = (f"{shown} exists but the process that bound it is gone "
+                 "(killed, crashed, or its terminal closed). Until something "
+                 "listens again, hooks connect, fail, and fall through to the "
+                 "fail-open/fail-closed default.")
+        if pinned:
+            return Check(
+                "Daemon", WARN, "stale socket — nothing is listening",
+                details=[stale,
+                         "This one self-heals: the next hook's connect is "
+                         "refused, it spawns a daemon, and the daemon "
+                         "unlinks the dead socket file before binding its "
+                         "own (it probes the path under an exclusive lock, "
+                         "so it only ever removes a socket it has proved "
+                         "dead)."] + autostart[1:],
+                fixes=autostart_fix,
+            )
         return Check(
             "Daemon", FAIL, "stale socket — nothing is listening",
-            details=[f"{shown} exists but the process that bound it is gone "
-                     "(killed, crashed, or its terminal closed). Hooks "
-                     "connect, fail, and silently fall through to the "
-                     "fail-open/fail-closed default."],
+            details=[stale,
+                     "Nothing will clear it either: there is no runtime "
+                     "receipt, so no hook will start a daemon (see the "
+                     "Runtime pin check)."],
             fixes=[f"rm {quoted}"] + start_fix,
         )
 
@@ -788,6 +1103,32 @@ def _module_version(module_name: str) -> str | None:
         return None
     version = getattr(module, "__version__", None)
     return str(version) if version else None
+
+
+def _pinned_interpreter_note() -> list[str]:
+    """Whose stack the two tier 3 checks below are actually describing.
+
+    The daemon now runs a *pinned* interpreter, and this command can be run
+    from any other one — so "transformers not installed", and the consequence
+    that normally follows it, are facts about the doctor's process and not
+    necessarily about the daemon's. Uncaveated, that is an overclaim in both
+    directions: which shell the user happened to be in would decide whether a
+    healthy setup reads as blind. Placed *after* the consequence it scopes,
+    and it never changes a verdict — the authoritative answer for the daemon's
+    interpreter is the Runtime pin check's probe of it.
+    """
+    try:
+        receipt, problem = runtime.load_receipt(_ledger_path().parent)
+        if receipt is None or problem:
+            return []
+        python = receipt["python"]
+        if Path(python).resolve() == Path(sys.executable).resolve():
+            return []
+    except Exception:  # a note is never worth failing a check over
+        return []
+    return [f"This describes the interpreter running privacy-hud-doctor. The "
+            f"daemon runs {_display_path(python)}, so the Runtime pin check — "
+            "not this one — decides whether tier 3 runs for a real session."]
 
 
 def check_detector_deps() -> Check:
@@ -852,9 +1193,10 @@ def check_detector_deps() -> Check:
         return Check("Detector deps", OK,
                      f"transformers {transformers_version}, "
                      f"torch {torch_version}",
-                     details=details)
+                     details=details + _pinned_interpreter_note())
 
     details.append(TIER3_CONSEQUENCE)
+    details += _pinned_interpreter_note()
     fixes.append("Install both floors together, in a dedicated virtualenv: "
                  "pip install -e \".[detectors]\"")
     fixes.append("Upgrading torch inside a shared environment breaks other "
@@ -949,7 +1291,7 @@ def check_tier3(load_model: bool = False) -> Check:
             return Check(
                 "Tier 3 model", WARN,
                 f"could not import the detector ({type(exc).__name__})",
-                details=[TIER3_CONSEQUENCE],
+                details=[TIER3_CONSEQUENCE] + _pinned_interpreter_note(),
                 fixes=["pip install -e \".[detectors]\""],
             )
         started = time.perf_counter()
@@ -980,7 +1322,8 @@ def check_tier3(load_model: bool = False) -> Check:
                               "torchvision / torchaudio version mismatch "
                               "(look for 'operator torchvision::nms does not "
                               "exist').")
-        return Check("Tier 3 model", WARN, "not available", details=details,
+        return Check("Tier 3 model", WARN, "not available",
+                     details=details + _pinned_interpreter_note(),
                      fixes=_model_fixes())
 
     snapshot, missing = _find_model_snapshot()
@@ -1002,7 +1345,8 @@ def check_tier3(load_model: bool = False) -> Check:
         details = ["Snapshot found but incomplete; missing: "
                    + ", ".join(missing), TIER3_CONSEQUENCE]
     return Check("Tier 3 model", WARN, "weights not found on disk",
-                 details=details, fixes=_model_fixes())
+                 details=details + _pinned_interpreter_note(),
+                 fixes=_model_fixes())
 
 
 def _model_fixes() -> list[str]:
@@ -1244,7 +1588,8 @@ def check_plugin_install() -> Check:
 # --------------------------------------------------------------------- #
 
 def run_checks(*, load_model: bool = False,
-               timeout: float = DAEMON_TIMEOUT) -> list[Check]:
+               timeout: float = DAEMON_TIMEOUT,
+               probe_timeout: float = runtime.PROBE_TIMEOUT) -> list[Check]:
     """Run every check, in the order a failure cascades.
 
     Order matters for readability, not for control flow: nothing here
@@ -1261,6 +1606,7 @@ def run_checks(*, load_model: bool = False,
         ("Python", check_python),
         ("PLUGIN_DATA", check_plugin_data),
         ("Ledger", check_ledger),
+        ("Runtime pin", lambda: check_runtime_pin(probe_timeout)),
         ("Daemon", lambda: check_daemon(timeout)),
         ("Detector deps", check_detector_deps),
         ("Tier 3 model", lambda: check_tier3(load_model)),
@@ -1345,8 +1691,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="privacy-hud-doctor",
         description="Health-check the Codex Privacy HUD setup: interpreter, "
-                    "PLUGIN_DATA, ledger, daemon round trip, detector stack, "
-                    "and the copy of the plugin Codex actually runs.",
+                    "PLUGIN_DATA, ledger, the pinned runtime the hooks spawn "
+                    "the daemon from, the daemon round trip, the detector "
+                    "stack, and the copy of the plugin Codex actually runs.",
         epilog="Exit code 0 when the setup is usable (warnings included), "
                "1 when something is genuinely broken.",
     )

@@ -44,6 +44,7 @@ import os
 import socketserver
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import threading
 import tomllib
@@ -51,7 +52,7 @@ from pathlib import Path
 
 import pytest
 
-from privacy_hud import doctor
+from privacy_hud import doctor, runtime
 from privacy_hud.ledger import Ledger
 from privacy_hud.matrix.loader import load_matrix
 
@@ -137,6 +138,30 @@ def _stop(server, thread):
 
 def _by_name(checks, name):
     return next(c for c in checks if c.name == name)
+
+
+def _pin_runtime(data_dir, monkeypatch, *, python=None, transformers="5.16.1",
+                 torch="2.5.1", package="present", **overrides):
+    """Write a runtime receipt and stub the probe of the interpreter it names.
+
+    Both halves are needed and neither can be skipped. The receipt has to be a
+    real file because that is what `hooks/handler.py` reads and what
+    `check_daemon` consults to decide whether "no daemon" is self-correcting.
+    The probe has to be stubbed because the real one spends ~1.4 s starting an
+    interpreter and asking it for `transformers` — the answer would then be
+    "whatever is installed on this laptop", which is exactly the kind of
+    assertion this suite refuses to make.
+    """
+    receipt = runtime.build_receipt(
+        data_dir, python=python or sys.executable,
+        versions={"transformers": transformers, "torch": torch})
+    receipt.update(overrides)
+    runtime.write_receipt(data_dir, receipt)
+    monkeypatch.setattr(doctor, "_probe_pinned_interpreter",
+                        lambda r, t: ({"privacy_hud": package,
+                                       "transformers": transformers,
+                                       "torch": torch}, 0.4, ""))
+    return receipt
 
 
 # --------------------------------------------------------------------- #
@@ -375,13 +400,210 @@ def test_ledger_check_never_prints_session_content(isolated_env):
 
 
 # --------------------------------------------------------------------- #
+# Runtime pin — the interpreter the hooks spawn the daemon from
+# --------------------------------------------------------------------- #
+#
+# The failure this section defends against is the quiet one. A daemon spawned
+# from Codex's PATH `python3` (Homebrew's, on the machine this was built on)
+# has no `transformers` at all: it starts, it binds, it answers every probe in
+# this file, and tier 3 is dead. Nothing else in this report would notice. So
+# a pin that is absent, damaged, or pointing at an interpreter that no longer
+# works has to be loud, and a pin that works has to be verified by asking that
+# interpreter rather than by asking the one running pytest.
+
+
+def test_no_receipt_fails_and_points_at_the_setup_step(isolated_env):
+    check = doctor.check_runtime_pin(1.0)
+    assert check.status == doctor.FAIL
+    assert any("privacy-hud-setup" in fix or "privacy_hud.runtime" in fix
+               for fix in check.fixes)
+
+
+def test_malformed_receipt_fails_rather_than_guessing(isolated_env):
+    """A receipt that cannot be parsed must never fall back to a plausible
+    interpreter — falling back is how a blind daemon gets started."""
+    runtime.receipt_path(isolated_env).write_text("{not json", encoding="utf-8")
+    check = doctor.check_runtime_pin(1.0)
+    assert check.status == doctor.FAIL
+    assert check.fixes
+
+
+def test_receipt_of_an_unknown_version_is_not_guessed_at(isolated_env):
+    receipt = runtime.build_receipt(isolated_env, python=sys.executable)
+    receipt["v"] = runtime.RECEIPT_VERSION + 99
+    runtime.write_receipt(isolated_env, receipt)
+    assert doctor.check_runtime_pin(1.0).status == doctor.FAIL
+
+
+def test_deleted_interpreter_fails_loudly_instead_of_degrading(isolated_env,
+                                                              monkeypatch,
+                                                              tmp_path):
+    """The stale-pin case: a removed venv or conda environment.
+
+    `FAIL`, and with no probe attempted — there is nothing to probe. The
+    alternative (quietly retrying against some other python) is the single
+    thing this whole mechanism must not do.
+    """
+    _pin_runtime(isolated_env, monkeypatch,
+                 python=str(tmp_path / "deleted-venv" / "bin" / "python3"))
+    check = doctor.check_runtime_pin(1.0)
+    assert check.status == doctor.FAIL
+    assert check.fixes
+
+
+def test_a_world_writable_receipt_fails_the_way_the_client_treats_it(
+        isolated_env, monkeypatch):
+    """The receipt names a program a hook executes, so the client refuses to
+    spawn from one other users can write — the state an unset `PLUGIN_DATA`
+    produces, since everything then falls back to /tmp. The report has to say
+    that rather than leave the user with a daemon that never starts."""
+    _pin_runtime(isolated_env, monkeypatch)
+    runtime.receipt_path(isolated_env).chmod(0o666)
+    check = doctor.check_runtime_pin(1.0)
+    assert check.status == doctor.FAIL
+    assert any("chmod 600" in fix for fix in check.fixes)
+
+
+def test_pinned_interpreter_without_transformers_warns_with_the_consequence(
+        isolated_env, monkeypatch):
+    """Same line `Detector deps` draws: tiers 0-2 still run, so this is
+    degraded-and-working, and the warning owes the user the consequence in
+    their terms rather than ours."""
+    _pin_runtime(isolated_env, monkeypatch, transformers=None, torch=None)
+    check = doctor.check_runtime_pin(1.0)
+    assert check.status == doctor.WARN
+    assert any("names and addresses will not be detected" in d.lower()
+               for d in check.details)
+    assert check.fixes
+
+
+def test_pinned_interpreter_below_the_transformers_floor_warns(isolated_env,
+                                                              monkeypatch):
+    _pin_runtime(isolated_env, monkeypatch, transformers="4.44.2")
+    assert doctor.check_runtime_pin(1.0).status == doctor.WARN
+
+
+def test_pinned_interpreter_that_cannot_import_the_package_fails(isolated_env,
+                                                                monkeypatch):
+    """A daemon spawned there would exit with an ImportError on every hook
+    forever, which is not degraded — it is nothing working at all."""
+    _pin_runtime(isolated_env, monkeypatch, package=None)
+    check = doctor.check_runtime_pin(1.0)
+    assert check.status == doctor.FAIL
+    assert check.fixes
+
+
+def test_a_probe_that_will_not_run_fails(isolated_env, monkeypatch):
+    _pin_runtime(isolated_env, monkeypatch)
+    monkeypatch.setattr(doctor, "_probe_pinned_interpreter",
+                        lambda r, t: (None, 0.2, "exited 1"))
+    assert doctor.check_runtime_pin(1.0).status == doctor.FAIL
+
+
+def test_receipt_recorded_for_another_directory_warns(isolated_env,
+                                                      monkeypatch, tmp_path):
+    """A copied or moved plugin-data directory. The interpreter still works,
+    so the daemon will start; what is uncertain is whether this receipt
+    describes this setup."""
+    _pin_runtime(isolated_env, monkeypatch,
+                 plugin_data=str(tmp_path / "somewhere-else"))
+    check = doctor.check_runtime_pin(1.0)
+    assert check.status == doctor.WARN
+    assert check.fixes
+
+
+def test_healthy_pin_is_ok_and_states_the_unmonitored_window(isolated_env,
+                                                            monkeypatch):
+    """CLAUDE.md §5: the good news does not get to travel without the cost.
+    The daemon starting itself means the first seconds of a session are
+    answered without detection, and that has to be in the report."""
+    _pin_runtime(isolated_env, monkeypatch)
+    check = doctor.check_runtime_pin(1.0)
+    assert check.status == doctor.OK
+    joined = " ".join(check.details).lower()
+    assert "unverified" in joined and "not monitored" in joined
+
+
+def test_detector_deps_scopes_its_verdict_when_the_daemon_runs_elsewhere(
+        isolated_env, monkeypatch, tmp_path):
+    """The doctor may be run from an interpreter that is not the daemon's.
+
+    "transformers not installed", and the "names and addresses will not be
+    detected" that follows it, are then facts about *this* process — stating
+    them unscoped is an overclaim in both directions, and would let the shell
+    the user happened to be in decide whether a healthy setup reads as blind.
+    It stays a detail line and never moves the verdict; the authoritative
+    answer is the Runtime pin check's probe.
+    """
+    _pin_versions(monkeypatch, transformers=None, torch=None)
+    _pin_runtime(isolated_env, monkeypatch,
+                 python=str(tmp_path / "elsewhere" / "bin" / "python3"))
+    check = doctor.check_detector_deps()
+
+    assert check.status == doctor.WARN
+    assert any("Runtime pin" in d for d in check.details)
+    # The scoping must come after the consequence it scopes, or a reader stops
+    # at the consequence and takes it for the product's.
+    consequence = next(i for i, d in enumerate(check.details)
+                       if "will not be detected" in d)
+    scoping = next(i for i, d in enumerate(check.details)
+                   if "Runtime pin" in d)
+    assert scoping > consequence
+
+
+def test_tier3_check_also_scopes_itself_to_this_interpreter(isolated_env,
+                                                           monkeypatch,
+                                                           tmp_path):
+    """`--check-model` constructs the detector in the doctor's own process,
+    and the default branch reads the doctor's own HF cache location. Both are
+    statements about this interpreter, and the daemon's may differ."""
+    _pin_runtime(isolated_env, monkeypatch,
+                 python=str(tmp_path / "elsewhere" / "bin" / "python3"))
+    check = doctor.check_tier3(load_model=False)
+    assert check.status == doctor.WARN  # isolated_env has no weights
+    assert any("Runtime pin" in d for d in check.details)
+
+
+# --------------------------------------------------------------------- #
 # Daemon — the round trip, not the socket file
 # --------------------------------------------------------------------- #
 
 def test_no_socket_fails_and_says_how_to_start_the_daemon(isolated_env):
+    """No receipt either, so nothing will ever start one: still a FAIL."""
     check = doctor.check_daemon(timeout=0.5)
     assert check.status == doctor.FAIL
     assert any("privacy_hud.daemon" in fix for fix in check.fixes)
+
+
+def test_absent_daemon_warns_rather_than_fails_when_a_pin_exists(isolated_env):
+    """The daemon idle-exits after 30 minutes and the next hook starts it, so
+    "no socket" between sessions is the correct state of a healthy setup.
+    Reporting that as FAIL would teach the user to ignore this line."""
+    check = doctor.check_daemon(timeout=0.5, pinned=True)
+    assert check.status == doctor.WARN
+    assert check.fixes
+
+
+def test_absent_daemon_with_a_pin_still_names_the_unmonitored_window(
+        isolated_env):
+    check = doctor.check_daemon(timeout=0.5, pinned=True)
+    assert any("unverified" in d for d in check.details)
+
+
+def test_stale_socket_with_a_pin_warns_because_it_self_heals(
+        isolated_env, monkeypatch, short_sockdir):
+    """`Daemon._claim_socket_path` unlinks a socket it has probed dead, under
+    the startup lock — so a leftover socket is cleared by the next spawn
+    rather than needing an `rm`."""
+    sock_path = short_sockdir / "stale.sock"
+    server, thread = _serve(sock_path, b"{}\n")
+    _stop(server, thread)  # closes the listener, leaves the file behind
+    assert sock_path.exists()
+    monkeypatch.setattr(doctor, "_socket_path", lambda _d: sock_path)
+
+    check = doctor.check_daemon(timeout=0.5, pinned=True)
+    assert check.status == doctor.WARN
+    assert check.fixes
 
 
 def test_responsive_daemon_is_ok(isolated_env, monkeypatch, short_sockdir):
@@ -848,7 +1070,7 @@ def test_a_check_that_raises_becomes_a_failure_not_a_traceback(monkeypatch,
     assert "RuntimeError" in ledger.summary
     text = doctor.format_report(checks)
     assert "something private" not in text
-    assert len(checks) == 7
+    assert len(checks) == 8
 
 
 def test_report_is_plain_text_with_no_escape_sequences(isolated_env):
@@ -922,9 +1144,9 @@ def test_healthy_setup_reports_healthy_and_exits_zero(isolated_env, monkeypatch,
                                                       tmp_path, short_sockdir,
                                                       capsys):
     """End to end, with every part of the stack standing up: the right
-    PLUGIN_DATA, a populated ledger, a responsive daemon, both detector
-    packages above their floors, the weights on disk, and a matching
-    installed copy."""
+    PLUGIN_DATA, a populated ledger, a pinned runtime, a responsive daemon,
+    both detector packages above their floors, the weights on disk, and a
+    matching installed copy."""
     assigned = tmp_path / "codex-home" / "plugins" / "data" / \
         "codex-privacy-hud-codex-privacy-hud"
     assigned.mkdir(parents=True)
@@ -932,6 +1154,7 @@ def test_healthy_setup_reports_healthy_and_exits_zero(isolated_env, monkeypatch,
     led = Ledger(assigned / "ledger.db", M)
     led.start_session("s1", cwd="/repo", model="gpt-5")
     led.conn.close()
+    _pin_runtime(assigned, monkeypatch)
 
     sock_path = short_sockdir / "d.sock"
     monkeypatch.setattr(doctor, "_socket_path", lambda _d: sock_path)
