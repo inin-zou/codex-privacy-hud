@@ -1,7 +1,25 @@
 #!/bin/sh
 # Reject AI attribution trailers. See CLAUDE.md §1.
-if grep -qiE '^(co-authored-by|assisted-by|generated-by|claude-session):|generated with \[?claude code' "$1"; then
-  echo "commit-msg: attribution trailer detected — remove it (see CLAUDE.md §1)." >&2
+#
+# Scoped to AI attribution specifically, not co-authorship in general: a
+# `Co-authored-by:` naming a HUMAN is a legitimate git convention and is how
+# pair-programmed work gets credited. The previous pattern was name-blind and
+# rejected those too -- stricter than CLAUDE.md §1's own wording ("a trailer
+# naming an AI model or assistant") and than this hook's own stated purpose.
+# That mattered once the repo went public: GitHub's squash-merge and web
+# editor both append human `Co-authored-by:` lines automatically.
+#
+# Keep this pattern byte-identical to the one in .github/workflows/ci.yml.
+# A rule that rejects locally but passes in CI (or the reverse) is worse than
+# either rule alone.
+#
+# Caveat: the vendor tokens below are substring matches, so a human co-author
+# whose name or email happens to contain "codex" or "gpt" would be rejected.
+# Given this repo is itself a Codex project that is not impossible -- if it
+# ever misfires, tighten the token to the bot's email domain rather than
+# dropping the check.
+if grep -qiE '^(assisted-by|generated-by|claude-session):|^co-authored-by:.*(claude|gpt|copilot|codex|noreply@anthropic)|generated with \[?claude code' "$1"; then
+  echo "commit-msg: AI attribution trailer detected — remove it (see CLAUDE.md §1)." >&2
   exit 1
 fi
 exit 0
