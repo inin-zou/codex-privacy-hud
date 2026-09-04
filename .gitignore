@@ -53,3 +53,4 @@ tests/fixtures/captured/
 
 # SDD scratch workspace
 .superpowers/
+.gitnexus
