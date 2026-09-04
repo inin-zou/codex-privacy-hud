@@ -17,7 +17,7 @@ Privacy HUD:  How much sensitive context has been disclosed?
 
 ![The Codex Privacy HUD user journey — from the ambient disclosure bar through the session audit, exposure detail, and minimizing a payload before it reaches an external tool](docs/images/user-journey-mockup.png)
 
-**Status:** implementation complete (all 13 planned tasks + post-hoc fixes, 259 tests passing) and whole-branch reviewed. **Verified end-to-end against a real Codex session** — including `codex exec` runs where sensitive text (e.g. a street address) is correctly detected by the real `openai/privacy-filter` model and recorded in the disclosure ledger. The daemon does not yet auto-start — see [Known limits](#known-limits). See [`.claude/docs/plans/2026-09-03-implementation.md`](.claude/docs/plans/2026-09-03-implementation.md).
+**Status:** implementation complete (all 13 planned tasks + post-hoc fixes, 332 tests passing) and whole-branch reviewed. **Verified end-to-end against a real Codex session** — including `codex exec` runs where sensitive text (e.g. a street address) is correctly detected by the real `openai/privacy-filter` model and recorded in the disclosure ledger. The daemon does not yet auto-start — see [Known limits](#known-limits). See [`.claude/docs/plans/2026-09-03-implementation.md`](.claude/docs/plans/2026-09-03-implementation.md).
 
 ---
 
@@ -128,6 +128,8 @@ snapshot_download('openai/privacy-filter', allow_patterns=[
 
 That exact file set is verified sufficient. Everything afterwards runs offline: the plugin sets `HF_HUB_OFFLINE=1` before importing `transformers`, so nothing reaches the network once the weights are on disk (Global Constraint I2).
 
+All three prerequisites fail quietly rather than loudly — an old `transformers`, a missing torch and absent weights all leave you with a running engine that is simply blind to names and addresses. `privacy-hud-doctor` (below) checks each of them by version and by file, and `privacy-hud-doctor --check-model` goes further and constructs the detector to read its real availability.
+
 **1. Install the plugin.** `codex plugin marketplace add` takes `owner/repo`, so no clone is needed for this half:
 
 ```bash
@@ -162,6 +164,34 @@ PYTHONPATH=src python3 -m privacy_hud.daemon &
 
 Leave it running for the session. Without it, hooks still fire but every call fails open (ingress) or closed (egress) to the default with no detection actually running.
 
+**Check the whole setup in one shot — `privacy-hud-doctor`.** Every moving part above fails *silently*, and they all look identical from the outside: nothing happens. A daemon you forgot to start. A `PLUGIN_DATA` the daemon and the hook client disagree on. Model weights that were never downloaded, so tier 3 reports `available = False` and person/address detection quietly stops. A `transformers` older than 5.16, or a `transformers` with no torch beside it. A stale copy of the plugin in Codex's cache, because Codex installs a *copy* and your edited `hooks/handler.py` is not what runs. One command tells you which of those it is:
+
+```bash
+export PLUGIN_DATA=~/.codex/plugins/data/codex-privacy-hud-codex-privacy-hud
+privacy-hud-doctor            # or: PYTHONPATH=src python3 -m privacy_hud.doctor
+```
+
+```text
+privacy-hud doctor
+
+  [ OK ] Python               3.12.10 (requires >= 3.11)
+  [ OK ] PLUGIN_DATA          ~/.codex/plugins/data/codex-privacy-hud-codex-privacy-hud
+  [ OK ] Ledger               6 sessions, 44 events recorded
+  [ OK ] Daemon               responsive (4 ms round trip)
+  [ OK ] Detector deps        transformers 5.16.1, torch 2.14.0
+  [ OK ] Tier 3 model         weights present on disk (not loaded)
+  [ OK ] Plugin install       installed, version 0.1.0, matches this checkout
+
+Summary: 7 ok, 0 warning(s), 0 failure(s).
+Setup is healthy.
+```
+
+The daemon check is a real round trip, not a look at the socket file — a unix socket outlives the process that bound it, so a stale one and a running daemon are indistinguishable until something connects. Every failing check prints what to do about it.
+
+**Exit code 0 when the setup is usable, 1 only when something is genuinely broken.** Degraded-but-working is a warning, not a failure: with no model weights the engine still runs tiers 0–2, so that is reported as `[WARN]` with the consequence spelled out — *names and addresses will not be detected* — and the command still exits 0, which is what makes it usable in a setup script. `[FAIL]` is reserved for states where nothing this plugin promises can happen at all: no daemon, no `PLUGIN_DATA`, no installed plugin, an interpreter below the floor.
+
+It reads the ledger read-only and never creates it, and it reports counts, versions, timestamps and the paths of its own machinery — never a prompt, a file, a detected value, or anything from a session. `--check-model` swaps the cheap on-disk weights check for actually constructing the tier 3 detector (~2.8 GB, about 7 s); by default it says the weights are present and that it did not load them, rather than claiming to know.
+
 **3. Optional — start the ambient Level 1 HUD in a second terminal pane.** It is a separate process, not a Codex status item: it polls `$PLUGIN_DATA/ledger.db` read-only and redraws one line in place, so give it its own pane or split beside the pane running Codex. It requires the daemon from step 2 to be running — without it nothing new is recorded, and the HUD shows either nothing at all (no ledger exists yet) or the last session's number, unchanging. It never reports 0% for a session that is simply unmonitored.
 
 ```bash
@@ -175,7 +205,7 @@ PRIVACY  Disclosure ███░░░░░░░ 30%  ›
 
 `--watch` redraws every 2 seconds; `--watch N` sets the interval. With no flags (or `--once`) it prints a single line and exits, which is what you want from a shell prompt or another status bar. `--session-id <id>` overrides session resolution. If the package is installed, the same entry point is available as `privacy-hud-ambient`.
 
-`--once` is also the quickest way to confirm the whole stack is live: if it prints a line, the daemon is recording and the ledger is readable. If it prints nothing, nothing has been recorded yet.
+`--once` is also the quickest way to confirm the whole stack is live: if it prints a line, the daemon is recording and the ledger is readable. If it prints nothing, nothing has been recorded yet — and `privacy-hud-doctor` is what tells you *why* not.
 
 **4. Use Codex normally.** The plugin's hooks (`hooks/hooks.json`) fire on every `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SubagentStart`/`Stop`, and `SessionEnd` — no per-command action needed once the daemon from step 2 is running.
 
@@ -200,7 +230,7 @@ codex plugin marketplace remove codex-privacy-hud
 
 Stated up front, because a privacy tool that overclaims is worse than none:
 
-1. **The daemon does not start itself yet.** `architecture.md` describes lazy auto-spawn from the hook client on first use; that piece was never built. Start it manually before a session — see [Using it in Codex](#using-it-in-codex) above. Without it, hooks still fire but every call falls through to the fail-open/fail-closed default with no detection running.
+1. **The daemon does not start itself yet.** `architecture.md` describes lazy auto-spawn from the hook client on first use; that piece was never built. Start it manually before a session — see [Using it in Codex](#using-it-in-codex) above. Without it, hooks still fire but every call falls through to the fail-open/fail-closed default with no detection running, and nothing anywhere says so. `privacy-hud-doctor` is the detector for that: it round-trips the daemon's socket and fails loudly if nothing answers.
 2. **Hosted tools bypass hooks.** WebSearch and similar do not trigger local function-tool hook paths. This is a practical guardrail, not a complete enforcement boundary.
 3. **No `ask` decision in Codex hooks.** Interactive consent is a deny → review → one-shot-token → retry loop rather than a modal.
 4. **No custom status item — Level 1 is not inside Codex.** `tui.status_line` accepts only built-in identifiers, and stock Codex has no plugin-owned renderer, so nothing this plugin produces can appear under the Codex input area. Level 1 is therefore a *separate process*: `privacy-hud-ambient` (`python -m privacy_hud.ambient --watch`), which you start yourself in a second terminal pane, and which polls the ledger and redraws one line in place there. It is a companion window next to Codex, not part of the Codex TUI — and if you do not start it, there is no ambient line at all. (Prior art confirms the cost of the alternative: both [`anhannin/codex-hud`](https://github.com/anhannin/codex-hud) and [`brandonwie/codex-hud`](https://github.com/brandonwie/codex-hud) get a real in-TUI footer only by patching Codex's own Rust source to add a `tui.status_line_command` config key, compiling a forked Codex, and installing that patched binary — which then goes stale on every upstream Codex release. Notably, `brandonwie/codex-hud`'s *default* mode avoids patching entirely and is exactly the second-pane companion pattern this project adopts.)

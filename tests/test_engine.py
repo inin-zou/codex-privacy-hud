@@ -381,3 +381,78 @@ def test_block_source_policy_does_not_affect_egress_from_other_sources(eng):
     # Denied via the existing credential/default_action path, not the
     # policy-table block_source path (distinguishable by wording).
     assert "block rule" not in (d.system_message or "").lower()
+
+
+# ---------------------------------------------------------------------------
+# Phase split: `scan()` must be safe to call without the daemon's lock.
+#
+# The whole concurrency fix rests on one claim — `Engine.scan()` touches no
+# ledger — so that claim gets a test rather than a comment. If a future
+# change adds a sqlite read to the scan path (a dedupe pre-check, a policy
+# lookup hoisted earlier, a cache), running it outside `State.lock` becomes
+# an unserialized use of the daemon's one shared `sqlite3.Connection`, and
+# these tests are what should fail first.
+# ---------------------------------------------------------------------------
+
+class _ExplodingConnection:
+    """Stands in for `Ledger.conn`. Any attribute touch is a test failure."""
+
+    def __getattr__(self, name):
+        raise AssertionError(
+            f"Engine.scan() touched the ledger connection (.{name}) — the "
+            "daemon runs scan() outside State.lock, so a sqlite call here "
+            "is an unserialized use of a shared connection. See "
+            "daemon.Daemon's docstring.")
+
+
+def test_scan_never_touches_the_ledger(eng):
+    eng.ledger.conn = _ExplodingConnection()
+    scan = eng.scan(_obs())
+    assert scan.dest_kind == "model_context"
+    assert scan.boundary == "B1"
+    assert any(f.data_type == "email" for f in scan.findings)
+
+
+def test_scan_never_touches_the_ledger_on_the_egress_policy_path(eng):
+    # Egress is the path with the policy-table reads, so pin it separately:
+    # those reads belong to observe(), never to scan().
+    eng.ledger.conn = _ExplodingConnection()
+    scan = eng.scan(_obs(hook_event="PreToolUse", direction="egress",
+                         destination="external_net", text=CREDENTIAL_TEXT,
+                         tool_name="Bash"))
+    assert scan.dest_kind == "external_net"
+    assert any(f.data_type == "credential" for f in scan.findings)
+
+
+def test_observe_with_a_precomputed_scan_matches_observe_alone(tmp_path):
+    # The two call shapes must be interchangeable: the daemon uses the
+    # split form, every other caller (and every other test) uses the
+    # single-call form, and a divergence between them would be a bug that
+    # only ever showed up under concurrency.
+    def _fresh():
+        led = Ledger(tmp_path / f"l{_fresh.n}.db", M)
+        _fresh.n += 1
+        led.start_session("s1", cwd="/r", model="gpt-5")
+        return Engine(ledger=led, matrix=M, salt=b"fixed-salt-for-comparison",
+                      detectors=[PathDetector(), SecretDetector(),
+                                 StubModelDetector([("email", "jordan@acme.com", 8, 23)])])
+    _fresh.n = 0
+
+    a = _fresh()
+    one_shot = a.observe(_obs())
+
+    b = _fresh()
+    split = b.observe(_obs(), scan=b.scan(_obs()))
+
+    assert one_shot == split
+    assert (a.ledger.list_events("s1", "exposed")
+            == b.ledger.list_events("s1", "exposed"))
+
+
+def test_scan_result_is_immutable(eng):
+    # A ScanResult crosses the lock boundary; it must not be the thing a
+    # second thread can mutate after the first produced it.
+    scan = eng.scan(_obs())
+    assert isinstance(scan.findings, tuple)
+    with pytest.raises(Exception):
+        scan.findings = ()

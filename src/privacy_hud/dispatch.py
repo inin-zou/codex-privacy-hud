@@ -59,6 +59,15 @@ Nothing here ever passes one session's salt into another session's
 `Engine` — `State.salts`/`State.engines` are both keyed strictly by
 `session_id`, and dropped (not overwritten) at `SessionEnd`.
 
+Lock scope: `State.lock` exists to serialize one shared resource — the
+`Ledger`'s single `sqlite3.Connection` — and is therefore held only across
+the code that touches it. Detection is NOT such code: `Engine.scan()` reads
+the immutable matrix and the shared detectors and nothing else, so
+`dispatch()` runs it between two short lock holds rather than inside one
+long one. `daemon.Daemon`'s docstring carries the measurement that forced
+this shape; `Engine.observe`'s docstring carries the argument for why
+splitting the two phases preserves dedupe and I4.
+
 No raw sensitive value is ever logged or printed anywhere in this module.
 """
 from __future__ import annotations
@@ -99,10 +108,11 @@ class State:
     ledger: Ledger
     detectors: list
 
-    # Guards every access to `ledger`/`engine` (a single shared sqlite3
-    # connection is not safe for unserialized concurrent use — see
-    # daemon.py / task-10-report.md for the full locking rationale) and
-    # every mutation of the per-session dicts below.
+    # Guards every touch of `ledger` (a single shared sqlite3 connection is
+    # not safe for unserialized concurrent use — see daemon.py for the full
+    # locking rationale) and every read/mutation of the per-session dicts
+    # below. It does NOT cover `Engine.scan()`, which touches neither: see
+    # `dispatch()` and daemon.py's `Daemon` docstring.
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     # Per-session state, keyed by session_id. Populated on SessionStart,
@@ -148,7 +158,7 @@ def _allow_cross_thread_access(ledger: Ledger, db_path: Path) -> None:
 
     Reopen the SAME on-disk database with `check_same_thread=False` so
     worker threads may use it, and rely on `State.lock` (a single
-    process-wide lock guarding every touch of `ledger`/`engine` — see
+    process-wide lock guarding every touch of this connection — see
     `daemon.Daemon`'s docstring) for the serialization sqlite3's own docs
     say becomes the caller's responsibility once same-thread checking is
     disabled. This is a workaround at the call site rather than a change
@@ -368,6 +378,16 @@ def dispatch(state: State, payload: dict) -> dict:
     handler in daemon.py is what turns that into a safe empty reply for
     the client's own fail-open/fail-closed defaults; it is not swallowed
     here).
+
+    Lock scope for the Engine path is three steps, not one — see the module
+    docstring's "Lock scope" note, `Engine.observe`'s docstring for the
+    safety argument, and `daemon.Daemon`'s for the measurement:
+
+      1. locked, microseconds: resolve (or start) this session's Engine.
+      2. UNLOCKED, ~500ms on ingress (tier 3) and sub-millisecond on egress
+         (regex only): `Engine.scan()`. Detection only; no sqlite.
+      3. locked, milliseconds: `Engine.observe(obs, scan=...)`. Every ledger
+         read and write for this observation, in one critical section.
     """
     event = payload.get("hook_event_name")
     session_id = payload.get("session_id") or ""
@@ -383,10 +403,34 @@ def dispatch(state: State, payload: dict) -> dict:
     if obs is None:
         return _allow()
 
+    cwd = payload.get("cwd", "") or ""
+    model = payload.get("model", "") or ""
+
     with state.lock:
-        engine = _get_or_start_engine(state, session_id,
-                                       cwd=payload.get("cwd", "") or "",
-                                       model=payload.get("model", "") or "")
-        decision = engine.observe(obs)
+        engine = _get_or_start_engine(state, session_id, cwd=cwd, model=model)
+
+    # Detection runs here, outside the lock. `Engine.scan()` touches no
+    # sqlite and no per-session daemon state (that is the contract its
+    # docstring states and the reason it is a separate method), so nothing
+    # it does needs serializing — while tier 3's model inference dominates
+    # the cost of the whole request. Holding `state.lock` across it made
+    # every concurrent hook call in EVERY session queue behind one forward
+    # pass; see daemon.Daemon's docstring for the measurement.
+    scan = engine.scan(obs)
+
+    with state.lock:
+        # Re-resolve rather than reusing the Engine from step 1. A
+        # `SessionEnd` for this session_id can land while the scan above is
+        # running, and it pops `state.engines`/`state.salts`; re-resolving
+        # means we then use the fresh Engine and fresh salt, which is
+        # exactly the behavior `_handle_session_end` already documents for
+        # any event arriving after SessionEnd ("gets a brand-new salt via
+        # `_get_or_start_engine`, never the old one"). Findings are
+        # salt-independent (see Engine.observe's docstring), so this is a
+        # legal serialization of the two operations, not a reinterpretation
+        # of the scan. `_get_or_start_engine` is idempotent, so in the
+        # ordinary case this is a dict lookup.
+        engine = _get_or_start_engine(state, session_id, cwd=cwd, model=model)
+        decision = engine.observe(obs, scan=scan)
 
     return _decision_to_output(decision)

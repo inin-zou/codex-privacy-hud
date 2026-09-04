@@ -15,6 +15,13 @@ dependencies = []
 # line in place -- it is not a Codex status item and does not render inside
 # the Codex TUI. See src/privacy_hud/ambient.py.
 privacy-hud-ambient = "privacy_hud.ambient:main"
+# One-shot health check for the whole setup. Every moving part of this plugin
+# fails silently -- an unstarted daemon, a PLUGIN_DATA the daemon and the hook
+# client disagree on, missing model weights, a stale copy in Codex's plugin
+# cache -- and all of them look identical to the user: "nothing happened".
+# Exits 0 when the setup is usable (warnings included), 1 only when something
+# is genuinely broken. See src/privacy_hud/doctor.py.
+privacy-hud-doctor = "privacy_hud.doctor:main"
 
 [project.optional-dependencies]
 test = ["pytest>=8"]

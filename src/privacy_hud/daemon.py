@@ -16,14 +16,15 @@ plumbing: accept a connection, read one line, hand the payload to
 `dispatch`, write one line back, chmod the socket 0600, and idle-exit
 after 30 minutes with no connections.
 
-Concurrency: see `Daemon`'s docstring and task-10-report.md for the full
-locking rationale. Short version: `dispatch.State.lock` is a single,
-daemon-wide `threading.Lock` guarding every access to the shared
-`Ledger`/`Engine` state, because the underlying resource that must not
-corrupt is one shared `sqlite3.Connection` — a resource scoped to the
-whole daemon, not to any one session — so the correct lock scope is the
-daemon, not the session. See dispatch.py for where that lock is actually
-held.
+Concurrency: see `Daemon`'s docstring for the full locking rationale.
+Short version: `dispatch.State.lock` is a single, daemon-wide
+`threading.Lock`, because the underlying resource that must not corrupt is
+one shared `sqlite3.Connection` — a resource scoped to the whole daemon,
+not to any one session — so the correct lock *scope* is the daemon, not
+the session. But it is held only across the code that touches that
+connection, NOT across detection: model inference reads no sqlite, so
+`dispatch()` runs `Engine.scan()` between two short lock holds. See
+dispatch.py for where the lock is actually taken.
 
 No raw sensitive value is ever logged or printed anywhere in this module.
 """
@@ -170,22 +171,103 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
     touches the ledger's sqlite connection or mutates per-session dicts,
     and releases it before returning.
 
-    This is a single daemon-wide lock, not one lock per `session_id`,
-    because the resource that must not corrupt under concurrent hook
-    calls — `Ledger`'s one `sqlite3.Connection` — is shared by ALL
-    sessions, not scoped to one. A per-session lock would correctly
-    serialize two concurrent calls for the SAME session (the case the
-    brief calls out explicitly) but would NOT prevent two DIFFERENT
-    sessions' worker threads from calling `self.conn.execute(...)`
+    **Scope: daemon-wide, and that part is not negotiable.** This is one
+    lock for the whole daemon, not one lock per `session_id`, because the
+    resource that must not corrupt under concurrent hook calls —
+    `Ledger`'s one `sqlite3.Connection` — is shared by ALL sessions, not
+    scoped to one. A per-session lock would correctly serialize two
+    concurrent calls for the SAME session but would NOT prevent two
+    DIFFERENT sessions' worker threads from calling `self.conn.execute(...)`
     concurrently on that one connection, which is exactly the scenario
     Python's `sqlite3` docs warn is unsafe without external
     serialization. So the lock's necessary scope is set by the shared
-    connection, not by session identity — "no more broadly than
-    necessary" here means "covers every touch of the shared ledger",
-    which in this design is the whole `dispatch()` call. Given the
-    latency budget (architecture.md §10: ~5ms for the ledger write, ~6ms
-    for tiers 0-2, well under the 150ms p99 target), the cost of a single
-    global lock is negligible next to the correctness it buys.
+    connection, not by session identity.
+
+    **Hold time: only the ledger interaction, NOT detection.** "No more
+    broadly than necessary" bites here, and an earlier version of this
+    docstring got it wrong. It used to conclude that "covers every touch
+    of the shared ledger" meant "the whole `dispatch()` call", and
+    justified that with architecture.md §10's latency budget (~5ms for the
+    ledger write, ~6ms for tiers 0-2, well under the 150ms p99 target).
+    That estimate predates the fix that made tier 3 run unconditionally on
+    every qualifying observation, and is roughly 50-100x off today: a
+    single warm ingress request through this daemon measures ~540ms on this
+    machine, essentially all of it one model forward pass.
+
+    Where that actually hurt is not where a first reading suggests, so the
+    numbers are worth stating precisely. Tier 3 runs on **ingress only** —
+    `Engine._scan` skips it for `local` (B0) and for B3/B4, and
+    `dispatch._build_observation` only ever produces `mcp_tool` (B3) or
+    `external_net` (B4) for `PreToolUse`. So every expensive request is a
+    `UserPromptSubmit`/`PostToolUse`, and for those `dispatch()`'s reply is
+    unconditionally `{}`: ingress can never deny or rewrite (Ruling 3), so
+    the scan result affects the ledger and nothing else. Meanwhile
+    `PreToolUse` — the only event that can be egress, the only one whose
+    reply carries a real decision, and the one I6 makes fail closed — is
+    regex-only and inherently sub-millisecond.
+
+    Holding one daemon-wide lock across inference put those two in the same
+    queue. Measured on this machine (12 cores, torch 2.14, model warm, 6
+    distinct session ids), before the split:
+
+        single warm ingress request                  ~540 ms
+        6 concurrent ingress, wall                 ~3230 ms  (~100% of the
+                                                    fully-serialized cost)
+        egress PreToolUse issued while those
+        6 ingress scans are in flight              ~3060 ms
+
+    That last row is the bug. `hooks/handler.py`'s client timeout is 2.0s,
+    so a `PreToolUse` that this daemon would have answered in under a
+    millisecond instead never gets answered in time, the client's exception
+    path fires, and per I6 it **denies**. Demonstrated end to end with a
+    benign call — `curl https://example.com/health`, no credential anywhere,
+    daemon's real answer `{}` (allow) — issued with the real 2.0s client
+    timeout while six ingress scans ran: before the split it took 2002ms and
+    Codex was told to deny; after, 0.7ms and allow. A privacy tool that
+    blocks a harmless health check because an unrelated session is busy has
+    failed at being a privacy tool.
+
+    (Worth recording what this is NOT, since it is the intuitive guess and
+    it is wrong: ingress disclosures are not lost when the client times
+    out. Probed directly — 10 concurrent ingress calls with the real 2.0s
+    timeout, 7 clients gave up, and all 10 rows were in the ledger once the
+    daemon drained. The worker thread finishes its `Ledger.record` whether
+    or not anyone is still listening; only the reply is dropped, and for
+    ingress the reply was `{}` anyway. What the user loses on an ingress
+    timeout is a misleading "disclosure unverified" note, not a row.)
+
+    The fix is scope, not scale: **model inference does not touch sqlite**,
+    so it does not belong inside a lock whose only job is serializing
+    sqlite. `Engine` splits into `scan()` (destination classification and
+    tiers 0-3 detection; reads the immutable matrix and the shared
+    detectors, no ledger) and `observe(obs, scan=...)` (the policy reads,
+    consent-token consumption, `Ledger.record` loop and `Ledger.summary` —
+    every sqlite touch in that module). `dispatch()` runs the scan between
+    two short lock holds. Dedupe
+    (`UNIQUE(session_id, value_hash, destination)`) and I4's monotonic
+    budget are both preserved because both live entirely inside
+    `Ledger.record`, hence entirely inside one uninterrupted lock hold —
+    the read-modify-write is never split across the gap. See
+    `Engine.observe`'s docstring for the full "what can change in between"
+    argument, and `dispatch.dispatch()` for the three steps.
+
+    **What this fix does not do, so nobody re-derives it from the diff.**
+    It does not make N concurrent ingress scans finish any faster: after
+    the split, 6 concurrent ingress still costs ~3250ms wall, because tier
+    3 is a genuinely serial resource on this machine and `engine._TIER3_LOCK`
+    now says so out loud (that lock's comment carries the measurement —
+    unserialized concurrent inference segfaults the interpreter, and even
+    when it survives it runs ~140% of the serialized cost at N=6,
+    unchanged by `torch.set_num_threads`). Ingress throughput is bounded by
+    inference, not by locking, and no amount of lock surgery moves it. What
+    the split buys is that inference no longer blocks the *decision* path
+    or any ledger operation: egress `PreToolUse` under the same load goes
+    from ~3060ms to ~1.5ms, and `SessionStart`/`SessionEnd` stay
+    sub-millisecond. Raising ingress throughput is a different change with
+    a different design (taking ingress off the client's critical path
+    entirely, since its reply is a constant `{}`) and different tradeoffs
+    (receipt completeness at `SessionEnd`, durability of a queue the daemon
+    could be killed with). It is deliberately not attempted here.
 
     Idle-exit: overrides `serve_forever()` to loop over `handle_request()`
     (which itself blocks in `select()` for up to `ACCEPT_POLL` seconds)
