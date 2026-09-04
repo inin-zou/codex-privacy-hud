@@ -16,6 +16,12 @@ plumbing: accept a connection, read one line, hand the payload to
 `dispatch`, write one line back, chmod the socket 0600, and idle-exit
 after 30 minutes with no connections.
 
+Startup is single-instance: several processes may try to start a daemon
+at the same socket path concurrently (the hook client spawning one on
+first use), exactly one wins, and a loser exits without touching the
+winner's socket. See `Daemon`'s "Single instance" section for the
+mechanism and `main()` for the exit codes.
+
 Concurrency: see `Daemon`'s docstring for the full locking rationale.
 Short version: `dispatch.State.lock` is a single, daemon-wide
 `threading.Lock`, because the underlying resource that must not corrupt is
@@ -30,9 +36,13 @@ No raw sensitive value is ever logged or printed anywhere in this module.
 """
 from __future__ import annotations
 
+import errno
+import fcntl
 import json
 import os
+import socket
 import socketserver
+import stat
 import sys
 import threading
 import time
@@ -51,6 +61,63 @@ IDLE_TIMEOUT = 30 * 60  # seconds
 # the loop below sleeps efficiently in the kernel between checks instead
 # of spinning.
 ACCEPT_POLL = 5.0  # seconds
+
+# Sidecar file whose kernel-held `flock` is what makes "exactly one daemon
+# per socket path" true rather than likely. See `Daemon`'s "Single
+# instance" section for the whole argument; see `_acquire_startup_lock` for
+# why the suffix is appended to the socket's *name* (so the lock always
+# lands in the same directory as the socket it guards, whatever that
+# directory is).
+LOCK_SUFFIX = ".lock"
+
+# How long the liveness probe waits for `connect()` on an existing socket
+# file. A live daemon's kernel-side accept queue makes this effectively
+# instant (`request_queue_size` is 128 and the listen backlog answers the
+# connect without any userspace involvement), and a dead one's socket file
+# refuses immediately, so this bound only ever matters for the pathological
+# "something is bound here but wedged" case -- where it expires and we
+# refuse to touch the file, which is the safe answer.
+PROBE_TIMEOUT = 0.5  # seconds
+
+# Exit-code contract for `main()`, read by the auto-spawning hook client.
+# 0 / 1 match `privacy-hud-doctor`'s existing "usable / broken" convention;
+# 3 is deliberately outside it (2 is reserved by convention for CLI usage
+# errors) and means "nothing is wrong -- the daemon you wanted already
+# exists".
+EXIT_OK = 0
+EXIT_FAILURE = 1
+EXIT_ALREADY_RUNNING = 3
+
+# Serializes the umask save/restore around `bind()` (see `Daemon.__init__`).
+# `os.umask()` is process-global and read-modify-write, so two threads each
+# doing "save, narrow, bind, restore" can interleave into "T1 saves 022, T2
+# saves 0177, T1 restores 022, T2 restores 0177" and leave the whole process
+# at 0177 for good -- after which every directory anything in the process
+# creates comes out 0600, with no search bit, and unrelated code starts
+# failing with EACCES. That is not hypothetical: it was observed while
+# validating tests/test_daemon.py's race test, whose four racers all reach
+# `bind()` when the startup lock is removed. The lock costs one uncontended
+# acquire per daemon startup.
+_UMASK_LOCK = threading.Lock()
+
+
+class AlreadyRunning(RuntimeError):
+    """Another daemon already owns `socket_path`; this one must not start.
+
+    Not an error condition: the caller asked for a daemon at that path and
+    there is one. `main()` maps this to `EXIT_ALREADY_RUNNING`, which an
+    auto-spawning hook client can treat as success. It is a `RuntimeError`
+    and NOT an `OSError` precisely so that "someone else owns it" cannot be
+    confused with a real bind failure by either `main()` or a test.
+    """
+
+    def __init__(self, socket_path, detail: str):
+        self.socket_path = Path(socket_path)
+        self.detail = detail
+        super().__init__(
+            f"another privacy-hud daemon already owns {self.socket_path} "
+            f"({detail}); not starting a second one"
+        )
 
 
 def _deny_for_internal_failure(payload: dict) -> dict:
@@ -163,6 +230,116 @@ class _Handler(socketserver.StreamRequestHandler):
 class Daemon(socketserver.ThreadingUnixStreamServer):
     """`socketserver.ThreadingUnixStreamServer` at `socket_path`, backed by
     one `dispatch.State` built from `data_dir`.
+
+    Two unrelated locks appear in this class and they guard different
+    things: the **startup lock** below (a `flock` on a file, guarding "only
+    one daemon per socket path") and `dispatch.State.lock` (a
+    `threading.Lock` guarding one sqlite connection, "Locking strategy"
+    further down). Neither is ever held while the other is taken.
+
+    Single instance: why two daemons cannot both own one socket path
+    ---------------------------------------------------------------
+    `__init__` used to open with an unconditional
+
+        if self.socket_path.exists(): self.socket_path.unlink()
+
+    which is correct for exactly one caller: a human starting one daemon by
+    hand. The moment startup is automatic (a hook client spawning the
+    daemon on first use), two Codex sessions starting together both run
+    that line, and the second **deletes the first's live socket** and binds
+    its own. The first daemon does not notice or exit: it keeps serving a
+    socket with no name, holding its ~2.8 GB model, until the 30-minute
+    idle timeout -- and every hook already talking to it silently falls
+    through to `hooks/handler.py`'s fail-open/fail-closed defaults with
+    nothing anywhere saying so. That trades a visible failure ("you forgot
+    to start the daemon", which `privacy-hud-doctor` diagnoses in one line)
+    for an invisible one, which is the class of regression CLAUDE.md §5
+    exists to prevent.
+
+    **Mechanism.** An exclusive `fcntl.flock` on a sidecar file next to the
+    socket (`<socket>.lock`), taken as the FIRST thing `__init__` does and
+    held for the daemon's entire life. Only while holding it does this
+    process probe the socket for a live listener, unlink a stale socket
+    file, and bind.
+
+    **Why the race is closed and not merely narrowed.** The tempting fix is
+    "probe with `connect()` before unlinking", and on its own it is not a
+    fix at all: between a successful probe and the `bind()` there is a
+    window in which the other process's probe also runs, and both conclude
+    the path is theirs. The lock removes the window rather than shrinking
+    it, in four steps:
+
+    1. `flock(LOCK_EX | LOCK_NB)` is decided by the kernel against the lock
+       file's inode. Two open file descriptions cannot hold it at once --
+       there is no interleaving of the "check" and the "act", because the
+       acquire IS the check and it is atomic. One racer gets the fd, the
+       other gets `EAGAIN` immediately (no blocking, hence no deadlock and
+       no retry loop, hence no livelock).
+    2. The lock is held for the daemon's **whole lifetime**, not just
+       across startup. So "this process holds the lock" implies "no other
+       daemon that follows this protocol is alive on this path", which is
+       what makes the unlink in step 3 safe: any socket file still sitting
+       there must belong to a process that is gone.
+    3. Both the unlink of a stale socket and, at shutdown, the unlink of
+       our own socket happen under the lock. A new starter therefore cannot
+       have bound in between and cannot have its socket deleted by our
+       shutdown -- `_close()` unlinks the socket BEFORE releasing the lock,
+       in that order, for exactly this reason.
+    4. `flock` is associated with the open file description, not with the
+       process, so a second `open()` in the SAME process conflicts too.
+       That is not incidental: it is why the thread-level race test in
+       tests/test_daemon.py is a valid test of the real thing, and it is
+       why this uses `flock` and not `fcntl.lockf` -- POSIX record locks are
+       per-process, so a second thread's request would silently *succeed*
+       (replacing the existing lock) and both racers would bind.
+
+    Two supporting details that are load-bearing:
+
+    * **The lock file is created once and never unlinked.** Deleting it
+      would reintroduce a race of its own: process A (exiting) unlinks the
+      path while process B is already holding a lock on that now-nameless
+      inode, then process C creates a fresh file at the same path and locks
+      *that* inode -- B and C both "hold the lock" and both bind. A
+      zero-byte file left in `PLUGIN_DATA` is the price of not having that
+      bug. Nothing is ever written into it (I1: its only content is kernel
+      lock state), and the kernel drops the lock when the holder dies, so
+      unlike a pidfile it cannot go stale and wedge the plugin.
+    * **A crashed daemon still self-heals.** `flock` dies with its process,
+      so after a `kill -9` the next starter takes the lock, probes the
+      leftover socket file, gets `ECONNREFUSED`, unlinks it, and binds --
+      the pre-existing behavior, preserved deliberately.
+
+    **Why not bind-a-temp-path-then-`rename()`.** `rename()` is atomic, but
+    atomic *replacement* is the wrong primitive here: both processes end up
+    with a successfully bound socket and the loser is the one holding the
+    now-unnamed one. That is the same invisible-downgrade bug with the
+    roles swapped -- last writer wins, earlier daemon keeps running
+    unreachable. Atomicity of the swap was never what was missing; mutual
+    exclusion between two *starters* was.
+
+    **What this does NOT close, stated rather than papered over.** The lock
+    only excludes starters that take it. A daemon from a build that predates
+    this code, or any other process bound at that path, is invisible to the
+    lock, and for those the `connect()` probe is the only defense and is
+    genuinely best-effort: if such a process is mid-unlink-and-bind while we
+    probe, either side can lose. No lock can fix a participant that does not
+    take it; what the probe does guarantee is that we never unlink a socket
+    that answers a connection right now, and that an unprobeable socket file
+    (a non-socket, or a `connect()` failing for any reason other than
+    "nobody home") is left strictly alone so `bind()` fails loudly with
+    `EADDRINUSE` instead of anything being clobbered.
+
+    **The 0600 constraint survives all of this.** The socket is still bound
+    at its real path (no temp path, so no interval where it is visible under
+    another name) and still chmod-ed 0600 after bind; additionally `bind()`
+    now runs under a temporarily restrictive umask, which closes the small
+    pre-existing window in which the freshly-created socket carried
+    `0777 & ~umask` (typically 0755) between `bind()` and `chmod()`. The
+    chmod stays as the authoritative guarantee -- umask is process-global
+    and this narrow save-and-restore around one `bind()` call is not
+    something to depend on -- and the lock file itself is created 0600.
+
+    Exit codes for the CLI wrapper are in `main()`.
 
     Locking strategy (stated explicitly per the task brief): a single
     `threading.Lock` on `self.state` (`dispatch.State.lock`) guards every
@@ -292,26 +469,214 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
 
     def __init__(self, socket_path, data_dir, *, idle_timeout: float = IDLE_TIMEOUT,
                  poll_interval: float = ACCEPT_POLL, state: State | None = None):
+        """Raises `AlreadyRunning` if another daemon owns `socket_path`, and
+        `OSError` for a real startup failure. Either way nothing is left
+        behind: the startup lock is released on every failing path, and a
+        failed `bind()` never unlinks anything (socketserver's own
+        constructor closes the socket it could not bind, and this class only
+        unlinks socket files it has proved dead or has bound itself).
+        """
         self.socket_path = Path(socket_path)
         self.socket_path.parent.mkdir(parents=True, exist_ok=True)
-        if self.socket_path.exists():
-            self.socket_path.unlink()
+        self.lock_path = self.socket_path.with_name(
+            self.socket_path.name + LOCK_SUFFIX)
+        self._lock_fd: int | None = None
+        self._closed = False
+        # Set only once bind() has actually returned. Nothing may unlink
+        # `socket_path` unless this is True: a bind that failed with
+        # EADDRINUSE means the file at that path is SOMEBODY ELSE'S, and
+        # deleting it on the way out of a failed startup would be the very
+        # clobber this fix exists to prevent.
+        self._bound = False
 
-        self.state = state if state is not None else new_state(data_dir)
-        self.idle_timeout = idle_timeout
+        # First thing, before the expensive part: a would-be second daemon
+        # must find out it is redundant BEFORE it loads a ~2.8 GB model, not
+        # after.
+        self._acquire_startup_lock()
+        try:
+            self.state = state if state is not None else new_state(data_dir)
+            self.idle_timeout = idle_timeout
 
-        super().__init__(str(self.socket_path), _Handler)
-        # Global constraint: the socket file must be 0600. bind() has
-        # already created it by the time __init__ returns (base class
-        # calls server_bind()/server_activate() before this constructor
-        # body resumes), so chmod it here rather than relying on any
-        # process umask to get this right.
-        os.chmod(self.socket_path, 0o600)
+            # Under the lock: decide whether the socket path is free, and
+            # take it. See the class docstring for why doing this under the
+            # lock is what makes the unlink safe.
+            self._claim_socket_path()
+
+            # Global constraint: the socket file must be 0600.
+            #
+            # bind() creates the file, and it does so with `0777 & ~umask`
+            # -- typically 0755, i.e. connectable by any local process for
+            # as long as it takes this constructor to reach the chmod below.
+            # Narrowing the umask across the bind removes that window
+            # instead of shrinking it. The save/restore is deliberately
+            # wrapped around this one call and nothing else: umask is
+            # process-global, and a wider scope would silently affect files
+            # created by other threads. mkdir() above is outside it on
+            # purpose -- a directory created under this umask would come out
+            # 0600, with no execute bit, and be unusable. `_UMASK_LOCK`
+            # keeps two concurrent constructions from interleaving their
+            # save/restore and leaking the narrow umask process-wide; see
+            # that constant's comment.
+            with _UMASK_LOCK:
+                prior_umask = os.umask(0o177)
+                try:
+                    super().__init__(str(self.socket_path), _Handler)
+                finally:
+                    os.umask(prior_umask)
+            self._bound = True
+            # And the chmod stays: it, not the umask, is the guarantee.
+            os.chmod(self.socket_path, 0o600)
+        except BaseException:
+            # Includes AlreadyRunning, a failed bind, a failed new_state,
+            # and KeyboardInterrupt during startup. Holding a lock for a
+            # daemon that does not exist would make the next starter
+            # wrongly believe one does.
+            self._abort_startup()
+            raise
 
         self.timeout = poll_interval  # bounds each handle_request() select()
         self._running = False
         self._last_activity = time.monotonic()
         self._activity_lock = threading.Lock()
+
+    # -- single-instance startup ------------------------------------------
+    def _abort_startup(self) -> None:
+        """Unwind a partially-completed startup, in the same order `_close()`
+        uses: stop listening, remove the socket *we* bound, and only then
+        release the startup lock.
+
+        The one failure that can reach here after a successful `bind()` is
+        the chmod, and "bound, listening, no serve loop, lock released" is
+        exactly the reachable-by-nobody state this fix exists to make
+        impossible -- so it is unwound rather than argued about. Everything
+        earlier (a held lock, a failed `new_state`, a refused `bind`) leaves
+        no socket of ours behind and only the lock to give back; `_bound`
+        gates the unlink so a bind that failed because the path was already
+        occupied never deletes what occupied it.
+        """
+        if self._bound:
+            try:
+                self.server_close()
+            except Exception:
+                pass
+            try:
+                self.socket_path.unlink()
+            except OSError:
+                pass
+            self._bound = False
+        self._release_startup_lock()
+
+    def _acquire_startup_lock(self) -> None:
+        """Take the exclusive, non-blocking `flock` that makes this process
+        the only daemon allowed to touch `socket_path`.
+
+        Non-blocking on purpose. Waiting for the other racer would buy
+        nothing a caller wants -- the answer "a daemon is being started at
+        this path" is already actionable, and the wait would have to be
+        bounded anyway, since the holder keeps the lock for its whole
+        30-minute-idle lifetime. `EAGAIN` therefore becomes `AlreadyRunning`
+        immediately: no blocking, no retry loop, no deadlock, no livelock.
+
+        The file is opened `O_CREAT` with mode 0600 (umask can only remove
+        bits, so it can never come out more permissive) and is never
+        written to and never unlinked -- see the class docstring for why
+        deleting it would reintroduce a race.
+        """
+        fd = os.open(self.lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            os.close(fd)
+            # EWOULDBLOCK is EAGAIN on Linux/macOS; EACCES is what some
+            # platforms report for "held by someone else". Anything else
+            # (a read-only filesystem, say) is a real failure and must not
+            # masquerade as "already running".
+            if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES):
+                raise AlreadyRunning(
+                    self.socket_path,
+                    f"the startup lock {self.lock_path.name} is held") from exc
+            raise
+        self._lock_fd = fd
+
+    def _release_startup_lock(self) -> None:
+        """Drop the startup lock. Idempotent.
+
+        Only ever called after our socket file is gone (`_close`) or when we
+        never bound one at all (`__init__`'s failure path). Closing the fd
+        would release the lock by itself; the explicit `LOCK_UN` is there to
+        make the release a visible event rather than a side effect of
+        garbage collection.
+        """
+        fd, self._lock_fd = self._lock_fd, None
+        if fd is None:
+            return
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+
+    def _probe_socket_path(self) -> str:
+        """Classify whatever is at `socket_path` right now, from a client's
+        point of view. Returns one of:
+
+        * `"absent"`  -- no file there; bind straight away.
+        * `"stale"`   -- a socket file whose listener is gone
+          (`ECONNREFUSED`): a killed daemon's leftover. Safe to unlink.
+        * `"live"`    -- `connect()` succeeded, so something is listening.
+        * `"unknown"` -- a file exists but its liveness could not be
+          established (not a socket at all, `connect()` timing out, any
+          other `OSError`). Deliberately NOT treated as stale: we do not
+          delete what we cannot prove is dead, and leaving it alone makes
+          `bind()` fail with `EADDRINUSE`, i.e. a loud real failure.
+
+        The probe costs a live daemon nothing and records nothing: it opens
+        a connection and closes it without sending a byte, so `_Handler`
+        reads an empty line and returns before `dispatch()` is ever called
+        (no session, no ledger row, no detection -- I1/I3 untouched). The
+        only trace is that the accept bumps the idle clock, which is
+        correct: someone did just look for this daemon.
+        """
+        try:
+            st = os.stat(self.socket_path)
+        except FileNotFoundError:
+            return "absent"
+        except OSError:
+            return "unknown"
+        if not stat.S_ISSOCK(st.st_mode):
+            return "unknown"
+
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            probe.settimeout(PROBE_TIMEOUT)
+            probe.connect(str(self.socket_path))
+        except (ConnectionRefusedError, FileNotFoundError):
+            return "stale"
+        except OSError:
+            return "unknown"
+        finally:
+            probe.close()
+        return "live"
+
+    def _claim_socket_path(self) -> None:
+        """Make `socket_path` bindable, or refuse to start. Must be called
+        with the startup lock held -- that is what makes the unlink here
+        provably safe rather than probably safe.
+        """
+        status = self._probe_socket_path()
+        if status == "live":
+            # Someone is answering on this path. It is not a daemon that
+            # took our lock (we hold it), so it is a foreign or older
+            # listener -- either way, clobbering it is the bug we are
+            # fixing.
+            raise AlreadyRunning(
+                self.socket_path, "a listener answered a probe connection")
+        if status == "stale":
+            try:
+                self.socket_path.unlink()
+            except FileNotFoundError:
+                pass
 
     # -- idle tracking ---------------------------------------------------
     def verify_request(self, request, client_address) -> bool:
@@ -353,13 +718,33 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
         self._running = False
 
     def _close(self) -> None:
+        """Stop listening, remove our socket file, then release the startup
+        lock -- in that order, and only that order.
+
+        Releasing the lock before unlinking would let the next starter take
+        it, probe (`ECONNREFUSED`, since `server_close()` already happened),
+        bind its own socket at this path -- and then our `unlink()` would
+        delete the new daemon's socket. Unlinking first means the only
+        socket file we can ever remove is the one we bound, because nobody
+        else could have bound while we held the lock.
+
+        Idempotent: `serve_forever()`'s `finally` is the normal caller, and
+        a second call must not unlink a successor's socket.
+        """
+        if self._closed:
+            return
+        self._closed = True
         try:
             self.server_close()
         finally:
             try:
-                self.socket_path.unlink()
-            except FileNotFoundError:
-                pass
+                try:
+                    self.socket_path.unlink()
+                except FileNotFoundError:
+                    pass
+                self._bound = False
+            finally:
+                self._release_startup_lock()
 
 
 def _default_socket_path(data_dir: Path) -> Path:
@@ -368,19 +753,50 @@ def _default_socket_path(data_dir: Path) -> Path:
 
 def main(argv: list[str] | None = None) -> int:
     """CLI entrypoint: `python -m privacy_hud.daemon` (or spawned detached
-    by a future lazy-start caller). Reads `PLUGIN_DATA` for the data
-    directory, same env var `hooks/handler.py` reads for the socket path.
+    by a lazy-start caller). Reads `PLUGIN_DATA` for the data directory,
+    same env var `hooks/handler.py` reads for the socket path.
+
+    Exit-code contract, which an auto-spawning hook client can rely on:
+
+    ======  ======================================================
+    0       Served, then exited (idle timeout, `stop()`, or Ctrl-C).
+    3       Another daemon already owns the socket path. **Not a
+            failure** -- the caller wanted a daemon there and there
+            is one; use it. Nothing was clobbered and no model was
+            loaded. `EXIT_ALREADY_RUNNING`.
+    1       Real startup failure: `bind()` refused, `PLUGIN_DATA`
+            unwritable, an `AF_UNIX` path over the kernel's
+            ~104-byte limit, and so on. One line on stderr says
+            which. `EXIT_FAILURE`.
+    ======  ======================================================
+
+    Keeping 3 distinct from 1 is the whole point: a spawner that cannot
+    tell them apart either retries forever against a healthy daemon or
+    reports a broken setup that is not broken. Anything not in the table
+    is an unanticipated bug, and it propagates as a traceback (also exit
+    1) rather than being flattened into a tidy message -- I6 is satisfied
+    by the client surviving a missing daemon, not by this process hiding
+    what happened to it.
     """
     data_dir = Path(os.environ.get("PLUGIN_DATA", "/tmp"))
     socket_path = _default_socket_path(data_dir)
-    daemon = Daemon(socket_path, data_dir)
+    try:
+        daemon = Daemon(socket_path, data_dir)
+    except AlreadyRunning as exc:
+        print(f"privacy-hud daemon: {exc}", file=sys.stderr)
+        return EXIT_ALREADY_RUNNING
+    except OSError as exc:
+        print(f"privacy-hud daemon: cannot start on {socket_path}: {exc}",
+              file=sys.stderr)
+        return EXIT_FAILURE
     try:
         daemon.serve_forever()  # returns on its own after idle_timeout;
-                                 # its own `finally` closes the socket on
-                                 # any exit path, KeyboardInterrupt included
+                                 # its own `finally` closes the socket and
+                                 # releases the startup lock on any exit
+                                 # path, KeyboardInterrupt included
     except KeyboardInterrupt:
         pass
-    return 0
+    return EXIT_OK
 
 
 if __name__ == "__main__":

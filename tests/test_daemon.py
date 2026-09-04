@@ -6,7 +6,12 @@ real `Daemon` on a temp socket and drives it exactly the way
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import socket
+import stat
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -14,7 +19,13 @@ from pathlib import Path
 
 import pytest
 
-from privacy_hud.daemon import Daemon
+import privacy_hud.daemon as daemon_mod
+from privacy_hud.daemon import (
+    EXIT_ALREADY_RUNNING,
+    EXIT_FAILURE,
+    AlreadyRunning,
+    Daemon,
+)
 from privacy_hud.dispatch import dispatch, new_state
 
 CREDENTIAL = "sk-proj-Ab3xY9zQw1Er5Ty7Ui0OpAs2Df4Gh6Jk8Lm"
@@ -675,3 +686,391 @@ def test_a_session_ending_mid_scan_does_not_reuse_the_discarded_salt(tmp_path):
     assert st.engines["race"].salt == st.salts["race"]
     # And nothing was silently dropped: the observation was still recorded.
     assert st.ledger.summary("race")["exposed_items"] >= 1
+
+
+# --------------------------------------------------------------------- #
+# Single-instance startup — the auto-spawn race.
+#
+# The bug these pin: `Daemon.__init__` used to unlink `socket_path`
+# unconditionally, with no check for a LIVE listener. Harmless while a human
+# starts one daemon by hand; the moment the hook client spawns the daemon on
+# first use, two sessions starting together make the second delete the
+# first's socket and bind its own — and the first keeps running, holding its
+# model, reachable by nobody, while every hook that was talking to it
+# silently falls back to fail-open/fail-closed. See daemon.Daemon's
+# "Single instance" section for the mechanism (a lifetime `flock` on
+# `<socket>.lock`) and why the check-then-act window is closed rather than
+# narrowed.
+# --------------------------------------------------------------------- #
+
+# Holds an exclusive flock on argv[1] until killed, announcing on stdout the
+# moment it has it. Stdlib-only and deliberately does NOT import privacy_hud:
+# what is under test here is the cross-PROCESS exclusion the kernel provides
+# and the fact that it dies with its holder, so the cheapest possible holder
+# is the most honest one (and costs no model load).
+_HOLD_LOCK = """
+import fcntl, os, sys, time
+fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+sys.stdout.write("held\\n")
+sys.stdout.flush()
+time.sleep(300)
+"""
+
+
+@pytest.fixture
+def sock_dir():
+    """A short-named directory for AF_UNIX paths (see `running_daemon` for
+    the ~104-byte `sockaddr_un` limit), cleaned up afterwards."""
+    path = Path(tempfile.mkdtemp(prefix="phd"))
+    yield path
+    shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.fixture(scope="module")
+def startup_state(tmp_path_factory):
+    """One `dispatch.State`, built once and injected into the daemons these
+    startup tests construct.
+
+    `new_state()` builds the detector stack, which loads the tier-3 model
+    when weights are present (seconds, per call). These tests are about who
+    gets to own a socket path, not about detection, so paying that once for
+    the whole module is the difference between a fast test and a slow one.
+    Sharing is safe here precisely because nothing in this section depends on
+    ledger contents; the two tests that do drive a real round trip use their
+    own session ids.
+    """
+    return new_state(tmp_path_factory.mktemp("startup") / "data")
+
+
+def _spawn_lock_holder(lock_path: Path) -> subprocess.Popen:
+    proc = subprocess.Popen([sys.executable, "-c", _HOLD_LOCK, str(lock_path)],
+                            stdout=subprocess.PIPE, text=True)
+    assert proc.stdout.readline().strip() == "held"
+    return proc
+
+
+def test_a_second_daemon_declines_while_the_first_is_live(running_daemon):
+    """The exact auto-spawn scenario, minus the timing: a live daemon is
+    already listening, a second construction happens, and the first must
+    come out untouched and still answering."""
+    daemon, sock_path = running_daemon
+    before = sock_path.stat().st_ino
+
+    with pytest.raises(AlreadyRunning):
+        Daemon(sock_path, daemon.state.data_dir, state=daemon.state)
+
+    # Not clobbered: same socket file (same inode — a bind-over would be a
+    # new one), still 0600, and still the daemon that was there before.
+    assert sock_path.stat().st_ino == before
+    assert sock_path.stat().st_mode & 0o777 == 0o600
+    out = _raw_call(sock_path, {"hook_event_name": "SessionStart",
+                                "session_id": "notclobbered", "cwd": "/r",
+                                "model": "gpt-5"})
+    assert out == {}
+
+
+def test_the_startup_race_leaves_exactly_one_owner(sock_dir, startup_state):
+    """The race itself: four threads construct a `Daemon` on the same path,
+    released together by a barrier, over 25 rounds.
+
+    A barrier rather than sleeps — the flakiness note in this file is about
+    wall-clock coordination, and there is none here: every racer blocks in
+    the kernel until the last one arrives, and the winner is decided by
+    `flock`, not by who woke up first.
+
+    Threads, in one process, are a valid test of the real cross-process race
+    because `flock` is held per open file description: a second `open()` in
+    the same process conflicts exactly as another process's would. (This is
+    also why the implementation must not switch to `fcntl.lockf`, whose
+    POSIX record locks are per-process and would let the second racer
+    silently take the lock.)
+    """
+    sock_path = sock_dir / "d.sock"
+    rounds, racers = 25, 4
+    # `Daemon.__init__` narrows the process umask across `bind()` to keep the
+    # socket from ever existing world-connectable. umask is process-global and
+    # save/restore is read-modify-write, so a concurrent-startup test is
+    # exactly where a leak would show up -- and a leaked 0177 makes every
+    # later directory in this process unusable rather than failing here.
+    umask_before = os.umask(0o022)
+    os.umask(umask_before)
+
+    for round_no in range(rounds):
+        barrier = threading.Barrier(racers)
+        results_lock = threading.Lock()
+        winners: list[Daemon] = []
+        declined: list[AlreadyRunning] = []
+        unexpected: list[BaseException] = []
+
+        def attempt():
+            barrier.wait()
+            try:
+                started = Daemon(sock_path, startup_state.data_dir,
+                                 idle_timeout=3600, poll_interval=0.05,
+                                 state=startup_state)
+            except AlreadyRunning as exc:
+                with results_lock:
+                    declined.append(exc)
+            except BaseException as exc:          # noqa: BLE001 - reported
+                with results_lock:
+                    unexpected.append(exc)
+            else:
+                with results_lock:
+                    winners.append(started)
+
+        threads = [threading.Thread(target=attempt) for _ in range(racers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30.0)
+            assert not thread.is_alive(), "a racer never finished — the "\
+                "startup lock must never block, deadlock or livelock"
+
+        try:
+            assert not unexpected, (
+                f"round {round_no}: unexpected failure {unexpected[0]!r}")
+            # The whole point: not two owners, and not zero owners either.
+            assert len(winners) == 1, (
+                f"round {round_no}: {len(winners)} daemons believe they own "
+                f"{sock_path}")
+            assert len(declined) == racers - 1
+            assert sock_path.exists()
+            assert sock_path.stat().st_mode & 0o777 == 0o600
+        finally:
+            for started in winners:
+                started._close()
+
+    # And the winner of one more round is a real, reachable daemon — the
+    # loser declining is only correct if what it declined in favour of works.
+    winner = Daemon(sock_path, startup_state.data_dir, idle_timeout=3600,
+                    poll_interval=0.05, state=startup_state)
+    thread = threading.Thread(target=winner.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(AlreadyRunning):
+            Daemon(sock_path, startup_state.data_dir, state=startup_state)
+        out = _raw_call(sock_path, {"hook_event_name": "SessionStart",
+                                    "session_id": "racewinner", "cwd": "/r",
+                                    "model": "gpt-5"})
+        assert out == {}
+    finally:
+        winner.stop()
+        thread.join(timeout=5.0)
+
+    umask_after = os.umask(0o022)
+    os.umask(umask_after)
+    assert umask_after == umask_before, (
+        "the umask narrowed around bind() leaked out of Daemon.__init__")
+
+
+def test_a_live_listener_that_never_took_the_lock_is_not_clobbered(
+        sock_dir, startup_state):
+    """A daemon from a build that predates the startup lock — or anything
+    else bound at that path — is invisible to `flock`. The `connect()` probe
+    is what covers it: a socket that answers is never unlinked."""
+    sock_path = sock_dir / "d.sock"
+    legacy = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    legacy.bind(str(sock_path))
+    legacy.listen(8)
+    before = sock_path.stat().st_ino
+    try:
+        with pytest.raises(AlreadyRunning) as raised:
+            Daemon(sock_path, startup_state.data_dir, state=startup_state)
+        # Declined by the probe, not by the lock: nobody was holding it.
+        assert "probe" in str(raised.value)
+
+        assert sock_path.stat().st_ino == before
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(2.0)
+        client.connect(str(sock_path))          # still the same listener
+        client.close()
+    finally:
+        legacy.close()
+        sock_path.unlink(missing_ok=True)
+
+
+def test_a_stale_socket_from_a_killed_daemon_is_reclaimed(sock_dir,
+                                                          startup_state):
+    """The behavior that must survive the fix: a crash must not wedge the
+    plugin. A leftover socket file with nobody listening (`ECONNREFUSED`) is
+    unlinked and rebound, and the new daemon really serves."""
+    sock_path = sock_dir / "d.sock"
+    leftover = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    leftover.bind(str(sock_path))
+    leftover.listen(8)
+    leftover.close()                 # closes the listener, leaves the file
+    assert sock_path.exists() and stat.S_ISSOCK(sock_path.stat().st_mode)
+
+    daemon = Daemon(sock_path, startup_state.data_dir, idle_timeout=3600,
+                    poll_interval=0.05, state=startup_state)
+    thread = threading.Thread(target=daemon.serve_forever, daemon=True)
+    thread.start()
+    try:
+        assert sock_path.stat().st_mode & 0o777 == 0o600
+        out = _raw_call(sock_path, {"hook_event_name": "SessionStart",
+                                    "session_id": "reclaimed", "cwd": "/r",
+                                    "model": "gpt-5"})
+        assert out == {}
+    finally:
+        daemon.stop()
+        thread.join(timeout=5.0)
+
+
+def test_a_lock_held_by_another_process_makes_the_next_start_decline(
+        sock_dir, startup_state):
+    """Cross-process exclusion, without spawning a whole daemon: while some
+    other process holds `<socket>.lock`, no daemon may claim the path."""
+    sock_path = sock_dir / "d.sock"
+    holder = _spawn_lock_holder(sock_dir / "d.sock.lock")
+    try:
+        with pytest.raises(AlreadyRunning) as raised:
+            Daemon(sock_path, startup_state.data_dir, state=startup_state)
+        assert "lock" in str(raised.value)
+        # Nothing was bound while the lock was elsewhere.
+        assert not sock_path.exists()
+    finally:
+        holder.kill()
+        holder.wait(timeout=10.0)
+
+
+def test_a_killed_holders_lock_does_not_wedge_the_next_start(sock_dir,
+                                                             startup_state):
+    """`flock` dies with its holder — which is exactly why the lock file is
+    safe to leave on disk forever and can never go stale the way a pidfile
+    does. Kill the holder mid-hold, and the next daemon starts."""
+    lock_path = sock_dir / "d.sock.lock"
+    sock_path = sock_dir / "d.sock"
+    holder = _spawn_lock_holder(lock_path)
+    holder.kill()
+    holder.wait(timeout=10.0)
+
+    daemon = Daemon(sock_path, startup_state.data_dir, idle_timeout=3600,
+                    poll_interval=0.05, state=startup_state)
+    try:
+        assert sock_path.exists()
+    finally:
+        daemon._close()
+    # The file itself outlives the daemon on purpose: unlinking it would let
+    # two processes lock two different inodes at the same path and both bind.
+    assert lock_path.exists()
+    assert lock_path.stat().st_mode & 0o777 == 0o600
+    # I1: nothing is ever written into it. Its only content is kernel state.
+    assert lock_path.stat().st_size == 0
+
+
+def test_shutdown_releases_the_lock_so_a_successor_can_start(sock_dir,
+                                                             startup_state):
+    sock_path = sock_dir / "d.sock"
+    first = Daemon(sock_path, startup_state.data_dir, state=startup_state)
+    first._close()
+    assert not sock_path.exists()
+
+    second = Daemon(sock_path, startup_state.data_dir, state=startup_state)
+    try:
+        assert sock_path.exists()
+        assert sock_path.stat().st_mode & 0o777 == 0o600
+    finally:
+        second._close()
+
+
+def test_a_real_bind_failure_still_surfaces_as_a_failure(sock_dir,
+                                                         startup_state):
+    """"Unprobeable" must not silently become "stale". A non-socket file at
+    the path cannot be listening, but it is also not something a daemon left
+    behind — so it is left strictly alone and `bind()` is allowed to fail
+    loudly rather than anything being deleted."""
+    sock_path = sock_dir / "d.sock"
+    sock_path.write_text("not a socket")
+
+    with pytest.raises(OSError) as raised:
+        Daemon(sock_path, startup_state.data_dir, state=startup_state)
+    # A real failure, not "someone else owns it": AlreadyRunning is a
+    # RuntimeError precisely so these two can never be confused.
+    assert not isinstance(raised.value, AlreadyRunning)
+    assert sock_path.read_text() == "not a socket"
+
+
+def test_a_failed_start_does_not_leave_the_lock_held(sock_dir, startup_state):
+    """A startup that fails must give the lock back, or the next attempt
+    would be told a daemon exists when none does."""
+    sock_path = sock_dir / "d.sock"
+    sock_path.write_text("not a socket")
+    with pytest.raises(OSError):
+        Daemon(sock_path, startup_state.data_dir, state=startup_state)
+
+    sock_path.unlink()
+    daemon = Daemon(sock_path, startup_state.data_dir, state=startup_state)
+    try:
+        assert sock_path.exists()
+    finally:
+        daemon._close()
+
+
+# -- the exit-code contract main() owes an auto-spawning hook client ------
+
+def test_main_returns_already_running_when_a_daemon_owns_the_socket(
+        sock_dir, startup_state, monkeypatch, capsys):
+    monkeypatch.setenv("PLUGIN_DATA", str(sock_dir))
+    sock_path = sock_dir / "daemon.sock"          # what main() computes
+    incumbent = Daemon(sock_path, startup_state.data_dir, idle_timeout=3600,
+                       poll_interval=0.05, state=startup_state)
+    thread = threading.Thread(target=incumbent.serve_forever, daemon=True)
+    thread.start()
+    try:
+        before = sock_path.stat().st_ino
+        assert daemon_mod.main([]) == EXIT_ALREADY_RUNNING
+        assert EXIT_ALREADY_RUNNING not in (0, EXIT_FAILURE)
+        assert "already owns" in capsys.readouterr().err
+        # The incumbent is untouched and still serving.
+        assert sock_path.stat().st_ino == before
+        assert _raw_call(sock_path, {"hook_event_name": "SessionStart",
+                                     "session_id": "mainexit", "cwd": "/r",
+                                     "model": "gpt-5"}) == {}
+    finally:
+        incumbent.stop()
+        thread.join(timeout=5.0)
+
+
+def test_main_returns_failure_on_a_real_bind_failure(sock_dir, startup_state,
+                                                     monkeypatch, capsys):
+    monkeypatch.setenv("PLUGIN_DATA", str(sock_dir))
+    (sock_dir / "daemon.sock").write_text("not a socket")
+    # Inject the prebuilt state: main() builds one before it binds, and this
+    # test is about the exit code, not about the detector stack.
+    monkeypatch.setattr(daemon_mod, "new_state", lambda data_dir: startup_state)
+
+    assert daemon_mod.main([]) == EXIT_FAILURE
+    assert "cannot start" in capsys.readouterr().err
+
+
+def test_the_cli_reports_already_running_with_its_own_exit_code(sock_dir,
+                                                                startup_state):
+    """End to end through the real entrypoint, since it is the exit code —
+    not the exception — that the auto-spawning hook client will read.
+
+    Also a check that the "already running" answer is cheap: the lock is
+    taken before `new_state()`, so a redundant spawn must decline without
+    ever loading the tier-3 model.
+    """
+    sock_path = sock_dir / "daemon.sock"
+    incumbent = Daemon(sock_path, startup_state.data_dir, idle_timeout=3600,
+                       poll_interval=0.05, state=startup_state)
+    thread = threading.Thread(target=incumbent.serve_forever, daemon=True)
+    thread.start()
+    try:
+        src = str(Path(daemon_mod.__file__).resolve().parents[1])   # .../src
+        env = {**os.environ, "PLUGIN_DATA": str(sock_dir), "PYTHONPATH": src}
+        proc = subprocess.run([sys.executable, "-m", "privacy_hud.daemon"],
+                              env=env, capture_output=True, text=True,
+                              timeout=120)
+        assert proc.returncode == EXIT_ALREADY_RUNNING, proc.stderr
+        assert "already owns" in proc.stderr
+        # The incumbent survived the spawn attempt.
+        assert _raw_call(sock_path, {"hook_event_name": "SessionStart",
+                                     "session_id": "clispawn", "cwd": "/r",
+                                     "model": "gpt-5"}) == {}
+    finally:
+        incumbent.stop()
+        thread.join(timeout=5.0)
+
