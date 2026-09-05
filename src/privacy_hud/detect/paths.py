@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 
-from .base import Detector, Finding
+from .base import Cost, DetectorProfile, Finding
 
 # Every pattern below captures the path itself in group 1, and only group 1.
 # Offsets and value are read from that one group so there is a single source
@@ -20,6 +20,12 @@ PATTERNS = [
 
 
 class PathDetector:
+    # Cheap by declaration, not by inference: compiled regex over the
+    # payload, ~0.1ms, nothing to load and nothing that can be missing. It
+    # runs on every observation at every boundary, and the engine is told so
+    # here rather than deducing it from the absence of an attribute.
+    profile = DetectorProfile(tier=0, cost=Cost.CHEAP)
+
     def scan(self, text: str, ctx: dict) -> list[Finding]:
         out = []
         for pat in PATTERNS:

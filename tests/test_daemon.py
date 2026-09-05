@@ -26,6 +26,7 @@ from privacy_hud.daemon import (
     AlreadyRunning,
     Daemon,
 )
+from privacy_hud.detect.base import Cost, DetectorProfile
 from privacy_hud.dispatch import dispatch, new_state
 
 CREDENTIAL = "sk-proj-Ab3xY9zQw1Er5Ty7Ui0OpAs2Df4Gh6Jk8Lm"
@@ -44,7 +45,7 @@ def _start(st, session_id="s1"):
 def test_session_start_creates_session(tmp_path):
     st = new_state(tmp_path)
     _start(st)
-    assert st.ledger.summary("s1")["percent"] == 0
+    assert st.ledger.summary("s1").percent == 0
 
 
 def test_session_start_returns_empty_hook_output(tmp_path):
@@ -76,7 +77,7 @@ def test_pretooluse_bash_local_command_is_allowed(tmp_path):
         "hook_event_name": "PreToolUse", "session_id": "s1", "turn_id": "t1",
         "tool_name": "Bash", "tool_input": {"command": "ls -la"}})
     assert out == {}
-    assert st.ledger.summary("s1")["exposed_items"] == 0
+    assert st.ledger.summary("s1").exposed_items == 0
 
 
 def test_pretooluse_mcp_tool_classifies_as_mcp_destination(tmp_path):
@@ -111,7 +112,7 @@ def test_posttooluse_records_an_exposure(tmp_path):
     _start(st)
     dispatch(st, {"hook_event_name": "PostToolUse", "session_id": "s1",
                   "tool_name": "Read", "tool_response": f"key={CREDENTIAL}"})
-    assert st.ledger.summary("s1")["exposed_items"] >= 1
+    assert st.ledger.summary("s1").exposed_items >= 1
 
 
 def test_userpromptsubmit_is_ingress_to_model_context(tmp_path):
@@ -121,7 +122,7 @@ def test_userpromptsubmit_is_ingress_to_model_context(tmp_path):
                         "session_id": "s1",
                         "prompt": f"here is my key {CREDENTIAL}"})
     assert "deny" not in json.dumps(out)
-    assert st.ledger.summary("s1")["exposed_items"] >= 1
+    assert st.ledger.summary("s1").exposed_items >= 1
 
 
 def test_subagentstart_propagates_without_denying(tmp_path):
@@ -143,7 +144,7 @@ def test_session_end_nulls_hashes_and_returns_receipt(tmp_path):
                         "reason": "exit"})
     assert "PRIVACY RECEIPT" in out.get("systemMessage", "")
     rows = st.ledger.list_events("s1", "exposed")
-    assert all(r["value_hash"] is None for r in rows)
+    assert all(r.value_hash is None for r in rows)
 
 
 def test_session_end_discards_the_salt(tmp_path):
@@ -423,7 +424,7 @@ def test_concurrent_calls_for_the_same_session_do_not_corrupt_the_ledger(running
     # actually lost under concurrency, which is the property being tested.
     conn = daemon.state.ledger.conn
     summary = daemon.state.ledger.summary("sockc")
-    assert summary["exposed_items"] >= 20
+    assert summary.exposed_items >= 20
 
     # I4, and the reason a row count alone is not enough. `exposed_items`
     # only counts INSERTs; the budget moves through a separate
@@ -478,10 +479,15 @@ def test_concurrent_calls_for_the_same_session_do_not_corrupt_the_ledger(running
 class _SlowTier3Detector:
     """A stand-in for `ModelDetector` that is slow and controllable.
 
-    `available` is what `engine._is_tier3_detector` keys on, so this counts
-    as tier 3 — which means it runs on ingress to `model_context` and is
-    skipped on B3/B4 egress, exactly like the real one.
+    Declares the same `DetectorProfile` as the real tier 3, which is what
+    makes it scheduled like it: it runs on ingress to `model_context` and is
+    skipped on B3/B4 egress and on local reads, exactly like the real one.
+    (It used to earn that classification by carrying an `available`
+    attribute, back when `engine` inferred the tier from the presence of one
+    — see `detect/base.py` for why that inference is gone.)
     """
+
+    profile = DetectorProfile(tier=3, cost=Cost.EXPENSIVE)
 
     def __init__(self, seconds: float):
         self.available = True
@@ -685,7 +691,7 @@ def test_a_session_ending_mid_scan_does_not_reuse_the_discarded_salt(tmp_path):
     assert st.salts["race"] != original_salt
     assert st.engines["race"].salt == st.salts["race"]
     # And nothing was silently dropped: the observation was still recorded.
-    assert st.ledger.summary("race")["exposed_items"] >= 1
+    assert st.ledger.summary("race").exposed_items >= 1
 
 
 # --------------------------------------------------------------------- #

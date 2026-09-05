@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 
-from .base import Finding
+from .base import Cost, DetectorProfile, Finding
 
 # Keys are the model's real entity_group values, uppercased (verified against
 # the shipped config.json's id2label — the model's BIOES taxonomy uses a
@@ -36,7 +36,14 @@ class StubModelDetector:
     qualifying observation (no shape pre-filter), so a stub that returned
     its configured findings regardless of input would fire on totally
     unrelated text in every test using this fixture — exactly the kind of
-    fixture unrealism this project has hit before with offset bugs."""
+    fixture unrealism this project has hit before with offset bugs.
+
+    Declares the *same* profile as `ModelDetector`, deliberately: a stand-in
+    the engine schedules differently from the thing it stands in for would
+    make every test that uses it a fiction. If tier 3's cost class ever
+    changes, both must change together."""
+
+    profile = DetectorProfile(tier=3, cost=Cost.EXPENSIVE)
 
     def __init__(self, findings: list[tuple[str, str, int, int]]):
         self._findings = findings
@@ -48,6 +55,17 @@ class StubModelDetector:
 
 
 class ModelDetector:
+    # The one expensive detector in the stack: ~430-540ms per scan on the
+    # development machine, over a `transformers` pipeline that is not safe to
+    # call concurrently. `Cost.EXPENSIVE` is what buys it the engine's
+    # boundary gate, the MAX_TIER3_CHARS cap and `_TIER3_LOCK` — and it is
+    # declared here rather than inferred from `self.available` below, because
+    # those are different claims: this one says "one scan is costly", that
+    # one says "the weights loaded on this machine". A tier-3 detector whose
+    # weights are present is still expensive, and an unavailable one is still
+    # tier 3.
+    profile = DetectorProfile(tier=3, cost=Cost.EXPENSIVE)
+
     def __init__(self, model_id: str = "openai/privacy-filter"):
         self.model_id = model_id
         self._pipe = None

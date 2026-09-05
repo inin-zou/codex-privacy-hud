@@ -478,6 +478,14 @@ def _handle_session_start(state: State, session_id: str, payload: dict) -> dict:
 
 
 def _handle_session_end(state: State, session_id: str, payload: dict) -> dict:
+    """Retire a session and return its receipt as hook output.
+
+    `summary` and `rows` are `ledger.py`'s `SessionSummary` and `EventRow`,
+    handed to `render_receipt` unprojected: an `EventRow` IS an `ExposureRow`
+    (see that class), so the receipt path needs no `mcp_tools` step and no
+    dict in between. The return value stays a plain dict — it is Codex's hook
+    wire format, whose shape the host dictates, not ours to type.
+    """
     with state.lock:
         summary = state.ledger.summary(session_id)
         rows = state.ledger.list_events(session_id, "exposed")

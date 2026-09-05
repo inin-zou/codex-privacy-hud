@@ -67,18 +67,18 @@ def test_denied_call_is_recorded_as_prevented_not_exposed(eng):
                      text=CREDENTIAL_TEXT,
                      tool_name="Bash"))
     s = eng.ledger.summary("s1")
-    assert s["prevented"] == 1 and s["exposed_items"] == 0
+    assert s.prevented == 1 and s.exposed_items == 0
 
 
 def test_clean_text_allows_without_recording(eng):
     d = eng.observe(_obs(text="the build passed"))
     assert d.action == "allow"
-    assert eng.ledger.summary("s1")["exposed_items"] == 0
+    assert eng.ledger.summary("s1").exposed_items == 0
 
 
 def test_local_destination_never_scores(eng):
     eng.observe(_obs(destination="local", direction="ingress"))
-    assert eng.ledger.summary("s1")["percent"] == 0
+    assert eng.ledger.summary("s1").percent == 0
 
 
 def test_system_message_contains_no_forbidden_copy(eng):
@@ -103,7 +103,7 @@ def test_local_read_with_secret_records_as_local_access_not_exposed(eng):
     assert d.budget_percent == 0
     local_rows = eng.ledger.list_events("s1", "local_access")
     assert len(local_rows) == 1
-    assert local_rows[0]["data_type"] == "credential"
+    assert local_rows[0].data_type == "credential"
     assert eng.ledger.list_events("s1", "exposed") == []
 
 
@@ -132,7 +132,7 @@ def test_detailed_mcp_destination_normalizes_and_does_not_raise(eng):
     # column stores the bare kind the matrix understands, not the detailed
     # literal — Ledger.record() itself calls Matrix.boundary_for(destination)
     # internally, so anything else would raise UnknownKey inside the ledger.
-    assert rows[0]["destination"] == "mcp_tool"
+    assert rows[0].destination == "mcp_tool"
 
 
 def test_detailed_subagent_destination_normalizes(eng):
@@ -141,7 +141,7 @@ def test_detailed_subagent_destination_normalizes(eng):
                          text="contact jordan@acme.com"))
     assert d.action == "allow"
     rows = eng.ledger.list_events("s1", "exposed")
-    assert rows[0]["destination"] == "subagent"
+    assert rows[0].destination == "subagent"
 
 
 def test_unrecognized_destination_raises_unknown_key_rather_than_silently_scoring(eng):
@@ -172,7 +172,7 @@ def test_egress_credential_to_mask_policy_destination_rewrites(eng):
     # whole observation is what gets masked/rewritten as a unit.
     rows = eng.ledger.list_events("s1", "prevented")
     assert len(rows) == 2
-    assert {r["data_type"] for r in rows} == {"credential", "email"}
+    assert {r.data_type for r in rows} == {"credential", "email"}
 
 
 def test_ingress_credential_is_never_rewritten(eng):
@@ -182,7 +182,7 @@ def test_ingress_credential_is_never_rewritten(eng):
     assert d.action != "rewrite"
     assert d.action == "allow"
     # The bytes are already in context, so this is an exposure, not a no-op.
-    assert eng.ledger.list_events("s1", "exposed")[0]["data_type"] == "credential"
+    assert eng.ledger.list_events("s1", "exposed")[0].data_type == "credential"
 
 
 def test_propagate_credential_is_never_rewritten(eng):
@@ -202,7 +202,7 @@ def test_large_ingress_payload_skips_tier3_and_marks_degraded(eng):
     d = eng.observe(_obs(text=big_text))
     assert d.degraded is True
     # tier 3 (the only detector that would find the email) never ran.
-    assert eng.ledger.summary("s1")["exposed_items"] == 0
+    assert eng.ledger.summary("s1").exposed_items == 0
 
 
 def test_small_pii_shaped_payload_is_not_degraded(eng):

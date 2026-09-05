@@ -27,6 +27,15 @@ task-8-report.md for the full account):
              `Decision` is marked `degraded` so the renderer can show
              design.md §5's "fast-path results only" banner.
 
+Which detectors those gates apply to is a declaration, not a deduction:
+each detector states its own `DetectorProfile(tier=..., cost=...)` and
+`_scan` groups by the declared `Cost`. This module used to infer "is this
+the expensive tier?" from `hasattr(detector, "available")`, which silently
+misfiled any cheap detector that tracked availability and let any expensive
+one that did not escape the gate entirely. `detect/base.py`'s module
+docstring has the full account; the rule here is that `engine.py` never
+inspects a detector's shape to decide how to schedule it.
+
 Two phases, and why they are separately callable
 ------------------------------------------------
 `observe()` is the single decision entry point and its whole body must run
@@ -85,7 +94,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 
-from .detect.base import Finding
+from .detect.base import Cost, Finding, is_available, profile_of
 from .mask import mask, value_hash
 from .matrix.loader import UnknownKey
 from .minimize import consume_token, minimize_tool_input
@@ -147,14 +156,6 @@ MAX_TIER3_CHARS = 8192
 # `State.lock` in between, so no thread can ever hold one while waiting for
 # the other in the opposite direction.
 _TIER3_LOCK = threading.Lock()
-
-
-def _is_tier3_detector(detector) -> bool:
-    """Tier 3 (the model/NER detector) is the only detector kind that
-    tracks weight availability. `ModelDetector` and `StubModelDetector`
-    both set `self.available`; the cheap tiers (`PathDetector`,
-    `SecretDetector`) do not."""
-    return hasattr(detector, "available")
 
 
 # Detailed destination literals architecture.md's schema comments suggest
@@ -219,9 +220,14 @@ class Decision:
     # real, non-None value here; a caller that ever sees rewrite+None has
     # found a bug, not a no-op.
     updated_input: str | dict | None = None
-    # Ruling 4: True when tier 3 was skipped for size rather than run.
-    # Renderer shows design.md §5's "Deep scan unavailable — fast-path
-    # results only" banner when this is set.
+    # Ruling 4: True when the expensive tier *would* have applied to this
+    # observation but did not run — over `MAX_TIER3_CHARS`, or no available
+    # detector to run. NOT set when the deep scan was simply out of scope (a
+    # local read, a B3/B4 egress, or a stack configured without tier 3):
+    # nothing was lost there, so claiming otherwise would tell the user the
+    # tool is impaired when it is behaving as specified. Renderer shows
+    # design.md §5's "Deep scan unavailable — fast-path results only" banner
+    # when this is set.
     degraded: bool = False
 
 
@@ -260,6 +266,16 @@ class Engine:
         self.matrix = matrix
         self.salt = salt
         self.detectors = detectors
+        # Fail at wiring time, not at the first scan of the first session.
+        # `profile_of` raises `UndeclaredDetector` for a detector that has
+        # not declared its tier and cost, and this loop is what makes that
+        # raise land on the line that assembled the stack (dispatch's
+        # `new_state`, a test fixture) rather than several hook calls later
+        # inside `_scan`. There is no default to fall back to: see
+        # `UndeclaredDetector`'s docstring for why every candidate default
+        # is a silent misclassification.
+        for d in detectors:
+            profile_of(d)
 
     # -- Ruling 2: destination normalization --------------------------
     def _normalize_destination(self, destination: str) -> str:
@@ -322,14 +338,42 @@ class Engine:
         return {r["selector"] for r in rows}
 
     def _scan(self, obs: Observation, dest_kind: str, boundary: str) -> tuple[list, bool]:
-        """Run tiers 0-2 unconditionally, then tier 3 only when it is
-        gated on and the payload is small enough (Ruling 4). Returns
-        (findings, degraded)."""
-        nonmodel = [d for d in self.detectors if not _is_tier3_detector(d)]
-        tier3 = [d for d in self.detectors if _is_tier3_detector(d)]
+        """Run every cheap detector unconditionally, then the expensive ones
+        only when they are gated on and the payload is small enough
+        (Ruling 4). Returns (findings, degraded).
+
+        The split is read off each detector's own `DetectorProfile.cost`, not
+        guessed from its shape. This used to ask
+        `hasattr(detector, "available")` and call a yes "tier 3", which
+        silently reclassified any cheap detector that tracked availability
+        (an optional ruleset, a config file) as expensive — it stopped
+        running on local reads and on B3/B4 and was skipped past the size
+        cap, with nothing raised — and left any expensive detector without an
+        `available` flag running unconditionally on every observation with no
+        cap at all. See `detect/base.py`'s module docstring.
+
+        Re-read from `self.detectors` on every call rather than partitioned
+        once in `__init__`: `dispatch`/`daemon` build one shared detector
+        list on a mutable `State` and several tests reassign it, so a cached
+        partition could describe a stack the engine is no longer using.
+        Reading two attributes per detector per scan is free next to the
+        regex pass it precedes.
+        """
+        cheap, expensive = [], []
+        for d in self.detectors:
+            (cheap if profile_of(d).cost is Cost.CHEAP else expensive).append(d)
 
         findings = []
-        for d in nonmodel:
+        for d in cheap:
+            # Availability is deliberately NOT consulted here. A cheap
+            # detector that cannot do its job is expected to say so from
+            # inside `scan()` by returning no findings (as
+            # `ModelDetector.scan` does), because there is no degradation
+            # story to tell about it: `Decision.degraded` drives design.md
+            # §5's "Deep scan unavailable" banner, which is a claim about
+            # the model tier specifically. Skipping cheap detectors here
+            # would either fly that banner dishonestly or drop findings with
+            # no signal at all.
             findings.extend(d.scan(obs.text, {"source": obs.source}))
 
         degraded = False
@@ -341,7 +385,7 @@ class Engine:
         # the shell parser already fully determine the block/mask decision
         # — a redundant deep scan there only adds synchronous latency risk
         # (the exact thing Ruling 4 exists to bound) for no new signal.
-        if tier3 and dest_kind != "local" and boundary not in ("B3", "B4"):
+        if expensive and dest_kind != "local" and boundary not in ("B3", "B4"):
             # Always deep-scan (no cheap-shape pre-filter): tier 3's whole
             # purpose is catching categories tiers 0-2 cannot shape-match at
             # all (address, person, date, account number) — gating its
@@ -361,8 +405,15 @@ class Engine:
                 # around the model call, so ledger work in other threads is
                 # never blocked by it.
                 with _TIER3_LOCK:
-                    for d in tier3:
-                        if not getattr(d, "available", True):
+                    for d in expensive:
+                        # Availability, unlike cost, is per-instance runtime
+                        # state — the weights loaded on this machine or they
+                        # did not. It is read through `is_available` (default
+                        # True: a detector that declares nothing has no reason
+                        # to be considered broken) and it decides only whether
+                        # *this instance* can run, never which tier it belongs
+                        # to. That conflation is the bug this refactor removed.
+                        if not is_available(d):
                             continue
                         findings.extend(d.scan(obs.text, {"source": obs.source}))
                         ran_any = True
@@ -534,7 +585,7 @@ class Engine:
                 tool_name=obs.tool_name,
                 protection=protection)
 
-        pct = self.ledger.summary(obs.session_id)["percent"]
+        pct = self.ledger.summary(obs.session_id).percent
 
         if action in ("deny", "rewrite"):
             label = ", ".join(sorted({f.data_type for f in findings})) or "sensitive data"

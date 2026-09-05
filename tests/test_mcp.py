@@ -62,9 +62,10 @@ def led(tmp_path):
 
 def test_summary_returns_the_four_tiles(led):
     s = get_session_summary(led, "s1")
-    assert set(s) >= {"percent", "exposed_items", "destinations", "prevented"}
-    assert s["exposed_items"] == 1
-    assert s["prevented"] == 1
+    assert set(s.as_dict()) == {"percent", "exposed_items", "destinations",
+                                "prevented"}
+    assert s.exposed_items == 1
+    assert s.prevented == 1
 
 
 # --------------------------------------------------------------------- #
@@ -73,23 +74,25 @@ def test_summary_returns_the_four_tiles(led):
 
 def test_list_exposures_returns_no_raw_values(led):
     rows = list_exposures(led, "s1", "Exposed")
-    blob = json.dumps(rows)
+    # `.as_dict()` is the explicit serialization step at the JSON boundary
+    # (ledger.py's `_EXPOSURE_JSON_FIELDS`); this is what a client receives.
+    blob = json.dumps([r.as_dict() for r in rows])
     assert "@acme.com" in blob          # the masked exemplar is fine
     assert RAW_LOCAL_PART not in blob   # the raw local part is not
     assert len(rows) == 1
-    assert rows[0]["data_type"] == "email"
+    assert rows[0].data_type == "email"
 
 
 def test_list_exposures_prevented_tab(led):
     rows = list_exposures(led, "s1", "Prevented")
     assert len(rows) == 1
-    assert rows[0]["data_type"] == "credential"
-    assert rows[0]["protection"] == "blocked"
+    assert rows[0].data_type == "credential"
+    assert rows[0].protection == "blocked"
 
 
 def test_list_exposures_all_events_includes_every_kind(led):
     rows = list_exposures(led, "s1", "All events")
-    kinds = {r["kind"] for r in rows}
+    kinds = {r.kind for r in rows}
     assert kinds == {"exposed", "prevented", "local_access"}
     assert len(rows) == 3
 
@@ -103,8 +106,13 @@ def test_list_exposures_rows_carry_no_value_hash_bytes(led):
     # bytes are not JSON-serializable at all -- if this key ever leaked
     # through, json.dumps above would already have raised. This test names
     # the invariant explicitly rather than relying on that side effect.
+    #
+    # It is now structural, not a maintained exclusion list: `ExposureRow` has
+    # no `value_hash` field at all (only `EventRow`, which never crosses this
+    # boundary, does), and `as_dict()` emits only `_EXPOSURE_JSON_FIELDS`.
     rows = list_exposures(led, "s1", "All events")
-    assert all("value_hash" not in r for r in rows)
+    assert all(not hasattr(r, "value_hash") for r in rows)
+    assert all("value_hash" not in r.as_dict() for r in rows)
 
 
 # --------------------------------------------------------------------- #
@@ -113,18 +121,18 @@ def test_list_exposures_rows_carry_no_value_hash_bytes(led):
 
 def test_get_exposure_detail_by_row_id(led):
     rows = list_exposures(led, "s1", "Exposed")
-    event_id = rows[0]["id"]
+    event_id = rows[0].id
     detail = get_exposure_detail(led, "s1", event_id)
-    assert detail["data_type"] == "email"
-    assert detail["masked_example"] == "jo•••@acme.com"
-    blob = json.dumps(detail)
+    assert detail.data_type == "email"
+    assert detail.masked_example == "jo•••@acme.com"
+    blob = json.dumps(detail.as_dict())
     assert RAW_LOCAL_PART not in blob
 
 
 def test_get_exposure_detail_includes_budget_cap(led):
     rows = list_exposures(led, "s1", "Exposed")
-    detail = get_exposure_detail(led, "s1", rows[0]["id"])
-    assert detail.get("budget_cap") == M.budget_cap
+    detail = get_exposure_detail(led, "s1", rows[0].id)
+    assert detail.budget_cap == M.budget_cap
 
 
 def test_get_exposure_detail_unknown_id_raises(led):
@@ -136,7 +144,7 @@ def test_get_exposure_detail_scoped_to_session(led):
     # A row id from a DIFFERENT session must not resolve, even if the
     # integer id happens to exist in the events table.
     rows = list_exposures(led, "s1", "Exposed")
-    event_id = rows[0]["id"]
+    event_id = rows[0].id
     with pytest.raises(LookupError):
         get_exposure_detail(led, "s2-does-not-exist", event_id)
 
@@ -235,13 +243,13 @@ def test_start_clean_session_starts_a_fresh_session_row(led):
 
 def test_no_raw_value_survives_json_round_trip(led):
     outputs = [
-        get_session_summary(led, "s1"),
-        list_exposures(led, "s1", "Exposed"),
-        list_exposures(led, "s1", "Prevented"),
-        list_exposures(led, "s1", "All events"),
+        get_session_summary(led, "s1").as_dict(),
+        [r.as_dict() for r in list_exposures(led, "s1", "Exposed")],
+        [r.as_dict() for r in list_exposures(led, "s1", "Prevented")],
+        [r.as_dict() for r in list_exposures(led, "s1", "All events")],
     ]
     rows = list_exposures(led, "s1", "Exposed")
-    outputs.append(get_exposure_detail(led, "s1", rows[0]["id"]))
+    outputs.append(get_exposure_detail(led, "s1", rows[0].id).as_dict())
 
     blob = json.dumps(outputs)
     for raw in (RAW_LOCAL_PART, RAW_SECRET):

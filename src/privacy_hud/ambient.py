@@ -159,8 +159,8 @@ def _line_for(session_id: str | None, width: int) -> str | None:
 
         summary = ledger.summary(sid)
         # I3: `percent` is the ledger's disclosure number, used verbatim.
-        return hud_line(int(summary["percent"]), width,
-                        int(summary["prevented"]))
+        return hud_line(int(summary.percent), width,
+                        int(summary.prevented))
     finally:
         try:
             ledger.conn.close()

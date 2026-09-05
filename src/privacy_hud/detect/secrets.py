@@ -6,7 +6,7 @@ import math
 import re
 from collections import Counter
 
-from .base import Finding
+from .base import Cost, DetectorProfile, Finding
 
 KEY_PATTERNS = [
     re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
@@ -82,6 +82,11 @@ def _overlaps_existing(out: list[Finding], start: int, end: int) -> bool:
 
 
 class SecretDetector:
+    # Cheap: regex plus a Shannon-entropy pass over already-matched
+    # candidates. Single-digit milliseconds worst case, no external
+    # resource, so nothing about it can become unavailable.
+    profile = DetectorProfile(tier=1, cost=Cost.CHEAP)
+
     def scan(self, text: str, ctx: dict) -> list[Finding]:
         out: list[Finding] = []
         for pat in KEY_PATTERNS:

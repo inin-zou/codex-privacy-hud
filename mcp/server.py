@@ -100,23 +100,33 @@ def build_app():
     app = FastMCP("privacy-hud")
     ledger = _open_ledger()
 
+    # The three read tools below end in `.as_dict()`. `mcp_tools` returns
+    # `ledger.py`'s `SessionSummary`/`ExposureRow` dataclasses, and this is the
+    # wire boundary: `ledger._EXPOSURE_JSON_FIELDS` pins which keys an MCP
+    # client sees and in what order, so the six `privacy.*` tools' published
+    # shape is a decision recorded in one place rather than whatever a
+    # dataclass happens to declare. Do not drop these calls -- a dataclass
+    # handed to the MCP transport is not serializable.
+
     @app.tool(name="privacy.get_session_summary")
     def get_session_summary(session_id: str) -> dict:
         """The four L2 tiles: disclosure percent, exposed items,
         destinations, prevented (design.md §5)."""
-        return mcp_tools.get_session_summary(ledger, session_id)
+        return mcp_tools.get_session_summary(ledger, session_id).as_dict()
 
     @app.tool(name="privacy.list_exposures")
     def list_exposures(session_id: str, tab: str) -> list[dict]:
         """Rows for one of the L2 tabs: "Exposed", "Prevented", or
         "All events" (design.md §5)."""
-        return mcp_tools.list_exposures(ledger, session_id, tab)
+        return [r.as_dict()
+                for r in mcp_tools.list_exposures(ledger, session_id, tab)]
 
     @app.tool(name="privacy.get_exposure_detail")
     def get_exposure_detail(session_id: str, event_id: int) -> dict:
         """The L3 detail payload for one flow, keyed by its `events` row
         id (design.md §6)."""
-        return mcp_tools.get_exposure_detail(ledger, session_id, event_id)
+        return mcp_tools.get_exposure_detail(
+            ledger, session_id, event_id).as_dict()
 
     @app.tool(name="privacy.update_policy")
     def update_policy(session_id: str, rule_type: str, selector: str) -> dict:

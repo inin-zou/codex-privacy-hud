@@ -17,11 +17,23 @@ for why band-only content changes would be redundant here anyway.
 No raw sensitive values are ever handled here: rows carry `masked_example`
 values the ledger already stored pre-masked (mask.py), and this module never
 reconstructs or unmasks anything (I1).
+
+**Input is typed.** `audit`, `detail` and `receipt` take `ledger.py`'s
+`SessionSummary` and `ExposureRow` (or an `EventRow`, which is one — see that
+class), not dicts. These functions are almost entirely `row[...]`/`.get(...)`
+lookups, which made them the single most exposed consumer of the old
+string-keyed contract: a mistyped key was either a `KeyError` in the middle of
+the audit the user just asked for, or a `.get()` returning `None` that rendered
+as an empty table cell nobody would notice was wrong. `row.data_typo` is an
+`AttributeError` at the call site instead, and the field list is somewhere a
+reader can check.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 
+from .ledger import ExposureRow, SessionSummary
 from .matrix.loader import load_matrix
 
 # Loaded once, at import time, the same way tests/test_ledger.py loads it —
@@ -156,18 +168,16 @@ def hud_line(percent: int, width: int, blocked: int = 0) -> str:
     return line[:max(width, 0)]
 
 
-def _status_chip(row: dict) -> str:
-    protection = row.get("protection")
-    if protection in ("masked", "minimized"):
+def _status_chip(row: ExposureRow) -> str:
+    if row.protection in ("masked", "minimized"):
         return "[MASKED]"
-    kind = row.get("kind")
-    if kind == "exposed":
+    if row.kind == "exposed":
         return "[EXPOSED]"
-    if kind == "prevented":
+    if row.kind == "prevented":
         return "[PREVENTED]"
-    if kind == "local_access":
+    if row.kind == "local_access":
         return "[LOCAL]"
-    return f"[{(kind or 'unknown').upper()}]"
+    return f"[{(row.kind or 'unknown').upper()}]"
 
 
 def _tile(value: str, label: str) -> list[str]:
@@ -179,14 +189,14 @@ def _tile(value: str, label: str) -> list[str]:
     return [top, val, lab, bot]
 
 
-def _tiles_block(summary: dict) -> str:
-    pct = int(summary.get("percent", 0))
+def _tiles_block(summary: SessionSummary) -> str:
+    pct = int(summary.percent)
     _check_band(pct)  # same fail-loud validation as hud_line
     tiles = [
         (f"{pct}%", "disclosure"),
-        (str(summary.get("exposed_items", 0)), "exposed items"),
-        (str(summary.get("destinations", 0)), "destinations"),
-        (str(summary.get("prevented", 0)), "prevented"),
+        (str(summary.exposed_items), "exposed items"),
+        (str(summary.destinations), "destinations"),
+        (str(summary.prevented), "prevented"),
     ]
     blocks = [_tile(v, l) for v, l in tiles]
     return "\n".join(" ".join(b[i] for b in blocks) for i in range(4))
@@ -206,13 +216,13 @@ def _tab_bar(exposed_n: int, prevented_n: int, all_n: int, tab: str) -> str:
     return line + "\n" + underline
 
 
-def _table(rows: list[dict]) -> str:
+def _table(rows: Sequence[ExposureRow]) -> str:
     headers = ["SENSITIVE DATA", "SOURCE", "DESTINATION", "STATUS"]
     data = []
     for r in rows:
-        title = _title(r["data_type"], r["count"])
-        source = _truncate_middle(r.get("source", ""), 24)
-        dest = r.get("destination", "")
+        title = _title(r.data_type, r.count)
+        source = _truncate_middle(r.source, 24)
+        dest = r.destination
         status = _status_chip(r)
         data.append([title, source, dest, status])
     widths = [
@@ -229,7 +239,7 @@ def _table(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def audit(summary: dict, rows: list[dict], tab: str) -> str:
+def audit(summary: SessionSummary, rows: Sequence[ExposureRow], tab: str) -> str:
     """The L2 session audit (design.md §5).
 
     `rows` is whatever the caller has already selected for `tab` — this
@@ -253,17 +263,17 @@ def audit(summary: dict, rows: list[dict], tab: str) -> str:
     summary` interface) does not carry a total event count and this
     function only ever sees one tab's rows at a time.
     """
-    exposed_n = summary.get("exposed_items", 0)
-    prevented_n = summary.get("prevented", 0)
+    exposed_n = summary.exposed_items
+    prevented_n = summary.prevented
     all_n = len(rows) if tab == "All events" else exposed_n + prevented_n
 
     ordered = list(rows)
     if tab == "Exposed":
-        ordered.sort(key=lambda r: r.get("budget_delta", 0.0), reverse=True)
+        ordered.sort(key=lambda r: r.budget_delta, reverse=True)
     elif tab == "Prevented":
-        ordered.sort(key=lambda r: r.get("ts", 0), reverse=True)
+        ordered.sort(key=lambda r: r.ts, reverse=True)
     else:
-        ordered.sort(key=lambda r: r.get("ts", 0))
+        ordered.sort(key=lambda r: r.ts)
 
     lines = ["Privacy Audit", "Current session", ""]
     lines.append(_tiles_block(summary))
@@ -275,7 +285,7 @@ def audit(summary: dict, rows: list[dict], tab: str) -> str:
     # being unavailable, and a payload too large for the bounded synchronous
     # scan (Task 8's degraded flag). Both surface identically here as a
     # `degraded` flag on the affected row.
-    degraded_n = sum(1 for r in ordered if r.get("degraded"))
+    degraded_n = sum(1 for r in ordered if r.degraded)
     if degraded_n:
         plural = "" if degraded_n == 1 else "s"
         lines.append(
@@ -292,7 +302,7 @@ def audit(summary: dict, rows: list[dict], tab: str) -> str:
     return "\n".join(lines)
 
 
-def detail(row: dict) -> str:
+def detail(row: ExposureRow) -> str:
     """The L3 exposure detail view (design.md §6).
 
     `Already disclosed data cannot be recalled from this session.` is
@@ -307,14 +317,14 @@ def detail(row: dict) -> str:
     contribution.
 
     Two divergences from a literal reading of design.md, both forced by the
-    fixed `detail(row: dict) -> str` interface (no summary/matrix/band
-    passed in):
-    - Budget contribution is shown as `+N pts` from `row["budget_delta"]`.
+    fixed one-row interface (no summary/matrix/band passed in):
+    - Budget contribution is shown as `+N pts` from `row.budget_delta`.
       design.md's mockup shows `+9 pts of 120`, but the 120 is the session's
       budget_cap, which this function has no access to; the "of {cap}" tail
-      is included only if the row itself carries an optional "budget_cap"
-      key, since fabricating 120 as a hardcoded constant here would silently
-      go stale the moment tables.toml's budget_cap is retuned.
+      is included only when the row itself carries a `budget_cap` (which is
+      why that field is optional and `None` when unknown, rather than
+      defaulted), since fabricating 120 as a hardcoded constant here would
+      silently go stale the moment tables.toml's budget_cap is retuned.
     - `Start a clean session` (design.md §6) is offered only when disclosure
       is in the red band — a session-level fact this function cannot see
       from a single row. Only the two source-scoped actions
@@ -322,36 +332,37 @@ def detail(row: dict) -> str:
     - The per-action confirmation line ("Rule added: ...") describes what
       happens after a button is pressed; there is no click state in a pure
       render of `row`, so it is not rendered here.
-    """
-    lines = [_title(row["data_type"], row["count"])]
 
-    hops = row.get("hops")
-    if hops:
-        lines.append(" → ".join(hops))
+    Takes the same `ExposureRow` the tab tables take, with its L3 fields
+    (`first_seen`, `last_seen`, `hops`, `budget_cap`) populated — that is what
+    `mcp_tools.get_exposure_detail` returns. Each of those is optional and
+    `None` when unknown, and each line below is still conditional on exactly
+    that, so a bare list row renders the shorter view rather than raising.
+    """
+    lines = [_title(row.data_type, row.count)]
+
+    if row.hops:
+        lines.append(" → ".join(row.hops))
     else:
-        lines.append(f"{row.get('source', '')} → {row.get('destination', '')}")
+        lines.append(f"{row.source} → {row.destination}")
     lines.append("")
 
-    first_ts = row.get("first_seen", row.get("ts"))
+    first_ts = row.first_seen if row.first_seen is not None else row.ts
     if first_ts is not None:
         lines.append(f"{'First seen':<12} {_fmt_time(first_ts)}")
-    last_ts = row.get("last_seen")
+    last_ts = row.last_seen
     if last_ts is not None and first_ts is not None and last_ts > first_ts:
         lines.append(f"{'Last seen':<12} {_fmt_time(last_ts)}")
 
-    protection = row.get("protection") or "none"
-    lines.append(f"{'Protection':<12} {protection}")
+    lines.append(f"{'Protection':<12} {row.protection or 'none'}")
 
-    masked = row.get("masked_example")
-    if masked:
-        lines.append(f"{'Example':<12} {masked}")
+    if row.masked_example:
+        lines.append(f"{'Example':<12} {row.masked_example}")
 
-    delta = row.get("budget_delta")
-    if delta is not None:
-        contrib = f"+{delta:g} pts"
-        cap = row.get("budget_cap")
-        if cap:
-            contrib += f" of {cap:g}"
+    if row.budget_delta is not None:
+        contrib = f"+{row.budget_delta:g} pts"
+        if row.budget_cap:
+            contrib += f" of {row.budget_cap:g}"
         lines.append(f"{'Budget':<12} {contrib}")
 
     lines += [
@@ -364,7 +375,8 @@ def detail(row: dict) -> str:
     return "\n".join(lines)
 
 
-def receipt(session_id: str, summary: dict, rows: list[dict], minutes: int) -> str:
+def receipt(session_id: str, summary: SessionSummary,
+            rows: Sequence[ExposureRow], minutes: int) -> str:
     """The end-of-session privacy receipt (design.md §10).
 
     `No file contents, prompts, or raw values were stored.` is the
@@ -379,27 +391,26 @@ def receipt(session_id: str, summary: dict, rows: list[dict], minutes: int) -> s
     than fabricate one, the Retained line states the true, generic fact:
     the session transcript is persisted by Codex, outside this ledger.
     """
-    pct = int(summary.get("percent", 0))
+    pct = int(summary.percent)
     _check_band(pct)
 
     lines = [
         f"PRIVACY RECEIPT · {session_id} · {minutes} min",
         "",
         f"{'Disclosure':<16} {pct}% of budget",
-        f"{'Exposed':<16} {summary.get('exposed_items', 0)} flows across "
-        f"{summary.get('destinations', 0)} destinations",
-        f"{'Prevented':<16} {summary.get('prevented', 0)} events",
+        f"{'Exposed':<16} {summary.exposed_items} flows across "
+        f"{summary.destinations} destinations",
+        f"{'Prevented':<16} {summary.prevented} events",
         f"{'Retained':<16} session transcript, persisted by Codex outside "
         "this ledger.",
         "",
     ]
 
     for r in rows:
-        title = _title(r["data_type"], r["count"])
-        source = _truncate_middle(r.get("source", ""), 20)
-        dest = r.get("destination", "")
-        suffix = "  (masked)" if r.get("protection") == "masked" else ""
-        lines.append(f"  {title:<22}{source:<18}→ {dest}{suffix}")
+        title = _title(r.data_type, r.count)
+        source = _truncate_middle(r.source, 20)
+        suffix = "  (masked)" if r.protection == "masked" else ""
+        lines.append(f"  {title:<22}{source:<18}→ {r.destination}{suffix}")
 
     lines += ["", "No file contents, prompts, or raw values were stored."]
     return "\n".join(lines)

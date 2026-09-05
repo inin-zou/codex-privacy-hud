@@ -4,7 +4,8 @@
 Every function here takes an already-open `Ledger` (the SAME ledger the
 daemon is writing to — see `mcp/server.py` for how a real MCP process
 opens it against `$PLUGIN_DATA/ledger.db`, `dispatch.new_state`'s same
-path) and returns a plain, JSON-serializable `dict`/`list[dict]`. No I/O
+path) and returns one of `ledger.py`'s read-contract dataclasses:
+`SessionSummary` or `ExposureRow`. No I/O
 beyond the ledger's own sqlite connection, no network calls, no raw
 sensitive value ever leaves any of these functions (I1) — every returned
 field is an ID, a count, a type, a source/destination label, a timestamp,
@@ -12,6 +13,17 @@ or the pre-masked `masked_example` the ledger already stored (mask.py runs
 long before any row reaches here). `tests/test_mcp.py`'s
 `test_no_raw_value_survives_json_round_trip` is the enforcement gate for
 that claim, run against a JSON dump of every function's return value.
+
+**Serializing is an explicit step, and the wire format is unchanged.** These
+functions used to return bare dicts assembled from a tuple of string keys
+(`_EVENT_FIELDS` + `_project`), which is what made the six `privacy.*` tools'
+JSON shape an emergent property of a key list nobody was checking against the
+schema. The shape is now `ExposureRow`/`SessionSummary`, and the two callers
+that put it on a wire — `local_ui_server` (browser JSON) and `mcp/server.py`
+(the MCP transport) — call `.as_dict()` themselves. That call is the contract
+boundary: `ledger._EXPOSURE_JSON_FIELDS` pins the keys and their order, so
+adding a field to the row type cannot silently widen what a client receives,
+and a dataclass can never reach `json.dumps` unserialized.
 
 **`apply_policy` and enforcement — read before wiring UI actions to this.**
 `apply_policy` writes a row to the `policy` table (schema from ledger.py /
@@ -47,19 +59,19 @@ from __future__ import annotations
 import time
 import uuid
 
+from .ledger import ExposureRow, SessionSummary
 from .minimize import mint_token
 
-# Curated event-row projection returned to every MCP-facing caller. Deliberately
-# excludes `value_hash` (a BLOB, not JSON-serializable, and not on the "IDs,
-# counts, types, destinations, timestamps, masked_example" allow-list even if
-# it were hex-encoded) and any column that does not exist in the schema in the
-# first place (there is no raw-value column to exclude -- see ledger.py's
-# SCHEMA docstring).
-_EVENT_FIELDS = (
-    "id", "turn_id", "ts", "kind", "data_type", "source", "destination",
-    "boundary", "count", "masked_example", "budget_delta", "protection",
-    "tool_name",
-)
+# The curated event-row projection that used to live here as `_EVENT_FIELDS` +
+# `_project()` is now `ledger.ExposureRow`, and narrowing a ledger row to it is
+# `EventRow.to_exposure()`. The reason for the move: a tuple of string keys and
+# the rows it filtered were two things that had to agree, with nothing checking
+# that they did — the same shape of bug as `detect/model.py`'s wrong `LABEL_MAP`
+# keys, which silently disabled tier 3 entirely. A type cannot drift from
+# itself: `to_exposure()` can only produce `ExposureRow`'s fields, so
+# `value_hash` (a salted BLOB, not JSON at all) and `session_id` are excluded
+# structurally rather than by a maintained list. See `ExposureRow`'s docstring
+# for the I1 argument in full.
 
 # design.md §5: "All events" is the forensic view -- every kind the ledger
 # can hold, not just exposed/prevented. `detected`/`retention` are part of
@@ -79,23 +91,25 @@ _TAB_KINDS = {
 _POLICY_RULE_TYPES = {"mask", "block_source", "allow_dest"}
 
 
-def _project(row: dict) -> dict:
-    return {k: row.get(k) for k in _EVENT_FIELDS}
-
-
-def get_session_summary(ledger, session_id: str) -> dict:
+def get_session_summary(ledger, session_id: str) -> SessionSummary:
     """The four L2 tiles (design.md §5): percent, exposed_items,
     destinations, prevented. `Ledger.summary` already returns exactly
     this shape and nothing beyond it -- no raw value is reachable from
-    session-level counts in the first place."""
-    return dict(ledger.summary(session_id))
+    session-level counts in the first place.
+
+    Returned straight through, with no copy. The defensive `dict(...)` this
+    used to make existed because a mutable dict handed to a caller is a dict
+    that caller can quietly rewrite; `SessionSummary` is frozen, so there is
+    nothing left to defend against."""
+    return ledger.summary(session_id)
 
 
-def list_exposures(ledger, session_id: str, tab: str) -> list[dict]:
+def list_exposures(ledger, session_id: str, tab: str) -> list[ExposureRow]:
     """Rows for one of design.md §5's three tabs: `"Exposed"`,
-    `"Prevented"`, or `"All events"`. Each row is the curated projection
-    from `_EVENT_FIELDS` -- metadata only, plus the ledger's pre-masked
-    `masked_example`, never a raw value.
+    `"Prevented"`, or `"All events"`. Each row is an `ExposureRow`, the
+    curated projection whose field list is itself the I1 allow-list --
+    metadata only, plus the ledger's pre-masked `masked_example`, never a
+    raw value.
 
     Does not aggregate by `(data_type, source, destination)` the way
     design.md's mockup groups rows for display -- `render.audit()` (Task
@@ -110,13 +124,13 @@ def list_exposures(ledger, session_id: str, tab: str) -> list[dict]:
     if kinds is None:
         raise ValueError(f"unknown tab {tab!r}; expected one of {sorted(_TAB_KINDS)}")
 
-    rows: list[dict] = []
+    rows: list[ExposureRow] = []
     for kind in kinds:
-        rows.extend(_project(r) for r in ledger.list_events(session_id, kind))
+        rows.extend(r.to_exposure() for r in ledger.list_events(session_id, kind))
     return rows
 
 
-def get_exposure_detail(ledger, session_id: str, event_id: int) -> dict:
+def get_exposure_detail(ledger, session_id: str, event_id: int) -> ExposureRow:
     """The L3 payload for one flow (design.md §6), keyed by the `events`
     table's own integer `id` -- see this module's docstring for why that
     selector was chosen over a composite key. Scoped to `session_id`: an
@@ -132,7 +146,14 @@ def get_exposure_detail(ledger, session_id: str, event_id: int) -> dict:
     hardcoded -- see render.py's `detail()` docstring for why a literal
     120 would go stale) so `render.detail()`'s optional "+N pts of {cap}"
     tail can be shown; the field is safely omitted by that function when
-    absent.
+    absent — and, on the wire, omitted from `as_dict()` entirely rather than
+    serialized as `null`, so "no cap known" stays distinguishable from a cap
+    of 0.
+
+    The return type is the same `ExposureRow` `list_exposures` yields, with its
+    L3 fields populated — see that class's docstring for why the detail payload
+    is not a separate type. `render.detail()` and `render.audit()` therefore
+    accept one type, not two.
     """
     row = ledger.conn.execute(
         "SELECT id, turn_id, ts, kind, data_type, source, destination,"
@@ -143,16 +164,15 @@ def get_exposure_detail(ledger, session_id: str, event_id: int) -> dict:
         raise LookupError(
             f"no event {event_id!r} in session {session_id!r}")
 
-    detail = _project(dict(row))
-    detail["first_seen"] = detail["ts"]
-
     cap_row = ledger.conn.execute(
         "SELECT budget_cap FROM sessions WHERE session_id=?",
         (session_id,)).fetchone()
-    if cap_row is not None:
-        detail["budget_cap"] = cap_row["budget_cap"]
 
-    return detail
+    columns = dict(row)
+    return ExposureRow(
+        **columns,
+        first_seen=columns["ts"],
+        budget_cap=cap_row["budget_cap"] if cap_row is not None else None)
 
 
 def apply_policy(ledger, session_id: str, *, rule_type: str, selector: str) -> None:

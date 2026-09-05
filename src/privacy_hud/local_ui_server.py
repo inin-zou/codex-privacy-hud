@@ -25,8 +25,15 @@ connection against that file safe.
 
 No raw sensitive value is served by any endpoint here -- every JSON
 response is built from `privacy_hud.mcp_tools` functions, which is exactly
-where that guarantee is enforced and tested (`tests/test_mcp.py`). This
-module adds no new field beyond what those functions already return, plus
+where that guarantee is enforced and tested (`tests/test_mcp.py`). Those
+functions return `ledger.py`'s `SessionSummary`/`ExposureRow` dataclasses, so
+every handler below serializes with an explicit `.as_dict()` immediately
+before `json.dumps` -- `ledger._EXPOSURE_JSON_FIELDS` is what pins the keys
+and their order, and `ui/app.js` reads exactly those. That call is not
+ceremony: without it a dataclass reaches `json.dumps` and the endpoint 500s,
+which is the correct failure (loud, at the boundary) rather than a silently
+reshaped payload. This module adds no new field beyond what those functions
+already return, plus
 the literal ASCII text from `render.py`'s own functions (`audit`/`detail`)
 for the "every view has a legible ASCII rendering" requirement (design.md
 §6/P6) -- reusing `render.py`'s actual functions, not re-describing their
@@ -194,7 +201,8 @@ class _Handler(BaseHTTPRequestHandler):
             if not sid:
                 self._send_json(404, {"error": "no session"})
                 return
-            self._send_json(200, mcp_tools.get_session_summary(ledger, sid))
+            self._send_json(
+                200, mcp_tools.get_session_summary(ledger, sid).as_dict())
             return
 
         if parsed.path == "/api/exposures":
@@ -209,8 +217,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": str(exc)})
                 return
             summary = mcp_tools.get_session_summary(ledger, sid)
+            # `rows` goes to the browser as JSON and to `render_audit` as
+            # typed rows -- the same values, serialized once, on purpose.
             self._send_json(200, {
-                "rows": rows,
+                "rows": [r.as_dict() for r in rows],
                 "text": render_audit(summary, rows, tab),
             })
             return
@@ -227,7 +237,8 @@ class _Handler(BaseHTTPRequestHandler):
             except (ValueError, LookupError) as exc:
                 self._send_json(404, {"error": str(exc)})
                 return
-            self._send_json(200, {"row": row, "text": render_detail(row)})
+            self._send_json(200, {"row": row.as_dict(),
+                                  "text": render_detail(row)})
             return
 
         self._send_json(404, {"error": "not found"})

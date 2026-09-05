@@ -4,6 +4,9 @@ and layouts these functions must reproduce.
 
 The banned-word test is the gate: this is a privacy tool, and it must never
 claim more than it can back up (design.md §9)."""
+from dataclasses import replace
+
+from privacy_hud.ledger import ExposureRow, SessionSummary
 from privacy_hud.render import hud_line, audit, detail, receipt
 
 # Extended past the brief's list per task-11 instructions: "dangerous" and
@@ -11,11 +14,18 @@ from privacy_hud.render import hud_line, audit, detail, receipt
 # facts alone are alarming enough (design.md §7).
 BANNED = ("undo", "revoke", "remove from context", "your data is protected",
           "100% secure", "threat", "dangerous", "critical")
-ROW = {"data_type": "email", "count": 12, "source": "support.log",
-       "destination": "model context", "kind": "exposed",
-       "masked_example": "jo•••@acme.com", "ts": 1757000000,
-       "protection": None, "budget_delta": 9.0}
-SUMMARY = {"percent": 28, "exposed_items": 4, "destinations": 2, "prevented": 17}
+# `ExposureRow`/`SessionSummary` rather than the dicts these used to be: the
+# renderer's input is typed (see ledger.py's read-contract dataclasses). Same
+# field values, same assertions — only the carrier changed.
+ROW = ExposureRow(id=1, turn_id="t1", ts=1757000000, kind="exposed",
+                  data_type="email", count=12, source="support.log",
+                  destination="model context", boundary="B1",
+                  masked_example="jo•••@acme.com", budget_delta=9.0,
+                  protection=None, tool_name="Read")
+SUMMARY = SessionSummary(percent=28, exposed_items=4, destinations=2,
+                         prevented=17)
+EMPTY_SUMMARY = SessionSummary(percent=0, exposed_items=0, destinations=0,
+                               prevented=0)
 
 
 def test_hud_bar_has_ten_cells_and_percent():
@@ -52,13 +62,13 @@ def test_detail_always_carries_the_irreversibility_notice():
 
 def test_detail_never_shows_a_raw_value_only_the_masked_example():
     out = detail(ROW)
-    assert ROW["masked_example"] in out
+    assert ROW.masked_example in out
 
 
 def test_detail_omits_example_line_when_no_exemplar_exists():
     # Credentials get no exemplar at all (mask.py) — the detail view must
     # not print "Example None".
-    row = dict(ROW, data_type="credential", masked_example=None)
+    row = replace(ROW, data_type="credential", masked_example=None)
     out = detail(row)
     assert "None" not in out
 
@@ -77,25 +87,22 @@ def test_receipt_states_that_nothing_raw_was_stored():
 
 
 def test_empty_exposed_tab_explains_the_engine_is_running():
-    out = audit({"percent": 0, "exposed_items": 0, "destinations": 0,
-                 "prevented": 0}, [], "All events")
+    out = audit(EMPTY_SUMMARY, [], "All events")
     assert "The engine is running." in out
 
 
 def test_empty_exposed_tab_says_nothing_crossed_a_boundary():
-    out = audit({"percent": 0, "exposed_items": 0, "destinations": 0,
-                 "prevented": 0}, [], "Exposed")
+    out = audit(EMPTY_SUMMARY, [], "Exposed")
     assert "No sensitive data has crossed a trust boundary this session." in out
 
 
 def test_empty_prevented_tab_says_nothing_blocked_yet():
-    out = audit({"percent": 0, "exposed_items": 0, "destinations": 0,
-                 "prevented": 0}, [], "Prevented")
+    out = audit(EMPTY_SUMMARY, [], "Prevented")
     assert "Nothing has been blocked or minimized yet." in out
 
 
 def test_audit_degraded_banner_covers_deep_scan_gaps():
-    row = dict(ROW, degraded=True)
+    row = replace(ROW, degraded=True)
     out = audit(SUMMARY, [row], "Exposed")
     assert "fast-path results only." in out
 
