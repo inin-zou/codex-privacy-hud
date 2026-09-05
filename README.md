@@ -17,7 +17,7 @@ Privacy HUD:  How much sensitive context has been disclosed?
 
 ![The Codex Privacy HUD user journey — from the ambient disclosure bar through the session audit, exposure detail, and minimizing a payload before it reaches an external tool](docs/images/user-journey-mockup.png)
 
-**Status:** implementation complete (all 13 planned tasks + post-hoc fixes, 525 tests passing) and whole-branch reviewed. **Verified end-to-end against a real Codex session** — including `codex exec` runs where sensitive text (e.g. a street address) is correctly detected by the real `openai/privacy-filter` model and recorded in the disclosure ledger. The daemon now starts itself on the first tool call of a session, which costs the **first few seconds of a session, during which nothing is monitored** — see [Known limits](#known-limits). See [`.claude/docs/plans/2026-09-03-implementation.md`](.claude/docs/plans/2026-09-03-implementation.md).
+**Before you rely on it,** read the [known limits](#known-limits). The most important one: the start of a session is **not monitored** while the model loads, and the ledger cannot tell you what it missed. Hosted tools bypass local hooks, and detection is heuristic. A privacy tool that overclaims is worse than none, so those limits are stated in full rather than in a footnote.
 
 ---
 
@@ -98,7 +98,7 @@ There is **no second LLM call to audit the first one.** That would re-transmit t
 
 ## Using it in Codex
 
-Verified end-to-end against a real Codex CLI install (Task 9's smoke test on 0.145.0; re-checked on 0.153.0).
+Verified end-to-end against a real Codex CLI install on 0.145.0 and 0.153.0.
 
 ### Prerequisites
 
