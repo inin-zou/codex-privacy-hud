@@ -66,7 +66,9 @@ No UI copy, log message, or API name may suggest disclosed data can be withdrawn
 Engine timeout on a read path: allow with an "unverified" warning. Engine timeout on an outbound call crossing B3/B4: deny. Never block Codex because of our own crash — the hook client exits 0 with empty stdout if it throws.
 
 **I7 — The tool survives its own audit.**
-Running Privacy HUD on this repo's own development session must produce zero exposures. There is a test for this.
+Running Privacy HUD on this repo's own development session must produce zero exposures.
+
+This is verified **by hand, not by a test** — it needs a live Codex session, which CI has neither the binary nor the network for. Do not add "there is a test for this" back until one exists. Verified on 2026-09-05 against Codex CLI 0.153.0 with a warm daemon: a session that read `src/privacy_hud/budget.py` and answered a question about it recorded zero events, budget 0.0/120.0. Re-run it after any change to the detector stack, and note that a cold daemon invalidates the result — the session goes unrecorded rather than clean (README known limit 1), which looks identical in the ledger.
 
 ---
 
