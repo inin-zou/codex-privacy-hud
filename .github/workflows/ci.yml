@@ -24,9 +24,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 3.11 is the floor declared in pyproject; 3.12 is what development
-        # happens on. Both ends, nothing in between.
-        python-version: ["3.11", "3.12"]
+        # 3.11 is the floor declared in pyproject and 3.12 is what development
+        # happens on, but neither is what hooks/handler.py actually runs under
+        # in production: a hook is invoked through its `#!/usr/bin/env python3`
+        # shebang, which resolves to whatever python3 is first on the host's
+        # PATH -- 3.14.7 on the maintainer's machine. That file is on the hot
+        # path of every tool call and is stdlib-only by constitution
+        # (CLAUDE.md section 4), so the newest interpreters are not a
+        # nice-to-have here: they are the ones the most failure-sensitive
+        # module is really executed by.
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     env:
       # Belt and braces for invariant I2 (no network calls). Tier 3
       # (src/privacy_hud/detect/model.py) imports transformers inside a
