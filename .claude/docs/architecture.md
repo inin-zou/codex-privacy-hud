@@ -56,7 +56,13 @@ daemon               [NOT IMPLEMENTED] designed to start lazily on first
                      hackathon's scope rather than built.
                      → holds Presidio models, regex set, SQLite conn, policy cache
                      → one process per user, serves all concurrent sessions
-                     → idle-exits after 30 min with no clients
+                     → reference-counts live sessions (SessionStart /
+                       SessionEnd, and any hook event as a keep-alive) and
+                       exits 5 min after the LAST one ends — never on a
+                       single SessionEnd, since one daemon serves them all.
+                       Fallbacks for a SessionEnd that never arrives: a
+                       session idle 4 h stops counting, and 4 h with no
+                       connection at all exits regardless of the count.
 ```
 
 **Socket protocol.** Newline-delimited JSON over `$PLUGIN_DATA/daemon.sock` (mode `0600`).

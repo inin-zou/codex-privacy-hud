@@ -13,8 +13,10 @@ unix socket.
 
 `dispatch.dispatch()` builds the reply; this module is only the socket
 plumbing: accept a connection, read one line, hand the payload to
-`dispatch`, write one line back, chmod the socket 0600, and idle-exit
-after 30 minutes with no connections.
+`dispatch`, write one line back, chmod the socket 0600, and exit once
+every Codex session it was serving has ended (see `Daemon`'s "Lifetime
+policy" section — the daemon serves all concurrent sessions, so this is a
+reference count, not a timeout).
 
 Startup is single-instance: several processes may try to start a daemon
 at the same socket path concurrently (the hook client spawning one on
@@ -48,10 +50,42 @@ import threading
 import time
 from pathlib import Path
 
-from .dispatch import State, _deny, dispatch, new_state
+from .dispatch import State, _deny, dispatch, live_session_count, new_state
 
-# Brief: "Idle-exit after 30 minutes with no connections."
-IDLE_TIMEOUT = 30 * 60  # seconds
+# -- daemon lifetime ---------------------------------------------------
+# Every number below is argued in `Daemon`'s "Lifetime policy" section.
+# Read it before changing one: the three constants are a single policy, and
+# each is only defensible in terms of the other two.
+
+# How long the daemon stays up after the LAST live session ends. Not an
+# idle timeout — an interval the daemon spends betting that another session
+# is about to arrive, because a wrong bet costs a 7 s cold start plus an
+# unmonitored window that has been measured to swallow an entire short
+# session, and a right bet costs a few more minutes of a process whose
+# resident set decays to ~68 MB while it waits (measured; see the class
+# docstring).
+LINGER_GRACE = 5 * 60  # seconds
+
+# A session with no hook event for this long is presumed dead and stops
+# counting as a reason to stay up. This is the bound on a reference leaked
+# by a Codex that crashed or was `kill -9`'d without sending `SessionEnd`.
+SESSION_STALE_AFTER = 4 * 60 * 60  # seconds
+
+# Absolute cap: exit after this long with no accepted connection of ANY
+# kind, whatever the session count says. Deliberately the same 4 hours as
+# `SESSION_STALE_AFTER`, and deliberately redundant with it — see the
+# "Bounding a leaked reference" part of `Daemon`'s docstring for why a
+# backstop that shares no code with the thing it backs up is worth keeping
+# even when it can be shown to fire at almost the same moment.
+IDLE_TIMEOUT = 4 * 60 * 60  # seconds
+
+# Once the exit condition is met, how long to keep serving so in-flight
+# requests can finish writing their replies. Bounded rather than
+# open-ended: a request that leaks the in-flight counter (see
+# `_request_finished`) must delay the exit, never prevent it. 30 s is
+# comfortably above `_Handler.request_timeout` (5 s) plus the slowest
+# measured request (a tier-3 ingress scan under contention, ~3 s).
+DRAIN_TIMEOUT = 30.0  # seconds
 
 # How long each `handle_request()` call blocks in select() before
 # returning control to the idle-check loop. This is what makes idle-exit
@@ -182,6 +216,22 @@ class _Handler(socketserver.StreamRequestHandler):
         super().setup()
         self.connection.settimeout(self.request_timeout)
 
+    def finish(self) -> None:
+        """Flush the reply, THEN tell the server this request is done.
+
+        Order is the point. `StreamRequestHandler.finish()` is what flushes
+        `wfile` — the actual bytes of the reply, including a `SessionEnd`
+        receipt — and the server's serve loop is allowed to break (and the
+        process to exit) the moment the in-flight count reaches zero. So the
+        decrement must be strictly after the flush, and in a `finally` so a
+        flush that raises still releases the count rather than pinning the
+        daemon until `DRAIN_TIMEOUT`.
+        """
+        try:
+            super().finish()
+        finally:
+            self.server._request_finished()
+
     def handle(self) -> None:
         try:
             line = self.rfile.readline()
@@ -248,10 +298,10 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
     daemon on first use), two Codex sessions starting together both run
     that line, and the second **deletes the first's live socket** and binds
     its own. The first daemon does not notice or exit: it keeps serving a
-    socket with no name, holding its ~2.8 GB model, until the 30-minute
-    idle timeout -- and every hook already talking to it silently falls
-    through to `hooks/handler.py`'s fail-open/fail-closed defaults with
-    nothing anywhere saying so. That trades a visible failure ("you forgot
+    socket with no name, holding its resident model, until the lifetime
+    policy below finally lets it go -- and every hook already talking to it
+    silently falls through to `hooks/handler.py`'s fail-open/fail-closed
+    defaults with nothing anywhere saying so. That trades a visible failure ("you forgot
     to start the daemon", which `privacy-hud-doctor` diagnoses in one line)
     for an invisible one, which is the class of regression CLAUDE.md §5
     exists to prevent.
@@ -446,14 +496,147 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
     (receipt completeness at `SessionEnd`, durability of a queue the daemon
     could be killed with). It is deliberately not attempted here.
 
-    Idle-exit: overrides `serve_forever()` to loop over `handle_request()`
-    (which itself blocks in `select()` for up to `ACCEPT_POLL` seconds)
-    rather than the base class's fixed-`poll_interval` `serve_forever()`,
-    and exits the loop once `ACCEPT_POLL`-spaced wall-clock checks show
-    `idle_timeout` seconds have passed with no accepted connection. No
-    busy loop: each iteration either blocks in the kernel on `select()`
-    until a connection arrives, or returns (a no-op) after `ACCEPT_POLL`
-    seconds.
+    Lifetime policy: exit when every Codex session has ended
+    --------------------------------------------------------
+    **Why this is not simply "exit on SessionEnd".** One daemon serves every
+    concurrent Codex session — that is the whole reason it is a daemon and
+    not a subprocess per session. Two Codex windows, or a `codex exec`
+    one-shot fired from inside an interactive session (both are in this
+    project's own ledger: session `01a06c30` ran entirely inside session
+    `01a06821`'s 19-hour span), share one process, one model and one sqlite
+    connection. Exiting on the first `SessionEnd` would take the daemon away
+    from a session that is still running, and the failure is *silent*: the
+    next hook gets `ECONNREFUSED`, `hooks/handler.py` answers from its
+    fail-open/fail-closed defaults, and the user goes on believing the
+    session is monitored while nothing is being recorded. Silently
+    unmonitoring a live session is the worst outcome this module can
+    produce, so the exit decision is a reference count over
+    `dispatch.State.live` and never a single event.
+
+    **The policy, in three rules.**
+
+    1. While any session is live, do not exit on idle. An interactive
+       session where nobody runs a tool for half an hour is not over; it is
+       a person reading a diff. The previous rule — 30 minutes since the
+       last accepted connection, full stop — took the daemon away from those
+       sessions and put them back through the cold-start window
+       *mid-session*, which is exactly the "the ledger does not know what it
+       is missing" hole README.md's known limit 1 exists to warn about.
+    2. When the last session ends, exit after `LINGER_GRACE` (5 min).
+    3. Regardless of the count, a session with no hook event for
+       `SESSION_STALE_AFTER` (4 h) stops counting, and the daemon exits
+       after `IDLE_TIMEOUT` (4 h) with no connection of any kind.
+
+    **Why 5 minutes and not 0.** Rule 2 is the one that is easy to get
+    wrong in the tempting direction. The measured `codex exec` one-shot in
+    this project's ledger ran 23:47:24 → 23:47:27 — **three seconds**, with
+    `SessionEnd` firing reliably. A script looping `codex exec` therefore
+    drops the count to zero every few seconds, and a grace of zero (or of
+    "a few seconds") makes every iteration pay a cold start: ~7 s of model
+    load before the socket binds, during which the *entire* next one-shot
+    can come and go unrecorded — README.md's known limit 1 records a real
+    8.2 s `codex exec` that recorded nothing at all for exactly this reason.
+    That is the product failing completely, once per loop iteration.
+
+    The two sides are not commensurable, which is what settles the number.
+    Staying up costs ~0.47 GB of RSS while the daemon is working (measured;
+    the 2.8 GB figure elsewhere in this repo is the on-disk weight size —
+    resident is far smaller because the model is 1.5B total / 50M active
+    MoE), and materially less than that while it is doing nothing, which is
+    exactly the state the grace period is: measured end to end on this
+    machine, a daemon's RSS decayed from 527 MB to **68 MB** within about
+    two minutes of its last request, because the weight pages are clean and
+    the OS reclaims them. So the thing being weighed against a hole in the
+    ledger is not half a gigabyte, it is tens of megabytes of an idle
+    process. Exiting early, meanwhile, costs a hole in the ledger that the
+    ledger cannot report. The grace therefore wants to be as long as it can
+    be while still honouring the other half of the requirement — "you quit
+    Codex, the daemon goes away".
+
+    Five minutes is where those meet. It is 43x the 7 s cold start, so the
+    daemon must sit unused for far longer than restarting it would cost
+    before it gives up; it covers a `codex exec` loop that also builds or
+    tests between iterations (the one-shots in the ledger last 3-15 s, so
+    the gap between them, not their duration, is what has to be covered);
+    and against the complaint that started this, it is a 6x reduction from
+    the old 30 minutes, which is the difference between "it went away when I
+    quit" and "why is this still running". Going to 60 s would buy four more
+    minutes of freed RSS and would start losing the loop case; going to 15
+    would be the old bug with a smaller number.
+
+    **Bounding a leaked reference.** `SessionEnd` is not guaranteed. A
+    `kill -9` on Codex, an OOM, or a closed terminal leaves a reference that
+    is never released, and a reference count on its own would let one such
+    event pin the process — and its resident model — until the machine
+    reboots. Two independent bounds, neither of which trusts the other:
+
+    * **Staleness (rule 3, in `dispatch.live_session_count`).** A session
+      with no hook event for 4 hours stops counting. This is the bound that
+      still works in the case a global timer cannot see: a leaked reference
+      sitting alongside a *busy* live session, whose traffic keeps any
+      global idle clock permanently fresh. The sweep releases the reference
+      and does nothing else — it does not end the ledger session and does
+      not discard the salt, because a staleness guess must not take an
+      irreversible action; `live_session_count`'s docstring carries that
+      argument.
+    * **An absolute cap (`IDLE_TIMEOUT`).** Exit after 4 h with no accepted
+      connection at all, whatever the count says. Given the sweep this is
+      almost redundant — if nothing has connected for 4 h then every session
+      is stale by 4 h — and it is kept precisely because it is redundant: it
+      shares no state and no code with the per-session bookkeeping, so it
+      still bounds the process if that bookkeeping has a bug. A wrong
+      refcount should cost one restart, not an unkillable process.
+
+    Why 4 hours for both: it is the interval a live-but-quiet session is
+    allowed before the daemon stops believing in it, so it has to clear the
+    real quiet stretches of interactive work — a long build, a meeting,
+    lunch — and 4 h clears all of them with room. It deliberately does NOT
+    clear "left the window open overnight": keeping a process resident for
+    8-14 hours on the chance that a session is still there is the wrong side
+    of the trade, and being wrong costs one 7 s restart on the next
+    morning's first hook. Note how low the bar for "alive" is — *any* hook resets it,
+    including a local `ls` and a `PreCompact`, neither of which records
+    anything (see `dispatch.note_session_live`) — so a session only goes
+    stale if the user has genuinely done nothing for four hours. This number
+    is reasoned, not measured: the ledger records only hooks that *detected*
+    something, so it cannot show the gap between consecutive hooks, and
+    claiming otherwise would be the kind of unearned precision CLAUDE.md §5
+    forbids.
+
+    **Exiting cleanly.** `SessionEnd` renders a receipt, and that reply must
+    reach Codex before the process goes. `daemon_threads = True` means
+    `server_close()` does not wait for worker threads, so the serve loop
+    counts in-flight requests itself: `verify_request` increments
+    (synchronously, in the accept loop, so a connection cannot be accepted
+    and then missed by the check), `_Handler.finish()` decrements after
+    `StreamRequestHandler.finish()` has flushed `wfile`, and the loop
+    refuses to break while the count is non-zero. The wait is bounded by
+    `DRAIN_TIMEOUT`, because the one way the counter can leak — an exception
+    inside `setup()`, or a `Thread.start()` that fails — must delay the exit
+    rather than prevent it. In production this guard is belt-and-braces: the
+    exit condition requires 5 minutes with no accepted connection and
+    `verify_request` stamps that clock at accept time, so a request in
+    flight has already made the exit impossible. It is the guarantee, not
+    the argument, that matters here.
+
+    **What this does not change.** Nothing about the startup flock or the
+    socket unlink: `_close()` still unlinks the socket *before* releasing
+    the lock, for the reason spelled out in "Single instance" above, and a
+    lifetime-policy exit reaches `_close()` by the same
+    `serve_forever()`-`finally` path a `stop()` or a Ctrl-C does. And
+    nothing about I6: a daemon that exits is simply restarted by the next
+    hook, and until it binds the client answers from its own fail-open /
+    fail-closed defaults exactly as it does for a daemon that was never
+    started.
+
+    Mechanics: `serve_forever()` overrides the base class's fixed
+    `poll_interval` loop with one that calls `handle_request()` (itself
+    blocking in `select()` for up to `ACCEPT_POLL` seconds) and re-evaluates
+    the exit predicate between calls. No busy loop: each iteration either
+    blocks in the kernel until a connection arrives, or returns (a no-op)
+    after `ACCEPT_POLL` seconds. `ACCEPT_POLL` is therefore also the
+    granularity of every interval above, which is why they are all minutes
+    or hours and none is seconds.
     """
 
     daemon_threads = True
@@ -468,13 +651,25 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
     request_queue_size = 128
 
     def __init__(self, socket_path, data_dir, *, idle_timeout: float = IDLE_TIMEOUT,
-                 poll_interval: float = ACCEPT_POLL, state: State | None = None):
+                 poll_interval: float = ACCEPT_POLL, state: State | None = None,
+                 linger_grace: float = LINGER_GRACE,
+                 session_stale_after: float = SESSION_STALE_AFTER,
+                 drain_timeout: float = DRAIN_TIMEOUT):
         """Raises `AlreadyRunning` if another daemon owns `socket_path`, and
         `OSError` for a real startup failure. Either way nothing is left
         behind: the startup lock is released on every failing path, and a
         failed `bind()` never unlinks anything (socketserver's own
         constructor closes the socket it could not bind, and this class only
         unlinks socket files it has proved dead or has bound itself).
+
+        The four lifetime arguments are the policy in "Lifetime policy"
+        above, made injectable so a test can compress hours into
+        milliseconds and assert on the *policy* rather than on a clock.
+        `idle_timeout` keeps its name and its meaning ("exit after this long
+        with no accepted connection") but is now the absolute backstop
+        rather than the whole rule: with a live session it is the only thing
+        that can end the daemon, and with none, `linger_grace` gets there
+        first.
         """
         self.socket_path = Path(socket_path)
         self.socket_path.parent.mkdir(parents=True, exist_ok=True)
@@ -496,6 +691,9 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
         try:
             self.state = state if state is not None else new_state(data_dir)
             self.idle_timeout = idle_timeout
+            self.linger_grace = linger_grace
+            self.session_stale_after = session_stale_after
+            self.drain_timeout = drain_timeout
 
             # Under the lock: decide whether the socket path is free, and
             # take it. See the class docstring for why doing this under the
@@ -537,7 +735,16 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
         self.timeout = poll_interval  # bounds each handle_request() select()
         self._running = False
         self._last_activity = time.monotonic()
+        # Guards `_last_activity` and `_inflight` together: both are stamped
+        # by the same `verify_request()` call, and both are read by the same
+        # exit predicate, so one lock is the honest scope.
         self._activity_lock = threading.Lock()
+        # Accepted connections whose reply has not been flushed yet. See
+        # "Exiting cleanly" in the class docstring.
+        self._inflight = 0
+        # When the exit condition first became true while requests were
+        # still in flight; `None` whenever it is not currently true.
+        self._draining_since: float | None = None
 
     # -- single-instance startup ------------------------------------------
     def _abort_startup(self) -> None:
@@ -574,8 +781,10 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
         nothing a caller wants -- the answer "a daemon is being started at
         this path" is already actionable, and the wait would have to be
         bounded anyway, since the holder keeps the lock for its whole
-        30-minute-idle lifetime. `EAGAIN` therefore becomes `AlreadyRunning`
-        immediately: no blocking, no retry loop, no deadlock, no livelock.
+        lifetime -- which, with a live session on the other end, is now
+        bounded in hours rather than in the old 30 idle minutes. `EAGAIN`
+        therefore becomes `AlreadyRunning` immediately: no blocking, no
+        retry loop, no deadlock, no livelock.
 
         The file is opened `O_CREAT` with mode 0600 (umask can only remove
         bits, so it can never come out more permissive) and is never
@@ -678,36 +887,116 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
             except FileNotFoundError:
                 pass
 
-    # -- idle tracking ---------------------------------------------------
+    # -- idle and in-flight tracking --------------------------------------
     def verify_request(self, request, client_address) -> bool:
         """Called synchronously in the accept loop for every accepted
         connection, before the request is handed to a worker thread — the
         one hook point guaranteed to run exactly once per connection
         regardless of what that connection turns out to contain, which
-        makes it the right place to record "not idle" for the idle-exit
-        clock.
+        makes it the right place both to record "not idle" and to count the
+        request as in flight.
+
+        Counting here rather than in `_Handler.setup()` closes a real
+        window: `setup()` runs on the worker thread, so between
+        `handle_request()` returning to the serve loop and that thread being
+        scheduled there is an interval in which an accepted connection is
+        invisible to the exit check. This method runs in the accept loop
+        itself, so by the time `handle_request()` returns, everything it
+        accepted is already counted.
         """
         with self._activity_lock:
             self._last_activity = time.monotonic()
+            self._inflight += 1
         return True
+
+    def _request_finished(self) -> None:
+        """Called from `_Handler.finish()` once the reply has been flushed.
+        Clamped at zero so a double-call can never drive the count negative
+        and make the daemon immortal."""
+        with self._activity_lock:
+            if self._inflight > 0:
+                self._inflight -= 1
 
     def _idle_seconds(self) -> float:
         with self._activity_lock:
             return time.monotonic() - self._last_activity
 
+    def live_sessions(self) -> int:
+        """Sessions this daemon is still serving, stale references swept.
+        Reads `dispatch.State.live` under its own lock — never
+        `State.lock` — so the accept loop can never queue behind another
+        session's sqlite work just to ask this question."""
+        return live_session_count(self.state,
+                                  stale_after=self.session_stale_after)
+
+    # -- exit decision ----------------------------------------------------
+    def _exit_due(self) -> bool:
+        """Has the lifetime policy said this daemon should go? See
+        "Lifetime policy" in the class docstring for why these are the two
+        branches and why the numbers are what they are.
+
+        The absolute cap is checked first and unconditionally, so it holds
+        even if `live_sessions()` is wrong — that independence is the only
+        reason it earns its place next to the staleness sweep.
+        """
+        idle = self._idle_seconds()
+        if idle >= self.idle_timeout:
+            return True
+        return idle >= self.linger_grace and self.live_sessions() == 0
+
+    def _ready_to_exit(self) -> bool:
+        """`_exit_due()`, plus "and no reply is still being written".
+
+        A `SessionEnd` receipt is generated and flushed by a worker thread,
+        and the exit that its own release of the last reference triggers
+        must not race it. Draining is bounded by `drain_timeout`, because
+        the count can in principle leak: `BaseRequestHandler.__init__` calls
+        `setup()` OUTSIDE the `try`/`finally` that guarantees `finish()`, so
+        an exception there is counted and never released, as is a
+        `process_request` whose `Thread.start()` fails. An unbounded wait
+        would turn either into a daemon that never exits — precisely the
+        failure mode this whole change exists to remove — so a leak costs
+        `drain_timeout` and nothing more.
+
+        `_draining_since` measures one *contiguous* stretch of "exit due and
+        requests still in flight", so it is cleared on both ways out of that
+        stretch — the condition lapsing, and the queue emptying. Clearing it
+        on the second is invisible to `serve_forever()` (which breaks the
+        moment this returns True) but keeps the predicate honest for any
+        other caller: without it, a drain window armed once would count
+        against every later drain, and the guard that is supposed to protect
+        an in-flight receipt would expire the instant it was armed.
+        """
+        if not self._exit_due():
+            self._draining_since = None
+            return False
+        with self._activity_lock:
+            inflight = self._inflight
+        if inflight == 0:
+            self._draining_since = None
+            return True
+        now = time.monotonic()
+        if self._draining_since is None:
+            self._draining_since = now
+            return False
+        return now - self._draining_since >= self.drain_timeout
+
     # -- serve loop -------------------------------------------------------
     def serve_forever(self, poll_interval: float | None = None) -> None:  # noqa: D401
-        """Serve requests until `idle_timeout` seconds pass with no
-        accepted connection, then close the socket and return. See the
-        class docstring for why this has no busy loop.
+        """Serve requests until the lifetime policy says to stop, then close
+        the socket and return. See the class docstring for the policy, and
+        for why this has no busy loop.
         """
         if poll_interval is not None:
             self.timeout = poll_interval
         self._running = True
         with self._activity_lock:
             self._last_activity = time.monotonic()
+        self._draining_since = None
         try:
-            while self._running and self._idle_seconds() < self.idle_timeout:
+            while self._running:
+                if self._ready_to_exit():
+                    break
                 self.handle_request()
         finally:
             self._close()
@@ -759,7 +1048,9 @@ def main(argv: list[str] | None = None) -> int:
     Exit-code contract, which an auto-spawning hook client can rely on:
 
     ======  ======================================================
-    0       Served, then exited (idle timeout, `stop()`, or Ctrl-C).
+    0       Served, then exited (the lifetime policy in `Daemon` -- the
+            last session ended, or nothing has connected in hours --
+            `stop()`, or Ctrl-C).
     3       Another daemon already owns the socket path. **Not a
             failure** -- the caller wanted a daemon there and there
             is one; use it. Nothing was clobbered and no model was
@@ -790,10 +1081,12 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return EXIT_FAILURE
     try:
-        daemon.serve_forever()  # returns on its own after idle_timeout;
-                                 # its own `finally` closes the socket and
-                                 # releases the startup lock on any exit
-                                 # path, KeyboardInterrupt included
+        daemon.serve_forever()  # returns on its own once every session it
+                                 # was serving has ended (see `Daemon`'s
+                                 # "Lifetime policy"); its own `finally`
+                                 # closes the socket and releases the
+                                 # startup lock on any exit path,
+                                 # KeyboardInterrupt included
     except KeyboardInterrupt:
         pass
     return EXIT_OK

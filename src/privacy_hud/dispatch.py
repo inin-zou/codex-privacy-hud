@@ -59,6 +59,15 @@ Nothing here ever passes one session's salt into another session's
 `Engine` — `State.salts`/`State.engines` are both keyed strictly by
 `session_id`, and dropped (not overwritten) at `SessionEnd`.
 
+Session reference counting: `State.live` maps each session id this daemon
+believes is alive to the monotonic time of its last hook event. It is
+maintained here (`note_session_live` / `release_session`) and read by
+`daemon.Daemon`'s serve loop (`live_session_count`) to decide when the
+daemon may exit — the daemon serves every concurrent session, so no single
+`SessionEnd` may take it down. The *policy* built on this count, and the
+reasoning behind every number in it, lives in `daemon.Daemon`'s "Lifetime
+policy" section; only the bookkeeping lives here.
+
 Lock scope: `State.lock` exists to serialize one shared resource — the
 `Ledger`'s single `sqlite3.Connection` — and is therefore held only across
 the code that touches it. Detection is NOT such code: `Engine.scan()` reads
@@ -120,6 +129,30 @@ class State:
     salts: dict[str, bytes] = field(default_factory=dict)
     engines: dict[str, Engine] = field(default_factory=dict)
     started_at: dict[str, float] = field(default_factory=dict)
+
+    # -- session reference count (daemon lifetime) --------------------- #
+    # session_id -> `time.monotonic()` of the last hook event seen for it.
+    # This is the daemon's answer to "is anyone still using me?", and
+    # `daemon.Daemon` reads it (via `live_session_count`) to decide whether
+    # it may exit. See that class's "Lifetime policy" section for the whole
+    # argument; see `note_session_live` for why it is a timestamp map and
+    # not an integer counter.
+    #
+    # I1: session ids and monotonic timestamps only. A session id is
+    # infrastructure — it is already a column in the ledger — and a
+    # monotonic timestamp is not even a wall clock, so nothing here can
+    # describe what a session did, only that it did something.
+    live: dict[str, float] = field(default_factory=dict)
+
+    # Deliberately NOT `lock` above. `lock` serializes one sqlite
+    # connection and is held across ledger work that can take milliseconds;
+    # `live` is read once per accept-loop iteration by the daemon's serve
+    # loop, and making that read queue behind another session's ledger write
+    # would put sqlite latency into the accept path for no reason. Lock
+    # ordering, stated so it stays true: `lock` may be taken while `live_lock`
+    # is NOT held and vice versa — the two are never nested, in either
+    # direction, anywhere in this module.
+    live_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 def new_state(data_dir) -> State:
@@ -335,6 +368,99 @@ def _build_observation(event: str, session_id: str, payload: dict) -> Observatio
     return None
 
 
+# --------------------------------------------------------------------- #
+# Session reference counting.
+#
+# These three functions are the entire mechanism behind "the daemon exits
+# once every Codex session has ended". `daemon.Daemon` owns the *policy*
+# (the grace period, the staleness bound, the absolute cap) and documents
+# the reasoning; this module owns the *bookkeeping*, because this is where
+# a hook payload is first understood to belong to a session.
+# --------------------------------------------------------------------- #
+
+def note_session_live(state: State, session_id: str) -> None:
+    """Record that `session_id` is alive right now.
+
+    Called for every hook event carrying a session id — including the ones
+    that produce no Observation and no ledger row at all (a local `ls`
+    PreToolUse, `PreCompact`, `SubagentStop`). That breadth is the point: a
+    session's *liveness* and its *disclosures* are different questions, and
+    a session that spends an hour doing purely local work is exactly as
+    alive as one leaking credentials. Keying liveness off ledger activity
+    would make the quiet, well-behaved session the one whose daemon gets
+    taken away.
+
+    Also registers a session that was never `SessionStart`-ed here. That is
+    not a leniency, it is the mid-session restart case: when a daemon exits
+    and the next hook starts a fresh one, that new daemon's first sight of
+    an ongoing session is some ordinary `PreToolUse`, and it must treat it
+    as a reason to stay up. `SessionStart` is a strong signal, not the only
+    one.
+
+    A timestamp map rather than an integer refcount, for two reasons the
+    integer cannot express. (1) `SessionEnd` is not guaranteed — a `kill -9`
+    on Codex increments and never decrements — so a reference has to be able
+    to *expire*, which requires knowing when it was last real. (2) Hook
+    events for one session arrive concurrently on several worker threads;
+    with an integer, "increment on first sight" needs a separate
+    already-counted set to stay idempotent, which is the map again with an
+    extra failure mode. Assigning `live[session_id] = now` is idempotent by
+    construction.
+    """
+    if not session_id:
+        return
+    with state.live_lock:
+        state.live[session_id] = time.monotonic()
+
+
+def release_session(state: State, session_id: str) -> None:
+    """Drop `session_id`'s reference. Idempotent — a duplicate `SessionEnd`,
+    or an end for a session this daemon never saw start, is a no-op.
+
+    Only `SessionEnd` calls this. The staleness sweep in
+    `live_session_count` deliberately does NOT: see its docstring for why
+    presuming a session dead and *declaring* it ended are different acts.
+    """
+    if not session_id:
+        return
+    with state.live_lock:
+        state.live.pop(session_id, None)
+
+
+def live_session_count(state: State, *, stale_after: float) -> int:
+    """How many sessions this daemon believes are still alive, after
+    dropping any whose last hook event is older than `stale_after` seconds.
+
+    The sweep is the liveness fallback for the one thing reference counting
+    cannot survive on its own: `SessionEnd` never arriving. Codex crashing,
+    being `kill -9`'d, or a terminal window closing all leave a reference
+    that will never be released, and without a sweep one such event pins the
+    daemon — and its resident model — for as long as the machine is up.
+
+    **The sweep releases the reference and nothing else.** It does not call
+    `Ledger.end_session`, does not discard the salt, and does not drop the
+    Engine. Those are `SessionEnd`'s acts and they are irreversible: ending
+    a ledger session nulls its `value_hash` column (see `Ledger`), and
+    discarding a salt makes every later hash for that session incomparable
+    with the earlier ones. A staleness sweep is a *guess* — the session may
+    be a real one whose user went to lunch — and a guess must not be allowed
+    to take an irreversible action. So a swept session that turns out to be
+    alive simply re-registers on its next hook and carries on with the same
+    Engine, same salt, same ledger row; the only thing that happened is that
+    the daemon stopped counting it as a reason to stay up.
+
+    Called from the daemon's accept loop once per poll interval, so it is
+    written to be cheap: one uncontended lock and a pass over a dict that
+    holds one entry per concurrent Codex session.
+    """
+    cutoff = time.monotonic() - stale_after
+    with state.live_lock:
+        stale = [sid for sid, seen in state.live.items() if seen < cutoff]
+        for sid in stale:
+            del state.live[sid]
+        return len(state.live)
+
+
 def _handle_session_start(state: State, session_id: str, payload: dict) -> dict:
     with state.lock:
         salt = new_salt()
@@ -345,6 +471,9 @@ def _handle_session_start(state: State, session_id: str, payload: dict) -> dict:
             ledger=state.ledger, matrix=state.matrix, salt=salt,
             detectors=state.detectors)
         state.started_at[session_id] = time.time()
+    # Outside the lock: `live_lock` and `lock` are never nested (State's
+    # `live_lock` comment states the ordering rule this keeps true).
+    note_session_live(state, session_id)
     return _allow()
 
 
@@ -362,12 +491,25 @@ def _handle_session_end(state: State, session_id: str, payload: dict) -> dict:
         state.salts.pop(session_id, None)
         state.engines.pop(session_id, None)
 
-    minutes = 0
-    if started is not None:
-        minutes = max(0, int((time.time() - started) // 60))
+    try:
+        minutes = 0
+        if started is not None:
+            minutes = max(0, int((time.time() - started) // 60))
 
-    message = render_receipt(session_id, summary, rows, minutes)
-    return {"systemMessage": message}
+        message = render_receipt(session_id, summary, rows, minutes)
+        return {"systemMessage": message}
+    finally:
+        # The reference is released only once the receipt exists, and in a
+        # `finally` so a rendering bug cannot leak it. Ordering is the
+        # cheap half of the guarantee, not the load-bearing half: this is
+        # the last session's `SessionEnd` in the common case, so releasing
+        # here is what lets the daemon start its exit grace — and the reply
+        # still has to be *written* after this function returns. What
+        # actually keeps that write from being cut off is `Daemon`'s
+        # in-flight drain (see its "Lifetime policy" section); this ordering
+        # just means the daemon does not even begin considering exit while
+        # the receipt is still being built.
+        release_session(state, session_id)
 
 
 def dispatch(state: State, payload: dict) -> dict:
@@ -396,6 +538,19 @@ def dispatch(state: State, payload: dict) -> dict:
         return _handle_session_start(state, session_id, payload)
     if event == "SessionEnd":
         return _handle_session_end(state, session_id, payload)
+
+    # Everything else is evidence that `session_id` is still alive, and is
+    # counted as such BEFORE the `_KNOWN_EVENTS` filter and before
+    # `_build_observation` can return None. Those two short-circuits are
+    # about whether there is anything to *score* — a `PreCompact`, a
+    # `SubagentStop`, a purely local Bash command — and none of them mean
+    # the session is over. Counting liveness only where a ledger row happens
+    # to be produced would take the daemon away from precisely the sessions
+    # that are behaving well. Payloads with no session id (the doctor's
+    # round-trip probe) register nothing: a health check is an observer, not
+    # a session, and must not keep the daemon alive.
+    note_session_live(state, session_id)
+
     if event not in _KNOWN_EVENTS:
         return _allow()
 

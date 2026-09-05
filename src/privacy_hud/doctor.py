@@ -669,7 +669,8 @@ def check_runtime_pin(timeout: float = runtime.PROBE_TIMEOUT) -> Check:
 
     **Why absence is a `FAIL`.** Without a receipt no hook will start a
     daemon, so a session records nothing unless someone remembered to start
-    one by hand — and even then the daemon idle-exits after 30 minutes with
+    one by hand — and even then the daemon exits five minutes after the last
+    session ends (and after four hours of total silence regardless) with
     nothing to bring it back. Nothing this plugin promises happens in that
     state, which is this file's definition of `FAIL`.
 
@@ -914,7 +915,8 @@ def check_daemon(timeout: float = DAEMON_TIMEOUT, *,
 
     **Absence means different things now, and this check has to say which.**
     The hook client starts the daemon itself when nothing answers, and the
-    daemon idle-exits after 30 minutes — so "no socket" between sessions is
+    daemon exits five minutes after the last session ends — so "no socket"
+    between sessions is
     the *correct* state of a healthy setup, not a fault, and reporting it as
     `FAIL` would train the user to ignore this line. What decides the verdict
     is therefore whether the auto-start is configured: with a usable runtime

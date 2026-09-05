@@ -17,7 +17,7 @@ Privacy HUD:  How much sensitive context has been disclosed?
 
 ![The Codex Privacy HUD user journey — from the ambient disclosure bar through the session audit, exposure detail, and minimizing a payload before it reaches an external tool](docs/images/user-journey-mockup.png)
 
-**Status:** implementation complete (all 13 planned tasks + post-hoc fixes, 423 tests passing) and whole-branch reviewed. **Verified end-to-end against a real Codex session** — including `codex exec` runs where sensitive text (e.g. a street address) is correctly detected by the real `openai/privacy-filter` model and recorded in the disclosure ledger. The daemon now starts itself on the first tool call of a session, which costs the **first few seconds of a session, during which nothing is monitored** — see [Known limits](#known-limits). See [`.claude/docs/plans/2026-09-03-implementation.md`](.claude/docs/plans/2026-09-03-implementation.md).
+**Status:** implementation complete (all 13 planned tasks + post-hoc fixes, 437 tests passing) and whole-branch reviewed. **Verified end-to-end against a real Codex session** — including `codex exec` runs where sensitive text (e.g. a street address) is correctly detected by the real `openai/privacy-filter` model and recorded in the disclosure ledger. The daemon now starts itself on the first tool call of a session, which costs the **first few seconds of a session, during which nothing is monitored** — see [Known limits](#known-limits). See [`.claude/docs/plans/2026-09-03-implementation.md`](.claude/docs/plans/2026-09-03-implementation.md).
 
 ---
 
@@ -170,7 +170,9 @@ privacy-hud setup
 
 You do not need to know what `PLUGIN_DATA` is, find it, or export it: setup reads the directory Codex assigned from Codex's own state, and the hook that later starts the daemon passes it its own value — so the daemon and the hooks cannot end up pointed at different directories, which used to be this project's most expensive misconfiguration. (`--plugin-data DIR` overrides it for a scratch setup.)
 
-**What the first tool call of a session now costs.** The daemon loads ~2.8 GB of model weights *before* it binds its socket — about seven seconds. The hook that starts it does not wait for it, and neither do the hooks that fire during the load: they get the same answer as a missing daemon (fail open on ingress with an "unverified" note, fail closed on egress). **The first few seconds of a session are unmonitored, and disclosures in that window are not recorded.** After that the daemon stays up for the session and idle-exits 30 minutes after the last hook; the next session's first hook starts a new one and pays the load again.
+**What the first tool call of a session now costs.** The daemon loads ~2.8 GB of model weights *before* it binds its socket — about seven seconds. The hook that starts it does not wait for it, and neither do the hooks that fire during the load: they get the same answer as a missing daemon (fail open on ingress with an "unverified" note, fail closed on egress). **The first few seconds of a session are unmonitored, and disclosures in that window are not recorded.** After that the daemon stays up for as long as *any* Codex session is open and exits five minutes after the last one closes; the next session's first hook starts a new one and pays the load again.
+
+**How long the daemon stays up, exactly.** One daemon serves every concurrent Codex session, so it counts them rather than watching a clock: `SessionStart` adds a session, `SessionEnd` removes it, and any other hook event counts as that session's keep-alive. While at least one session is open it will not exit no matter how long you leave it idle — an interactive session where nothing has run for half an hour is a person reading a diff, not a session that is over, and taking the daemon away there would put the session back through the unmonitored cold-start window mid-flight. Five minutes after the last session ends, it exits. Two fallbacks bound it if `SessionEnd` never arrives (Codex crashed, was `kill -9`'d, the terminal closed): a session with no hook event for four hours stops counting, and four hours with no connection of any kind exits the daemon regardless of the count. So a leaked session reference costs at most four hours of a resident process, not an unbounded one — and leaving a Codex window open overnight will outlive its daemon, with the next morning's first hook paying one seven-second restart.
 
 **Starting one by hand still works** and is the way to have a daemon up *before* the session — worth it if you want the ambient HUD in step 3 to have something to read immediately, or you are debugging:
 
@@ -178,6 +180,8 @@ You do not need to know what `PLUGIN_DATA` is, find it, or export it: setup read
 export PLUGIN_DATA=~/.codex/plugins/data/codex-privacy-hud-codex-privacy-hud
 PYTHONPATH=src python3 -m privacy_hud.daemon &
 ```
+
+Start Codex within five minutes of it: a hand-started daemon that no session ever connects to is indistinguishable from one whose last session ended, and it exits on the same grace.
 
 Only one daemon can own the socket: whichever starts first wins an exclusive lock and any other exits immediately without disturbing it, so a hand-started daemon and an auto-started one cannot fight or clobber each other's socket.
 
@@ -208,7 +212,7 @@ Setup is healthy.
 
 The daemon check is a real round trip, not a look at the socket file — a unix socket outlives the process that bound it, so a stale one and a running daemon are indistinguishable until something connects. The `Runtime pin` check is a real import in a real subprocess of the recorded interpreter (~1.4 s), for the same reason: "`transformers` is installed there" and "`transformers` imports there" are different claims, and this project has hit the gap between them (a torch/torchvision mismatch surfacing as `operator torchvision::nms does not exist`). A missing or stale pin is a `[FAIL]`, never a quiet fallback to some other Python. Every failing check prints what to do about it.
 
-`Daemon` reporting `[WARN] not running` between sessions is the correct state of a healthy setup, not a fault — the daemon idle-exits and the next hook starts it. It is a `[FAIL]` only when there is no pin, because then nothing will.
+`Daemon` reporting `[WARN] not running` between sessions is the correct state of a healthy setup, not a fault — the daemon exits once your last session ends, and the next hook starts it. It is a `[FAIL]` only when there is no pin, because then nothing will.
 
 Note that the doctor and the daemon need not be the same interpreter any more. Run `privacy-hud-doctor` from anywhere; where its own `transformers` view differs from the daemon's, the report says so rather than passing one off as the other.
 
@@ -243,7 +247,7 @@ Real output from a live Codex session (not a mockup) — a fresh session with no
 
 **6. When a call is blocked**, Codex surfaces the reason via `systemMessage`. Run `$privacy` to review the exposure, then choose to minimize and retry, allow once, or leave it blocked — see [`design.md` §8](.claude/docs/design.md) for the full consent flow.
 
-**7. Uninstall** (also stop any daemon still running — an auto-started one exits by itself 30 minutes after the last hook — and the ambient HUD from step 3 if you started it):
+**7. Uninstall** (also stop any daemon still running — an auto-started one exits by itself five minutes after your last Codex session ends — and the ambient HUD from step 3 if you started it):
 
 ```bash
 codex plugin remove codex-privacy-hud@codex-privacy-hud
@@ -254,7 +258,7 @@ codex plugin marketplace remove codex-privacy-hud
 
 Stated up front, because a privacy tool that overclaims is worse than none:
 
-1. **The start of a session is unmonitored.** The daemon starts itself now (`architecture.md`'s lazy auto-spawn, built), but it loads ~2.8 GB of model weights before it binds its socket — about seven seconds. The hook that starts it does not wait, and the hooks that fire during the load get the same answer as a missing daemon: fail open on ingress with an "unverified" note, fail closed on egress. **Whatever is disclosed in those first seconds is not in the ledger, and the ledger does not know it is missing.** Measured: a `codex exec` one-shot that finished in 8.2 s from a cold start recorded *nothing at all* — the daemon it started was still loading when the session ended, so for short non-interactive runs this is not "the first few seconds" but the whole session. An interactive session is a different story, since typing the first prompt already outlasts the load. Starting a daemon by hand before the session (step 2) is the only way to close that window. It reopens whenever the daemon idle-exits after 30 minutes and a later hook has to start a new one.
+1. **The start of a session is unmonitored.** The daemon starts itself now (`architecture.md`'s lazy auto-spawn, built), but it loads ~2.8 GB of model weights before it binds its socket — about seven seconds. The hook that starts it does not wait, and the hooks that fire during the load get the same answer as a missing daemon: fail open on ingress with an "unverified" note, fail closed on egress. **Whatever is disclosed in those first seconds is not in the ledger, and the ledger does not know it is missing.** Measured: a `codex exec` one-shot that finished in 8.2 s from a cold start recorded *nothing at all* — the daemon it started was still loading when the session ended, so for short non-interactive runs this is not "the first few seconds" but the whole session. An interactive session is a different story, since typing the first prompt already outlasts the load. Starting a daemon by hand before the session (step 2) is the only way to close that window. It reopens whenever the daemon exits and a later hook has to start a new one — which now happens five minutes after your last session ends, rather than in the middle of a session that merely went quiet for half an hour.
 
    The other half of the trade: auto-start works only if `privacy-hud-setup` has recorded an interpreter that can load the model. It refuses to record one that cannot, and with no recorded interpreter no daemon is started at all — deliberately, since guessing one produces a daemon that detects nothing while looking healthy. `privacy-hud-doctor` is the detector for both states: it round-trips the socket, and it re-imports the recorded interpreter's stack.
 2. **Hosted tools bypass hooks.** WebSearch and similar do not trigger local function-tool hook paths. This is a practical guardrail, not a complete enforcement boundary.
