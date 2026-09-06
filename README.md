@@ -289,7 +289,8 @@ Stated up front, because a privacy tool that overclaims is worse than none:
    - **Capitalized words in structured data**, as a `person`: `"tool_name": "Bash"` scores 1.00.
 
    Read a `person` or `date` row on a `Bash` source with that in mind: the exemplar column is there so you can tell at a glance which findings are yours and which are the machine's.
-8. **Nothing recalls disclosed data.** Ever.
+8. **`$privacy` resolves which session it is auditing, and says so when it cannot be sure.** Codex exposes no session id to a skill, so the session to audit is worked out rather than read: the daemon knows which session fired a hook most recently, and running `$privacy` itself fires one (the skill runs bash, which is a `PreToolUse` in the session you typed in), so the asking session is the most recently active one. Two consequences. With **two sessions active in the same few seconds** the signal cannot separate them — the audit then names the other active session in a line above the table instead of picking one silently, and `$privacy <session id>` audits a specific one. With **no daemon to ask**, it falls back to the most recently started session in the ledger and labels it as that, rather than as yours; a session with no daemon is also not being recorded (limit 1), so that is the state in which the numbers mean least. Note the ambient line (limit 5) does not ask the daemon at all — it polls the ledger and shows the most recently *started* session, so with two sessions open it can name a different one than `$privacy` does; `--session-id` pins it.
+9. **Nothing recalls disclosed data.** Ever.
 
 ## Documentation
 

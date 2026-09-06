@@ -114,10 +114,18 @@ def _reopen_for_background_thread(ledger: Ledger) -> None:
 
 
 def _latest_session_id(ledger: Ledger) -> str | None:
-    """Best-effort default when no `session_id` is given in the request:
-    the most recently started session. Not one of the six MCP tools (this
-    is UI convenience, not an audit surface), and returns only an id --
-    no session content."""
+    """The most recently *started* session.
+
+    **Not the session the user is in**, and no longer this module's default:
+    with two Codex windows open it names the one that started last, whoever is
+    asking. `mcp_tools.resolve_audit_session` is the resolution the request
+    handler uses now (`_session_id` below) — read its docstring for why the
+    daemon has to be asked and why `MAX(events.ts)` is not the fix either.
+
+    Kept, and kept exported, because it is still the honest answer when no
+    daemon can be reached, and `ambient` imports it by name for its own
+    (deliberately daemon-free, DB-polling) resolution. Returns only an id, no
+    session content."""
     row = ledger.conn.execute(
         "SELECT session_id FROM sessions ORDER BY started_at DESC LIMIT 1"
     ).fetchone()
@@ -155,10 +163,24 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _session_id(self, query: dict) -> str | None:
+        """The session a request is about: the one it names, or the one the
+        caller is in.
+
+        The default goes through `mcp_tools.resolve_audit_session` — the same
+        resolution `$privacy` uses — so a page opened with no query string and
+        the ASCII audit printed beside it cannot describe two different
+        sessions. That was the whole bug: two surfaces guessing "most recently
+        started" agree with each other and disagree with the user.
+
+        In practice the skill always puts `session_id` in the URL it prints
+        and `ui/app.js` carries it on every later request, so this default is
+        reached about once, by a hand-typed URL."""
         given = query.get("session_id", [None])[0]
         if given:
             return given
-        return _latest_session_id(self.server.ledger)  # type: ignore[attr-defined]
+        ledger: Ledger = self.server.ledger  # type: ignore[attr-defined]
+        return mcp_tools.resolve_audit_session(
+            ledger, _ledger_path().parent).session_id
 
     def _read_json_body(self) -> dict:
         length = int(self.headers.get("Content-Length", "0") or "0")

@@ -25,22 +25,62 @@ whichever agent happens to invoke this skill.
 **1. Resolve the ledger and the session.**
 
 The ledger lives at `$PLUGIN_DATA/ledger.db` (same path the daemon writes
-to). If the user gave an explicit id after `$privacy` (design.md §2's
-`$privacy <id>` deep link), use that. Otherwise resolve the most recently
-started session — in the common case there is exactly one, the session
-you are running in right now:
+to). Run this as written, substituting the id the user typed after
+`$privacy` (design.md §2's `$privacy <id>` deep link) for the empty string
+argument — leave it empty if they did not give one:
 
 ```bash
-python3 - <<'PY'
-import os, sqlite3
+python3 - "" <<'PY'
+import os, sys
+sys.path.insert(0, os.path.join(os.environ.get("PLUGIN_ROOT", "."), "src"))
+
+from privacy_hud.ledger import Ledger
+from privacy_hud.matrix.loader import load_matrix
+from privacy_hud import mcp_tools
+
 data_dir = os.environ.get("PLUGIN_DATA", "/tmp")
-conn = sqlite3.connect(os.path.join(data_dir, "ledger.db"))
-row = conn.execute(
-    "SELECT session_id FROM sessions ORDER BY started_at DESC LIMIT 1"
-).fetchone()
-print(row[0] if row else "")
+explicit = (sys.argv[1] if len(sys.argv) > 1 else "").strip()
+ledger = Ledger(os.path.join(data_dir, "ledger.db"), load_matrix())
+
+resolved = mcp_tools.resolve_audit_session(
+    ledger, data_dir, explicit=explicit or None)
+print(f"session_id: {resolved.session_id or ''}")
+print(f"basis: {resolved.basis}")
+if resolved.note:
+    print(f"note: {resolved.note}")
 PY
 ```
+
+`session_id` is what the rest of the steps use. **If a `note:` line is
+printed, print it to the user verbatim, above the audit table.** It is
+there because the resolution was not certain, and the copy is already
+written to design.md §9's rules — see `mcp_tools.ResolvedSession.note`.
+
+Do not replace this with `SELECT session_id FROM sessions ORDER BY
+started_at DESC LIMIT 1`, which is what this skill used to do. That is the
+most recently *started* session, so a user with two Codex windows open who
+runs `$privacy` in the first one is shown the second one's audit, silently
+— confirmed against a real ledger, where the most recently started and the
+most recently active session were two different sessions. Nor is
+`MAX(events.ts)` the fix: a session that has disclosed nothing has no
+event rows at all, so ordering by event time skips the cleanest possible
+session and serves an older one's numbers in its place. The daemon is the
+only process that knows which session is live, because it sees every hook
+including the ones that record nothing, and asking it works because
+**running `$privacy` itself fires hooks** — this skill runs bash, which is
+a `PreToolUse` in the session you are in, so that session is the most
+recently active one by construction rather than by guess.
+
+`basis` says how the id was reached — `explicit`, `active` (the daemon
+named it), `started_at` (fallback, daemon unreachable or no live session),
+`none` (the ledger holds no session yet). Never describe a `started_at`
+resolution as "your current session"; the `note:` line already says what
+it is.
+
+If `session_id` comes back empty (`basis: none`), stop here: print the
+`note:` line and nothing else. There is no session to audit, and steps 2
+and 3 would render an empty table for an id that does not exist, which
+reads exactly like a clean session.
 
 **2. Print the ASCII audit.**
 
@@ -64,9 +104,17 @@ ledger = Ledger(os.path.join(data_dir, "ledger.db"), load_matrix())
 
 summary = mcp_tools.get_session_summary(ledger, session_id)
 rows = mcp_tools.list_exposures(ledger, session_id, "Exposed")
-print(render.audit(summary, rows, "Exposed"))
+coverage = mcp_tools.get_session_coverage(ledger, session_id)
+print(render.audit(summary, rows, "Exposed", coverage=coverage))
 PY
 ```
+
+`coverage` is not optional decoration. Without it `render.audit` cannot
+tell "0% because nothing was disclosed" from "0% because nothing was
+recorded", and the second is exactly what a session whose daemon was down
+looks like (README known limit 1) — the same condition that makes step 1
+fall back to `basis: started_at`. `render.audit` adds one banner line when
+the record is incomplete and leaves the table untouched otherwise.
 
 Swap the tab argument (`"Exposed"` / `"Prevented"` / `"All events"`) to
 show a different one — `render.audit` and `mcp_tools.list_exposures` both
@@ -118,6 +166,11 @@ binding a new port.
 
 ## What NOT to do
 
+- Do not call the audit "your session" when step 1 printed a `note:` line.
+  The note exists because the resolution could not be certain — two Codex
+  windows both active in the same moment, or no daemon to ask — and
+  dropping it turns "here is a session's audit" into a claim about *this*
+  session that nothing supports. Print the note, then the table.
 - Do not summarize the numbers from memory or from an earlier tool call
   instead of running step 2 again — the ledger is append-only and grows
   as the session continues; a stale summary is a wrong one.

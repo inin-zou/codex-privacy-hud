@@ -74,6 +74,15 @@ daemon               [NOT IMPLEMENTED] designed to start lazily on first
 
 The client is deliberately dumb: it forwards the hook payload unmodified and relays whatever the daemon returns. All policy lives in one place, and the client has no dependencies that could break a user's session.
 
+`op` is the discriminator, and there is a second value on it, used by the `$privacy` skill and by nothing on the hook path:
+
+```json
+→ {"v":1,"op":"active_sessions"}
+← {"v":1,"op":"active_sessions","sessions":[{"session_id":"…","age":0.04}, …]}
+```
+
+Most recently active first; `age` is seconds since that session's last hook event (an age and not a timestamp, because a monotonic clock means nothing in another process). **Why the daemon has to be asked:** Codex exposes no session id to a skill, and neither question the ledger can answer is the right one — "most recently started" names the wrong session as soon as a second window is open, and "most recently disclosing" (`MAX(events.ts)`) skips a session that has disclosed nothing, which is precisely the clean session this tool must get right. The daemon's session reference count (`dispatch.State.live`) is updated for *every* hook carrying a session id, including the ones that write no ledger row, so it covers both. Running `$privacy` fires a hook in the asking session, which is what makes "most recently active" mean "the caller". `hooks/handler.py` is deliberately not taught this op: stdlib-only, hot path, no reason to ask. An unknown `op` is answered with silence, which every client on this socket already treats as "no useful answer" — never with an error object, which would reach Codex as hook output.
+
 **Failure behavior** (matters more than the happy path):
 
 | Failure | Client behavior |
@@ -413,6 +422,7 @@ privacy.start_clean_session   → wipe session state and salt
 **UI delivery.** Codex Desktop does not currently render MCP Apps inline iframe resources ([openai/codex#21019](https://github.com/openai/codex/issues/21019)), and `tui.status_line` accepts only built-in item identifiers. So:
 
 - **L2/L3** — daemon serves static HTML + vanilla JS on `127.0.0.1:<ephemeral>`; the `$privacy` skill prints the URL and an ASCII table fallback, so the demo works even with no browser.
+  - **Which session either surface shows** is resolved by `mcp_tools.resolve_audit_session`: an explicit `$privacy <id>` wins, otherwise the daemon's `active_sessions` op (§2) names the session that fired a hook most recently, and only if the daemon cannot be asked does it fall back to the ledger's most-recently-*started* session — labelled as that, never as the caller's own. Concurrent active sessions are reported, not silently resolved. `local_ui_server`'s default (`/api/session` with no `session_id`) goes through the same function so the page and the ASCII table cannot describe two different sessions; `ambient` deliberately does not (it polls the DB and never talks to the daemon — see README known limit 8).
 - **L1** — `privacy_hud.ambient` (entry point `privacy_hud.ambient:main`, console script `privacy-hud-ambient`): a standalone process the user runs in a second terminal pane, which polls `$PLUGIN_DATA/ledger.db` read-only and redraws `render.hud_line()` in place. Not a Codex status item.
 - **Alerts** — hook `systemMessage`, which is native and always available.
 

@@ -6,7 +6,13 @@ daemon is writing to — see `mcp/server.py` for how a real MCP process
 opens it against `$PLUGIN_DATA/ledger.db`, `dispatch.new_state`'s same
 path) and returns one of `ledger.py`'s read-contract dataclasses:
 `SessionSummary` or `ExposureRow`. No I/O
-beyond the ledger's own sqlite connection, no network calls, no raw
+beyond the ledger's own sqlite connection — with exactly one documented
+exception, `resolve_audit_session`, which also asks the local daemon over its
+AF_UNIX socket which session is live right now, because that is the one
+question the ledger cannot answer (see that function). A unix socket is a
+filesystem rendezvous with a process on this machine, not a network call: I2
+is untouched and `tests/test_network_isolation.py`'s transport tests are what
+keep that true. No raw
 sensitive value ever leaves any of these functions (I1) — every returned
 field is an ID, a count, a type, a source/destination label, a timestamp,
 or the pre-masked `masked_example` the ledger already stored (mask.py runs
@@ -58,6 +64,8 @@ from __future__ import annotations
 
 import time
 import uuid
+from dataclasses import dataclass
+from pathlib import Path
 
 from .ledger import ExposureRow, SessionCoverage, SessionSummary
 from .minimize import mint_token
@@ -89,6 +97,220 @@ _TAB_KINDS = {
 }
 
 _POLICY_RULE_TYPES = {"mask", "block_source", "allow_dest"}
+
+#: How close two sessions' last hook events have to be, in seconds, before
+#: "which of these is the caller?" stops being answerable.
+#:
+#: The signal `resolve_audit_session` ranks on is "who fired a hook most
+#: recently", and the caller's own hook (the `PreToolUse` for the bash the
+#: skill runs) landed a fraction of a second before the question was asked. A
+#: second session that has not fired a hook in the last few seconds therefore
+#: cannot be the caller and needs no caveat — which is the ordinary
+#: two-windows case, where the other window is idle while its user reads.
+#:
+#: The window is seconds and not milliseconds because a *tight* window would
+#: be worse than none: a second session in an active tool loop can easily fire
+#: a hook between the caller's hook and the caller's query, taking the top
+#: rank by a margin a millisecond-scale window would wave through as
+#: certainty. Five seconds is comfortably wider than that interleaving and
+#: still narrow enough that an idle window does not trip it.
+CONCURRENT_WITHIN = 5.0
+
+
+@dataclass(frozen=True)
+class ResolvedSession:
+    """Which session an audit is about, and how confidently.
+
+    The second half is the point. Every field but `session_id` exists so a
+    caller can say what it is showing without overclaiming (CLAUDE.md §5): an
+    audit that silently prints another window's numbers under the heading
+    "your session" is a worse failure for this tool than one that admits it
+    had to guess.
+
+    `basis` is one of:
+
+    ``"explicit"``
+        The user named the id (`$privacy <id>`). Nothing was inferred.
+    ``"active"``
+        The daemon named it: the session whose last hook event is the most
+        recent. Load-bearing property — running `$privacy` fires hooks, so the
+        asking session is the most recently active one by construction.
+    ``"started_at"``
+        Fallback. The most recently *started* session in the ledger, which is
+        the right session only when there is exactly one.
+    ``"none"``
+        The ledger holds no session at all; `session_id` is `None`.
+
+    `also_active` names the other sessions that fired a hook within
+    `CONCURRENT_WITHIN` of the chosen one — genuinely concurrent windows, which
+    this signal cannot tell apart. `daemon_answered` distinguishes the two
+    fallback cases, which have different meanings for the user: a daemon that
+    did not answer means the session is not being recorded *at all* right now
+    (README known limit 1), while a daemon that answered with no live session
+    means it started after the session did.
+
+    I1: ids and a couple of enum-ish strings. Nothing here describes what any
+    session did.
+    """
+
+    session_id: str | None
+    basis: str
+    also_active: tuple[str, ...] = ()
+    daemon_answered: bool = True
+
+    @property
+    def certain(self) -> bool:
+        """Whether this names the caller's own session without qualification."""
+        return (self.basis == "explicit"
+                or (self.basis == "active" and not self.also_active))
+
+    @property
+    def note(self) -> str:
+        """The caveat to print with the audit, or `""` when there is none.
+
+        Copy rules (design.md §9) apply here as much as to `render.py`: no
+        "undo", no "your data is protected", no severity adjectives, and no
+        claim about recall. Shaped like `render._coverage_banner`'s
+        `⚠ … — …` line because it sits in the same place and answers the
+        neighbouring question: that banner says whether the numbers are a full
+        account, this says whether they are the account of the session you are
+        in.
+        """
+        if self.certain:
+            return ""
+        if self.basis == "active":
+            others = ", ".join(self.also_active)
+            return ("⚠ More than one Codex session was active in the same "
+                    f"moment — also active: {others}. This audit is of the "
+                    "session that acted most recently, which may not be the "
+                    "window you typed in. Run `$privacy <session id>` to "
+                    "audit a specific one.")
+        if self.basis == "started_at" and not self.daemon_answered:
+            # Deliberately does NOT point at the coverage banner. Coverage
+            # describes the record up to now, and a session observed earlier
+            # by a daemon that has since exited still reads `verified` — so a
+            # note that promised a line below it would be pointing at a line
+            # that is not there. What is true right now is stated here
+            # instead, in one sentence, and `Ledger.coverage` keeps answering
+            # its own (different) question beside it.
+            return ("⚠ The Privacy HUD daemon did not answer, so this is the "
+                    "most recently started session on record — not "
+                    "necessarily the one you are in. Nothing is being "
+                    "recorded for any session while no daemon is listening.")
+        if self.basis == "started_at":
+            return ("⚠ The daemon has no live session on record, so this is "
+                    "the most recently started session on record, not "
+                    "necessarily the one you are in.")
+        return "No session has been recorded in this ledger yet."
+
+
+def _most_recently_started(ledger) -> str | None:
+    """The ledger's own best guess: the most recently started session.
+
+    Kept as a named function so the fallback is one call and one docstring
+    rather than a SQL string copied into every caller — the "most recently
+    started session" query has already been duplicated into three surfaces in
+    this project and each copy is a place the same wrong answer can be
+    reintroduced (`local_ui_server._latest_session_id`, and `ambient` via it).
+
+    Wrong as a *primary* answer for the reason `resolve_audit_session`
+    documents; correct as a fallback because with one session it is the same
+    answer, and with no daemon there is nothing better to have.
+    """
+    row = ledger.conn.execute(
+        "SELECT session_id FROM sessions ORDER BY started_at DESC LIMIT 1"
+    ).fetchone()
+    return row["session_id"] if row is not None else None
+
+
+def _ask_daemon(data_dir) -> list[dict] | None:
+    """`daemon.query_active_sessions` against `$PLUGIN_DATA`'s socket, or
+    `None` if it could not be asked.
+
+    The import is deferred, and the `except` around it is deliberate rather
+    than defensive: importing `daemon` pulls in `dispatch` and the detector
+    stack, which this module's other callers (the MCP server, the UI) have no
+    need of, and an interpreter that cannot import it is in exactly the same
+    position as one that cannot reach the socket — no answer available. One
+    degradation path, not two.
+    """
+    try:
+        from .daemon import _default_socket_path, query_active_sessions
+        return query_active_sessions(_default_socket_path(Path(data_dir)))
+    except Exception:
+        return None
+
+
+def resolve_audit_session(ledger, data_dir, *, explicit: str | None = None,
+                          concurrent_within: float = CONCURRENT_WITHIN,
+                          ) -> ResolvedSession:
+    """Decide which session an audit (`$privacy`, the local UI's default view)
+    should describe, and how honestly it can be labelled.
+
+    **Why this is not a one-line SQL query.** Both answers the ledger can give
+    are wrong, and each is wrong in a way that looks right:
+
+    * `ORDER BY started_at DESC LIMIT 1` — the most recently *started*
+      session. Open a second Codex window, then run `$privacy` in the first,
+      and it audits the second window's session with nothing saying so. This
+      was the shipped behavior and it was confirmed against a real ledger,
+      where most-recently-started and most-recently-active were two different
+      sessions.
+    * `ORDER BY MAX(events.ts) DESC` — the most recently *disclosing* session.
+      A session that has disclosed nothing has no `events` rows at all, so the
+      cleanest possible session is skipped and an older one's audit is served
+      in its place. The fix must work for a brand-new session with an empty
+      ledger, which rules this out on its own.
+
+    The daemon is the only process that knows, because it sees every hook —
+    including the ones that write no ledger row (`dispatch.note_session_live`)
+    — and Codex exposes no session id to a skill (verified: the CLI prints one
+    in its startup banner, and no environment variable carries it into a
+    skill's shell). So this asks the daemon, and the property that makes the
+    answer sound rather than lucky is that **asking fires hooks**: the skill
+    runs bash, bash is a `PreToolUse` in the asking session, so that session's
+    last-hook time is a fraction of a second old by the time this function
+    runs. "Most recently active" is the caller by construction.
+
+    **Two concurrent sessions are a real state, not an edge case**, and this
+    does not paper over it: any other session that fired a hook within
+    `concurrent_within` of the chosen one is returned in `also_active`, and
+    `ResolvedSession.note` says so in the audit's own output. Picking one
+    silently is what this whole function exists to stop doing.
+
+    **`explicit` wins outright.** `$privacy <id>` is a deep link; a user who
+    names a session gets that session, daemon or no daemon, and gets no
+    caveat because nothing was inferred.
+
+    Falls back to the ledger when the daemon cannot be asked, because the
+    alternative is a skill that stops working exactly when the user has the
+    least information — but the fallback is labelled (`basis`,
+    `daemon_answered`), so the caller cannot present it as "your current
+    session". Note what a missing daemon also means: no daemon listening is no
+    session being recorded (README known limit 1), which is `Ledger.coverage`'s
+    territory and why every caller of this should render
+    `get_session_coverage` beside it.
+
+    Never raises for a missing daemon. A genuinely broken ledger still
+    raises — that is a real failure and worth surfacing.
+    """
+    if explicit:
+        return ResolvedSession(explicit, "explicit")
+
+    sessions = _ask_daemon(data_dir)
+    if sessions:
+        chosen = sessions[0]
+        cutoff = chosen["age"] + concurrent_within
+        others = tuple(s["session_id"] for s in sessions[1:]
+                       if s["age"] <= cutoff)
+        return ResolvedSession(chosen["session_id"], "active", others)
+
+    latest = _most_recently_started(ledger)
+    if latest is None:
+        return ResolvedSession(None, "none",
+                               daemon_answered=sessions is not None)
+    return ResolvedSession(latest, "started_at",
+                           daemon_answered=sessions is not None)
 
 
 def get_session_summary(ledger, session_id: str) -> SessionSummary:

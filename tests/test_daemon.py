@@ -1617,3 +1617,238 @@ def test_an_event_after_session_end_re_registers_the_session(tmp_path):
     dispatch(st, {"hook_event_name": "PostToolUse", "session_id": "again",
                   "tool_name": "Read", "tool_response": "more work"})
     assert "again" in st.live
+
+
+# --------------------------------------------------------------------- #
+# The `active_sessions` op — "which session is the user asking from?"
+#
+# This is the fix for a shipped correctness bug in the `$privacy` skill,
+# which resolved the session to audit with `sessions ORDER BY started_at
+# DESC LIMIT 1`. That is the most recently *started* session, so a user
+# with two Codex windows open who ran `$privacy` in the first one was shown
+# the second one's audit, with nothing saying so. `MAX(events.ts)` is not
+# the fix either: a session that has disclosed nothing has no event rows at
+# all, so ordering by event time skips a brand-new clean session entirely.
+#
+# The daemon is the only process that knows, because `note_session_live`
+# runs for every hook carrying a session id — including the ones that write
+# no ledger row. `test_the_bug_active_beats_most_recently_started` below is
+# the reproduction: it asserts the new resolution and the old query
+# disagree, on the exact shape of the real report.
+# --------------------------------------------------------------------- #
+
+from privacy_hud.daemon import (  # noqa: E402
+    OP_ACTIVE_SESSIONS,
+    OP_EVENT,
+    query_active_sessions,
+)
+from privacy_hud.dispatch import active_sessions  # noqa: E402
+from privacy_hud.ledger import Ledger  # noqa: E402
+from privacy_hud.matrix.loader import load_matrix  # noqa: E402
+from privacy_hud.mcp_tools import resolve_audit_session  # noqa: E402
+
+
+def _raw_request(sock_path, request: dict, timeout: float = 5.0):
+    """One request line, one reply line — the whole protocol. Returns the
+    parsed reply, or `None` when the daemon answered with silence (which is
+    a defined outcome, not an error: see `_Handler.handle`)."""
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    s.connect(str(sock_path))
+    s.sendall((json.dumps(request) + "\n").encode())
+    buf = b""
+    while not buf.endswith(b"\n"):
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+    s.close()
+    if not buf:
+        return None
+    return json.loads(buf.decode())
+
+
+def _hook(sock_path, payload: dict):
+    return _raw_call(sock_path, payload)
+
+
+def test_active_sessions_op_lists_a_live_session(running_daemon):
+    _daemon, sock_path = running_daemon
+    _hook(sock_path, {"hook_event_name": "SessionStart", "session_id": "solo",
+                      "cwd": "/r", "model": "gpt-5"})
+    reply = _raw_request(sock_path, {"v": 1, "op": OP_ACTIVE_SESSIONS})
+    assert reply["op"] == OP_ACTIVE_SESSIONS
+    assert [s["session_id"] for s in reply["sessions"]] == ["solo"]
+    assert reply["sessions"][0]["age"] >= 0
+
+
+def test_active_sessions_op_is_empty_before_any_session(running_daemon):
+    """An empty list is a real answer ("nobody is live"), distinct from the
+    client's `None` ("could not ask") — the two must not be conflated, or
+    "I do not know" starts reading as "there is no session"."""
+    _daemon, sock_path = running_daemon
+    reply = _raw_request(sock_path, {"v": 1, "op": OP_ACTIVE_SESSIONS})
+    assert reply["sessions"] == []
+
+
+def test_active_sessions_op_orders_most_recently_active_first(running_daemon):
+    _daemon, sock_path = running_daemon
+    for sid in ("first", "second"):
+        _hook(sock_path, {"hook_event_name": "SessionStart", "session_id": sid,
+                          "cwd": "/r", "model": "gpt-5"})
+    # A hook in "first" — a purely local Bash call, which records NO ledger
+    # row at all. That is exactly the case a ledger-based resolution cannot
+    # see and this one must.
+    _hook(sock_path, {"hook_event_name": "PreToolUse", "session_id": "first",
+                      "turn_id": "t1", "tool_name": "Bash",
+                      "tool_input": {"command": "ls -la"}})
+    reply = _raw_request(sock_path, {"v": 1, "op": OP_ACTIVE_SESSIONS})
+    assert [s["session_id"] for s in reply["sessions"]] == ["first", "second"]
+
+
+def test_the_bug_active_beats_most_recently_started(sock_dir):
+    """The reported bug, end to end, against a real daemon and a real ledger.
+
+    Session A starts, session B starts, then A fires a hook — the user who
+    opened a second window and went back to the first one. The old
+    resolution names B; the new one names A.
+    """
+    sock_path = sock_dir / "daemon.sock"
+    daemon = Daemon(sock_path, sock_dir, idle_timeout=3600, poll_interval=0.05)
+    thread = threading.Thread(target=daemon.serve_forever, daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 2.0
+        while not sock_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        _hook(sock_path, {"hook_event_name": "SessionStart",
+                          "session_id": "A", "cwd": "/r", "model": "gpt-5"})
+        # `sessions.started_at` is whole seconds, and two rows in the same
+        # second make the old query's answer arbitrary rather than wrong —
+        # which is its own indictment, but not the reported bug. Sleep past
+        # the second boundary so B is unambiguously the most recently
+        # STARTED session, exactly as it was in the real ledger.
+        time.sleep(1.05)
+        _hook(sock_path, {"hook_event_name": "SessionStart",
+                          "session_id": "B", "cwd": "/r", "model": "gpt-5"})
+        # Then the user goes back to the first window and runs `$privacy`,
+        # whose own bash is this PreToolUse. The gap matters: B has to stop
+        # being the most recently *active* session, which is the whole
+        # premise of the fix.
+        time.sleep(0.3)
+        _hook(sock_path, {"hook_event_name": "PreToolUse", "session_id": "A",
+                          "turn_id": "t1", "tool_name": "Bash",
+                          "tool_input": {"command": "ls"}})
+
+        # What the skill used to do, verbatim.
+        ledger = Ledger(sock_dir / "ledger.db", load_matrix())
+        old = ledger.conn.execute(
+            "SELECT session_id FROM sessions ORDER BY started_at DESC LIMIT 1"
+        ).fetchone()["session_id"]
+        resolved = resolve_audit_session(ledger, sock_dir)
+
+        assert old == "B", "fixture no longer reproduces the bug"
+        assert resolved.session_id == "A"
+        assert resolved.basis == "active"
+        # B's own last hook is ~1 s old here, i.e. inside the default
+        # concurrency window, so the answer is honest about it instead of
+        # silently confident. In the real two-windows case the other window
+        # has been idle for minutes, which the narrower window below stands
+        # in for: then A is named outright, with no caveat.
+        assert resolved.also_active == ("B",)
+        tight = resolve_audit_session(ledger, sock_dir, concurrent_within=0.25)
+        assert tight.session_id == "A"
+        assert tight.certain and tight.note == ""
+    finally:
+        daemon.stop()
+        thread.join(timeout=5.0)
+
+
+def test_a_clean_session_with_no_events_still_resolves(sock_dir):
+    """The `MAX(events.ts)` trap. This session has disclosed nothing, so it
+    owns no `events` row — an event-time ordering would skip it and hand
+    back some other session's audit, which is the same bug with different
+    symptoms."""
+    sock_path = sock_dir / "daemon.sock"
+    daemon = Daemon(sock_path, sock_dir, idle_timeout=3600, poll_interval=0.05)
+    thread = threading.Thread(target=daemon.serve_forever, daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 2.0
+        while not sock_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        _hook(sock_path, {"hook_event_name": "SessionStart",
+                          "session_id": "clean", "cwd": "/r", "model": "gpt-5"})
+        ledger = Ledger(sock_dir / "ledger.db", load_matrix())
+        assert ledger.conn.execute(
+            "SELECT COUNT(*) AS n FROM events").fetchone()["n"] == 0
+        assert resolve_audit_session(ledger, sock_dir).session_id == "clean"
+    finally:
+        daemon.stop()
+        thread.join(timeout=5.0)
+
+
+def test_query_active_sessions_returns_none_with_nothing_listening(sock_dir):
+    """No daemon means "could not ask", never "no session is live"."""
+    assert query_active_sessions(sock_dir / "absent.sock", timeout=0.5) is None
+
+
+def test_query_active_sessions_round_trips_against_a_real_daemon(running_daemon):
+    _daemon, sock_path = running_daemon
+    _hook(sock_path, {"hook_event_name": "SessionStart", "session_id": "rt",
+                      "cwd": "/r", "model": "gpt-5"})
+    sessions = query_active_sessions(sock_path)
+    assert [s["session_id"] for s in sessions] == ["rt"]
+
+
+def test_an_unknown_op_gets_silence_not_an_error_object(running_daemon):
+    """Silence is the degradation every client on this socket already
+    handles. An error dict would travel back through `hooks/handler.py` and
+    reach Codex as hook output (I6)."""
+    _daemon, sock_path = running_daemon
+    assert _raw_request(sock_path, {"v": 1, "op": "no-such-op",
+                                    "payload": {"hook_event_name": "SessionStart",
+                                                "session_id": "x"}}) is None
+
+
+def test_a_request_with_no_op_is_still_dispatched_as_an_event(running_daemon):
+    """Backward compatibility with any client that predates the second op —
+    `op` has always defaulted to "event"."""
+    _daemon, sock_path = running_daemon
+    reply = _raw_request(sock_path, {"v": 1, "payload": {
+        "hook_event_name": "SessionStart", "session_id": "noop",
+        "cwd": "/r", "model": "gpt-5"}})
+    assert reply == {}
+    assert "noop" in _daemon.state.live
+
+
+def test_the_hook_client_still_sends_the_event_op_literally():
+    """`hooks/handler.py` imports nothing from this package, so its `op` is a
+    literal. Checked rather than trusted, the same treatment `daemon.sock`
+    gets."""
+    source = (Path(__file__).resolve().parent.parent
+              / "hooks" / "handler.py").read_text(encoding="utf-8")
+    assert f'"op": "{OP_EVENT}"' in source
+
+
+def test_active_sessions_does_not_sweep_stale_references(tmp_path):
+    """A query must not change the daemon's own lifetime accounting: deciding
+    a session is dead is the accept loop's act (`live_session_count`), taken
+    on its own schedule."""
+    st = new_state(tmp_path)
+    note_session_live(st, "old")
+    assert active_sessions(st, stale_after=0.0) == []
+    assert "old" in st.live
+    assert live_session_count(st, stale_after=0.0) == 0
+    assert "old" not in st.live
+
+
+def test_active_sessions_reports_ages_not_timestamps(tmp_path):
+    """Monotonic timestamps mean nothing in another process; an age in
+    seconds is comparable anywhere, which is what the client's
+    concurrent-session window is measured in."""
+    st = new_state(tmp_path)
+    note_session_live(st, "s")
+    (_sid, age), = active_sessions(st, stale_after=3600)
+    assert 0 <= age < 5

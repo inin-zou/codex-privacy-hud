@@ -11,6 +11,22 @@ unix socket.
     -> {"v": 1, "op": "event", "payload": <verbatim Codex hook JSON>}
     <- <hook-output JSON, written back to Codex's stdout as-is>
 
+`op` was a discriminator from the start, and there is now a second one, used
+by the `$privacy` skill and by nothing on the hook path:
+
+    -> {"v": 1, "op": "active_sessions"}
+    <- {"v": 1, "op": "active_sessions",
+        "sessions": [{"session_id": ..., "age": <seconds since its last
+                      hook event>}, ...]}   # most recently active first
+
+It exists because the daemon is the only process that knows which Codex
+session is live *right now* — Codex exposes no session id to a skill, and the
+ledger can only say which session started last or disclosed last, both of
+which are the wrong answer (`dispatch.active_sessions`). `hooks/handler.py`
+is deliberately not taught this op: it is stdlib-only, on the hot path, and
+has no reason to ask. Server side is `_Handler.handle`; client side is
+`query_active_sessions` in this module, so the two halves cannot drift.
+
 `dispatch.dispatch()` builds the reply; this module is only the socket
 plumbing: accept a connection, read one line, hand the payload to
 `dispatch`, write one line back, chmod the socket 0600, and exit once
@@ -50,7 +66,39 @@ import threading
 import time
 from pathlib import Path
 
-from .dispatch import State, _deny, dispatch, live_session_count, new_state
+from .dispatch import (
+    State,
+    _deny,
+    active_sessions,
+    dispatch,
+    live_session_count,
+    new_state,
+)
+
+# -- wire protocol -----------------------------------------------------
+# The `op` values this daemon answers. See the module docstring for both
+# shapes. `OP_EVENT` is what `hooks/handler.py` sends (as a literal — it
+# imports nothing from this package, and `tests/test_daemon.py` asserts the
+# two agree, the same treatment `daemon.sock` and `MIN_PYTHON` get).
+
+#: One Codex hook payload, answered with hook-output JSON.
+OP_EVENT = "event"
+
+#: "Which Codex sessions are alive right now, most recently active first?"
+#: Answered from `dispatch.State.live`, which is the only place in the system
+#: that knows — read `dispatch.active_sessions` before assuming the ledger
+#: could answer this instead.
+OP_ACTIVE_SESSIONS = "active_sessions"
+
+#: Client-side bound for `query_active_sessions`. Deliberately generous
+#: compared with the hook client's 120 ms: the caller is a human running
+#: `$privacy`, not a hook with a 5 s budget, and the daemon answers requests
+#: serially — so a query that arrives while a tier-3 ingress scan is in
+#: flight (~3 s measured) should wait for the true answer rather than
+#: degrade to the ledger's wrong one. Still bounded, because a wedged daemon
+#: must not hang the skill: expiring reads as "no answer", which the caller
+#: already has an honest fallback for.
+QUERY_TIMEOUT = 5.0
 
 # -- daemon lifetime ---------------------------------------------------
 # Every number below is argued in `Daemon`'s "Lifetime policy" section.
@@ -245,6 +293,40 @@ class _Handler(socketserver.StreamRequestHandler):
             return
         if not isinstance(request, dict):
             return
+
+        # `op` has always been the protocol's discriminator; until the
+        # `$privacy` skill needed to ask who was live, "event" was the only
+        # value anyone sent. A missing/empty `op` still means "event", so
+        # every client that predates this branch is unaffected.
+        op = request.get("op") or OP_EVENT
+
+        if op == OP_ACTIVE_SESSIONS:
+            try:
+                reply = self._active_sessions_reply()
+            except Exception:
+                # No reply, deliberately: see the unknown-op case below.
+                # This op cannot affect a tool call, so there is no egress
+                # to fail closed on — the caller's own fallback is the
+                # correct degradation.
+                return
+            self._write(reply)
+            return
+
+        if op != OP_EVENT:
+            # An op this daemon does not know is a version mismatch between
+            # a client and a daemon, and it gets silence rather than an
+            # error object. Two reasons. (1) Silence is a degradation every
+            # client on this socket already implements — `hooks/handler.py`
+            # treats "the daemon gave me nothing useful" as its
+            # fail-open/fail-closed trigger, and `query_active_sessions`
+            # treats it as "no answer, use the fallback". (2) An error dict
+            # would travel back through the hook client and reach Codex as
+            # *hook output* if a hook ever sent an unknown op, and inventing
+            # new keys in that channel to report our own confusion is
+            # exactly the way I6 ("never block Codex because of our own
+            # crash") gets violated by accident.
+            return
+
         payload = request.get("payload")
         if not isinstance(payload, dict):
             return
@@ -271,10 +353,54 @@ class _Handler(socketserver.StreamRequestHandler):
             else:
                 reply = {}
 
+        self._write(reply)
+
+    def _write(self, reply: dict) -> None:
+        """One newline-delimited JSON reply, or nothing if the peer is gone.
+
+        A client that hung up mid-request is not this daemon's problem (the
+        hook client's own timeout already has a defined behavior for it), so
+        an `OSError` here is swallowed rather than logged — there is nothing
+        useful to say and nobody left to say it to.
+        """
         try:
             self.wfile.write((json.dumps(reply) + "\n").encode("utf-8"))
         except OSError:
             pass
+
+    def _active_sessions_reply(self) -> dict:
+        """Answer the `active_sessions` op from `dispatch.State.live`.
+
+        Reads `State.live` through `dispatch.active_sessions`, i.e. under
+        `State.live_lock` and never `State.lock`: this is the same "do not
+        put sqlite latency in front of a liveness question" rule the accept
+        loop follows (`Daemon.live_sessions`), and it means a `$privacy`
+        query cannot queue behind another session's ledger write.
+
+        The staleness bound is the daemon's own `session_stale_after`, so
+        "alive" means exactly what it means for the lifetime policy — one
+        definition of liveness in this process, not two. The `getattr`
+        fallback covers a server object built without the policy attributes
+        (a test double); it never fires for `Daemon`.
+
+        I1: session ids and ages in seconds. Same content as the reference
+        count itself — infrastructure, and nothing that can describe what a
+        session did.
+        """
+        server = self.server
+        stale_after = getattr(server, "session_stale_after",
+                              SESSION_STALE_AFTER)
+        sessions = active_sessions(server.state, stale_after=stale_after)
+        return {
+            "v": 1,
+            "op": OP_ACTIVE_SESSIONS,
+            # Rounded because the wire value is compared against a
+            # several-second window, and a full float here would suggest a
+            # precision the measurement (one poll of a dict of monotonic
+            # stamps) does not have.
+            "sessions": [{"session_id": sid, "age": round(age, 3)}
+                         for sid, age in sessions],
+        }
 
 
 class Daemon(socketserver.ThreadingUnixStreamServer):
@@ -1044,6 +1170,68 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
 
 def _default_socket_path(data_dir: Path) -> Path:
     return data_dir / "daemon.sock"
+
+
+def query_active_sessions(socket_path, *, timeout: float = QUERY_TIMEOUT
+                          ) -> list[dict] | None:
+    """Ask the daemon at `socket_path` which sessions are alive right now.
+
+    Returns the reply's `sessions` list — dicts of `session_id` and `age`
+    (seconds since that session's last hook event), most recently active
+    first — or `None` when there was **no usable answer**: nothing listening,
+    a socket file with no daemon behind it, a timeout, a truncated or
+    unparseable reply, a reply for a different op. `None` and `[]` are
+    different facts and callers must keep them apart: `[]` is a daemon that
+    is up and believes no session is live, while `None` is not knowing.
+
+    The client half of the op lives here, next to the server half, because
+    the failure mode this whole file guards against is two ends of a protocol
+    drifting apart (see the module docstring on why architecture.md's
+    illustrative example is not what any code parses). `hooks/handler.py`
+    stays untouched: it is stdlib-only, on the hot path, and never needs to
+    ask this.
+
+    Never raises. Every caller of this is a surface that must still work with
+    no daemon at all — the honest fallback is the caller's business, but it
+    has to be reachable, so a broken socket cannot arrive here as an
+    exception.
+    """
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect(str(socket_path))
+        request = json.dumps({"v": 1, "op": OP_ACTIVE_SESSIONS}) + "\n"
+        sock.sendall(request.encode("utf-8"))
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+        reply = json.loads(buf.decode("utf-8"))
+    except Exception:
+        return None
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    # The op is echoed and checked, not assumed. A daemon old enough not to
+    # know this op answers with silence (see `_Handler.handle`), which lands
+    # in the `except` above — but a *hook* reply arriving here would be a
+    # plain dict too, and mistaking one for an empty session list would turn
+    # "I could not ask" into the confident, wrong "no session is live".
+    if not isinstance(reply, dict) or reply.get("op") != OP_ACTIVE_SESSIONS:
+        return None
+    sessions = reply.get("sessions")
+    if not isinstance(sessions, list):
+        return None
+    return [s for s in sessions
+            if isinstance(s, dict) and isinstance(s.get("session_id"), str)
+            and s["session_id"] and isinstance(s.get("age"), (int, float))]
 
 
 def main(argv: list[str] | None = None) -> int:

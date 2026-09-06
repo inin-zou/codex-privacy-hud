@@ -78,6 +78,13 @@ daemon may exit — the daemon serves every concurrent session, so no single
 reasoning behind every number in it, lives in `daemon.Daemon`'s "Lifetime
 policy" section; only the bookkeeping lives here.
 
+That same map answers a second question it was not built for but is the only
+thing in the system that can: *which session is the user asking from right
+now* (`active_sessions`, served over the wire as the daemon's
+`active_sessions` op). `$privacy` needs it because the ledger cannot supply
+it — see that function's docstring for why "most recently started" and
+"most recently disclosing" are both wrong answers.
+
 Lock scope: `State.lock` exists to serialize one shared resource — the
 `Ledger`'s single `sqlite3.Connection` — and is therefore held only across
 the code that touches it. Detection is NOT such code: `Engine.scan()` reads
@@ -539,6 +546,59 @@ def live_session_count(state: State, *, stale_after: float) -> int:
         for sid in stale:
             del state.live[sid]
         return len(state.live)
+
+
+def active_sessions(state: State, *, stale_after: float
+                    ) -> list[tuple[str, float]]:
+    """Every session this daemon believes is alive, most recently active
+    first, each paired with how many seconds ago its last hook event arrived.
+
+    **Why this signal, and why the two obvious answers are both wrong.** The
+    question a caller actually has is "which session is the user asking from
+    right now" — `$privacy` has to audit the session it was typed in. Neither
+    of the answers the ledger can give is that:
+
+    * `sessions ORDER BY started_at DESC LIMIT 1` is "most recently
+      *started*". Open a second Codex window and run `$privacy` in the first
+      one and it names the second window's session, silently. Measured on a
+      real ledger: most-recently-started and most-recently-active were
+      different sessions.
+    * `MAX(events.ts)` is "most recently *disclosing*". A session that has
+      disclosed nothing has no `events` rows at all, so a brand-new, clean
+      session is skipped entirely and some older session's id comes back —
+      the same bug wearing different clothes, and worst precisely where this
+      tool must be most trustworthy.
+
+    `State.live` is the answer to a third question — "who fired a hook most
+    recently" — and it is maintained for *every* hook carrying a session id,
+    including the ones that write no ledger row (`note_session_live`). It
+    therefore covers the clean session, and it is what a caller means by
+    "current": running `$privacy` itself fires hooks (the skill runs bash,
+    which is a `PreToolUse` in the asking session), so by the time anyone
+    asks this question the asking session is the most recently active one by
+    construction rather than by guess.
+
+    **Ages, not timestamps.** `State.live` holds `time.monotonic()` values,
+    which are meaningful only inside this process — another process's
+    monotonic clock has an unrelated origin, and a wall clock would drag in
+    NTP steps for no benefit. An age in seconds is comparable anywhere, which
+    is what a client needs to decide whether two sessions were active in the
+    same moment (see `mcp_tools.resolve_audit_session`).
+
+    **Does not sweep.** Unlike `live_session_count`, this deliberately
+    filters stale entries without deleting them: answering a question must
+    not change the daemon's own lifetime accounting. Deciding a session is
+    dead is the accept loop's act, taken on its own schedule, and a
+    read-only query that quietly retired a reference would make the daemon's
+    exit depend on how often somebody ran `$privacy`.
+    """
+    now = time.monotonic()
+    with state.live_lock:
+        seen = list(state.live.items())
+    fresh = [(sid, now - last) for sid, last in seen
+             if now - last <= stale_after]
+    fresh.sort(key=lambda pair: pair[1])
+    return fresh
 
 
 def _handle_session_start(state: State, session_id: str, payload: dict) -> dict:
