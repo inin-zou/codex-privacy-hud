@@ -201,8 +201,18 @@ class _Handler(BaseHTTPRequestHandler):
             if not sid:
                 self._send_json(404, {"error": "no session"})
                 return
-            self._send_json(
-                200, mcp_tools.get_session_summary(ledger, sid).as_dict())
+            # `coverage` is appended AFTER the four tile keys, so the pinned
+            # order `ui/app.js` reads (percent, exposed_items, destinations,
+            # prevented) is untouched and an older client simply ignores the
+            # extra key. It is here rather than left implicit because the four
+            # tiles alone cannot say "these numbers are not a full account" —
+            # `percent: 0` is what both a clean session and an unrecorded one
+            # serialize to, and a JSON client that only ever sees the tiles has
+            # no way to tell them apart. See `ledger.SessionCoverage`.
+            payload = mcp_tools.get_session_summary(ledger, sid).as_dict()
+            payload["coverage"] = \
+                mcp_tools.get_session_coverage(ledger, sid).as_dict()
+            self._send_json(200, payload)
             return
 
         if parsed.path == "/api/exposures":
@@ -219,9 +229,18 @@ class _Handler(BaseHTTPRequestHandler):
             summary = mcp_tools.get_session_summary(ledger, sid)
             # `rows` goes to the browser as JSON and to `render_audit` as
             # typed rows -- the same values, serialized once, on purpose.
+            #
+            # `coverage` is passed to `render_audit` but not added to this
+            # payload: the banner and the corrected empty-state line travel
+            # inside `text`, which is the block `ui/app.js` puts on the page
+            # verbatim, so the browser shows the caveat without this endpoint's
+            # own key set moving. A client that wants the machine-readable form
+            # asks `/api/summary`, which carries it.
             self._send_json(200, {
                 "rows": [r.as_dict() for r in rows],
-                "text": render_audit(summary, rows, tab),
+                "text": render_audit(
+                    summary, rows, tab,
+                    coverage=mcp_tools.get_session_coverage(ledger, sid)),
             })
             return
 

@@ -59,7 +59,7 @@ from __future__ import annotations
 import time
 import uuid
 
-from .ledger import ExposureRow, SessionSummary
+from .ledger import ExposureRow, SessionCoverage, SessionSummary
 from .minimize import mint_token
 
 # The curated event-row projection that used to live here as `_EVENT_FIELDS` +
@@ -102,6 +102,27 @@ def get_session_summary(ledger, session_id: str) -> SessionSummary:
     that caller can quietly rewrite; `SessionSummary` is frozen, so there is
     nothing left to defend against."""
     return ledger.summary(session_id)
+
+
+def get_session_coverage(ledger, session_id: str) -> SessionCoverage:
+    """Whether the ledger's account of this session is known to be complete.
+
+    Deliberately a SECOND call rather than a field on `get_session_summary`'s
+    return value, for the reason `SessionCoverage` gives: the summary's four
+    numbers say what happened, and this says whether those numbers are the whole
+    story. Two questions, two answers — and keeping them separate is what let
+    `SessionSummary.as_dict()`'s pinned key order stay pinned.
+
+    Every caller that renders a summary should ask this too. A caller that shows
+    `get_session_summary` without it is showing a number that cannot tell "0%
+    because nothing was disclosed" from "0% because nothing was recorded",
+    which is the conflation this function exists to end.
+
+    Metadata only, so no I1 question arises: a boolean, a count, and a short
+    phrase from a closed set of literals in `ledger.py`. No session content, no
+    path, no value.
+    """
+    return ledger.coverage(session_id)
 
 
 def list_exposures(ledger, session_id: str, tab: str) -> list[ExposureRow]:

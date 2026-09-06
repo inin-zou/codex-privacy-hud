@@ -45,6 +45,19 @@ that itself nags. Per `hud_line`'s own docstring, that state is not reachable
 through its signature and "the caller must decide not to call `hud_line` at
 all"; `_line_for()` returning `None` is that decision.
 
+**Three states, not two.** "Disabled" (render nothing) and a real reading are
+not the whole space, and treating them as if they were is what let an I7
+self-audit read as a clean pass against a session the daemon had never seen —
+see `ledger.py`'s docstring for the incident. The third state is design.md §4's
+"Engine degraded": a line IS drawn, carrying whatever the ledger actually
+holds, with `⚠unverified` saying that what it holds is not a complete account.
+It replaces neither of the others. "Disabled" still means there is nothing to
+report on; unverified means there is something to report on and part of it was
+never recorded. The distinction the user needs is between `0%` meaning "nothing
+sensitive was disclosed" and `0%` meaning "I have no idea what was disclosed",
+and for a privacy tool a single glyph is the cheapest honest way to draw it.
+`Ledger.coverage()` decides which one this is; this module never infers it.
+
 **No colour.** `hud_line` returns plain text, and design.md §3's band colours
 are applied by a client that has the band — a channel this module's inputs do
 not carry. Rather than invent a colour layer, we emit none, which makes
@@ -155,12 +168,26 @@ def _line_for(session_id: str | None, width: int) -> str | None:
         else:
             sid = _latest_session_id(ledger)
             if not sid:
+                # No sessions. Two very different situations share that shape,
+                # and only one of them is "Disabled": a ledger nothing has ever
+                # used, and a ledger that watched hook events go by unobserved
+                # and recorded not one of them (`Ledger.unattributed_gaps`).
+                # Rendering nothing for the second is how the incident in
+                # `ledger.py`'s docstring stayed invisible for a whole audit.
+                # There is no session to take a percentage from, so the line
+                # carries the ledger's own figure — zero, because that is
+                # genuinely all it holds — under the `⚠unverified` marker that
+                # says the figure is not a reading of anything.
+                if ledger.unattributed_gaps():
+                    return hud_line(0, width, 0, unverified=True)
                 return None
 
         summary = ledger.summary(sid)
+        coverage = ledger.coverage(sid)
         # I3: `percent` is the ledger's disclosure number, used verbatim.
         return hud_line(int(summary.percent), width,
-                        int(summary.prevented))
+                        int(summary.prevented),
+                        unverified=not coverage.verified)
     finally:
         try:
             ledger.conn.close()

@@ -27,11 +27,25 @@ below exist so that failure mode has somewhere to fail loudly instead:
 `SessionSummary`, `ExposureRow` and `EventRow` are the read contract, and the
 JSON boundary is an explicit `as_dict()` rather than an accident of whatever
 the dict happened to hold.
+
+**A ledger that recorded nothing looks exactly like a ledger with nothing to
+record — unless it also records whether it was watching.** That is what the
+`coverage` table is for, and it is the third state this schema previously could
+not express. `summary()` answers an unknown session with a well-formed zero,
+and zero events / 0% is also what a genuinely clean session looks like, so the
+product's central number conflated "nothing sensitive was disclosed" with "I
+have no idea what was disclosed". This is not hypothetical: an I7 self-audit
+(CLAUDE.md §3) once read as a clean pass — zero events, budget 0.0/120.0 —
+against a session the daemon had never seen at all, because it cold-started
+after the `codex exec` had already finished. The session count went 8 → 8 and
+nothing in the ledger said so. `coverage` is the row that now says so; see
+`SessionCoverage` for exactly what it can and cannot prove.
 """
 from __future__ import annotations
 
 import sqlite3
 import time
+import uuid
 from dataclasses import dataclass, fields
 from pathlib import Path
 
@@ -84,6 +98,15 @@ CREATE TABLE IF NOT EXISTS policy (
   created_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS coverage (     -- append-only; who was watching, when
+  id          INTEGER PRIMARY KEY,
+  session_id  TEXT NOT NULL,            -- '' when the gap is not attributable
+  ts          INTEGER NOT NULL,
+  observer    TEXT NOT NULL,            -- opaque per-Ledger-instance id
+  reason      TEXT NOT NULL,            -- session_start|attached|unobserved_hooks
+  UNIQUE(session_id, observer)          -- one row per observer per session
+);
+
 CREATE TABLE IF NOT EXISTS policy_tokens (  -- one-shot consent, §8
   token      TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
@@ -95,6 +118,127 @@ CREATE TABLE IF NOT EXISTS policy_tokens (  -- one-shot consent, §8
 );
 """
 
+#: `coverage.reason` values. Three, and the list is closed on purpose: each one
+#: names a *specific piece of evidence*, not a guess. Nothing may be added here
+#: that a heuristic inferred — an unmarked gap you cannot see is the bug this
+#: table exists to fix, and a marked gap you invented is the same bug wearing a
+#: warning label.
+#:
+#: `session_start`     — this observer created the session row from a real
+#:                       `SessionStart` hook, so it watched from the beginning.
+#: `attached`          — this observer's first sight of the session was some
+#:                       later event (`dispatch._get_or_start_engine`'s lazy
+#:                       path). Whatever happened before that point is not in
+#:                       the ledger and cannot be reconstructed from it.
+#: `unobserved_hooks`  — a daemon found, at startup, the hook client's
+#:                       spawn-attempt latch: proof that at least one hook event
+#:                       was answered "unverified" because nothing was
+#:                       listening. Carries a timestamp but no session id (the
+#:                       latch has none), so it is filed under
+#:                       `UNATTRIBUTED_SESSION`.
+COVERAGE_SESSION_START = "session_start"
+COVERAGE_ATTACHED = "attached"
+COVERAGE_UNOBSERVED_HOOKS = "unobserved_hooks"
+
+#: `coverage.session_id` for a gap that is real but not attributable to any one
+#: session. The empty string rather than NULL so `UNIQUE(session_id, observer)`
+#: still dedupes it (SQLite treats NULLs as distinct, which would let one daemon
+#: write the same gap twice).
+UNATTRIBUTED_SESSION = ""
+
+
+@dataclass(frozen=True, kw_only=True)
+class SessionCoverage:
+    """Whether the ledger's account of one session is known to be complete.
+
+    **Why this exists as a separate reading from `SessionSummary`.** A summary
+    is four numbers about what happened; this is one bit about whether those
+    numbers are a full account. Folding it into `SessionSummary` was rejected
+    because the two have different lifetimes and different failure modes: a
+    summary is recomputed from `events` on every read, while coverage is a
+    durable claim written once, at the moment observation began, and it has to
+    survive the daemon restarting — restarts being precisely when gaps happen.
+
+    Every field below is a *recorded* fact or a direct consequence of one. In
+    particular `verified` is never an estimate: it is true only when the ledger
+    holds positive evidence of continuous observation, so absence of evidence
+    reads as unverified rather than as clean.
+
+    **What this can prove:**
+
+    - `recorded` — there is a `sessions` row at all.
+    - `observers` — how many distinct `Ledger` instances (in practice, daemon
+      processes) recorded observing this session. More than one means the
+      daemon was replaced mid-session, and nothing was listening in between.
+    - `attached` — at least one observer's first sight of the session was a
+      mid-session event, so the session was already under way before anyone was
+      watching.
+    - `unobserved_hooks` — a daemon recorded hook events that reached no daemon
+      at all.
+
+    **What it cannot prove, and must not be read as proving:** that a session
+    with `verified is True` saw every event. A hook that Codex never fired, a
+    hook whose 2 s client timeout expired against a busy daemon, a hosted tool
+    that bypasses local hooks entirely (README known limits) — each of those is
+    an event that leaves no trace anywhere, by construction, while a single
+    daemon stays up throughout. `verified` means "nothing on record contradicts
+    a complete account", which is the strongest claim the evidence supports and
+    deliberately weaker than "complete".
+    """
+
+    recorded: bool
+    observers: int
+    attached: bool
+    unobserved_hooks: bool
+
+    @property
+    def verified(self) -> bool:
+        """True only when nothing on record says the account is partial.
+
+        Note the conjunction includes `observers == 1`: zero observers is a
+        session row written by a `Ledger` that predates this table (or by a
+        caller that bypassed `start_session`), and "I have no record of when
+        observation began" is not the same claim as "observation began at the
+        beginning". It reads unverified, which is the honest answer.
+        """
+        return (self.recorded and self.observers == 1 and not self.attached
+                and not self.unobserved_hooks)
+
+    @property
+    def reason(self) -> str:
+        """A short phrase naming the *evidence*, for the L2 banner. Empty when
+        `verified`.
+
+        Ordered most-specific first, and each phrase describes only what the
+        ledger recorded. None of them promises the missing events can be
+        recovered, because they cannot be (I5): the ledger is the only record,
+        and what it did not write down is gone.
+        """
+        if not self.recorded:
+            return "this session was never recorded"
+        if self.observers == 0:
+            return "there is no record of when observation began"
+        if self.attached:
+            return "observation began after this session was already under way"
+        if self.observers > 1:
+            return "Privacy HUD restarted during this session"
+        if self.unobserved_hooks:
+            return "tool calls went unverified with no daemon listening"
+        return ""
+
+    def as_dict(self) -> dict:
+        """The JSON shape served by the local UI's `/api/summary`. `verified`
+        and `reason` are included even though they are derived: a client that
+        recomputed them from the raw fields would be a second implementation of
+        the honesty rule, and the two would drift."""
+        return {
+            "verified": self.verified,
+            "reason": self.reason,
+            "recorded": self.recorded,
+            "observers": self.observers,
+            "attached": self.attached,
+            "unobserved_hooks": self.unobserved_hooks,
+        }
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -265,19 +409,162 @@ class EventRow(ExposureRow):
 
 
 class Ledger:
-    def __init__(self, path: Path, matrix: Matrix):
+    def __init__(self, path: Path, matrix: Matrix, *, observer: str | None = None):
+        """`observer` identifies this `Ledger` instance in the `coverage` table.
+
+        One id per instance, defaulted to a fresh random one, because "who was
+        watching" is a property of the *process* holding the connection: the
+        daemon builds exactly one `Ledger` for its lifetime (`dispatch.
+        new_state`), so a per-instance id is a per-daemon-instance id, and a
+        second id appearing against one session is direct evidence that the
+        daemon was replaced while that session was running. It is opaque and
+        random rather than a pid or a hostname — I1: it must identify a process
+        to us without describing the machine to anyone reading the file.
+        """
         self.matrix = matrix
+        self.observer = observer or uuid.uuid4().hex[:16]
         self.conn = sqlite3.connect(path, isolation_level=None)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(SCHEMA)
         Path(path).chmod(0o600)
 
-    def start_session(self, session_id: str, *, cwd: str, model: str) -> None:
+    def start_session(self, session_id: str, *, cwd: str, model: str,
+                      observed_start: bool = True) -> None:
+        """Open (or re-open) a session row, and record that this observer is
+        now watching it.
+
+        `observed_start=False` says: this call is creating the session row
+        *lazily*, from an event in the middle of a session, so the beginning was
+        not observed. Only `dispatch._get_or_start_engine` passes it — the one
+        code path that knows the session began before the daemon did. The
+        default is True because every other caller genuinely is at a session's
+        beginning (a real `SessionStart` hook, or `mcp_tools.
+        start_clean_session` minting a brand-new id), and defaulting to False
+        would flag every one of them with a gap that does not exist.
+
+        Both writes are `INSERT OR IGNORE`, which is what makes this idempotent
+        in the two ways it has to be. For `sessions` it always was: replayed
+        hook events must not restart a session. For `coverage` it means a second
+        call from the SAME observer changes nothing — so a `SessionStart`
+        followed by a hundred lazy re-resolutions leaves the one
+        `session_start` row intact — while a call from a DIFFERENT observer
+        inserts a new row, which is exactly the mid-session-restart evidence
+        `SessionCoverage.observers` counts. Note the ordering consequence:
+        `session_start` recorded first cannot be downgraded to `attached` by a
+        later lazy call from the same daemon, and that is correct — that daemon
+        really did watch from the start.
+        """
         self.conn.execute(
             "INSERT OR IGNORE INTO sessions(session_id,started_at,cwd,model,budget_cap)"
             " VALUES(?,?,?,?,?)",
             (session_id, int(time.time()), cwd, model, self.matrix.budget_cap))
+        self.conn.execute(
+            "INSERT OR IGNORE INTO coverage(session_id,ts,observer,reason)"
+            " VALUES(?,?,?,?)",
+            (session_id, int(time.time()), self.observer,
+             COVERAGE_SESSION_START if observed_start else COVERAGE_ATTACHED))
+
+    def note_unobserved_hooks(self, ts: int) -> None:
+        """Record that hook events at around `ts` reached no daemon at all.
+
+        Called once per daemon startup, from `dispatch.new_state`, when the hook
+        client's spawn-attempt latch shows it had to start us — see that
+        function for where the timestamp comes from and why the latch is
+        evidence rather than inference. This is the only trace a session the
+        daemon never saw can leave, and without it the incident in this module's
+        docstring is undetectable: a session that produced no rows is
+        indistinguishable from a session that never existed.
+
+        Filed under `UNATTRIBUTED_SESSION` because the latch carries no session
+        id, and guessing one would be exactly the heuristic this table refuses
+        to hold. `SessionCoverage` therefore relates it to sessions by time
+        alone — see `coverage()` for the bound, which is deliberately narrow.
+
+        `INSERT OR IGNORE` on `(UNATTRIBUTED_SESSION, observer)` caps this at
+        one row per daemon instance, so a long-lived machine accumulates one row
+        per cold start rather than one per read.
+        """
+        self.conn.execute(
+            "INSERT OR IGNORE INTO coverage(session_id,ts,observer,reason)"
+            " VALUES(?,?,?,?)",
+            (UNATTRIBUTED_SESSION, int(ts), self.observer,
+             COVERAGE_UNOBSERVED_HOOKS))
+
+    def unattributed_gaps(self) -> int:
+        """How many `unobserved_hooks` records this ledger holds in total.
+
+        The one question a caller with no session id can still ask, and the
+        reason it exists: a ledger holding zero sessions but a recorded gap is
+        not an idle installation, it is an installation that watched nothing
+        happen. `ambient.py` uses this to tell those two apart.
+        """
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM coverage WHERE session_id=? AND reason=?",
+            (UNATTRIBUTED_SESSION, COVERAGE_UNOBSERVED_HOOKS)).fetchone()[0]
+
+    def coverage(self, session_id: str) -> SessionCoverage:
+        """Whether this ledger's account of `session_id` is known to be complete.
+
+        Read `SessionCoverage` first for what the answer means. This method is
+        only the evidence-gathering half, and it makes exactly one judgement
+        call worth stating plainly:
+
+        **When does an unattributed `unobserved_hooks` record count against a
+        session?** Only when it is at or after that session's `started_at`, AND
+        the session is either still open or is the newest session in the ledger.
+        Two cases, one rule:
+
+        - Still open: hook events were dropped while this session was running.
+          That is a hole in *its* record, full stop.
+        - Ended, but still the newest row: this is the incident. The hooks that
+          went unobserved belong to some session that came after it — a session
+          the ledger has no row for and can never describe. A caller that
+          resolved "the current session" by taking the newest row is therefore
+          looking at a number that is not an answer to the question it asked,
+          and it must not be shown as one.
+
+        A session that ended and was followed by another *recorded* session is
+        unaffected: whatever was dropped afterwards belongs to that later
+        session, not to this one. Widening the bound past that would let one
+        cold start three days ago mark every historical session unverified,
+        which is noise, and noise is how a warning gets trained away.
+
+        An empty `session_id` returns `recorded=False` rather than reading the
+        unattributed rows as if they were a session.
+        """
+        if not session_id:
+            return SessionCoverage(recorded=False, observers=0, attached=False,
+                                   unobserved_hooks=False)
+
+        srow = self.conn.execute(
+            "SELECT started_at, ended_at FROM sessions WHERE session_id=?",
+            (session_id,)).fetchone()
+
+        rows = self.conn.execute(
+            "SELECT reason FROM coverage WHERE session_id=?",
+            (session_id,)).fetchall()
+        reasons = [r["reason"] for r in rows]
+
+        if srow is None:
+            return SessionCoverage(recorded=False, observers=len(reasons),
+                                   attached=COVERAGE_ATTACHED in reasons,
+                                   unobserved_hooks=False)
+
+        started_at, ended_at = srow["started_at"], srow["ended_at"]
+        newer = self.conn.execute(
+            "SELECT 1 FROM sessions WHERE started_at>? LIMIT 1",
+            (started_at,)).fetchone()
+        in_scope = ended_at is None or newer is None
+        gap = bool(in_scope and self.conn.execute(
+            "SELECT 1 FROM coverage WHERE session_id=? AND reason=? AND ts>=?"
+            " LIMIT 1",
+            (UNATTRIBUTED_SESSION, COVERAGE_UNOBSERVED_HOOKS, started_at)
+        ).fetchone())
+
+        return SessionCoverage(recorded=True, observers=len(reasons),
+                               attached=COVERAGE_ATTACHED in reasons,
+                               unobserved_hooks=gap)
 
     def record(self, session_id: str, *, turn_id, kind, data_type, source,
                destination, value_hash, masked_example, tool_name,

@@ -18,6 +18,17 @@ No raw sensitive values are ever handled here: rows carry `masked_example`
 values the ledger already stored pre-masked (mask.py), and this module never
 reconstructs or unmasks anything (I1).
 
+**The third HUD state.** design.md §4's state table has always specified an
+"Engine degraded" render (`⚠unverified`), and this module could not produce it:
+`hud_line`'s three integers had no channel for it, so `0%` meant both "nothing
+sensitive was disclosed" and "I have no idea what was disclosed". That gap is
+now closed by opt-in keyword arguments — `hud_line(..., unverified=)`,
+`audit(..., coverage=)`, `receipt(..., coverage=)` — each defaulting to the
+previous behaviour so no existing call site or golden string moved. The decision
+itself is never made here: `ledger.SessionCoverage` is the evidence, this module
+only draws it. Do not "simplify" the third state away; see `ledger.py`'s
+docstring for the audit it silently passed.
+
 **Input is typed.** `audit`, `detail` and `receipt` take `ledger.py`'s
 `SessionSummary` and `ExposureRow` (or an `EventRow`, which is one — see that
 class), not dicts. These functions are almost entirely `row[...]`/`.get(...)`
@@ -33,7 +44,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import datetime
 
-from .ledger import ExposureRow, SessionSummary
+from .ledger import ExposureRow, SessionCoverage, SessionSummary
 from .matrix.loader import load_matrix
 
 # Loaded once, at import time, the same way tests/test_ledger.py loads it —
@@ -52,6 +63,23 @@ _EMPTY_MESSAGES = {
     "Prevented": "Nothing has been blocked or minimized yet.",
     "All events": "No privacy events recorded. The engine is running.",
 }
+
+#: The one empty-state line for a session whose record is not verified — it
+#: replaces all three of the above, on every tab.
+#:
+#: Each `_EMPTY_MESSAGES` entry asserts something about the world ("No sensitive
+#: data has crossed…", "…The engine is running."), and none of those assertions
+#: survives an incomplete record. The third is the sentence design.md §5 added
+#: specifically so "an empty audit is otherwise indistinguishable from a broken
+#: plugin" — which is right, and which is exactly why printing it when the
+#: plugin WAS broken for this session is the worst available outcome: it spends
+#: the reader's trust to vouch for the one case it cannot vouch for. So on this
+#: path the empty table says what is true about the ledger and makes no claim
+#: about the session.
+_EMPTY_UNVERIFIED = (
+    "No events recorded for this tab. With this session's record incomplete, "
+    "that is not evidence that none occurred."
+)
 
 
 def _check_band(pct) -> None:
@@ -110,7 +138,8 @@ def _bar(pct: int, cells: int) -> str:
     return _FILLED * filled + _EMPTY * (cells - filled)
 
 
-def hud_line(percent: int, width: int, blocked: int = 0) -> str:
+def hud_line(percent: int, width: int, blocked: int = 0, *,
+             unverified: bool = False) -> str:
     """The ambient L1 HUD line (design.md §4).
 
     Width-degradation ladder: >=52, 40-51, 28-39, <28 columns. Never exceeds
@@ -119,34 +148,61 @@ def hud_line(percent: int, width: int, blocked: int = 0) -> str:
     for the given bucket doesn't fit, which can happen when `blocked` is a
     large number of digits.
 
-    The "Engine degraded" (`⚠unverified`) and "Disabled" (render nothing)
-    states from design.md §4's state table are not reachable through this
-    signature — it takes only `percent`, `width`, `blocked`, per the fixed
-    interface in the task-11 brief, with no channel for a degraded flag or
-    an enabled/disabled flag. That is a real gap between design.md and the
-    frozen interface; the caller must decide not to call `hud_line` at all
-    for the disabled state, and has no way to ask for the unverified suffix
-    through this function.
+    **`unverified` closes design.md §4's "Engine degraded" gap.** Until it
+    existed, this function's three integers gave `0%` two irreconcilable
+    meanings — "nothing sensitive was disclosed" and "I have no idea what was
+    disclosed" — and for a privacy tool those must be distinguishable. It is
+    keyword-only with a False default so every existing three-positional call
+    site, and every golden string pinned against one, is byte-for-byte
+    unchanged; a caller opts in by knowing something this function cannot see
+    (`Ledger.coverage`). design.md §4's state table owns the copy: the suffix is
+    `⚠unverified`, spelled exactly that way, not paraphrased here.
+
+    The remaining state, "Disabled" (render nothing), is still not reachable
+    through this signature and deliberately so: it is the absence of a line, not
+    a line, so the caller must decide not to call `hud_line` at all —
+    `ambient._line_for()` returning `None` is that decision. Do not conflate the
+    two. "Disabled" means there is nothing to report on; `unverified` means
+    there is something to report on and the report has a hole in it.
+
+    **The marker survives the whole ladder, including truncation.** Below 28
+    columns the word does not fit, so the warning glyph *replaces* the band dot
+    rather than being appended after the percentage. That looks like a downgrade
+    and is the opposite: a marker appended to `⬤ 28%` is the first thing a
+    truncating `[:width]` would cut, and what it would leave behind is a
+    clean-looking number — precisely the failure this parameter exists to
+    prevent. Losing the band colour that the dot carries is the cheaper loss,
+    because a percentage we cannot vouch for must not be the last thing
+    standing.
     """
     pct = int(percent)
     _check_band(pct)  # fail loud on an out-of-range percent; never swallow
     prefix = f"⚠ {blocked} blocked · " if blocked else ""
+    # design.md §4's state table, character for character:
+    #   normal      `... ███░░░░░░░ 28%  ›`   (two spaces before the chevron)
+    #   unverified  `... ███░░░░░░░ 28% ⚠unverified ›`
+    # The two-space gap is what the marker occupies, so the unverified line is
+    # not the normal line plus something — it is the normal line with the gap
+    # spent. That is why this is one string and not a suffix appended to it.
+    full_tail = " ⚠unverified ›" if unverified else "  ›"
+    tail = " ⚠unverified ›" if unverified else " ›"
 
     def full():
         bar = _bar(pct, 10)
-        return f"PRIVACY  {prefix}Disclosure {bar} {pct:>2}%  ›"
+        return f"PRIVACY  {prefix}Disclosure {bar} {pct:>2}%{full_tail}"
 
     def mid():
         bar = _bar(pct, 10)
-        return f"PRIVACY {prefix}{bar} {pct:>2}% ›"
+        return f"PRIVACY {prefix}{bar} {pct:>2}%{tail}"
 
     def compact():
         bar = _bar(pct, 5)
         short_prefix = f"⚠{blocked} " if blocked else ""
-        return f"PRIV {short_prefix}{bar} {pct:>2}% ›"
+        return f"PRIV {short_prefix}{bar} {pct:>2}%{tail}"
 
     def dot():
-        return f"{_DOT} {pct:>2}%"
+        # The glyph, not a suffix — see the docstring's truncation argument.
+        return f"{'⚠' if unverified else _DOT} {pct:>2}%"
 
     if width >= 52:
         ladder = (full, mid, compact, dot)
@@ -163,7 +219,9 @@ def hud_line(percent: int, width: int, blocked: int = 0) -> str:
             return line
 
     # Last resort: even `dot()` didn't fit (pathologically narrow width).
-    # Never exceed the given width regardless.
+    # Never exceed the given width regardless. Truncating from the right is
+    # safe for the unverified state only because `dot()` puts the warning
+    # glyph FIRST — see the docstring; do not "tidy" that into a suffix.
     line = dot()
     return line[:max(width, 0)]
 
@@ -239,7 +297,31 @@ def _table(rows: Sequence[ExposureRow]) -> str:
     return "\n".join(lines)
 
 
-def audit(summary: SessionSummary, rows: Sequence[ExposureRow], tab: str) -> str:
+def _coverage_banner(coverage: SessionCoverage) -> str:
+    """design.md §5's "Never silently present partial results as complete",
+    applied to the whole session rather than to one event's deep scan.
+
+    Shaped like the deep-scan banner it sits beside (`⚠ … — …`) on purpose: the
+    two say the same kind of thing at different scopes, and a reader who has
+    learned to read one should not have to learn a second visual language for
+    the other.
+
+    I5 audit of this string, since it is the one place a reader might hope for
+    good news: it states what the ledger holds and stops. "not a full account"
+    is a fact about the record. Nothing here says the unrecorded events can be
+    listed, retrieved, replayed or recovered, because they cannot be — the
+    ledger is the only record and what it did not write down is gone.
+
+    Two lines rather than one because the longest `reason` would otherwise push
+    a single line past 100 columns and wrap mid-sentence in a terminal — and a
+    caveat that wraps is a caveat that reads as a glitch.
+    """
+    return (f"⚠ Session record incomplete — {coverage.reason}.\n"
+            "  Figures below are not a full account of this session.")
+
+
+def audit(summary: SessionSummary, rows: Sequence[ExposureRow], tab: str, *,
+          coverage: SessionCoverage | None = None) -> str:
     """The L2 session audit (design.md §5).
 
     `rows` is whatever the caller has already selected for `tab` — this
@@ -262,6 +344,27 @@ def audit(summary: SessionSummary, rows: Sequence[ExposureRow], tab: str) -> str
     best-effort approximation, because `summary` (per the given `Ledger.
     summary` interface) does not carry a total event count and this
     function only ever sees one tab's rows at a time.
+
+    **`coverage` is a `ledger.SessionCoverage`, or `None` for "not asked".**
+    When it says the session's record is not verified, two things change, and
+    the second matters more than the first:
+
+    1. A banner appears above the table (`_coverage_banner`).
+    2. The empty-state line is REPLACED. `_EMPTY_MESSAGES` makes three positive
+       claims — "No sensitive data has crossed a trust boundary this session",
+       "Nothing has been blocked or minimized yet", "No privacy events
+       recorded. The engine is running." — and an unverified session cannot
+       support any of them. That last one is the exact sentence the incident in
+       `ledger.py`'s docstring printed while the engine had, in fact, not been
+       running for the session being audited. An empty table plus a banner is
+       not enough; the sentence in the middle of the empty table has to stop
+       asserting the thing that is not known.
+
+    `None` (the default) renders exactly what this function always rendered, so
+    a caller that has no coverage reading cannot accidentally acquire a clean
+    bill of health it did not ask for — but note that "no reading" and "a
+    reading of verified" are different, and only `Ledger.coverage()` can supply
+    the latter.
     """
     exposed_n = summary.exposed_items
     prevented_n = summary.prevented
@@ -281,6 +384,14 @@ def audit(summary: SessionSummary, rows: Sequence[ExposureRow], tab: str) -> str
     lines.append(_tab_bar(exposed_n, prevented_n, all_n, tab))
     lines.append("")
 
+    # Session-scope first, event-scope second: "we were not watching" is a
+    # bigger caveat than "one event got the fast path only", and reading them
+    # in the other order invites treating the first as a footnote to it.
+    incomplete = coverage is not None and not coverage.verified
+    if incomplete:
+        lines.append(_coverage_banner(coverage))
+        lines.append("")
+
     # Deep-scan degradation covers two situations (task-11 brief): the model
     # being unavailable, and a payload too large for the bounded synchronous
     # scan (Task 8's degraded flag). Both surface identically here as a
@@ -295,7 +406,8 @@ def audit(summary: SessionSummary, rows: Sequence[ExposureRow], tab: str) -> str
         lines.append("")
 
     if not ordered:
-        lines.append(_EMPTY_MESSAGES.get(tab, "No events to show."))
+        lines.append(_EMPTY_UNVERIFIED if incomplete
+                     else _EMPTY_MESSAGES.get(tab, "No events to show."))
     else:
         lines.append(_table(ordered))
 
@@ -376,7 +488,8 @@ def detail(row: ExposureRow) -> str:
 
 
 def receipt(session_id: str, summary: SessionSummary,
-            rows: Sequence[ExposureRow], minutes: int) -> str:
+            rows: Sequence[ExposureRow], minutes: int, *,
+            coverage: SessionCoverage | None = None) -> str:
     """The end-of-session privacy receipt (design.md §10).
 
     `No file contents, prompts, or raw values were stored.` is the
@@ -390,11 +503,22 @@ def receipt(session_id: str, summary: SessionSummary,
     (it isn't part of `summary`, `rows`, or any other parameter), so rather
     than fabricate one, the Retained line states the true, generic fact:
     the session transcript is persisted by Codex, outside this ledger.
+
+    `coverage` (a `ledger.SessionCoverage`, or `None` for "not asked") adds one
+    banner line at the top when the record is not verified. A receipt is the
+    artifact a user keeps and quotes, so it is the single worst place for a
+    disclosure figure that reads complete and is not — a receipt is a claim
+    about a whole session, and a session with an unrecorded stretch has no
+    complete claim to make. The banner goes ABOVE the header rather than beside
+    the figures because it qualifies all of them at once.
     """
     pct = int(summary.percent)
     _check_band(pct)
 
-    lines = [
+    lines = []
+    if coverage is not None and not coverage.verified:
+        lines += [_coverage_banner(coverage), ""]
+    lines += [
         f"PRIVACY RECEIPT · {session_id} · {minutes} min",
         "",
         f"{'Disclosure':<16} {pct}% of budget",

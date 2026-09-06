@@ -438,3 +438,110 @@ def test_main_returns_an_int_exit_code_for_help(capsys):
 
 def test_once_and_watch_are_mutually_exclusive(capsys):
     assert ambient.main(["--once", "--watch"]) == 2
+
+
+# --------------------------------------------------------------------- #
+# The third state: `⚠unverified` (design.md §4's "Engine degraded").
+#
+# "Disabled" (nothing rendered) and a real reading were never the whole space.
+# The state that was missing is the one where a line IS drawn and says the
+# figure on it is not a complete account — because `0%` meaning "nothing was
+# disclosed" and `0%` meaning "nothing was recorded" must not look the same.
+# --------------------------------------------------------------------- #
+
+def test_a_clean_session_carries_no_unverified_marker(data_dir, capsys):
+    _seed(data_dir, exposures=1)
+
+    ambient.main(["--once"])
+
+    assert "unverified" not in capsys.readouterr().out
+
+
+def test_a_session_observed_late_is_marked_unverified(data_dir, capsys):
+    """The daemon's first sight of this session was a mid-session event, so the
+    ledger has no account of what came before. The line still draws — silence
+    would hide the gap as effectively as a clean 0% did."""
+    led = _ledger(data_dir)
+    led.start_session("late", cwd="/repo", model="gpt-5", observed_start=False)
+    led.conn.close()
+
+    ambient.main(["--once"])
+
+    out = capsys.readouterr().out
+    assert "⚠unverified" in out
+    assert out == hud_line(0, 80, 0, unverified=True) + "\n"
+
+
+def test_the_newest_session_is_unverified_when_hooks_were_dropped_after_it(
+        data_dir, capsys):
+    """The reproduced incident. A short session ran while no daemon was
+    listening and left no row at all; the newest row in the ledger is the
+    session BEFORE it, and showing that row's clean number as the current
+    reading is the lie this fixes."""
+    led = _ledger(data_dir)
+    led.start_session("earlier", cwd="/repo", model="gpt-5")
+    led.end_session("earlier")
+    started = led.conn.execute(
+        "SELECT started_at FROM sessions WHERE session_id='earlier'"
+    ).fetchone()[0]
+    led.note_unobserved_hooks(started + 60)
+    led.conn.close()
+
+    ambient.main(["--once"])
+
+    assert "⚠unverified" in capsys.readouterr().out
+
+
+def test_a_ledger_holding_only_a_recorded_gap_still_says_something(
+        data_dir, capsys):
+    """Zero sessions plus a recorded gap is not an idle install — it is an
+    install that watched hook events go by and recorded none of them. Rendering
+    nothing here is exactly how the incident stayed invisible."""
+    led = _ledger(data_dir)
+    led.note_unobserved_hooks(1_757_000_000)
+    led.conn.close()
+
+    assert ambient.main(["--once"]) == 0
+
+    out = capsys.readouterr().out
+    assert out == hud_line(0, 80, 0, unverified=True) + "\n"
+
+
+def test_a_ledger_with_no_sessions_and_no_gap_still_renders_nothing(
+        data_dir, capsys, no_hud_line):
+    """The other half of the pair above: an untouched ledger is still
+    "Disabled". A caveat that fires on an idle install is a caveat that gets
+    trained away."""
+    _ledger(data_dir).conn.close()
+
+    assert ambient.main(["--once"]) == 0
+    assert capsys.readouterr().out == ""
+    assert no_hud_line == []
+
+
+@pytest.mark.parametrize("columns", [80, 52, 51, 40, 39, 28, 27, 12])
+def test_the_unverified_line_also_respects_the_width_ladder(
+        data_dir, monkeypatch, capsys, columns):
+    monkeypatch.setenv("COLUMNS", str(columns))
+    led = _ledger(data_dir)
+    led.start_session("late", cwd="/repo", model="gpt-5", observed_start=False)
+    led.conn.close()
+
+    ambient.main(["--once"])
+
+    line = capsys.readouterr().out.rstrip("\n")
+    assert len(line) <= columns
+    assert "⚠" in line
+
+
+def test_unverified_copy_is_still_free_of_forbidden_words(data_dir, capsys):
+    led = _ledger(data_dir)
+    led.start_session("late", cwd="/repo", model="gpt-5", observed_start=False)
+    led.conn.close()
+
+    ambient.main(["--once"])
+    captured = capsys.readouterr()
+
+    for text in (captured.out, captured.err):
+        for word in BANNED:
+            assert word not in text.lower()

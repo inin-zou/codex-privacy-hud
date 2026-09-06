@@ -6,7 +6,7 @@ The banned-word test is the gate: this is a privacy tool, and it must never
 claim more than it can back up (design.md §9)."""
 from dataclasses import replace
 
-from privacy_hud.ledger import ExposureRow, SessionSummary
+from privacy_hud.ledger import ExposureRow, SessionCoverage, SessionSummary
 from privacy_hud.render import hud_line, audit, detail, receipt
 
 # Extended past the brief's list per task-11 instructions: "dangerous" and
@@ -110,3 +110,141 @@ def test_audit_degraded_banner_covers_deep_scan_gaps():
 def test_audit_no_degraded_banner_when_nothing_is_degraded():
     out = audit(SUMMARY, [ROW], "Exposed")
     assert "fast-path results only." not in out
+
+
+# --------------------------------------------------------------------- #
+# The third state: design.md §4's "Engine degraded" / `⚠unverified`.
+#
+# What every test below is really defending: `0%` must not mean both "nothing
+# sensitive was disclosed" and "I have no idea what was disclosed". The first
+# is a finding; the second is an admission, and a privacy tool that renders
+# them identically has a hole where its central number should be.
+# --------------------------------------------------------------------- #
+
+INCOMPLETE = SessionCoverage(recorded=True, observers=1, attached=True,
+                             unobserved_hooks=False)
+COMPLETE = SessionCoverage(recorded=True, observers=1, attached=False,
+                           unobserved_hooks=False)
+
+
+def test_hud_unverified_is_off_by_default():
+    """The parameter is keyword-only with a False default so no existing call
+    site — and no golden pinned against one — moves a byte."""
+    assert hud_line(28, 80) == hud_line(28, 80, 0)
+    assert "unverified" not in hud_line(28, 80)
+
+
+def test_hud_unverified_marker_is_designs_exact_wording():
+    # design.md §4's state table, not a paraphrase.
+    assert hud_line(28, 80, unverified=True) == \
+        "PRIVACY  Disclosure ███░░░░░░░ 28% ⚠unverified ›"
+
+
+def test_hud_unverified_zero_percent_is_distinguishable_from_a_clean_zero():
+    clean = hud_line(0, 80)
+    unknown = hud_line(0, 80, unverified=True)
+    assert clean != unknown
+    assert "unverified" in unknown and "unverified" not in clean
+
+
+def test_hud_unverified_survives_every_rung_of_the_ladder():
+    """The marker may never be the thing that gets dropped to make the line
+    fit: a narrower line that still says "unverified" beats a wider one that
+    silently claims a number it cannot back."""
+    for width in (80, 52, 51, 40, 39, 28, 27, 12, 4, 1):
+        line = hud_line(28, width, unverified=True)
+        assert len(line) <= width
+        assert "⚠" in line, (width, line)
+
+
+def test_hud_unverified_never_exceeds_width_with_a_block_prefix_too():
+    for width in (80, 52, 45, 39, 30, 15, 4, 1):
+        assert len(hud_line(28, width, blocked=999, unverified=True)) <= width
+
+
+def test_hud_unverified_replaces_the_band_dot_below_28_columns():
+    # Appending the marker would put it first in line for truncation, and what
+    # truncation would leave is a clean-looking number.
+    assert hud_line(28, 27, unverified=True) == "⚠ 28%"
+    assert hud_line(28, 27) == "⬤ 28%"
+
+
+def test_audit_banner_appears_only_when_coverage_says_it_should():
+    assert "Session record incomplete" in audit(SUMMARY, [ROW], "Exposed",
+                                                 coverage=INCOMPLETE)
+    assert "Session record incomplete" not in audit(SUMMARY, [ROW], "Exposed",
+                                                     coverage=COMPLETE)
+    assert "Session record incomplete" not in audit(SUMMARY, [ROW], "Exposed")
+
+
+def test_audit_stops_claiming_the_engine_was_running_when_it_was_not():
+    """The regression this pins is the whole task. design.md §5 added "The
+    engine is running." so an empty audit could not be mistaken for a broken
+    plugin — which makes printing it for a session the engine missed the single
+    most expensive sentence in the product."""
+    out = audit(EMPTY_SUMMARY, [], "All events", coverage=INCOMPLETE)
+    assert "The engine is running." not in out
+    assert "not evidence that none occurred" in out
+
+
+def test_audit_empty_state_stops_asserting_nothing_crossed_a_boundary():
+    out = audit(EMPTY_SUMMARY, [], "Exposed", coverage=INCOMPLETE)
+    assert "No sensitive data has crossed a trust boundary" not in out
+    assert "not evidence that none occurred" in out
+
+
+def test_audit_unverified_line_never_exceeds_a_terminal_width_assumption():
+    # The banner is one line and is not width-degraded (the L2 audit is a
+    # block view, not the ambient line) -- but it must not be so long that it
+    # wraps into unreadability. 100 columns is the floor design.md's own §5
+    # mockup assumes.
+    for line in audit(SUMMARY, [ROW], "Exposed",
+                       coverage=INCOMPLETE).splitlines():
+        assert len(line) <= 100
+
+
+def test_receipt_qualifies_its_figures_when_the_record_is_incomplete():
+    out = receipt("s1", SUMMARY, [ROW], 41, coverage=INCOMPLETE)
+    assert out.splitlines()[0].startswith("⚠ Session record incomplete")
+    assert receipt("s1", SUMMARY, [ROW], 41, coverage=COMPLETE) == \
+        receipt("s1", SUMMARY, [ROW], 41)
+
+
+def test_unverified_copy_never_implies_the_lost_events_can_be_recovered():
+    """I5, applied to the new strings specifically. "Unverified" is a statement
+    about the ledger, never a promise about what can be got back."""
+    forbidden = ("recover", "restore", "retriev", "replay", "undo", "re-scan",
+                 "rescan", "will be recorded", "try again")
+    views = [
+        hud_line(28, 80, unverified=True),
+        audit(EMPTY_SUMMARY, [], "All events", coverage=INCOMPLETE),
+        audit(SUMMARY, [ROW], "Exposed", coverage=INCOMPLETE),
+        receipt("s1", SUMMARY, [ROW], 41, coverage=INCOMPLETE),
+    ]
+    for view in views:
+        low = view.lower()
+        for word in BANNED + forbidden:
+            assert word not in low, (word, view)
+
+
+def test_every_coverage_reason_renders_a_banner_with_no_empty_clause():
+    """Each `reason` is interpolated into one sentence, so an empty one would
+    render `incomplete — . What follows`. Every reachable unverified shape must
+    produce a phrase."""
+    shapes = [
+        SessionCoverage(recorded=False, observers=0, attached=False,
+                        unobserved_hooks=False),
+        SessionCoverage(recorded=True, observers=0, attached=False,
+                        unobserved_hooks=False),
+        SessionCoverage(recorded=True, observers=1, attached=True,
+                        unobserved_hooks=False),
+        SessionCoverage(recorded=True, observers=2, attached=False,
+                        unobserved_hooks=False),
+        SessionCoverage(recorded=True, observers=1, attached=False,
+                        unobserved_hooks=True),
+    ]
+    for shape in shapes:
+        assert not shape.verified
+        assert shape.reason
+        assert "—  ." not in audit(EMPTY_SUMMARY, [], "Exposed",
+                                    coverage=shape)

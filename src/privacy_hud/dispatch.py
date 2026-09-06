@@ -59,6 +59,16 @@ Nothing here ever passes one session's salt into another session's
 `Engine` — `State.salts`/`State.engines` are both keyed strictly by
 `session_id`, and dropped (not overwritten) at `SessionEnd`.
 
+Coverage: this module is where "was anyone watching?" is first knowable, so it
+is where it is written down. Two writes, both into `ledger.py`'s `coverage`
+table and both explained in full where they happen: `_get_or_start_engine`
+records `attached` when its first sight of a session is a mid-session event
+(the daemon cold-started late, or replaced one that died), and `new_state`
+records `unobserved_hooks` at startup when the hook client's spawn-attempt
+latch shows hooks were answered with no daemon listening at all. Neither is a
+guess; see `_record_unobserved_hooks` for the one thing the latch cannot say
+(which session) and the one case that leaves no trace at all.
+
 Session reference counting: `State.live` maps each session id this daemon
 believes is alive to the monotonic time of its last hook event. It is
 maintained here (`note_session_live` / `release_session`) and read by
@@ -97,6 +107,7 @@ from .ledger import Ledger
 from .mask import new_salt
 from .matrix.loader import Matrix, load_matrix
 from .render import receipt as render_receipt
+from .runtime import latch_path
 
 # Events with a pinned Observation mapping. Anything else that reaches this
 # daemon (SubagentStop, PreCompact, ...) has no Observation defined by the
@@ -170,9 +181,65 @@ def new_state(data_dir) -> State:
     matrix = load_matrix()
     ledger = Ledger(data_dir / "ledger.db", matrix)
     _allow_cross_thread_access(ledger, data_dir / "ledger.db")
+    _record_unobserved_hooks(ledger, data_dir)
     detectors = [PathDetector(), SecretDetector(), ModelDetector()]
     return State(data_dir=data_dir, matrix=matrix, ledger=ledger,
                  detectors=detectors)
+
+
+def _record_unobserved_hooks(ledger: Ledger, data_dir: Path) -> None:
+    """Turn the hook client's spawn-attempt latch into a durable coverage record.
+
+    **This is the only evidence a session the daemon never saw can leave.** The
+    incident behind `ledger.py`'s `coverage` table went like this: no daemon was
+    listening, a short `codex exec` ran to completion, every one of its hooks
+    failed to `connect()` and was answered "unverified", the daemon finished
+    loading its model after the session had already ended, and the ledger's
+    session count went 8 → 8. Nothing about that session exists in the ledger,
+    and nothing can — a session whose beginning was never recorded leaves no
+    trace by construction.
+
+    But the *hooks* left one, and it was already on disk. `hooks/handler.py`
+    writes `$PLUGIN_DATA/daemon.spawn-attempt` on every spawn attempt (that file
+    is a cooldown latch; see `runtime.SPAWN_COOLDOWN`), and its `at` timestamp is
+    the moment a hook event was answered without being checked. Reading it here
+    is inference-free: the latch exists *because* a hook could not be served, so
+    "at least one hook event went unobserved around `at`" is recorded fact, not a
+    heuristic. What it cannot say is WHICH session, or how many events — the
+    latch carries neither, and `Ledger.note_unobserved_hooks` files it
+    unattributed rather than guessing.
+
+    Reading it at daemon startup, exactly once per daemon instance, is the right
+    moment for two reasons: it is the first time a process capable of writing to
+    the ledger exists after the drop, and `INSERT OR IGNORE` on
+    `(UNATTRIBUTED_SESSION, observer)` then bounds the table at one row per cold
+    start rather than one per hook.
+
+    A stale latch (this daemon was started by hand, or by the doctor, and the
+    latch is days old) is recorded with its own old timestamp and is therefore
+    harmless: `Ledger.coverage`'s bound only relates a gap to sessions that
+    started at or before it, so an old gap cannot retroactively mark a new
+    session.
+
+    Every failure is silence, deliberately: no latch, an unreadable one,
+    malformed JSON, a missing `at`. A daemon must not refuse to start because it
+    could not read an advisory file, and I1 forbids logging what it found. The
+    cost is honest and worth stating: when `PLUGIN_DATA` is unwritable, or
+    auto-spawn is off (`PRIVACY_HUD_NO_SPAWN`), no latch is written at all and
+    the gap leaves no trace anywhere. That case is undetectable, full stop.
+    """
+    try:
+        with open(latch_path(data_dir)) as handle:
+            record = json.load(handle)
+        at = record["at"]
+        # A latch that recorded neither a launched pid nor an error is not a
+        # spawn attempt this code understands; treat it as no evidence rather
+        # than as evidence of nothing.
+        if not (record.get("pid") or record.get("error")):
+            return
+        ledger.note_unobserved_hooks(int(float(at)))
+    except (OSError, ValueError, KeyError, TypeError, sqlite3.Error):
+        return
 
 
 def _allow_cross_thread_access(ledger: Ledger, db_path: Path) -> None:
@@ -282,12 +349,25 @@ def _get_or_start_engine(state: State, session_id: str, *, cwd: str = "",
     """Return the Engine for `session_id`, creating one (with a fresh,
     session-scoped salt) if `SessionStart` was never seen for it. Caller
     must hold `state.lock`.
+
+    **`observed_start=False` is the load-bearing argument here.** Reaching this
+    branch means the daemon's first sight of this session was NOT a
+    `SessionStart` — either it cold-started after the session began, or it
+    replaced a daemon that died mid-session. Either way there is a stretch of
+    that session nobody recorded, and the session's ledger row would otherwise
+    be byte-identical to one belonging to a session watched from its first
+    keystroke. `Ledger.start_session` writes an `attached` coverage row instead
+    of a `session_start` one, which is what makes the two distinguishable
+    afterwards; `INSERT OR IGNORE` means a daemon that DID see the
+    `SessionStart` keeps its stronger record when it later re-resolves through
+    here (after a `SessionEnd`, say).
     """
     engine = state.engines.get(session_id)
     if engine is not None:
         return engine
     salt = state.salts.setdefault(session_id, new_salt())
-    state.ledger.start_session(session_id, cwd=cwd, model=model)
+    state.ledger.start_session(session_id, cwd=cwd, model=model,
+                                observed_start=False)
     state.started_at.setdefault(session_id, time.time())
     engine = Engine(ledger=state.ledger, matrix=state.matrix, salt=salt,
                      detectors=state.detectors)
@@ -485,9 +565,17 @@ def _handle_session_end(state: State, session_id: str, payload: dict) -> dict:
     (see that class), so the receipt path needs no `mcp_tools` step and no
     dict in between. The return value stays a plain dict — it is Codex's hook
     wire format, whose shape the host dictates, not ours to type.
+
+    `coverage` is read BEFORE `end_session`, which is not incidental:
+    `end_session` stamps `ended_at`, and `Ledger.coverage` uses that column to
+    decide whether an unattributed gap still falls inside this session's window.
+    Reading afterwards would narrow the window at the exact moment the receipt
+    is being written, so a gap that occurred during the session's final seconds
+    could drop out of the very artifact meant to account for it.
     """
     with state.lock:
         summary = state.ledger.summary(session_id)
+        coverage = state.ledger.coverage(session_id)
         rows = state.ledger.list_events(session_id, "exposed")
         started = state.started_at.pop(session_id, None)
         state.ledger.end_session(session_id)
@@ -504,7 +592,8 @@ def _handle_session_end(state: State, session_id: str, payload: dict) -> dict:
         if started is not None:
             minutes = max(0, int((time.time() - started) // 60))
 
-        message = render_receipt(session_id, summary, rows, minutes)
+        message = render_receipt(session_id, summary, rows, minutes,
+                                  coverage=coverage)
         return {"systemMessage": message}
     finally:
         # The reference is released only once the receipt exists, and in a

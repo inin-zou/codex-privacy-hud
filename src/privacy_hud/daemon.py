@@ -520,8 +520,14 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
        a person reading a diff. The previous rule — 30 minutes since the
        last accepted connection, full stop — took the daemon away from those
        sessions and put them back through the cold-start window
-       *mid-session*, which is exactly the "the ledger does not know what it
-       is missing" hole README.md's known limit 1 exists to warn about.
+       *mid-session*, which is exactly the hole README.md's known limit 1
+       exists to warn about. Note what has and has not changed there: a
+       daemon that comes back mid-session now records an `attached` coverage
+       row, so the ledger says its account of that session is incomplete
+       (`ledger.SessionCoverage`) instead of reading as a clean pass. Being
+       able to *name* the hole is not the same as not having one — the
+       disclosures inside it are still absent and unrecoverable — so this
+       rule stands exactly as it did.
     2. When the last session ends, exit after `LINGER_GRACE` (5 min).
     3. Regardless of the count, a session with no hook event for
        `SESSION_STALE_AFTER` (4 h) stops counting, and the daemon exits

@@ -219,6 +219,59 @@ def test_audit_empty_session_is_byte_identical(led, tab):
     assert _audit(led, EMPTY_SESSION, tab) == AUDIT_EMPTY[tab]
 
 
+#: The same empty audit, for a session the ledger did NOT watch from the start.
+#:
+#: Read the two goldens side by side: `AUDIT_EMPTY["All events"]` ends with "No
+#: privacy events recorded. The engine is running." — the sentence design.md §5
+#: added so an empty audit could not be mistaken for a broken plugin. This one
+#: cannot say it, because for this session the engine was not running, and
+#: printing it anyway spends the reader's trust vouching for the exact case it
+#: cannot vouch for. That substitution, plus the banner, IS the fix.
+AUDIT_UNVERIFIED = (
+    "Privacy Audit\n"
+    "Current session\n"
+    "\n"
+    "┌────────────┐ ┌───────────────┐ ┌──────────────┐ ┌───────────┐\n"
+    "│     0%     │ │       0       │ │      0       │ │     0     │\n"
+    "│ disclosure │ │ exposed items │ │ destinations │ │ prevented │\n"
+    "└────────────┘ └───────────────┘ └──────────────┘ └───────────┘\n"
+    "\n"
+    " Exposed 0      Prevented 0      All events 0\n"
+    "                                 ────────────\n"
+    "\n"
+    "⚠ Session record incomplete — observation began after this session was "
+    "already under way.\n"
+    "  Figures below are not a full account of this session.\n"
+    "\n"
+    "No events recorded for this tab. With this session's record incomplete, "
+    "that is not evidence that none occurred."
+)
+
+
+def test_audit_for_an_unwatched_session_is_byte_identical(led):
+    led.start_session("sess-attached", cwd="/repo", model="gpt-5",
+                       observed_start=False)
+    out = render.audit(
+        mcp_tools.get_session_summary(led, "sess-attached"),
+        mcp_tools.list_exposures(led, "sess-attached", "All events"),
+        "All events",
+        coverage=mcp_tools.get_session_coverage(led, "sess-attached"))
+    assert out == AUDIT_UNVERIFIED
+
+
+def test_audit_for_a_watched_session_did_not_move(led):
+    """Passing a *verified* coverage reading must render exactly what passing
+    none renders. Otherwise every existing golden in this file would have had to
+    be rebaselined, and the change would be a rendering rewrite rather than a
+    new state."""
+    for tab in ("Exposed", "Prevented", "All events"):
+        with_coverage = render.audit(
+            mcp_tools.get_session_summary(led, SESSION),
+            mcp_tools.list_exposures(led, SESSION, tab), tab,
+            coverage=mcp_tools.get_session_coverage(led, SESSION))
+        assert with_coverage == _audit(led, SESSION, tab)
+
+
 # --------------------------------------------------------------------- #
 # render.detail -- the L3 exposure detail (design.md §6)
 # --------------------------------------------------------------------- #
@@ -371,12 +424,69 @@ def test_hud_line_blocked_prefix_is_byte_identical(width, golden):
     assert render.hud_line(63, width, blocked=17) == golden
 
 
+#: design.md §4's "Engine degraded" row, down the same ladder. These are NEW
+#: goldens, not moved ones: `unverified` is keyword-only and defaults False, so
+#: `HUD_LADDER` and `HUD_BLOCKED` above are byte-for-byte what they were.
+#:
+#: The two rungs worth reading closely are the last ones. At 28-39 columns the
+#: marker still spells out the word and the line lands exactly on 28. Below
+#: that, the warning glyph REPLACES the band dot instead of following the
+#: percentage — because a marker appended after `28%` is the first thing
+#: `[:width]` truncation removes, and what truncation would leave is a
+#: clean-looking number, which is the precise failure this state exists to
+#: prevent.
+HUD_UNVERIFIED = {
+    80: "PRIVACY  Disclosure ███░░░░░░░ 28% ⚠unverified ›",
+    52: "PRIVACY  Disclosure ███░░░░░░░ 28% ⚠unverified ›",
+    51: "PRIVACY ███░░░░░░░ 28% ⚠unverified ›",
+    40: "PRIVACY ███░░░░░░░ 28% ⚠unverified ›",
+    39: "PRIV ███░░ 28% ⚠unverified ›",
+    28: "PRIV ███░░ 28% ⚠unverified ›",
+    27: "⚠ 28%",
+    12: "⚠ 28%",
+    4: "⚠ 28",
+    1: "⚠",
+}
+
+
+@pytest.mark.parametrize("width,golden", sorted(HUD_UNVERIFIED.items()))
+def test_hud_line_unverified_ladder_is_byte_identical(width, golden):
+    assert render.hud_line(28, width, unverified=True) == golden
+
+
+@pytest.mark.parametrize("width", sorted(HUD_LADDER))
+def test_hud_line_default_ladder_did_not_move(width):
+    """The compatibility half of the change, stated as a test rather than a
+    comment: opting in is the only way to see the new state."""
+    assert render.hud_line(28, width) == HUD_LADDER[width]
+
+
 # --------------------------------------------------------------------- #
 # The MCP / JSON contract -- the six `privacy.*` tools are public.
 # --------------------------------------------------------------------- #
 
 JSON_SUMMARY = {"percent": 6, "exposed_items": 2, "destinations": 2,
                 "prevented": 1}
+
+#: `/api/summary` = the four tiles PLUS the coverage reading, appended after
+#: them so the pinned tile order `ui/app.js` reads is untouched.
+#:
+#: This golden MOVED, on purpose, and the reason is the point of the change: the
+#: four tiles alone serialize a session that was never observed and a genuinely
+#: clean session to the same four numbers, so a JSON client had no way to tell
+#: "nothing was disclosed" from "nothing was recorded". `coverage` is that
+#: channel. `mcp_tools.get_session_summary`'s own payload is unchanged (see
+#: `JSON_SUMMARY` above and its test) — the extra key lives at the HTTP boundary
+#: only, because that is where the browser reads it.
+#:
+#: `verified` is True here because `_fill` opens both sessions through
+#: `Ledger.start_session`, which records a `session_start` coverage row. That is
+#: the ordinary path, and it is what keeps every other golden in this file where
+#: it was.
+JSON_UI_SUMMARY = dict(JSON_SUMMARY, coverage={
+    "verified": True, "reason": "", "recorded": True, "observers": 1,
+    "attached": False, "unobserved_hooks": False,
+})
 
 JSON_ROWS = [
     {"id": 1, "turn_id": "t1", "ts": TS, "kind": "exposed",
@@ -476,7 +586,12 @@ def _get(base, path):
 
 
 def test_ui_summary_endpoint_json_is_byte_identical(ui):
-    assert _get(ui, f"/api/summary?session_id={SESSION}") == JSON_SUMMARY
+    payload = _get(ui, f"/api/summary?session_id={SESSION}")
+    assert payload == JSON_UI_SUMMARY
+    # Key ORDER: the four tiles first, in the order `ui/app.js` reads them,
+    # with `coverage` appended. An older client keeps working precisely because
+    # nothing ahead of it moved.
+    assert list(payload) == list(JSON_SUMMARY) + ["coverage"]
 
 
 def test_ui_exposures_endpoint_json_is_byte_identical(ui):

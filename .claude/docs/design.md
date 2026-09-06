@@ -90,6 +90,23 @@ PRIVACY  Disclosure ███░░░░░░░ 28%  ›
 | Engine degraded | `PRIVACY  Disclosure ███░░░░░░░ 28% ⚠unverified ›` |
 | Disabled | render nothing (never a "privacy off" banner that itself nags) |
 
+**`⚠unverified` is a third state, not a variant of the other two.** "Disabled"
+means there is nothing to report on. "Engine degraded" means there is something
+to report on and the report has a hole in it — which makes it the only state
+that can distinguish `0%` meaning *nothing sensitive was disclosed* from `0%`
+meaning *I have no idea what was disclosed*. For a privacy tool those must
+never render identically, and until this state was wired up they did: an I7
+self-audit passed on a ledger that had never recorded the session being
+audited. The renderer takes it as a flag it cannot infer (`render.hud_line`'s
+`unverified=`); the ledger's `coverage` table is what decides it, from recorded
+evidence only — never from a heuristic guess that a gap probably happened.
+
+Below 28 columns the word does not fit, so the warning glyph **replaces** the
+band dot: `⚠ 28%`, not `⬤ 28% ⚠`. A marker appended after the percentage is the
+first thing width-truncation removes, and what it leaves behind is a
+clean-looking number — the exact failure the state exists to prevent. The band
+colour is the cheaper thing to lose.
+
 **Width degradation** — the companion renderer is terminal-width aware:
 
 ```text
@@ -141,6 +158,34 @@ Internal hostname ×3  terminal output  model context    [MASKED]
 - All events, empty: `No privacy events recorded. The engine is running.` — the second sentence matters; an empty audit is otherwise indistinguishable from a broken plugin.
 
 **Degraded state banner.** If the deep scanner timed out at any point: `⚠ Deep scan unavailable for 2 events — fast-path results only.` Never silently present partial results as complete.
+
+**Session-record banner.** The same rule at session scope, and it takes
+precedence in reading order because it is the larger caveat. If the ledger's
+account of the session is not verified:
+
+```text
+⚠ Session record incomplete — observation began after this session was already under way.
+  Figures below are not a full account of this session.
+```
+
+The clause after the dash names the recorded evidence — the session was never
+recorded at all, observation began mid-session, Privacy HUD restarted during it,
+or tool calls went unverified with no daemon listening. Nothing in this copy may
+imply the unrecorded events can be listed, retrieved or replayed (§9 / I5):
+"unverified" is a statement about the ledger, not a promise.
+
+**The empty states above are replaced, not supplemented, when the record is
+incomplete.** All three make positive claims — "No sensitive data has crossed a
+trust boundary this session", "…The engine is running." — and an unverified
+session supports none of them. The third is the worst of the three to get wrong:
+it exists so an empty audit cannot be mistaken for a broken plugin, which is
+precisely why printing it *when the plugin was broken for this session* spends
+the reader's trust vouching for the one case it cannot vouch for. On that path
+the line becomes:
+
+```text
+No events recorded for this tab. With this session's record incomplete, that is not evidence that none occurred.
+```
 
 ---
 
