@@ -46,15 +46,23 @@ resolved = mcp_tools.resolve_audit_session(
     ledger, data_dir, explicit=explicit or None)
 print(f"session_id: {resolved.session_id or ''}")
 print(f"basis: {resolved.basis}")
+print(f"also_active: {','.join(resolved.also_active)}")
 if resolved.note:
     print(f"note: {resolved.note}")
 PY
 ```
 
-`session_id` is what the rest of the steps use. **If a `note:` line is
-printed, print it to the user verbatim, above the audit table.** It is
-there because the resolution was not certain, and the copy is already
-written to design.md §9's rules — see `mcp_tools.ResolvedSession.note`.
+`session_id` is what the rest of the steps use, and `basis` /
+`also_active` travel with it into step 2 — the audit table's own header
+line is written from them (`render._subtitle`), so an id passed on its
+own makes the table go back to claiming "Current session" for a session
+nothing established was current. Resolve once, here, and carry all three;
+do not re-run this script per step.
+
+**If a `note:` line is printed, print it to the user verbatim, above the
+audit table.** It is there because the resolution was not certain, and the
+copy is already written to design.md §9's rules — see
+`mcp_tools.ResolvedSession.note`.
 
 Do not replace this with `SELECT session_id FROM sessions ORDER BY
 started_at DESC LIMIT 1`, which is what this skill used to do. That is the
@@ -75,7 +83,7 @@ recently active one by construction rather than by guess.
 named it), `started_at` (fallback, daemon unreachable or no live session),
 `none` (the ledger holds no session yet). Never describe a `started_at`
 resolution as "your current session"; the `note:` line already says what
-it is.
+it is, and so does the table's own header once `basis` reaches step 2.
 
 If `session_id` comes back empty (`basis: none`), stop here: print the
 `note:` line and nothing else. There is no session to audit, and steps 2
@@ -84,13 +92,13 @@ reads exactly like a clean session.
 
 **2. Print the ASCII audit.**
 
-Run this with `SESSION_ID` set to whatever step 1 resolved (or the id the
-user gave). It imports `privacy_hud` from the plugin's own source tree —
-adjust `sys.path` if `$PLUGIN_ROOT` is not already importable in your
-shell:
+Run this with `SESSION_ID`, `BASIS` and `ALSO_ACTIVE` set to the three
+values step 1 printed. It imports `privacy_hud` from the plugin's own
+source tree — adjust `sys.path` if `$PLUGIN_ROOT` is not already
+importable in your shell:
 
 ```bash
-python3 - "$SESSION_ID" <<'PY'
+python3 - "$SESSION_ID" "$BASIS" "$ALSO_ACTIVE" <<'PY'
 import os, sys
 sys.path.insert(0, os.path.join(os.environ.get("PLUGIN_ROOT", "."), "src"))
 
@@ -98,23 +106,46 @@ from privacy_hud.ledger import Ledger
 from privacy_hud.matrix.loader import load_matrix
 from privacy_hud import mcp_tools, render
 
-session_id = sys.argv[1]
+argv = sys.argv[1:] + ["", ""]
+session_id = argv[0]
+# No basis carried over -> the weakest claim the id can support, never the
+# strongest. An unlabelled session id read out of a ledger IS the most
+# recently started one; assuming "current" here is the overclaim this
+# argument exists to prevent.
+basis = argv[1].strip() or "started_at"
+resolved = mcp_tools.ResolvedSession(
+    session_id, basis,
+    tuple(s for s in argv[2].split(",") if s))
+
 data_dir = os.environ.get("PLUGIN_DATA", "/tmp")
 ledger = Ledger(os.path.join(data_dir, "ledger.db"), load_matrix())
 
 summary = mcp_tools.get_session_summary(ledger, session_id)
 rows = mcp_tools.list_exposures(ledger, session_id, "Exposed")
 coverage = mcp_tools.get_session_coverage(ledger, session_id)
-print(render.audit(summary, rows, "Exposed", coverage=coverage))
+print(render.audit(summary, rows, "Exposed",
+                   coverage=coverage, resolved=resolved))
 PY
 ```
 
-`coverage` is not optional decoration. Without it `render.audit` cannot
-tell "0% because nothing was disclosed" from "0% because nothing was
-recorded", and the second is exactly what a session whose daemon was down
-looks like (README known limit 1) — the same condition that makes step 1
-fall back to `basis: started_at`. `render.audit` adds one banner line when
-the record is incomplete and leaves the table untouched otherwise.
+Two keyword arguments, two different questions, and neither substitutes
+for the other.
+
+`coverage` says whether the ledger's account of this session is complete.
+Without it `render.audit` cannot tell "0% because nothing was disclosed"
+from "0% because nothing was recorded", and the second is exactly what a
+session whose daemon was down looks like (README known limit 1) — the same
+condition that makes step 1 fall back to `basis: started_at`.
+`render.audit` adds one banner line when the record is incomplete and
+leaves the table untouched otherwise.
+
+`resolved` says *whose* session those numbers are. It sets the header's
+second line: `Current session` only when the daemon named a single live
+session, `Session <id>` for `$privacy <id>`, `Most recently active
+session` when two windows were active in the same moment, `Most recently
+started session` for the no-daemon fallback. Passing it is what stops the
+table asserting "Current session" over a row nothing established was
+current — the same claim the `note:` line above it is busy retracting.
 
 Swap the tab argument (`"Exposed"` / `"Prevented"` / `"All events"`) to
 show a different one — `render.audit` and `mcp_tools.list_exposures` both

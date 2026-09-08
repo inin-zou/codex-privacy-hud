@@ -116,7 +116,27 @@ colour is the cheaper thing to lose.
 < 28 cols   ⬤ 28%          (dot colored by band)
 ```
 
-**Non-goals for L1:** no counts, no data types, no last-event ticker. Every addition here is a tax paid on every frame of the user's attention.
+**Which session the line is about** is resolved by the same function `$privacy`
+uses (`mcp_tools.resolve_audit_session`), so the pane beside a window and the
+audit typed into it can never name different sessions. It is resolved once at
+startup and roughly every 30 s after, never per redraw: the resolution asks the
+daemon, whose socket is the hook hot path, and a pane that changed which
+session it reported on between two-second frames would be unreadable even if
+every frame were individually correct. `--session-id` pins it outright.
+
+**L1 says nothing about session ambiguity, and that is deliberate.** When
+resolution is uncertain — two windows active in the same moment, or no daemon
+to ask — `$privacy` prints a two-sentence note above a full-width table. This
+line has 52 columns at its widest and 5 at its narrowest; there is no honest
+way to fit a second caveat into that, and `⚠unverified` is not available to
+carry it. That glyph means *this session's record has a known hole*, which is a
+different question from *whose session this is*, and a marker that meant both
+would mean neither — collapsing the three states above back into two. Say
+nothing here and let L2 explain.
+
+**Non-goals for L1:** no counts, no data types, no last-event ticker, no
+session-identity caveat. Every addition here is a tax paid on every frame of
+the user's attention.
 
 ---
 
@@ -140,6 +160,18 @@ Full name ×1          user prompt      model context    [EXPOSED]
 Repository path ×4    tool input       GitHub MCP       [EXPOSED]
 Internal hostname ×3  terminal output  model context    [MASKED]
 ```
+
+**Header subtitle.** `Current session` in the mockup above, but it is a claim, not a label, and it is written from how the session was actually resolved (`mcp_tools.ResolvedSession.basis` → `render._subtitle`):
+
+| Resolution | Subtitle |
+|---|---|
+| The daemon named one live session | `Current session` |
+| The daemon named it, but another window was active in the same moment | `Most recently active session` |
+| The user named it (`$privacy <id>`) | `Session <id>` |
+| No daemon to ask — the ledger's most recently *started* row | `Most recently started session` |
+| The ledger holds no session | `No session on record` |
+
+Only the first line supports the word "current", and it supports it for a specific reason: running `$privacy` fires a hook in the asking session, so "most recently active" *is* "current" by construction. A header asserting certainty above a note retracting it is the same overclaim §9 forbids anywhere else.
 
 **Summary tiles.** Four, fixed: disclosure %, exposed items, destinations, prevented. `destinations` is the tile people underestimate — it is the "how far did this spread" number, and it is what distinguishes this from a scanner.
 

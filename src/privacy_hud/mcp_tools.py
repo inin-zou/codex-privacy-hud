@@ -209,9 +209,11 @@ def _most_recently_started(ledger) -> str | None:
 
     Kept as a named function so the fallback is one call and one docstring
     rather than a SQL string copied into every caller — the "most recently
-    started session" query has already been duplicated into three surfaces in
-    this project and each copy is a place the same wrong answer can be
-    reintroduced (`local_ui_server._latest_session_id`, and `ambient` via it).
+    started session" query had been duplicated into three surfaces in this
+    project and each copy was a place the same wrong answer could be
+    reintroduced. There is one copy now: `local_ui_server._latest_session_id`
+    is an alias onto this, and `ambient` calls `resolve_audit_session` rather
+    than resolving for itself.
 
     Wrong as a *primary* answer for the reason `resolve_audit_session`
     documents; correct as a fallback because with one session it is the same

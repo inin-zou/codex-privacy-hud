@@ -29,6 +29,14 @@ itself is never made here: `ledger.SessionCoverage` is the evidence, this module
 only draws it. Do not "simplify" the third state away; see `ledger.py`'s
 docstring for the audit it silently passed.
 
+**Coverage and identity are two questions, and one glyph answers only one.**
+`⚠unverified` / the `⚠ Session record incomplete` banner mean *this session's
+record has a known hole*. Which session the numbers belong to is a separate
+question with a separate answer — `audit(..., resolved=)`, which moves the
+header subtitle and nothing else (`_subtitle`). Never route "I am not sure
+which session this is" through the coverage marker: that would collapse the
+three states back into two and undo the paragraph above.
+
 **Input is typed.** `audit`, `detail` and `receipt` take `ledger.py`'s
 `SessionSummary` and `ExposureRow` (or an `EventRow`, which is one — see that
 class), not dicts. These functions are almost entirely `row[...]`/`.get(...)`
@@ -43,9 +51,17 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from .ledger import ExposureRow, SessionCoverage, SessionSummary
 from .matrix.loader import load_matrix
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    # Type-only, and deliberately so: `audit()` reads three attributes off a
+    # `ResolvedSession` and needs none of `mcp_tools`' behaviour. A runtime
+    # import would give this module — which is meant to be a pure function of
+    # ledger types — a dependency on the layer above it, for an annotation.
+    from .mcp_tools import ResolvedSession
 
 # Loaded once, at import time, the same way tests/test_ledger.py loads it —
 # deterministic, no I/O beyond reading the packaged tables.toml. Used only to
@@ -320,8 +336,64 @@ def _coverage_banner(coverage: SessionCoverage) -> str:
             "  Figures below are not a full account of this session.")
 
 
+#: What the audit header says when the caller did not say which session this
+#: is. Matches design.md §5's mockup ("Current session · 41 min", minus the
+#: duration this function has no channel for) and is what every call site
+#: rendered before `resolved=` existed.
+_SUBTITLE_CURRENT = "Current session"
+
+#: Subtitle per `mcp_tools.ResolvedSession.basis`, for the bases whose copy
+#: does not depend on anything else. `explicit` and `active` are decided in
+#: `_subtitle` because they need the id and the `certain` flag respectively.
+_SUBTITLE_BY_BASIS = {
+    "started_at": "Most recently started session",
+    "none": "No session on record",
+}
+
+
+def _subtitle(resolved: "ResolvedSession | None") -> str:
+    """The audit header's second line: which session this table is about.
+
+    **Why this cannot be the constant it used to be.** "Current session" is a
+    claim, and exactly one of `resolve_audit_session`'s four bases actually
+    supports it. The daemon naming a single live session does: running
+    `$privacy` fires a hook in the asking session, so "most recently active"
+    *is* "current", by construction. The others do not. A `started_at`
+    resolution is the most recently *started* session — the answer the daemon
+    could not be asked for, and the wrong one the moment a second Codex window
+    exists. An `explicit` id is whichever session the user named, which may be
+    one they closed an hour ago. Printing "Current session" over any of those
+    is the same overclaim CLAUDE.md §5 forbids in the README, one layer down:
+    the skill already prints `ResolvedSession.note` above this table saying the
+    resolution was uncertain, and a header that goes on asserting certainty
+    directly contradicts the line above it.
+
+    `None` — the caller did not resolve, or had no reason to — keeps the
+    previous constant, the same compatibility rule `coverage=None` follows.
+    That is not a claim this function is making on its own behalf; it is the
+    string every existing call site already renders, and changing it would
+    rewrite goldens for callers that did not opt in.
+
+    I5: every branch names a session and stops. Nothing here suggests anything
+    can be taken back. I1: an id, which `ResolvedSession` already establishes
+    is metadata, not content.
+    """
+    if resolved is None:
+        return _SUBTITLE_CURRENT
+    if resolved.basis == "explicit":
+        return f"Session {resolved.session_id}"
+    if resolved.basis == "active":
+        # `certain` is False here only when other sessions were active in the
+        # same moment; the daemon's ranking still stands, it just cannot be
+        # called "current" without qualification.
+        return (_SUBTITLE_CURRENT if resolved.certain
+                else "Most recently active session")
+    return _SUBTITLE_BY_BASIS.get(resolved.basis, _SUBTITLE_CURRENT)
+
+
 def audit(summary: SessionSummary, rows: Sequence[ExposureRow], tab: str, *,
-          coverage: SessionCoverage | None = None) -> str:
+          coverage: SessionCoverage | None = None,
+          resolved: "ResolvedSession | None" = None) -> str:
     """The L2 session audit (design.md §5).
 
     `rows` is whatever the caller has already selected for `tab` — this
@@ -336,7 +408,8 @@ def audit(summary: SessionSummary, rows: Sequence[ExposureRow], tab: str, *,
     min" — this function's fixed interface (`summary, rows, tab`, no
     duration) has no channel for the minute count, so the subtitle here
     omits it. `receipt()` is the function that receives `minutes` and shows
-    session duration.
+    session duration. The first half of that subtitle is no longer a constant
+    either: see `resolved` below and `_subtitle`.
 
     The "All events" tab count in the tab bar is exact when `tab == "All
     events"` (`len(rows)`, since that's exactly what's being rendered);
@@ -365,6 +438,16 @@ def audit(summary: SessionSummary, rows: Sequence[ExposureRow], tab: str, *,
     bill of health it did not ask for — but note that "no reading" and "a
     reading of verified" are different, and only `Ledger.coverage()` can supply
     the latter.
+
+    **`resolved` is an `mcp_tools.ResolvedSession`, or `None` for "not
+    asked".** It changes exactly one thing: the header subtitle, which used to
+    read the literal `"Current session"` for every session this function was
+    ever handed. That was an unsupported claim whenever the session had been
+    resolved by falling back to the ledger's most-recently-*started* row —
+    which is precisely the case where `$privacy` prints a note above this table
+    saying it could not be sure. See `_subtitle` for the copy and the argument.
+    `None` keeps the old constant, on the same compatibility rule as
+    `coverage=None`: opting in is the only way to see the new strings.
     """
     exposed_n = summary.exposed_items
     prevented_n = summary.prevented
@@ -378,7 +461,7 @@ def audit(summary: SessionSummary, rows: Sequence[ExposureRow], tab: str, *,
     else:
         ordered.sort(key=lambda r: r.ts)
 
-    lines = ["Privacy Audit", "Current session", ""]
+    lines = ["Privacy Audit", _subtitle(resolved), ""]
     lines.append(_tiles_block(summary))
     lines.append("")
     lines.append(_tab_bar(exposed_n, prevented_n, all_n, tab))

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import pytest
 
-from privacy_hud import ambient
+from privacy_hud import ambient, mcp_tools
 from privacy_hud.ledger import Ledger
 from privacy_hud.matrix.loader import load_matrix
 from privacy_hud.render import hud_line
@@ -60,6 +60,28 @@ def no_hud_line(monkeypatch):
 
     monkeypatch.setattr(ambient, "hud_line", _fail)
     return calls
+
+
+@pytest.fixture
+def daemon_says(monkeypatch):
+    """Stub the one socket call session resolution makes, and count it.
+
+    Same seam `tests/test_mcp.py` uses (`mcp_tools._ask_daemon`), for the same
+    reason: these tests are about the POLICY — which session this pane shows,
+    and how often it asks — not about socket plumbing, which
+    `tests/test_daemon.py` exercises against a real daemon. Returns the call
+    log, so "did not ask at all" is assertable and not merely unobserved.
+    """
+    calls = []
+
+    def _install(sessions):
+        def _fake(data_dir):
+            calls.append(data_dir)
+            return sessions
+        monkeypatch.setattr(mcp_tools, "_ask_daemon", _fake)
+        return calls
+
+    return _install
 
 
 def _ledger(data_dir) -> Ledger:
@@ -176,10 +198,12 @@ def test_no_forbidden_copy_on_any_path(data_dir, capsys):
 # Session resolution
 # --------------------------------------------------------------------- #
 
-def test_defaults_to_the_most_recently_started_session(data_dir, capsys):
+def test_falls_back_to_the_most_recently_started_session_with_no_daemon(
+        data_dir, capsys):
     # The bug this guards: a stray session (a test run, an earlier pane)
-    # shadowing the user's real one. Resolution lives in exactly one place
-    # (`local_ui_server._latest_session_id`); this asserts ambient uses it.
+    # shadowing the user's real one. With no daemon to ask, "most recently
+    # started" is still the honest answer and `resolve_audit_session` returns
+    # it — the same line this surface has always drawn.
     _seed(data_dir, "older", exposures=4, started_at=1_000)
     newer = _seed(data_dir, "newer", exposures=1, started_at=2_000)
 
@@ -199,6 +223,56 @@ def test_session_id_override_is_honored(data_dir, capsys):
     assert out == hud_line(older.percent, 80, older.prevented) + "\n"
     # And it is genuinely a different line than the default resolution.
     assert older.percent != 0
+
+
+def test_the_daemons_live_session_beats_the_most_recently_started_one(
+        data_dir, capsys, daemon_says):
+    """The self-contradiction this closes.
+
+    `$privacy` has resolved through `mcp_tools.resolve_audit_session` since the
+    two-windows bug was fixed; this pane was still calling
+    `local_ui_server._latest_session_id`. On one machine that is an ambient
+    line and an audit naming *different* sessions — worse than the original
+    bug, because two surfaces that disagree teach the user to trust neither.
+    """
+    older = _seed(data_dir, "older", exposures=4, started_at=1_000)
+    newer = _seed(data_dir, "newer", exposures=1, started_at=2_000)
+    daemon_says([{"session_id": "older", "age": 0.02}])
+
+    ambient.main(["--once"])
+
+    out = capsys.readouterr().out
+    assert out == hud_line(older.percent, 80, older.prevented) + "\n"
+    assert out != hud_line(newer.percent, 80, newer.prevented) + "\n"
+
+
+def test_the_pane_and_the_audit_name_the_same_session(data_dir, capsys,
+                                                      daemon_says):
+    """Stated as one assertion rather than two, because agreement between the
+    two surfaces IS the property — not each one's answer on its own."""
+    _seed(data_dir, "older", exposures=4, started_at=1_000)
+    _seed(data_dir, "newer", exposures=1, started_at=2_000)
+    daemon_says([{"session_id": "older", "age": 0.02}])
+
+    led = _ledger(data_dir)
+    audited = mcp_tools.resolve_audit_session(led, data_dir).session_id
+    led.conn.close()
+
+    assert ambient._SessionPin().current() == audited == "older"
+
+
+def test_an_explicit_pin_never_asks_the_daemon(data_dir, capsys, daemon_says):
+    """`--session-id` is an answer, not a question. It must keep working with
+    no daemon, and must not be overridden by one that disagrees."""
+    older = _seed(data_dir, "older", exposures=4, started_at=1_000)
+    _seed(data_dir, "newer", exposures=1, started_at=2_000)
+    asked = daemon_says([{"session_id": "newer", "age": 0.01}])
+
+    ambient.main(["--session-id", "older", "--once"])
+
+    out = capsys.readouterr().out
+    assert out == hud_line(older.percent, 80, older.prevented) + "\n"
+    assert asked == []
 
 
 def test_unknown_session_id_renders_nothing(data_dir, capsys, no_hud_line):
@@ -423,6 +497,87 @@ def test_watch_leaves_the_cursor_on_a_fresh_line(data_dir, monkeypatch,
     ambient.main(["--watch"])
 
     assert capsys.readouterr().out.endswith("\n")
+
+
+# --------------------------------------------------------------------- #
+# Resolution cadence: often enough to follow a new session, rarely enough
+# that the pane means one thing at a time and the hook socket stays quiet.
+# --------------------------------------------------------------------- #
+
+def test_watch_resolves_once_not_once_per_redraw(data_dir, monkeypatch,
+                                                 capsys, daemon_says):
+    """The load half of `_SessionPin`'s argument. The daemon's socket is the
+    hook hot path; a two-second redraw loop must not be on it."""
+    _seed(data_dir, "s1", exposures=1)
+    asked = daemon_says([{"session_id": "s1", "age": 0.01}])
+    _stub_sleep(monkeypatch, 5)
+
+    ambient.main(["--watch"])
+    capsys.readouterr()
+
+    assert len(asked) == 1
+
+
+def test_watch_does_not_hop_between_sessions_between_redraws(
+        data_dir, monkeypatch, capsys, daemon_says):
+    """The other half, and the one a user would actually see. Two busy windows
+    change which session is "most recently active" every few seconds; a pane
+    resolved per frame would flip between their numbers mid-glance."""
+    first = _seed(data_dir, "s1", exposures=1, started_at=1_000)
+    _seed(data_dir, "s2", exposures=4, started_at=2_000)
+    live = [{"session_id": "s1", "age": 0.01}]
+
+    def _fake(data_dir_arg):
+        answer = list(live)
+        live[:] = [{"session_id": "s2", "age": 0.01}]  # the other window acts
+        return answer
+    monkeypatch.setattr(mcp_tools, "_ask_daemon", _fake)
+    _stub_sleep(monkeypatch, 3)
+
+    ambient.main(["--watch"])
+
+    line = hud_line(first.percent, 80, first.prevented)
+    assert capsys.readouterr().out == ("\r\x1b[K" + line) * 3 + "\n"
+
+
+def test_the_pin_re_resolves_after_the_interval(data_dir, daemon_says):
+    """Pinning forever would freeze the pane on a session that ended hours
+    ago — the stale-number failure `run_watch` blanks the line to avoid."""
+    _seed(data_dir, "s1", exposures=1)
+    asked = daemon_says([{"session_id": "s1", "age": 0.01}])
+
+    pin = ambient._SessionPin(interval=0.0)
+    assert pin.current() == "s1"
+    assert pin.current() == "s1"
+
+    assert len(asked) == 2
+
+
+def test_no_session_yet_is_not_cached(data_dir, daemon_says):
+    """A pane started before Codex must pick the session up on the next
+    redraw, not `RESOLVE_INTERVAL` seconds later."""
+    _ledger(data_dir).conn.close()  # schema, no sessions
+    daemon_says(None)
+
+    pin = ambient._SessionPin()
+    assert pin.current() is None
+
+    _seed(data_dir, "s1", exposures=1)
+    assert pin.current() == "s1"
+
+
+def test_resolution_failure_is_silence_not_a_traceback(data_dir, monkeypatch,
+                                                       capsys):
+    """I6's spirit reaches the new code path too: this runs unattended in a
+    pane beside a live session, and every failure there is silence."""
+    _seed(data_dir, "s1", exposures=1)
+
+    def _boom(ledger, data_dir_arg, **kwargs):
+        raise RuntimeError("resolution exploded")
+    monkeypatch.setattr(mcp_tools, "resolve_audit_session", _boom)
+
+    assert ambient.main(["--once"]) == 0
+    assert capsys.readouterr().out == ""
 
 
 # --------------------------------------------------------------------- #

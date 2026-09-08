@@ -123,13 +123,14 @@ def _latest_session_id(ledger: Ledger) -> str | None:
     daemon has to be asked and why `MAX(events.ts)` is not the fix either.
 
     Kept, and kept exported, because it is still the honest answer when no
-    daemon can be reached, and `ambient` imports it by name for its own
-    (deliberately daemon-free, DB-polling) resolution. Returns only an id, no
-    session content."""
-    row = ledger.conn.execute(
-        "SELECT session_id FROM sessions ORDER BY started_at DESC LIMIT 1"
-    ).fetchone()
-    return row["session_id"] if row is not None else None
+    daemon can be reached — but it no longer holds a copy of the query.
+    `ambient` used to import this and resolve with it directly, which is how
+    one machine ended up with an ambient line and a `$privacy` audit that could
+    name two different sessions; `ambient` now goes through
+    `mcp_tools.resolve_audit_session` like everything else, and this is a
+    one-line alias onto that function's own fallback so the two cannot drift
+    back apart. Returns only an id, no session content."""
+    return mcp_tools._most_recently_started(ledger)
 
 
 class _Handler(BaseHTTPRequestHandler):

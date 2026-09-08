@@ -7,6 +7,7 @@ claim more than it can back up (design.md §9)."""
 from dataclasses import replace
 
 from privacy_hud.ledger import ExposureRow, SessionCoverage, SessionSummary
+from privacy_hud.mcp_tools import ResolvedSession
 from privacy_hud.render import hud_line, audit, detail, receipt
 
 # Extended past the brief's list per task-11 instructions: "dangerous" and
@@ -248,3 +249,117 @@ def test_every_coverage_reason_renders_a_banner_with_no_empty_clause():
         assert shape.reason
         assert "—  ." not in audit(EMPTY_SUMMARY, [], "Exposed",
                                     coverage=shape)
+
+
+# --------------------------------------------------------------------- #
+# The audit header's second line: WHOSE session these numbers are.
+#
+# It was the literal "Current session" for every session this function was
+# ever handed, including the ones reached by falling back to the ledger's
+# most-recently-started row — the exact case where `$privacy` prints a note
+# above the table saying it could not be sure. A header that keeps asserting
+# certainty directly under a line retracting it is worse than either alone.
+#
+# Deliberately NOT the `⚠unverified` / `Session record incomplete` channel:
+# that one means "this session's record has a known hole", and a marker that
+# also meant "I am not sure which session this is" would mean neither.
+# --------------------------------------------------------------------- #
+
+def _subtitle_of(out: str) -> str:
+    return out.splitlines()[1]
+
+
+def test_subtitle_says_current_only_when_the_daemon_named_one_live_session():
+    """The one basis that supports the claim, and the reason it does: running
+    `$privacy` fires a hook in the asking session, so "most recently active"
+    *is* "current" by construction."""
+    resolved = ResolvedSession("s1", "active")
+    assert resolved.certain
+    assert _subtitle_of(audit(SUMMARY, [ROW], "Exposed",
+                              resolved=resolved)) == "Current session"
+
+
+def test_subtitle_stops_claiming_current_for_the_no_daemon_fallback():
+    """`started_at` is the answer the daemon could not be asked for, and the
+    wrong one the moment a second Codex window exists."""
+    out = audit(SUMMARY, [ROW], "Exposed",
+                resolved=ResolvedSession("s1", "started_at"))
+    assert _subtitle_of(out) == "Most recently started session"
+    assert "Current session" not in out
+
+
+def test_subtitle_names_the_session_for_an_explicit_deep_link():
+    """`$privacy <id>` may name a session the user closed an hour ago."""
+    out = audit(SUMMARY, [ROW], "Exposed",
+                resolved=ResolvedSession("sess-abc", "explicit"))
+    assert _subtitle_of(out) == "Session sess-abc"
+    assert "Current session" not in out
+
+
+def test_subtitle_hedges_when_two_sessions_were_active_at_once():
+    """Ambiguity is a real state in this design: the daemon's ranking still
+    stands, it just cannot be called "current" without qualification."""
+    resolved = ResolvedSession("s1", "active", ("s2",))
+    assert not resolved.certain
+    out = audit(SUMMARY, [ROW], "Exposed", resolved=resolved)
+    assert _subtitle_of(out) == "Most recently active session"
+    assert "Current session" not in out
+
+
+def test_subtitle_for_an_empty_ledger_claims_no_session_at_all():
+    out = audit(EMPTY_SUMMARY, [], "Exposed",
+                resolved=ResolvedSession(None, "none"))
+    assert _subtitle_of(out) == "No session on record"
+
+
+def test_every_basis_gets_its_own_subtitle():
+    """A basis silently sharing another's copy would make the header say
+    something true of a different resolution — the failure this replaces."""
+    subtitles = [
+        _subtitle_of(audit(SUMMARY, [ROW], "Exposed", resolved=r))
+        for r in (ResolvedSession("s1", "explicit"),
+                  ResolvedSession("s1", "active"),
+                  ResolvedSession("s1", "active", ("s2",)),
+                  ResolvedSession("s1", "started_at"),
+                  ResolvedSession(None, "none"))
+    ]
+    assert len(set(subtitles)) == len(subtitles)
+
+
+def test_no_resolution_renders_exactly_what_it_always_did():
+    """The compatibility rule `coverage=` already follows, stated as a test:
+    opting in is the only way to see the new strings, so no existing caller
+    and no existing golden moved."""
+    for tab in ("Exposed", "Prevented", "All events"):
+        assert audit(SUMMARY, [ROW], tab, resolved=None) == \
+            audit(SUMMARY, [ROW], tab)
+        assert _subtitle_of(audit(SUMMARY, [ROW], tab)) == "Current session"
+
+
+def test_the_subtitle_is_not_the_coverage_channel():
+    """Two questions, two answers. A session whose record is incomplete but
+    whose identity is certain keeps saying "Current session" — and a session
+    resolved by fallback but fully recorded still gets no coverage banner."""
+    incomplete_but_certain = audit(SUMMARY, [ROW], "Exposed",
+                                   coverage=INCOMPLETE,
+                                   resolved=ResolvedSession("s1", "active"))
+    assert _subtitle_of(incomplete_but_certain) == "Current session"
+    assert "Session record incomplete" in incomplete_but_certain
+
+    complete_but_unsure = audit(SUMMARY, [ROW], "Exposed", coverage=COMPLETE,
+                                resolved=ResolvedSession("s1", "started_at"))
+    assert _subtitle_of(complete_but_unsure) == "Most recently started session"
+    assert "Session record incomplete" not in complete_but_unsure
+    assert "unverified" not in complete_but_unsure
+
+
+def test_no_subtitle_implies_recall_or_editorializes():
+    """I5 / design.md §9, applied to the new strings specifically."""
+    for r in (ResolvedSession("s1", "explicit"),
+              ResolvedSession("s1", "active"),
+              ResolvedSession("s1", "active", ("s2",)),
+              ResolvedSession("s1", "started_at"),
+              ResolvedSession(None, "none")):
+        low = audit(SUMMARY, [ROW], "Exposed", resolved=r).lower()
+        for word in BANNED:
+            assert word not in low, (word, r.basis)
