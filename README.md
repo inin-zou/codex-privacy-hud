@@ -126,6 +126,18 @@ interpreter, fetches the patched Codex build matching `codex --version`,
 and runs `privacy-hud-doctor`. `--yes` skips the question, `--no-model`
 skips the weights (names and addresses then go undetected; doctor says so).
 
+> **Status as of 2026-09-15 — read before running this.** No release has
+> been published yet, and the patched Codex build has never been executed
+> end to end. `install.sh` will therefore reach step 6, find no matching
+> build, print "no patched build published for codex `<ver>` yet", and fall
+> back to the ambient pane — everything else installs and works, but there
+> is no status-line item until the first CI release lands. When it does,
+> the binary it publishes is **unsigned and unnotarized**; the installer
+> removes the quarantine attribute itself, and the SHA-256 it verifies
+> protects against a corrupted or truncated download, not against a
+> compromised release. Delete this note once a release exists and has been
+> run.
+
 ### Uninstall
 
 ```bash
@@ -312,6 +324,8 @@ codex plugin marketplace remove codex-privacy-hud
 Stated up front, because a privacy tool that overclaims is worse than none:
 
 1. **The start of a session is unmonitored.** The daemon starts itself now (`architecture.md`'s lazy auto-spawn, built), but it loads ~2.8 GB of model weights before it binds its socket — about seven seconds. The hook that starts it does not wait, and the hooks that fire during the load get the same answer as a missing daemon: fail open on ingress with an "unverified" note, fail closed on egress. **Whatever is disclosed in those first seconds is not in the ledger, and no later reading can say what it was.** The ledger does now know that *something* is missing — see limit 2 — but knowing a gap exists is not knowing what fell into it, and nothing recovers the difference. Measured: a `codex exec` one-shot that finished in 8.2 s from a cold start recorded *nothing at all* — the daemon it started was still loading when the session ended, so for short non-interactive runs this is not "the first few seconds" but the whole session. An interactive session is a different story, since typing the first prompt already outlasts the load. Starting a daemon by hand before the session (step 2) is the only way to close that window. It reopens whenever the daemon exits and a later hook has to start a new one — which now happens five minutes after your last session ends, rather than in the middle of a session that merely went quiet for half an hour.
+
+   The same lifetime has one consequence at upgrade time: **upgrading the plugin while an older daemon is still running leaves the status item silent until that daemon exits** — about five minutes after its last session ends — because the running daemon is the only writer of the snapshot file and it is still the old code; restart Codex, or wait it out.
 
    The other half of the trade: auto-start works only if `privacy-hud-setup` has recorded an interpreter that can load the model. It refuses to record one that cannot, and with no recorded interpreter no daemon is started at all — deliberately, since guessing one produces a daemon that detects nothing while looking healthy. `privacy-hud-doctor` is the detector for both states: it round-trips the socket, and it re-imports the recorded interpreter's stack.
 2. **"Unverified" marks the gaps it can see, and there are gaps it cannot.** A session whose record has a known hole renders `⚠unverified` on the ambient line and carries a `⚠ Session record incomplete` banner in the `$privacy` audit, instead of the clean `0%` that used to stand in for both "nothing was disclosed" and "nothing was recorded". Four things are recorded evidence and are detected: a session the ledger has no row for at all; a session whose beginning the daemon never saw (it cold-started late, or replaced one that died mid-session); a daemon replaced during a session; and hook calls that reached no daemon at all, which the daemon learns from the spawn-attempt latch the hook client leaves behind.
