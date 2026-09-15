@@ -99,9 +99,17 @@ def test_golden_core_shape():
 
 
 def test_patch_embeds_the_same_golden_file():
+    """The copy of the golden inside the Codex patch is byte-identical to ours.
+
+    Reconstructs the added file from its hunk rather than checking line
+    membership, so a reordering or a dropped duplicate line fails too.
+    """
     patch = (Path(__file__).parents[1] / "patches" / "privacy-status-line.patch").read_text()
-    expected = (MATRIX / "hud_golden.json").read_text().splitlines()
-    # Every line of the golden must appear as an added line in the patch.
-    added = {line[1:] for line in patch.splitlines() if line.startswith("+")}
-    missing = [l for l in expected if l and l not in added]
-    assert missing == [], missing
+    lines = patch.splitlines()
+    starts = [i for i, l in enumerate(lines)
+              if l.startswith("+++ ") and l.endswith("privacy_status_golden.json")]
+    assert len(starts) == 1, "patch must add privacy_status_golden.json exactly once"
+    body = lines[starts[0] + 1:]
+    end = next((i for i, l in enumerate(body) if l.startswith("diff --git")), len(body))
+    embedded = [l[1:] for l in body[:end] if l.startswith("+")]
+    assert "\n".join(embedded) + "\n" == (MATRIX / "hud_golden.json").read_text()

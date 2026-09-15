@@ -114,20 +114,21 @@ index f45ae82..243c401 100644
              status_line_workspace_headline_pending_request_id: None,
              next_status_line_workspace_headline_request_id: 0,
 diff --git a/codex-rs/tui/src/chatwidget/status_surfaces.rs b/codex-rs/tui/src/chatwidget/status_surfaces.rs
-index 17f437c..d85fb35 100644
+index 17f437c..1257474 100644
 --- a/codex-rs/tui/src/chatwidget/status_surfaces.rs
 +++ b/codex-rs/tui/src/chatwidget/status_surfaces.rs
-@@ -657,6 +657,20 @@ impl ChatWidget {
+@@ -657,6 +657,21 @@ impl ChatWidget {
          }
      }
  
 +    /// Repaints the status line while the `privacy` item is configured, so the
 +    /// plugin's snapshot file is picked up within one `READ_INTERVAL`.
 +    pub(super) fn refresh_status_line_if_privacy_due(&mut self) {
-+        if self
-+            .status_line_items_with_invalids()
-+            .0
-+            .contains(&StatusLineItem::Privacy)
++        if self.privacy_status.is_due()
++            && self
++                .status_line_items_with_invalids()
++                .0
++                .contains(&StatusLineItem::Privacy)
 +        {
 +            self.refresh_status_line();
 +            self.frame_requester
@@ -138,7 +139,7 @@ index 17f437c..d85fb35 100644
      pub(crate) fn set_status_line_workspace_headline(
          &mut self,
          request_id: u64,
-@@ -787,6 +801,12 @@ impl ChatWidget {
+@@ -787,6 +802,12 @@ impl ChatWidget {
                  .and_then(|usage| usage.estimated_usage_usd_micros)
                  .and_then(format_estimated_usd_micros),
              StatusLineItem::SessionId => self.thread_id.map(|id| id.to_string()),
@@ -151,7 +152,7 @@ index 17f437c..d85fb35 100644
              StatusLineItem::FastMode => self
                  .model_catalog
                  .try_list_models()
-@@ -859,6 +879,7 @@ impl ChatWidget {
+@@ -859,6 +880,7 @@ impl ChatWidget {
              StatusSurfacePreviewItem::FastMode => StatusLineItem::FastMode,
              StatusSurfacePreviewItem::RawOutput => StatusLineItem::RawOutput,
              StatusSurfacePreviewItem::WorkspaceHeadline => StatusLineItem::WorkspaceHeadline,
@@ -173,10 +174,10 @@ index 3d9650d..3da7f5b 100644
  mod resize_reflow_cap;
 diff --git a/codex-rs/tui/src/privacy_status.rs b/codex-rs/tui/src/privacy_status.rs
 new file mode 100644
-index 0000000..d2ac19a
+index 0000000..154c3a6
 --- /dev/null
 +++ b/codex-rs/tui/src/privacy_status.rs
-@@ -0,0 +1,214 @@
+@@ -0,0 +1,277 @@
 +//! `privacy` status-line item: reads the Codex Privacy HUD plugin's snapshot
 +//! file (contract A) and renders `Privacy ███░░░░░░░ 28%`.
 +//!
@@ -209,7 +210,8 @@ index 0000000..d2ac19a
 +
 +/// `$PRIVACY_HUD_DATA` (tests, scratch setups) else Codex's plugin-data dir for this plugin.
 +pub(crate) fn data_dir() -> Option<PathBuf> {
-+    if let Some(dir) = std::env::var_os("PRIVACY_HUD_DATA") {
++    let explicit = std::env::var_os("PRIVACY_HUD_DATA").filter(|dir| !dir.is_empty());
++    if let Some(dir) = explicit {
 +        return Some(PathBuf::from(dir));
 +    }
 +    let home = std::env::var_os("CODEX_HOME")
@@ -264,6 +266,8 @@ index 0000000..d2ac19a
 +pub(crate) struct PrivacyStatusSource {
 +    dir: Option<PathBuf>,
 +    last_read: Option<Instant>,
++    /// The thread the cached reading belongs to; a different one bypasses the throttle.
++    last_thread: Option<String>,
 +    cached: Option<PrivacyReading>,
 +}
 +
@@ -281,24 +285,39 @@ index 0000000..d2ac19a
 +        Self {
 +            dir,
 +            last_read: None,
++            last_thread: None,
 +            cached: None,
 +        }
 +    }
 +
++    /// Whether the next `current` call would hit the disk. Cheap gate for the
++    /// per-frame refresh hook, which must not rebuild the status line every frame.
++    pub(crate) fn is_due(&self) -> bool {
++        self.last_read
++            .is_none_or(|last| last.elapsed() >= READ_INTERVAL)
++    }
++
 +    /// The reading to show now. At most one file read per `READ_INTERVAL`.
 +    pub(crate) fn current(&mut self, thread_id: Option<&str>) -> Option<PrivacyReading> {
++        self.current_at(thread_id, Instant::now())
++    }
++
++    fn current_at(&mut self, thread_id: Option<&str>, now: Instant) -> Option<PrivacyReading> {
 +        let thread_id = thread_id?;
 +        if thread_id.is_empty() || thread_id.contains('/') || thread_id.starts_with('.') {
 +            return None;
 +        }
-+        let now = Instant::now();
-+        if self
++        // A thread switch must never show the previous session's number, so the
++        // throttle only applies while the id is unchanged.
++        let same_thread = self.last_thread.as_deref() == Some(thread_id);
++        let throttled = self
 +            .last_read
-+            .is_some_and(|last| now.duration_since(last) < READ_INTERVAL)
-+        {
++            .is_some_and(|last| now.duration_since(last) < READ_INTERVAL);
++        if same_thread && throttled {
 +            return self.cached;
 +        }
 +        self.last_read = Some(now);
++        self.last_thread = Some(thread_id.to_string());
 +        let dir = self.dir.as_ref()?;
 +        let path = dir.join("hud").join(format!("{thread_id}.json"));
 +        let now_unix = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
@@ -376,19 +395,64 @@ index 0000000..d2ac19a
 +        assert!(src.current(Some("nope")).is_none());
 +    }
 +
-+    #[test]
-+    fn source_reads_file_and_throttles() {
++    fn unix_now() -> f64 {
++        let elapsed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
++        elapsed.as_secs_f64()
++    }
++
++    /// A data dir holding `hud/<name>.json` for each `(name, percent)` given.
++    fn data_dir_with(files: &[(&str, i64)]) -> tempfile::TempDir {
 +        let dir = tempfile::tempdir().unwrap();
 +        let hud = dir.path().join("hud");
 +        std::fs::create_dir_all(&hud).unwrap();
-+        let elapsed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-+        let now = elapsed.as_secs_f64();
-+        std::fs::write(hud.join("sid.json"), snap(1, 63, false, now)).unwrap();
++        for (name, percent) in files {
++            let path = hud.join(format!("{name}.json"));
++            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
++            std::fs::write(path, snap(1, *percent, false, unix_now())).unwrap();
++        }
++        dir
++    }
++
++    #[test]
++    fn source_reads_file_and_throttles() {
++        let dir = data_dir_with(&[("sid", 63)]);
++        let hud = dir.path().join("hud");
 +        let mut src = PrivacyStatusSource::with_data_dir(dir.path().to_path_buf());
 +        assert_eq!(src.current(Some("sid")).unwrap().percent, 63);
-+        std::fs::write(hud.join("sid.json"), snap(1, 64, false, now)).unwrap();
++        std::fs::write(hud.join("sid.json"), snap(1, 64, false, unix_now())).unwrap();
 +        let cached = src.current(Some("sid")).unwrap().percent;
 +        assert_eq!(cached, 63, "cached within READ_INTERVAL");
++    }
++
++    #[test]
++    fn source_rereads_once_the_interval_has_passed() {
++        let dir = data_dir_with(&[("sid", 63)]);
++        let hud = dir.path().join("hud");
++        let mut src = PrivacyStatusSource::with_data_dir(dir.path().to_path_buf());
++        let start = Instant::now();
++        assert_eq!(src.current_at(Some("sid"), start).unwrap().percent, 63);
++        assert!(!src.is_due(), "a fresh read is not due again yet");
++        std::fs::write(hud.join("sid.json"), snap(1, 64, false, unix_now())).unwrap();
++        let later = src.current_at(Some("sid"), start + READ_INTERVAL);
++        assert_eq!(later.unwrap().percent, 64);
++    }
++
++    #[test]
++    fn source_rereads_immediately_for_a_different_thread() {
++        let dir = data_dir_with(&[("a", 10), ("b", 20)]);
++        let mut src = PrivacyStatusSource::with_data_dir(dir.path().to_path_buf());
++        assert_eq!(src.current(Some("a")).unwrap().percent, 10);
++        let switched = src.current(Some("b")).unwrap().percent;
++        assert_eq!(switched, 20, "a thread switch must not reuse the cache");
++    }
++
++    #[test]
++    fn source_rejects_unsafe_thread_ids_even_when_a_file_exists() {
++        let dir = data_dir_with(&[("", 30), (".hidden", 40), ("../x", 50)]);
++        let mut src = PrivacyStatusSource::with_data_dir(dir.path().to_path_buf());
++        assert!(src.current(Some("")).is_none());
++        assert!(src.current(Some(".hidden")).is_none());
++        assert!(src.current(Some("../x")).is_none());
 +    }
 +}
 diff --git a/codex-rs/tui/src/privacy_status_golden.json b/codex-rs/tui/src/privacy_status_golden.json
