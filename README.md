@@ -44,6 +44,10 @@ PRIVACY  Disclosure ███░░░░░░░ 28%  ›
 gpt-5.4 · ~/proj · Privacy ███░░░░░░░ 28% ⚠2
 ```
 
+Real output from a live Codex 0.154 session running the patched build (not a mockup): one prompt containing a street address, and the `Privacy` item under the composer already at 5%, beside Codex's own model, directory, and context items:
+
+![Codex's own status line with the plugin's `Privacy` item after a single prompt that contained a street address — 5% disclosure, next to the model, directory, and context items](docs/images/status-line-patched.png)
+
 Stock Codex has no plugin-owned status item, so this needs a Codex build
 with a small patch (`patches/privacy-status-line.patch`, one added item,
 nothing else). `install.sh` fetches that build for your exact Codex version
@@ -174,7 +178,7 @@ Open a new terminal (so the `PATH` change is picked up) and run `codex`.
 The status line looks unchanged at first: Codex fires its `SessionStart`
 hook with the first turn, not at boot, so nothing reaches the daemon until
 you send a message. After your first prompt the item appears under the
-composer next to the usual ones:
+composer next to the usual ones, as in the [screenshot above](#what-it-does):
 
 ```text
 Privacy ░░░░░░░░░░  0% · gpt-5.4 · ~/proj · Context 96% left
@@ -393,12 +397,6 @@ Read this as *"the ledger holds 0%, and the ledger is not a complete record of t
 **4. Use Codex normally.** The plugin's hooks (`hooks/hooks.json`) fire on every `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SubagentStart`/`Stop`, and `SessionEnd` — no per-command action needed. The first hook of the session starts the daemon if nothing is listening; that hook and the ones during the ~7 s model load are answered without detection.
 
 **5. Run `$privacy` at any point** to see the session audit — the ASCII table always works; it also starts a local browser UI at a `127.0.0.1` URL it prints (never a link to anything else).
-
-Real output from a live Codex session (not a mockup) — a fresh session with nothing yet disclosed, and the same audit after a few turns that sent addresses, names, URLs, and a credential to the model:
-
-![`$privacy` rendering a fresh session's audit table — 0% disclosure, nothing exposed yet](docs/images/dashboard-empty.png)
-
-![`$privacy` rendering the same session a few turns later — 100% disclosure, 12 exposed items across address, person, URL, and credential](docs/images/dashboard-exposed.png)
 
 **6. When a call is blocked**, Codex surfaces the reason via `systemMessage`. Run `$privacy` to review the exposure, then choose to minimize and retry, allow once, or leave it blocked — see [`design.md` §8](.claude/docs/design.md) for the full consent flow.
 
