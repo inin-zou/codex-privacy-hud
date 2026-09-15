@@ -18,10 +18,19 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
 
 import pytest
+
+# `install.sh` is macOS-only by construction, and so is this file: it calls
+# `sed -i ''` (the BSD spelling, which GNU sed reads as an empty script) and
+# `xattr`, and its `target()` refuses any uname but Darwin. On Linux these
+# tests would fail for reasons that say nothing about the installer.
+pytestmark = pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason="install.sh is macOS-only (BSD sed, xattr)")
 
 INSTALL = Path(__file__).parents[1] / "install.sh"
 VER = "0.154.0"
@@ -191,3 +200,93 @@ def test_purge_without_uninstall_is_a_usage_error(home):
     home, env, rel = home
     r = run(env, "--purge")
     assert r.returncode == 2
+
+
+# -- config.toml shapes the installer must refuse rather than corrupt -----
+
+def test_an_indented_status_line_is_left_alone_with_a_message(home):
+    """A `status_line` we can see but cannot edit at column 0. The sed that
+    inserts "privacy" is anchored to the start of the line, so on an indented
+    key it silently does nothing -- and a manifest claiming an edit that did
+    not happen would make uninstall strip "privacy" out of a line the user
+    wrote. Refuse, say so, record nothing."""
+    home, env, rel = home
+    cfg = home / ".codex/config.toml"
+    original = '[tui]\n  status_line = ["model-with-reasoning", "current-dir"]\n'
+    cfg.write_text(original)
+    r = run(env, "--yes", "--release-base-url", rel.as_uri())
+    assert r.returncode == 0, r.stderr
+    assert cfg.read_text() == original
+    assert "config.toml" in r.stdout and "status_line" in r.stdout
+    m = json.loads((home / ".local/share/codex-privacy-hud/manifest.json").read_text())
+    assert "config.toml" not in m["edited"]
+
+
+def test_a_tui_header_with_a_trailing_comment_is_not_duplicated(home):
+    """Appending a second `[tui]` table is not a cosmetic problem: TOML
+    rejects a duplicate table outright, so Codex would refuse to load the
+    config at all."""
+    home, env, rel = home
+    cfg = home / ".codex/config.toml"
+    original = '[tui]  # my ui settings\ntheme = "dark"\n'
+    cfg.write_text(original)
+    r = run(env, "--yes", "--release-base-url", rel.as_uri())
+    assert r.returncode == 0, r.stderr
+    assert cfg.read_text() == original
+    assert cfg.read_text().count("[tui]") == 1
+    assert "config.toml" in r.stdout
+
+
+def test_the_created_status_line_carries_codex_own_defaults(home):
+    """Setting the key replaces Codex's built-in list, so the value we write
+    has to be that list plus ours -- otherwise installing this plugin quietly
+    takes status items away."""
+    home, env, rel = home
+    run(env, "--yes", "--release-base-url", rel.as_uri())
+    line = (home / ".codex/config.toml").read_text()
+    for item in ("model-with-reasoning", "current-dir", "thread-name", "privacy"):
+        assert f'"{item}"' in line, line
+
+
+# -- partial installs, PATH, and flag validation -------------------------
+
+def test_an_aborted_install_still_leaves_an_actionable_manifest(home):
+    """The manifest is contract C, and `--uninstall` refuses to infer. If it
+    were written only at the end, an install that died after creating the
+    forwarder would leave our files on disk with nothing to reverse them."""
+    home, env, rel = home
+    before = _tree(home)
+    r = run({**env, "PRIVACY_HUD_FAKE_ABORT_AFTER": "forwarder"},
+            "--yes", "--release-base-url", rel.as_uri())
+    assert r.returncode != 0
+    fwd = home / ".local/bin/codex"
+    assert fwd.exists(), "the fixture no longer aborts after the forwarder"
+    m = json.loads((home / ".local/share/codex-privacy-hud/manifest.json").read_text())
+    assert str(fwd) in m["created"]
+
+    r = run(env, "--uninstall")
+    assert r.returncode == 0, r.stderr
+    assert not fwd.exists()
+    assert _tree(home) == before
+
+
+def test_it_says_so_when_the_official_binary_still_wins_on_path(home):
+    """`~/.local/bin` after Homebrew's bin is the common broken install: every
+    step succeeds, nothing is appended to the rc file (the directory is
+    already on PATH), and `codex` keeps running the official build."""
+    home, env, rel = home
+    local_bin = home / ".local/bin"
+    local_bin.mkdir(parents=True)
+    env = {**env, "PATH": f"{env['PATH']}:{local_bin}"}
+    r = run(env, "--yes", "--release-base-url", rel.as_uri())
+    assert r.returncode == 0, r.stderr
+    assert "PATH" in r.stdout
+    assert 'export PATH="$HOME/.local/bin:$PATH"' in r.stdout
+    assert "# codex-privacy-hud" not in (home / ".zshrc").read_text()
+
+
+def test_release_base_url_without_a_value_is_a_usage_error(home):
+    home, env, rel = home
+    r = run(env, "--release-base-url")
+    assert r.returncode == 2
+    assert "usage" in r.stderr.lower()
