@@ -443,18 +443,6 @@ Stated up front, because a privacy tool that overclaims is worse than none:
    The ambient line (limit 5) resolves the same way, so the pane beside your window and the audit typed into it name the same session. It does so on a slower clock — once when it starts and roughly every 30 s after, not on every two-second redraw — because that resolution asks the daemon over the socket the hooks use, and because a HUD that changed which session it was reporting on between redraws would be unreadable. Two things follow. A session that starts right after a re-resolution can take up to half a minute to appear in the pane. And the ambient line carries **no marker for session ambiguity at all**: at 52 columns there is no honest room for one, and the `⚠unverified` glyph is not available for it — that marker means the session's *record* has a known hole (limit 2), and one glyph cannot mean two things. If you need certainty about which session a pane is showing, pin it with `privacy-hud-ambient --session-id <id>`, or ask `$privacy`, which has the room to explain itself.
 9. **Nothing recalls disclosed data.** Ever.
 
-## Documentation
+## License
 
-| Doc | Contents |
-|---|---|
-| [`.claude/docs/PRD.md`](.claude/docs/PRD.md) | Problem, disclosure model, budget formula, scope, success criteria |
-| [`.claude/docs/design.md`](.claude/docs/design.md) | Three-level UX, visual language, copy rules, consent flow |
-| [`.claude/docs/architecture.md`](.claude/docs/architecture.md) | Process model, context accounting, schema, enforcement, testing |
-
-## Prior art
-
-- [`jarrodwatts/claude-hud`](https://github.com/jarrodwatts/claude-hud) — the token HUD for Claude Code that inspired the ambient layer.
-
-## References
-
-- [Codex Hooks](https://learn.chatgpt.com/docs/hooks) · [Build plugins](https://learn.chatgpt.com/docs/build-plugins) · [Config reference](https://learn.chatgpt.com/docs/config-file/config-reference) · [App Server](https://learn.chatgpt.com/docs/app-server)
+[MIT](LICENSE).
