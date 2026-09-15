@@ -99,6 +99,14 @@ codex plugin add codex-privacy-hud@codex-privacy-hud
 运行 `install.sh`，即可补齐这些组件；已有插件也可以安全地运行此脚本。
 也可以参照 [docs/installing-by-hand.md](docs/installing-by-hand.md) 手动安装。
 
+下次启动时，请留意两件事。
+Codex 0.154 会显示 **Hooks need review**（需要审核 hook），提示你审核插件的八个 hook。
+请选择 **Trust all and continue**（信任全部并继续）。
+在这些 hook 获得信任之前，插件中的任何内容都不会运行。
+之后，在运行安装脚本之前，每个会话的第一轮交互都会显示一行提醒，其中包含安装命令 `sh <plugin root>/install.sh --yes`（该脚本由 Codex 安装在 hook 旁边）。
+你可以将该命令粘贴到会话中，让 Codex 执行。
+安装完成后，重启 Codex，让补丁版 Codex 和状态行项生效。
+
 ### 首次启动
 
 打开新终端，让 `PATH` 变更生效。运行 `codex`。
