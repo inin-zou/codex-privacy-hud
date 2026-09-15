@@ -40,6 +40,13 @@ TIMEOUT = 2.0  # seconds
 # observed Codex-side hook timeout (SessionEnd is clamped to 3s on newer
 # Codex builds -- see architecture.md's platform-drift note) while comfortably
 # covering slower/larger payloads up to MAX_TIER3_CHARS.
+
+# The client half of I6: the events a failure must fail *closed* on. The
+# daemon's half is `privacy_hud/codex.py`'s `EGRESS_EVENTS`, which is where
+# everything this project knows about Codex the platform lives; this file is
+# stdlib-only and never imports the package, so it restates the set and
+# `tests/test_runtime.py` compares the two -- checked rather than trusted,
+# the same treatment `daemon.sock` and the receipt literals below get.
 EGRESS_EVENTS = {"PreToolUse"}
 
 # --- lazy daemon start ------------------------------------------------------
@@ -106,6 +113,9 @@ def _deny(reason):
 
 
 def _looks_like_egress(payload):
+    # `.startswith("mcp")`, not `"mcp__"`: Codex's own spelling. The daemon
+    # applies the same predicate as `codex.is_mcp_tool`, so the two ends
+    # cannot disagree about which call this is.
     if payload.get("hook_event_name") not in EGRESS_EVENTS:
         return False
     ti = payload.get("tool_input") or {}

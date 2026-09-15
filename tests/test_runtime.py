@@ -39,7 +39,7 @@ from pathlib import Path
 
 import pytest
 
-from privacy_hud import runtime
+from privacy_hud import codex, runtime
 
 HANDLER = Path(__file__).resolve().parents[1] / "hooks" / "handler.py"
 SRC = Path(runtime.__file__).resolve().parent.parent
@@ -465,3 +465,15 @@ def test_handler_restates_the_receipt_contract_correctly(name):
     auto-spawn, so the duplication is checked rather than trusted, exactly as
     `MIN_PYTHON` is checked against `pyproject.toml`."""
     assert _handler_constants()[name] == getattr(runtime, name)
+
+
+def test_handler_restates_the_egress_event_set_correctly():
+    """`hooks/handler.py`'s `EGRESS_EVENTS` is the client half of I6 — the
+    events it fails *closed* on when the daemon cannot answer — and the
+    daemon's half is `codex.EGRESS_EVENTS` (`daemon._Handler.handle`'s
+    internal-failure gate). Drift is worse than silent: the two ends would
+    disagree about which calls must never be allowed through unverified, and
+    the direction that fails is the one that leaks. Same treatment as the
+    receipt literals above, and as `daemon.sock`.
+    """
+    assert _handler_constants()["EGRESS_EVENTS"] == set(codex.EGRESS_EVENTS)

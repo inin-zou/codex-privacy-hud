@@ -55,7 +55,6 @@ with no working backend behind it.
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import sys
 import threading
@@ -63,7 +62,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import mcp_tools
+from . import mcp_tools, runtime
 from .ledger import Ledger
 from .matrix.loader import load_matrix
 from .render import _ACRONYMS as _RENDER_ACRONYMS
@@ -80,30 +79,17 @@ _STATIC = {
 }
 
 
-def resolve_data_dir() -> Path | None:
-    """The plugin-data directory, or `None`. `$PLUGIN_DATA` if set; otherwise
-    the single directory Codex assigns this plugin, via `runtime`'s resolver;
-    otherwise nothing. There is no `/tmp` default any more (spec §6): a
-    glance-only surface run by hand must not create a ledger in a shared
-    directory, and "nothing to read" is a state every caller here already
-    renders as silence."""
-    env = os.environ.get("PLUGIN_DATA")
-    if env:
-        return Path(env).expanduser()
-    from . import runtime  # deferred: runtime imports doctor, which imports
-                            # this module's siblings -- see runtime.py's own
-                            # note on `_codex_data_candidates`'s deferred
-                            # import for the same reason.
-    chosen, _notes, _candidates = runtime.resolve_data_dir()
-    return chosen
-
-
-def _ledger_path() -> Path | None:
-    """Same convention as `dispatch.new_state()` / `hooks/handler.py` /
-    `mcp/server.py`: `$PLUGIN_DATA/ledger.db`, or `None` when there is no
-    resolvable plugin-data directory (see `resolve_data_dir`)."""
-    data_dir = resolve_data_dir()
-    return None if data_dir is None else data_dir / "ledger.db"
+# Both of these moved into `runtime.py` and are re-exported here under the
+# names `ambient`, `mcp/server.py` and the tests already use. The move is
+# what lets `doctor.py` stop importing this module: a diagnostic that must
+# survive a broken install was pulling in `mcp_tools`, `render`, the matrix
+# and the ledger to learn where a file is, and that import closed a real
+# cycle (`doctor` -> `local_ui_server` -> `runtime` -> `doctor`), which two
+# deferred imports existed only to dodge. The resolution itself is unchanged:
+# `$PLUGIN_DATA` if set, else the single directory Codex assigns, else
+# `None` -- there is no `/tmp` default (spec §6).
+resolve_data_dir = runtime.plugin_data_dir
+_ledger_path = runtime.ledger_path
 
 
 def _reopen_for_background_thread(ledger: Ledger) -> None:

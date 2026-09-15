@@ -67,6 +67,7 @@ import threading
 import time
 from pathlib import Path
 
+from . import codex
 from .dispatch import (
     State,
     _deny,
@@ -351,8 +352,11 @@ class _Handler(socketserver.StreamRequestHandler):
             # are ingress/propagate/lifecycle by construction — see
             # dispatch.py's mapping table), so that cheap, exception-proof
             # check is the gate: fail closed there (I6), fail open
-            # everywhere else exactly as before.
-            if payload.get("hook_event_name") == "PreToolUse":
+            # everywhere else exactly as before. Which events those are is
+            # Codex's fact, not this daemon's, so the set is
+            # `codex.EGRESS_EVENTS` -- the same set `hooks/handler.py`
+            # restates as a literal for its own client-side gate.
+            if payload.get("hook_event_name") in codex.EGRESS_EVENTS:
                 reply = _deny_for_internal_failure(payload)
             else:
                 reply = {}
@@ -1225,7 +1229,10 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
 
 
 def _default_socket_path(data_dir: Path) -> Path:
-    return data_dir / "daemon.sock"
+    # The name is Codex-facing plumbing, not this daemon's choice: the hook
+    # client joins the same name onto the same `$PLUGIN_DATA`, so it lives in
+    # `codex.py` with the rest of the facts both ends must share.
+    return codex.socket_path(data_dir)
 
 
 def query_active_sessions(socket_path, *, timeout: float = QUERY_TIMEOUT

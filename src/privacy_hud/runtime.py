@@ -61,10 +61,15 @@ prompt, no finding, ever.
 sets `HF_HUB_OFFLINE=1` in every interpreter it probes, so nothing here can
 reach the hub even accidentally.
 
-Stdlib only, and it imports nothing else from `privacy_hud` at module import
-time. `doctor.py` imports this module at module level and must be able to
-diagnose a broken package; the one import of `doctor` here is deferred into
-the CLI, where a circular import cannot form.
+Stdlib only, and the only thing it imports from `privacy_hud` is `codex`,
+which is itself stdlib-only and imports nothing from the package. `doctor.py`
+imports this module at module level and must be able to diagnose a broken
+package, so nothing here may pull in the detector stack, the ledger or the
+renderer — and nothing here imports `doctor` at all any more. It used to, in
+two deferred imports whose only purpose was to keep that cycle from forming:
+one for Codex's plugin-data candidates (now `codex.codex_data_candidates`)
+and one for the two path-printing helpers, which now live below and are
+re-exported by `doctor` under their old names.
 """
 from __future__ import annotations
 
@@ -75,6 +80,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+from . import codex
 
 #: Bumped only when the meaning of an existing field changes. A receipt whose
 #: `v` this code does not recognize is treated as unusable rather than
@@ -406,17 +413,17 @@ def resolve_data_dir(explicit: str | None = None
     a design that required them to export it correctly would not achieve. A
     disagreement is reported rather than silently resolved.
 
-    The candidate list comes from `doctor._codex_data_candidates`, imported
-    here and not reimplemented: that function is where this project's
-    knowledge of Codex's layout lives, and a second derivation of it would be
-    a second thing to get wrong. The import is deferred to keep `doctor`'s
-    module-level import of *this* module acyclic.
+    The candidate list comes from `codex.codex_data_candidates`, not
+    reimplemented here: that module is where this project's knowledge of
+    Codex's layout lives, and a second derivation of it would be a second
+    thing to get wrong. It used to come from `doctor`, through an import
+    deferred purely to break the `doctor` -> `runtime` -> `doctor` cycle;
+    `codex` imports nothing from this package, so there is no cycle to break.
     """
     notes: list[str] = []
     try:
-        from .doctor import _codex_data_candidates
-        candidates = _codex_data_candidates()
-    except Exception:  # a broken doctor must not block setup
+        candidates = codex.codex_data_candidates()
+    except Exception:  # an unreadable Codex home must not block setup
         candidates = []
 
     env_value = os.environ.get("PLUGIN_DATA")
@@ -453,6 +460,105 @@ def resolve_data_dir(explicit: str | None = None
     notes.append("Codex has no plugin-data directory for this plugin and "
                  "$PLUGIN_DATA is not set.")
     return None, notes, candidates
+
+
+# --------------------------------------------------------------------- #
+# Where the data lives, and how to print a path
+#
+# Both halves are here rather than in a richer module for the same reason
+# the receipt is: this file is stdlib-only and is the one thing `doctor.py`
+# may import at module level. `local_ui_server` (which pulls in the ledger,
+# the matrix and the renderer) used to own the resolver and `doctor.py` the
+# printing, so a diagnostic that has to survive a broken install imported
+# the whole read stack to learn where a file was — and closed an import
+# cycle doing it. `codex.py` owns the *facts* (`LEDGER_NAME`, the candidate
+# directories); this owns the *choice* of which one, which is policy.
+# --------------------------------------------------------------------- #
+
+def plugin_data_dir() -> Path | None:
+    """The plugin-data directory, or `None`. `$PLUGIN_DATA` if set; otherwise
+    the single directory Codex assigns this plugin, via `resolve_data_dir`;
+    otherwise nothing. There is no `/tmp` default any more (spec §6): a
+    glance-only surface run by hand must not create a ledger in a shared
+    directory, and "nothing to read" is a state every caller already renders
+    as silence.
+
+    Re-exported as `local_ui_server.resolve_data_dir`, which is the name
+    `ambient`, `mcp/server.py` and the tests use for it.
+    """
+    env = os.environ.get("PLUGIN_DATA")
+    if env:
+        return Path(env).expanduser()
+    chosen, _notes, _candidates = resolve_data_dir()
+    return chosen
+
+
+def ledger_path() -> Path | None:
+    """Same convention as `dispatch.new_state()` / `hooks/handler.py` /
+    `mcp/server.py`: `$PLUGIN_DATA/ledger.db`, or `None` when there is no
+    resolvable plugin-data directory (see `plugin_data_dir`)."""
+    data_dir = plugin_data_dir()
+    return None if data_dir is None else codex.ledger_path(data_dir)
+
+
+def display_path(path) -> str:
+    """`/Users/x/.codex/...` -> `~/.codex/...`.
+
+    Two reasons. It keeps a report narrow enough to read, and it keeps the
+    account name out of a report a user is likely to paste into a bug tracker
+    — a small thing, but this is a privacy tool and the shell will expand `~`
+    in the remedy lines anyway, so nothing is lost.
+
+    Lived in `doctor.py` until the Codex-facts split, and is still reachable
+    as `doctor._display_path`: `doctor` is where its callers are, but `main`
+    below prints paths too, and a setup command must not have to import a
+    1700-line diagnostic to spell one.
+    """
+    text = str(path)
+    home = str(Path.home())
+    if home and text.startswith(home):
+        return "~" + text[len(home):]
+    return text
+
+
+#: Characters that need no shell quoting inside an unquoted word.
+_SHELL_SAFE = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    "._-/+=:@,")
+
+
+def shell_path(path) -> str:
+    """A path as it should appear *inside a command the user will paste*.
+
+    `display_path` is for prose; this is for the `-> ` remedy lines, which
+    are meant to be copied into a shell. The difference is not cosmetic: this
+    very project lives in a directory whose name contains spaces, so an
+    unquoted `codex plugin marketplace add <repo>` silently becomes a
+    three-argument command and the remedy fails in a way that reads as the
+    tool's fault.
+
+    Quoting a home-relative path is where this gets subtle, and the obvious
+    answer is wrong. `~'/Desktop/a b'` does **not** expand: POSIX tilde
+    expansion applies only when no character of the tilde-prefix is quoted,
+    and with no unquoted slash in the word the whole thing is the
+    tilde-prefix. Verified, not assumed. So a home-relative path that needs
+    quoting is emitted as `"$HOME/..."` instead, which expands inside double
+    quotes, tolerates spaces, and still keeps the account name out of the
+    report (see `display_path`). A path that needs no quoting stays bare and
+    readable.
+    """
+    text = display_path(path)
+    if text.startswith("~"):
+        rest = text[1:]
+        if set(rest) <= _SHELL_SAFE:
+            return "~" + rest
+        escaped = rest
+        for char in ("\\", '"', "$", "`"):
+            escaped = escaped.replace(char, "\\" + char)
+        return f'"$HOME{escaped}"'
+    if text and set(text) <= _SHELL_SAFE:
+        return text
+    return "'" + text.replace("'", "'\\''") + "'"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -502,11 +608,6 @@ def main(argv: list[str] | None = None, *, out=None) -> int:
     def say(line: str = "") -> None:
         print(line, file=out)
 
-    # Imported here, not at module level: this module is imported by
-    # `doctor` and (in spirit) mirrored by the stdlib-only hook client, and
-    # only this command needs the pretty-printing helpers.
-    from .doctor import _display_path, _shell_path
-
     say("privacy-hud setup")
     say()
 
@@ -526,10 +627,10 @@ def main(argv: list[str] | None = None, *, out=None) -> int:
 
     versions = _local_versions()
     missing = [name for name, value in versions.items() if value is None]
-    say(f"  interpreter    {_display_path(sys.executable)}")
+    say(f"  interpreter    {display_path(sys.executable)}")
     say(f"  transformers   {versions.get('transformers') or 'NOT INSTALLED'}")
     say(f"  torch          {versions.get('torch') or 'NOT INSTALLED'}")
-    say(f"  plugin data    {_display_path(data_dir)}")
+    say(f"  plugin data    {display_path(data_dir)}")
     say()
 
     if missing and not args.allow_degraded:
@@ -580,11 +681,11 @@ def main(argv: list[str] | None = None, *, out=None) -> int:
     except OSError as exc:
         say(f"  FAILED: cannot write the receipt ({type(exc).__name__}).")
         say()
-        say(f"  -> Check that {_shell_path(data_dir)} exists and is "
+        say(f"  -> Check that {shell_path(data_dir)} exists and is "
             "writable.")
         return 1
 
-    say(f"  recorded       {_display_path(written)}")
+    say(f"  recorded       {display_path(written)}")
     say()
     if missing:
         say("  Recorded a DEGRADED runtime, as asked: tier 3 cannot run in "

@@ -303,7 +303,8 @@ def test_empty_plugin_data_fails_the_same_way_unset_does(monkeypatch, tmp_path):
 def test_unset_plugin_data_fails_cleanly_in_the_checks_that_need_a_data_dir(
         monkeypatch, tmp_path):
     """`check_ledger`, `check_runtime_pin` and `check_daemon` all resolve
-    `PLUGIN_DATA` through `local_ui_server._ledger_path()`, which returns
+    `PLUGIN_DATA` through `runtime.ledger_path()` (`doctor._ledger_path`,
+    and `local_ui_server._ledger_path` — one function, three names), which returns
     `None` once there is no `/tmp` fallback to guess with (spec §6). Left
     unguarded, each one called `.parent`/`.exists()` on that `None` and
     crashed with `AttributeError` -- caught by `run_checks()`'s per-check
