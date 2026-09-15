@@ -93,7 +93,7 @@ CREATE TABLE IF NOT EXISTS flows (        -- multi-hop chains for the L3 flow li
 
 CREATE TABLE IF NOT EXISTS policy (
   id         INTEGER PRIMARY KEY,
-  scope      TEXT NOT NULL,               -- global|session:<id>
+  scope      TEXT NOT NULL,               -- session:<id>
   rule_type  TEXT NOT NULL,               -- mask|block_source|allow_dest
   selector   TEXT NOT NULL,               -- data_type / path glob / destination
   created_at INTEGER NOT NULL
@@ -114,8 +114,7 @@ CREATE TABLE IF NOT EXISTS policy_tokens (  -- one-shot consent, §8
   tool_name  TEXT NOT NULL,
   args_hash  BLOB NOT NULL,
   mode       TEXT NOT NULL,               -- allow_once|minimize
-  expires_at INTEGER NOT NULL,
-  consumed   INTEGER NOT NULL DEFAULT 0
+  expires_at INTEGER NOT NULL
 );
 """
 
@@ -146,14 +145,6 @@ COVERAGE_UNOBSERVED_HOOKS = "unobserved_hooks"
 #: still dedupes it (SQLite treats NULLs as distinct, which would let one daemon
 #: write the same gap twice).
 UNATTRIBUTED_SESSION = ""
-
-#: `policy.scope` for a rule that applies to every session in this ledger.
-#: No caller mints one today (`add_policy` writes session scope), but the
-#: schema documents it as a first-class scope, so `policy_selectors` honours
-#: it: a rule nobody can write is a comment, a rule the reader silently skips
-#: is protection that looks applied and is not.
-POLICY_SCOPE_GLOBAL = "global"
-
 
 def _session_scope(session_id: str) -> str:
     """`policy.scope` for a rule bound to one session.
@@ -725,14 +716,19 @@ class Ledger:
             (_session_scope(session_id), rule_type, selector, int(time.time())))
 
     def policy_selectors(self, session_id: str, rule_type: str) -> set[str]:
-        """Every `selector` of `rule_type` that applies to `session_id`: the
-        session's own rules plus any `global` ones.
+        """Every `selector` of `rule_type` written for `session_id`.
+
+        Session scope only. The schema once documented a `global` scope and
+        this reader honoured it, but nothing could write one: `add_policy` is
+        session-scoped on purpose, and no action in design.md offers a rule
+        for every session. A reader for a scope the product does not offer is
+        a promise the schema makes and the UI never does, so it is gone.
 
         What this defends is that a user-written rule is actually consulted.
         `Engine.observe` calls this on every egress observation ahead of its
         own matrix defaults, so a selector missing from this set is a rule the
-        UI told the user was in force and the engine never saw. Hence both
-        scopes, and hence no `except` around the read: a malformed `policy` row
+        UI told the user was in force and the engine never saw. Hence no
+        `except` around the read: a malformed `policy` row
         must fail loud, exactly like an unmapped destination (I2), rather than
         read as "no rules".
 
@@ -740,8 +736,8 @@ class Ledger:
         duplicate rows for the same selector are the same rule written twice.
         """
         rows = self.conn.execute(
-            "SELECT selector FROM policy WHERE rule_type=? AND scope IN (?, ?)",
-            (rule_type, POLICY_SCOPE_GLOBAL, _session_scope(session_id)),
+            "SELECT selector FROM policy WHERE rule_type=? AND scope=?",
+            (rule_type, _session_scope(session_id)),
         ).fetchall()
         return {r["selector"] for r in rows}
 
@@ -767,9 +763,15 @@ class Ledger:
         would authorize a call the user never saw.
         """
         token = os.urandom(16).hex()
+        # A second consent for the same call replaces the first rather than
+        # stacking with it: two rows would let a retried call through twice,
+        # and "once" is the whole grant.
+        self.conn.execute(
+            "DELETE FROM policy_tokens WHERE session_id=? AND tool_name=?"
+            " AND args_hash=?", (session_id, tool_name, args_hash))
         self.conn.execute(
             "INSERT INTO policy_tokens(token,session_id,tool_name,args_hash,mode,"
-            "expires_at,consumed) VALUES(?,?,?,?,?,?,0)",
+            "expires_at) VALUES(?,?,?,?,?,?)",
             (token, session_id, tool_name, args_hash, mode,
              int(time.time()) + ttl_seconds))
         return token
@@ -791,7 +793,10 @@ class Ledger:
           was about to happen is not consent for a call that happens later.
         * Consumption is a `DELETE` of the matching row, so a replayed call
           with identical arguments finds nothing. A blocked tool call that
-          Codex retries in a loop gets exactly one pass.
+          Codex retries in a loop gets exactly one pass. `mint_token`
+          replaces an earlier token for the same call, so there is at most
+          one row to find; the `ORDER BY` only makes the choice deterministic
+          in a ledger written before that rule existed.
 
         No match is `None`, not an error: "no token" is the ordinary state of
         almost every call, and the caller's next step (deny) is the safe one.
@@ -805,7 +810,7 @@ class Ledger:
         """
         row = self.conn.execute(
             "SELECT token, mode FROM policy_tokens WHERE session_id=? AND tool_name=?"
-            " AND args_hash=? AND consumed=0 AND expires_at>?",
+            " AND args_hash=? AND expires_at>? ORDER BY expires_at DESC LIMIT 1",
             (session_id, tool_name, args_hash, int(time.time()))).fetchone()
         if row is None:
             return None
