@@ -96,3 +96,12 @@ def test_golden_core_shape():
         assert len(bar) == 10 and set(bar) <= {"█", "░"}
         assert pct == f"{g['percent']:>2}%"
         assert bar.count("█") == round(g["percent"] / 10)
+
+
+def test_patch_embeds_the_same_golden_file():
+    patch = (Path(__file__).parents[1] / "patches" / "privacy-status-line.patch").read_text()
+    expected = (MATRIX / "hud_golden.json").read_text().splitlines()
+    # Every line of the golden must appear as an added line in the patch.
+    added = {line[1:] for line in patch.splitlines() if line.startswith("+")}
+    missing = [l for l in expected if l and l not in added]
+    assert missing == [], missing
