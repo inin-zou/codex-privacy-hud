@@ -448,6 +448,51 @@ def check_python(version_info=None) -> Check:
     )
 
 
+def _plugin_data_export_fix(candidates: list[Path]) -> list[str]:
+    """Shared "how to fix it" wording for a missing or unresolved
+    `PLUGIN_DATA`. `check_plugin_data` and every check below that cannot
+    proceed without a data directory (`check_ledger`, `check_runtime_pin`,
+    `check_daemon`, via `_plugin_data_unset_check`) call this instead of
+    each carrying its own copy of the same three cases, which is how a
+    fix like "candidates found: ..." would otherwise drift out of sync
+    between them."""
+    if len(candidates) == 1:
+        return [f"export PLUGIN_DATA={_shell_path(candidates[0])}"]
+    if candidates:
+        return ["Pick the directory Codex assigned to this plugin and "
+                "export it, e.g. "
+                f"export PLUGIN_DATA={_shell_path(candidates[0])}",
+                "Candidates found: " + ", ".join(
+                    _display_path(c) for c in candidates)]
+    return [f"ls {_shell_path(_codex_home() / 'plugins' / 'data')} "
+            "and export the entry for this plugin as PLUGIN_DATA",
+            "If that directory is empty, install the plugin first: "
+            "codex plugin add codex-privacy-hud@codex-privacy-hud"]
+
+
+def _plugin_data_unset_check(name: str) -> Check:
+    """A `FAIL` `Check` named `name`, for the state `check_ledger`,
+    `check_runtime_pin` and `check_daemon` all share with `check_plugin_data`
+    itself: no resolvable `PLUGIN_DATA` at all (unset, and no Codex
+    candidate either -- spec §6, there is no `/tmp` guess to fall back to).
+    Without this guard each of those three called `_ledger_path()` and used
+    the result unconditionally, so an unset `PLUGIN_DATA` crashed with
+    `AttributeError` and `run_checks()` reported the opaque "the check
+    itself failed" -- exactly the fresh-install state this whole file
+    exists to diagnose clearly. One shared message also keeps the wording
+    in sync with `check_plugin_data`'s own "not set" case instead of three
+    near-duplicates drifting apart."""
+    return Check(
+        name, FAIL,
+        "PLUGIN_DATA is not set — nothing is written until it is",
+        details=["Codex assigns this value; the daemon and the hook "
+                 "client must both use the same one or every hook "
+                 "reports unavailable.",
+                 "See the PLUGIN_DATA check above for how to set it."],
+        fixes=_plugin_data_export_fix(_codex_data_candidates()),
+    )
+
+
 def check_plugin_data() -> Check:
     """`PLUGIN_DATA`: is it set, does it exist, is it the one Codex assigns?
 
@@ -465,20 +510,6 @@ def check_plugin_data() -> Check:
     raw = os.environ.get("PLUGIN_DATA")
     candidates = _codex_data_candidates()
 
-    def _export_fix() -> list[str]:
-        if len(candidates) == 1:
-            return [f"export PLUGIN_DATA={_shell_path(candidates[0])}"]
-        if candidates:
-            return ["Pick the directory Codex assigned to this plugin and "
-                    "export it, e.g. "
-                    f"export PLUGIN_DATA={_shell_path(candidates[0])}",
-                    "Candidates found: " + ", ".join(
-                        _display_path(c) for c in candidates)]
-        return [f"ls {_shell_path(_codex_home() / 'plugins' / 'data')} "
-                "and export the entry for this plugin as PLUGIN_DATA",
-                "If that directory is empty, install the plugin first: "
-                "codex plugin add codex-privacy-hud@codex-privacy-hud"]
-
     if raw is None:
         return Check(
             "PLUGIN_DATA", FAIL,
@@ -486,7 +517,7 @@ def check_plugin_data() -> Check:
             details=["Codex assigns this value; the daemon and the hook "
                      "client must both use the same one or every hook "
                      "reports unavailable."],
-            fixes=_export_fix(),
+            fixes=_plugin_data_export_fix(candidates),
         )
 
     data_dir = _ledger_path().parent  # `raw` is set, so this cannot be None
@@ -497,7 +528,7 @@ def check_plugin_data() -> Check:
             details=["Set but pointing at nothing: the daemon would create "
                      "this directory, but Codex's hooks would still be "
                      "talking to the directory Codex itself assigned."],
-            fixes=_export_fix(),
+            fixes=_plugin_data_export_fix(candidates),
         )
 
     check = Check("PLUGIN_DATA", OK, _display_path(data_dir))
@@ -511,7 +542,7 @@ def check_plugin_data() -> Check:
         check.details.append(
             "Fine if you meant to point at a scratch directory; nothing "
             "recorded here will show up for a real Codex session.")
-        check.fixes = _export_fix()
+        check.fixes = _plugin_data_export_fix(candidates)
     return check
 
 
@@ -530,6 +561,8 @@ def check_ledger() -> Check:
     what `ambient.py --once` printing nothing cannot tell them.
     """
     path = _ledger_path()
+    if path is None:
+        return _plugin_data_unset_check("Ledger")
     shown = _display_path(path)
     # Prose uses `shown`; the sqlite3 remedy below is a command the user
     # pastes, so it gets the shell-quoted form. See `_shell_path`.
@@ -682,7 +715,10 @@ def check_runtime_pin(timeout: float = runtime.PROBE_TIMEOUT) -> Check:
     would report this project's documented torch/torchvision ABI break —
     `operator torchvision::nms does not exist` — as a healthy setup.
     """
-    data_dir = _ledger_path().parent
+    ledger_path = _ledger_path()
+    if ledger_path is None:
+        return _plugin_data_unset_check("Runtime pin")
+    data_dir = ledger_path.parent
     receipt, problem = runtime.load_receipt(data_dir)
 
     if receipt is None and problem == "absent":
@@ -714,11 +750,13 @@ def check_runtime_pin(timeout: float = runtime.PROBE_TIMEOUT) -> Check:
 
     # Same refusal `hooks/handler.py` makes, reported before anything else it
     # would mask: a receipt anyone can write is a program anyone can choose
-    # for a hook to execute, so the client declines to spawn from one. This
-    # only arises where `PLUGIN_DATA` is unset and everything falls back to
-    # /tmp, which `check_plugin_data` already fails on -- but a FAIL there
-    # does not stop this check, and silence here would leave the user with a
-    # daemon that never starts and no line saying why.
+    # for a hook to execute, so the client declines to spawn from one. There
+    # is no `/tmp` fallback any more (spec §6) -- an unset `PLUGIN_DATA`
+    # already returned a FAIL above, before `data_dir` could even be
+    # resolved -- but a receipt in a directory another local user can write
+    # to (a shared scratch directory someone explicitly exported) is still
+    # possible, and silence here would leave the user with a daemon that
+    # never starts and no line saying why.
     receipt_file = runtime.receipt_path(data_dir)
     try:
         info = receipt_file.stat()
@@ -732,9 +770,9 @@ def check_runtime_pin(timeout: float = runtime.PROBE_TIMEOUT) -> Check:
             details=["It names an interpreter a hook process executes, so "
                      "the hook client refuses to spawn from it and no daemon "
                      "will start.",
-                     "This is what an unset PLUGIN_DATA looks like from here: "
-                     "every component falls back to /tmp, where anyone can "
-                     "plant one."],
+                     "A directory other local users can write to is what "
+                     "produces this -- for example PLUGIN_DATA exported to "
+                     "a shared scratch directory."],
             fixes=[f"chmod 600 {_shell_path(receipt_file)}"] + _setup_fixes(),
         )
 
@@ -924,7 +962,10 @@ def check_daemon(timeout: float = DAEMON_TIMEOUT, *,
     instead of arranging a receipt on disk; left `None` it is read from the
     same `PLUGIN_DATA` everything else here uses.
     """
-    data_dir = _ledger_path().parent
+    ledger_path = _ledger_path()
+    if ledger_path is None:
+        return _plugin_data_unset_check("Daemon")
+    data_dir = ledger_path.parent
     sock_path = _socket_path(data_dir)
     shown = _display_path(sock_path)
     quoted = _shell_path(sock_path)
