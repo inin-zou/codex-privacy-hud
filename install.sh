@@ -440,4 +440,5 @@ fi
 # Already written after every step that changed anything; this final call
 # only matters when nothing did.
 write_manifest
-log "done. run: codex   (then /statusline to toggle the privacy item)"
+log "done. restart codex to pick up the patched build and the privacy status item"
+log "      (then /statusline toggles the item; \$privacy shows the session audit)"

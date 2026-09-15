@@ -61,6 +61,35 @@ PINNED_ENV_NAMES = ("HF_HOME", "HF_HUB_CACHE", "TRANSFORMERS_CACHE")
 # failure, so a child that exits with it does not latch as one.
 EXIT_ALREADY_RUNNING = 3
 
+
+
+def _setup_hint():
+    """The reply to `SessionStart` (Codex fires it with the first turn, so
+    once per session) when the plugin is installed but `privacy-hud-setup`
+    has never recorded an interpreter -- the state `codex plugin add` alone
+    leaves you in. Every later hook in that session keeps the plain
+    "unavailable" answer: a hook is not a place to lecture, but the first
+    turn is where one line saves a trip to the README.
+
+    The command names the copy of `install.sh` Codex placed beside this file
+    when it installed the plugin, so the hint carries no URL (I2: this file
+    contains no endpoint, not even one meant for a human to paste) and the
+    user runs the same script the README's one-liner downloads. `--yes`
+    because the installer, run from inside a Codex session, has no terminal
+    to ask about the model download and would otherwise skip it.
+    """
+    script = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "install.sh")
+    if os.path.isfile(script):
+        command = "  sh %s --yes" % script
+    else:
+        command = "  install.sh --yes  (from the codex-privacy-hud repository)"
+    return {"systemMessage": (
+        "Privacy HUD is installed but not set up, so nothing is being "
+        "recorded. Run the installer, here or in another terminal:\n"
+        + command + "\nthen restart Codex.")}
+
 # Holds the `Popen` handle for the lifetime of this process. Two reasons, both
 # learned the hard way elsewhere: a dropped handle makes a child that exited
 # instantly indistinguishable from one still booting (so `poll()` below has
@@ -294,6 +323,9 @@ def main():
             starting = _spawn_daemon(data_dir)
         except Exception:
             pass  # I6: a failed spawn must never break Codex
+        if (payload.get("hook_event_name") == "SessionStart"
+                and not os.path.exists(os.path.join(data_dir, RECEIPT_NAME))):
+            return _setup_hint()
         return _unverified(payload, starting)
 
     try:

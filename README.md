@@ -107,7 +107,15 @@ the patched Codex build, so until those exist every hook answers
 `Privacy HUD unavailable — disclosure unverified` and `$privacy` reports no
 daemon. Run `install.sh` afterwards to add them (it is safe to run over an
 existing plugin install), or follow
-[docs/installing-by-hand.md](docs/installing-by-hand.md).
+[docs/installing-by-hand.md](docs/installing-by-hand.md). Two things to
+expect on the next launch. Codex 0.154 opens with **Hooks need review** for
+the plugin's eight hooks; choose **Trust all and continue**, since nothing
+from the plugin runs until they are trusted. Then, until setup has run, the
+first turn of every session shows a one-line reminder with the installer
+command (`sh <plugin root>/install.sh --yes`, the copy Codex installed
+beside the hooks). You can paste that command into the session and let
+Codex run it; when it finishes, restart Codex so the patched build and the
+status item are picked up.
 
 ### First launch
 
