@@ -115,14 +115,15 @@ daemon. From here:
 1. Run `codex`. Codex 0.154 opens with **Hooks need review** for the
    plugin's eight hooks; choose **Trust all and continue**. Nothing from
    the plugin runs before that.
-2. Send any message. The first turn shows a one-line reminder with the
-   installer's path in the plugin cache:
-   `sh ~/.codex/plugins/cache/codex-privacy-hud/codex-privacy-hud/<version>/install.sh --yes`.
-   Paste it into the session and let Codex run it (Codex asks before it
-   writes outside the working directory), or run it in another terminal.
-   It is the same script as the one-liner above and is safe to run over an
-   existing plugin install; `--yes` downloads the model without asking,
-   `--no-model` skips it.
+2. Send any message. The first turn shows a one-line reminder. Type
+   `$privacy setup`: Codex runs the installer from the plugin cache
+   (`sh ~/.codex/plugins/cache/codex-privacy-hud/codex-privacy-hud/<version>/install.sh --yes`)
+   and asks once for permission to run it outside the sandbox, since it
+   writes to your home directory and downloads. Approve, and wait; the
+   model download takes a few minutes. The reminder prints the same path,
+   so you can also run it in another terminal. It is the same script as
+   the one-liner above and is safe to run over an existing plugin install;
+   `--yes` downloads the model without asking, `--no-model` skips it.
 3. Restart Codex so the patched build and the status item are picked up.
 
 [docs/installing-by-hand.md](docs/installing-by-hand.md) has every step
@@ -294,6 +295,7 @@ Stated up front, because a privacy tool that overclaims is worse than none:
 |---|---|
 | `/statusline` inside Codex | Ticks or unticks the `privacy` item for good. The choice is saved in `config.toml`. |
 | `$privacy hud on\|off\|status` | Hides or shows the item for now, without touching your config. `status` prints `absent`, `stale`, `hidden`, or `shown`. |
+| `$privacy setup` | Runs the installer that came with the plugin, for an install made with `codex plugin add` alone. Asks once to run outside the sandbox. |
 | `[tui].status_line` in `~/.codex/config.toml` | The list of status-line items Codex renders. The installer adds `"privacy"` to it. |
 | `install.sh --yes` / `--no-model` / `--release-base-url URL` / `--uninstall` / `--purge` | `--yes` answers the model question with yes, `--no-model` skips the download, `--release-base-url` fetches the patched build from somewhere other than this repository's GitHub releases, `--uninstall` removes what the installer created, `--purge` also removes the ledger and the weights. |
 | `PRIVACY_HUD_NO_SPAWN=1` | Turns daemon auto-start off entirely, for a sandbox where the spawn cannot succeed. |

@@ -224,7 +224,53 @@ print(out["state"])
 PY
 ```
 
+### `$privacy setup`
+
+For an install that came from `codex plugin add` alone: the first turn of
+such a session shows `Privacy HUD is installed but not set up`, and
+`$privacy` above finds no daemon. This runs the installer Codex copied in
+beside this skill. It creates the daemon's Python environment, downloads
+the detection model (~2.8 GB, once), fetches the patched Codex build for
+the installed Codex version, and adds the `privacy` item to
+`[tui].status_line`. It is safe to run over an existing install.
+
+The script writes under `~/.local/share/codex-privacy-hud/` and
+`~/.codex/`, appends one `PATH` line to the shell rc file, and needs the
+network for its downloads, so it cannot run inside the workspace sandbox:
+request escalated permissions for exactly this command, with that sentence
+as the justification. Run it as written; if the user said to skip the
+model, replace `--yes` with `--no-model` and nothing else.
+
+```bash
+ROOT="${PLUGIN_ROOT:-$(ls -d "${CODEX_HOME:-$HOME/.codex}"/plugins/cache/codex-privacy-hud/codex-privacy-hud/*/ | tail -1)}"
+sh "$ROOT/install.sh" --yes
+```
+
+(`PLUGIN_ROOT` is set for hooks; in a skill's shell it may not be, so the
+fallback locates the installed copy under Codex's plugin cache and takes
+the newest version.) It takes several minutes; the model download
+dominates. Keep waiting on
+the same process instead of starting a second one. It ends in one of two
+ways, and the user needs to hear which:
+
+- `done. restart codex …`: tell the user to restart Codex. This session is
+  still the official binary; the patched build, the status-line item and
+  the `PATH` change apply to the next one.
+- `no patched build published for codex <ver> yet`: everything else
+  installed. Say that the status-line item needs a build for their Codex
+  version, and that the fallback pane (`privacy-hud-ambient --watch`)
+  works meanwhile. A restart is still needed for the daemon's hooks.
+
+If it fails before either line, print its last lines verbatim and stop; do
+not retry with different flags, and do not edit `~/.codex/config.toml` or
+the rc file by hand.
+
 ## What NOT to do
+
+- Do not fetch the installer from the network for `$privacy setup`. The
+  copy at `$PLUGIN_ROOT/install.sh` is the one Codex installed with the
+  plugin and the one the user can read; a `curl | sh` from inside a
+  session is exactly the kind of call this plugin exists to flag.
 
 - Do not call the audit "your session" when step 1 printed a `note:` line.
   The note exists because the resolution could not be certain — two Codex
