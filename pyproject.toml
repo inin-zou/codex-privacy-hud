@@ -80,3 +80,10 @@ ignore = [
 # on a user's 3.11. `files` makes a bare `mypy` check what CI checks.
 python_version = "3.11"
 files = ["src"]
+
+# The `detectors` extra, which the typecheck job does not install (see
+# ci.yml). Without this mypy's verdict would depend on whether the machine
+# running it happens to have transformers.
+[[tool.mypy.overrides]]
+module = ["transformers", "transformers.*", "torch", "torch.*"]
+ignore_missing_imports = true
