@@ -1,5 +1,7 @@
 # Codex Privacy HUD
 
+![Codex's own status line, under the composer, with the plugin's Privacy item beside the model and working directory](docs/images/banner.png)
+
 [![CI](https://github.com/inin-zou/codex-privacy-hud/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/inin-zou/codex-privacy-hud/actions/workflows/ci.yml)
 
 > Trace your privacy disclosure the same way you already trace your token usage — live, in every conversation.
@@ -44,9 +46,9 @@ PRIVACY  Disclosure ███░░░░░░░ 28%  ›
 gpt-5.4 · ~/proj · Privacy ███░░░░░░░ 28% ⚠2
 ```
 
-Real output from a live Codex 0.154 session running the patched build (not a mockup): one prompt containing a street address, and the `Privacy` item under the composer already at 5%, beside Codex's own model, directory, and context items:
+Real output from a live Codex 0.154 session running the patched build (not a mockup): one prompt containing a street address, and the `Privacy` item under the composer already at 5%, beside Codex's own model and directory items:
 
-![Codex's own status line with the plugin's `Privacy` item after a single prompt that contained a street address — 5% disclosure, next to the model, directory, and context items](docs/images/status-line-patched.png)
+![A Codex session: one prompt containing a street address, the model's reply, and the plugin's `Privacy` item under the composer at 5% disclosure, next to Codex's own model and directory items](docs/images/status-line-patched.png)
 
 Stock Codex has no plugin-owned status item, so this needs a Codex build
 with a small patch (`patches/privacy-status-line.patch`, one added item,
