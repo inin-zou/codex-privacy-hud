@@ -72,7 +72,8 @@ diagnostic pointed at a user's real ledger should be *incapable* of writing
 to it rather than merely careful not to.
 
 The precise claim, since an approximate one would be the kind of overclaim
-CLAUDE.md §5 forbids: no file this module names is ever created or modified.
+README's known-limits section forbids: no file this module names is ever
+created or modified.
 Sqlite itself may materialize its own `-shm`/`-wal` sidecars beside a
 WAL-mode ledger that no other connection currently holds open — that is
 sqlite's locking bookkeeping, it contains none of our writes, it does not
