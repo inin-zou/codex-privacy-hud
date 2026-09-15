@@ -24,6 +24,11 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+if [ "$PURGE" -eq 1 ] && [ "$UNINSTALL" -eq 0 ]; then
+  echo "usage: --purge requires --uninstall" >&2
+  exit 2
+fi
+
 log() { printf '%s\n' "$*"; }
 die() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 
@@ -56,16 +61,45 @@ if [ "$UNINSTALL" -eq 1 ]; then
     head -2 "$FWD" | grep -q "codex-privacy-hud forwarder" || die "$FWD is not ours; not removing it"
     rm -f "$FWD"; log "removed $FWD"
   fi
-  # config.toml: remove "privacy" from status_line; drop the key if we created it
+  # config.toml: only touch it when the manifest itself recorded an edit --
+  # i.e. this install (or one it inherited the marker from) is what put
+  # "privacy" there. A user-authored status_line that happens to already
+  # contain "privacy" is left alone (spec: uninstall reverses exactly what
+  # the manifest lists, nothing else).
   CFG="$HOME/.codex/config.toml"
-  if [ -f "$CFG" ] && grep -q '"privacy"' "$CFG"; then
-    if grep -q '"config.toml": "status_line:created-table"' "$MANIFEST"; then
-      sed -i '' -e '/^\[tui\]$/d' -e '/^status_line = .*"privacy".*$/d' "$CFG"
-    elif grep -q '"config.toml": "status_line:created-key"' "$MANIFEST"; then
-      sed -i '' -e '/^status_line = .*"privacy".*$/d' "$CFG"
-    else
-      sed -i '' -e 's/, *"privacy"//; s/"privacy", *//' "$CFG"
-    fi
+  CFG_EDIT="$(sed -n 's/.*"config.toml": *"\([^"]*\)".*/\1/p' "$MANIFEST")"
+  if [ -f "$CFG" ] && [ -n "$CFG_EDIT" ]; then
+    case "$CFG_EDIT" in
+      status_line:created-table)
+        # Drop our status_line line; drop the [tui] header too, but only if
+        # the table is now empty (a user may have added other keys under it
+        # after we created it) -- header followed by EOF, a blank line, or
+        # another "[" header counts as empty.
+        awk '
+          { lines[NR] = $0 }
+          END {
+            n = NR; m = 0
+            for (i = 1; i <= n; i++) {
+              if (lines[i] ~ /^status_line = .*"privacy".*$/) continue
+              m++; out[m] = lines[i]
+            }
+            for (i = 1; i <= m; i++) {
+              if (out[i] == "[tui]") {
+                nxt = (i < m) ? out[i+1] : ""
+                if (nxt == "" || nxt ~ /^\[/) continue
+              }
+              print out[i]
+            }
+          }
+        ' "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"
+        ;;
+      status_line:created-key)
+        sed -i '' -e '/^status_line = .*"privacy".*$/d' "$CFG"
+        ;;
+      status_line:privacy)
+        sed -i '' -e 's/, *"privacy"//; s/"privacy", *//' "$CFG"
+        ;;
+    esac
     log "removed privacy from status_line"
   fi
   RC="$(rc_file)"
@@ -109,8 +143,18 @@ if [ "${PRIVACY_HUD_FAKE:-0}" != "1" ]; then
   add_created "$SHARE/venv/"
   if [ "$NO_MODEL" -eq 0 ]; then
     if [ "$YES" -eq 0 ]; then
-      printf 'step 3/9: download openai/privacy-filter weights (~2.8 GB, from Hugging Face, once; everything after is offline)? [y/N] '
-      read -r ans; case "$ans" in y|Y) ;; *) NO_MODEL=1 ;; esac
+      # Piped installs (`curl ... | sh`) have no controlling terminal to
+      # prompt on -- plain `read` there either reads the script's own bytes
+      # off the pipe or hits EOF, and either way a bare failing `read` would
+      # abort the whole script under `set -e` right after step 2 already
+      # installed the venv. Only prompt when /dev/tty is actually usable,
+      # and never let a failed read propagate out of this statement.
+      if ans="$(printf 'step 3/9: download openai/privacy-filter weights (~2.8 GB, from Hugging Face, once; everything after is offline)? [y/N] ' 2>/dev/null >/dev/tty && read -r a 2>/dev/null </dev/tty && echo "$a")" 2>/dev/null; then
+        case "$ans" in y|Y) ;; *) NO_MODEL=1 ;; esac
+      else
+        log "no terminal to ask about the model download; skipping it -- rerun with --yes to fetch the weights"
+        NO_MODEL=1
+      fi
     fi
   fi
   if [ "$NO_MODEL" -eq 0 ]; then
@@ -133,8 +177,11 @@ fi
 log "step 6/9: fetching patched Codex $VER"
 ART="codex-privacy-$VER-$TRIPLE.tar.gz"
 TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
 if curl -fsSL "$BASE_URL/codex-$VER-hud/$ART" -o "$TMP/$ART" 2>/dev/null || curl -fsSL "$BASE_URL/latest/$ART" -o "$TMP/$ART" 2>/dev/null; then
-  curl -fsSL "$BASE_URL/codex-$VER-hud/$ART.sha256" -o "$TMP/$ART.sha256" 2>/dev/null || curl -fsSL "$BASE_URL/latest/$ART.sha256" -o "$TMP/$ART.sha256"
+  if ! { curl -fsSL "$BASE_URL/codex-$VER-hud/$ART.sha256" -o "$TMP/$ART.sha256" 2>/dev/null || curl -fsSL "$BASE_URL/latest/$ART.sha256" -o "$TMP/$ART.sha256" 2>/dev/null; }; then
+    die "checksum file for $ART not found; not installing"
+  fi
   EXPECT="$(awk '{print $1}' "$TMP/$ART.sha256")"
   ACTUAL="$(shasum -a 256 "$TMP/$ART" | awk '{print $1}')"
   [ "$EXPECT" = "$ACTUAL" ] || die "checksum mismatch for $ART; not installing"
@@ -168,8 +215,21 @@ FWD
   esac
   log "step 8/9: enabling the privacy status item"
   CFG="$HOME/.codex/config.toml"; touch "$CFG"
+  # If a previous install of ours edited config.toml, carry that marker
+  # forward so a later uninstall still knows the edit is reversible (it is
+  # only overwritten -- not appended to -- once this run's manifest is
+  # written at the end).
+  PREV_CFG_EDIT=""
+  if [ -f "$MANIFEST" ]; then
+    PREV_CFG_EDIT="$(sed -n 's/.*"config.toml": *"\([^"]*\)".*/\1/p' "$MANIFEST")"
+  fi
   if grep -q '^status_line *=' "$CFG"; then
-    grep -q '"privacy"' "$CFG" || { sed -i '' 's/^\(status_line *= *\[\)/\1"privacy", /' "$CFG"; add_edited "config.toml" "status_line:privacy"; }
+    if grep -q '"privacy"' "$CFG"; then
+      [ -n "$PREV_CFG_EDIT" ] && add_edited "config.toml" "$PREV_CFG_EDIT"
+    else
+      sed -i '' 's/^\(status_line *= *\[\)/\1"privacy", /' "$CFG"
+      add_edited "config.toml" "status_line:privacy"
+    fi
   elif grep -q '^\[tui\]$' "$CFG"; then
     # the table exists without the key: add only the key, right under the header
     sed -i '' '/^\[tui\]$/a\
@@ -184,7 +244,6 @@ else
   log "no patched build published for codex $VER yet; skipping the status line."
   log "the fallback pane still works: privacy-hud-ambient --watch"
 fi
-rm -rf "$TMP"
 
 if [ "${PRIVACY_HUD_FAKE:-0}" != "1" ]; then
   log "step 9/9: doctor"

@@ -132,3 +132,62 @@ def test_missing_release_continues_without_forwarder(home):
     assert r.returncode == 0, r.stderr
     assert "no patched build" in r.stdout.lower()
     assert not (home / ".local/bin/codex").exists()
+
+
+def test_missing_sha256_aborts_before_installing(home):
+    # The tarball is there but its .sha256 is not (a partial/broken release
+    # publish) -- the OR-chain of both .sha256 fetch attempts must not be
+    # allowed to fail bare under `set -e`; it has to be caught and reported.
+    home, env, rel = home
+    (rel / "latest" / f"codex-privacy-{VER}-{TRIPLE}.tar.gz.sha256").unlink()
+    r = run(env, "--yes", "--release-base-url", rel.as_uri())
+    assert r.returncode != 0 and "checksum" in r.stderr.lower()
+    assert not (home / ".local/bin/codex").exists()
+
+
+def test_second_install_preserves_created_table_marker_for_uninstall(home):
+    # Installing twice (e.g. re-running after a codex point release with the
+    # same version) must not lose track of the fact that WE created the
+    # [tui] table the first time -- uninstall still has to be able to
+    # reverse it.
+    home, env, rel = home
+    run(env, "--yes", "--release-base-url", rel.as_uri())
+    r = run(env, "--yes", "--release-base-url", rel.as_uri())
+    assert r.returncode == 0, r.stderr
+    r = run(env, "--uninstall")
+    assert r.returncode == 0, r.stderr
+    assert (home / ".codex/config.toml").read_text() == 'model = "gpt-5.4"\n'
+
+
+def test_uninstall_leaves_preexisting_privacy_config_untouched(home):
+    # If the user's config.toml already listed "privacy" before we ever
+    # touched it, install must not claim credit for that edit, and uninstall
+    # must leave it exactly as the user wrote it.
+    home, env, rel = home
+    cfg = home / ".codex/config.toml"
+    cfg.write_text('[tui]\nstatus_line = ["model-with-reasoning", "privacy"]\n')
+    r = run(env, "--yes", "--release-base-url", rel.as_uri())
+    assert r.returncode == 0, r.stderr
+    r = run(env, "--uninstall")
+    assert r.returncode == 0, r.stderr
+    assert cfg.read_text() == '[tui]\nstatus_line = ["model-with-reasoning", "privacy"]\n'
+
+
+def test_uninstall_keeps_tui_header_when_user_added_a_key(home):
+    # We created the [tui] table; the user later added their own key under
+    # it. Uninstall must drop only our status_line line, not the header the
+    # user's own key now depends on.
+    home, env, rel = home
+    r = run(env, "--yes", "--release-base-url", rel.as_uri())
+    assert r.returncode == 0, r.stderr
+    cfg = home / ".codex/config.toml"
+    cfg.write_text(cfg.read_text().rstrip("\n") + '\ntheme = "dark"\n')
+    r = run(env, "--uninstall")
+    assert r.returncode == 0, r.stderr
+    assert cfg.read_text() == 'model = "gpt-5.4"\n[tui]\ntheme = "dark"\n'
+
+
+def test_purge_without_uninstall_is_a_usage_error(home):
+    home, env, rel = home
+    r = run(env, "--purge")
+    assert r.returncode == 2
