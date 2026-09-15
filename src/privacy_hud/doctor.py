@@ -163,7 +163,10 @@ MIN_TORCH = (2, 5)
 PLUGIN_NAME = "codex-privacy-hud"
 
 #: Socket file name inside `$PLUGIN_DATA`. See `_socket_path` for why this
-#: literal exists here as well as in `daemon.py`.
+#: literal exists here as well as in `daemon.py`. All three copies — this one,
+#: `daemon._default_socket_path`'s and `hooks/handler.py`'s — are compared by
+#: `test_the_socket_name_is_the_same_in_all_three_places` in
+#: `tests/test_daemon.py`, so the duplication is checked rather than trusted.
 SOCKET_NAME = "daemon.sock"
 
 #: The harmless probe event. See the module docstring for why this one.

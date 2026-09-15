@@ -86,8 +86,9 @@ RECEIPT_VERSION = 1
 #: The receipt's filename inside `$PLUGIN_DATA`. Duplicated as a literal in
 #: `hooks/handler.py`, which is stdlib-only and never imports this package —
 #: `tests/test_runtime.py` asserts the two agree, so the duplication is
-#: checked rather than trusted (the same treatment `daemon.sock` and
-#: `MIN_PYTHON` already get).
+#: checked rather than trusted — the same treatment `daemon.sock` gets in
+#: `tests/test_daemon.py::test_the_socket_name_is_the_same_in_all_three_places`
+#: and `MIN_PYTHON` gets against `pyproject.toml`.
 RECEIPT_NAME = "runtime.json"
 
 #: Marker written after every spawn attempt. Its *mtime* is the whole
