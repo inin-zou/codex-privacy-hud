@@ -96,10 +96,24 @@ Rules:
 - **Atomic writes**: write `<sid>.json.tmp` then `os.replace`. A reader
   never sees a partial file.
 - **Written on every change**: after each observation is recorded for the
-  session, on `SessionStart` (zeros), and when `hidden` flips. Not on a timer.
+  session, on `SessionStart` (zeros), and when `hidden` flips. The *numbers*
+  change only on those events — never on a timer.
+- **Heartbeat every 10 s** (`HudPublisher.heartbeat`, amended 2026-09-15):
+  the daemon's serve loop re-stamps `updated_at` on the snapshots of every
+  session it believes is live (`dispatch.State.live`, same staleness cutoff
+  the lifetime policy uses) and on `_daemon.json`, changing no other field.
+  This is not a second writer of the numbers; it is the writer saying "still
+  here". Without it the staleness rule below meant "nothing has happened
+  lately" rather than "the daemon is gone": a session whose user paused for
+  31 s lost its status item, and `_daemon.json` — written once at startup —
+  went stale half a minute in, so `ambient.py` stopped rendering the
+  unattributed-gaps line for the rest of the daemon's life. 10 s leaves room
+  for two missed beats inside the 30 s window, so a daemon busy with a
+  tier-3 scan does not make the item blink.
 - **Stale after 30 s**: a reader that finds `updated_at` older than 30 s
   treats the file as absent. A crashed daemon must not leave a frozen number
-  on screen.
+  on screen — and, given the heartbeat above, a stale file now means exactly
+  that and nothing else.
 - **Deleted on `SessionEnd`**, and the whole `hud/` directory is swept of
   files older than 4 h at daemon start (matches the daemon's own leaked-
   session bound).
@@ -145,6 +159,9 @@ Uninstall never infers; it only reverses what is listed.
 - `set_hidden(session_id, hidden)` — contract B.
 - `retire(session_id)` — deletes the file.
 - `sweep(max_age_s=4*3600)` — startup housekeeping.
+- `heartbeat(session_ids)` — re-stamps `updated_at` on each listed session's
+  snapshot and on `_daemon.json`, changing nothing else (§4.1's heartbeat
+  rule). Called from `daemon.Daemon`'s serve loop, not from a hook path.
 
 Depends on `PLUGIN_DATA` only. Never opens the ledger; the caller passes
 numbers it already has. Call sites in `dispatch.py`: after

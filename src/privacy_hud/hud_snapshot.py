@@ -37,6 +37,22 @@ watched go by without recording (`Ledger.unattributed_gaps()`). `ambient.py`
 used to open sqlite for that one question; now the daemon answers it here at
 startup and readers stay sqlite-free.
 
+**Why there is a heartbeat** (`heartbeat()`, spec §4.1). Snapshots are
+written on hook events, and both readers treat a file older than
+`STALE_AFTER` as absent. Those two facts together used to mean that a
+session which merely went quiet — the user reading, thinking, or away from
+the keyboard for 31 seconds — lost its status item, and that `_daemon.json`
+(written once, at daemon start) went stale half a minute in, so
+`ambient.py` stopped rendering the unattributed-gaps line for the entire
+remaining life of the daemon. Staleness is supposed to mean "the daemon
+that writes this is gone", and without a heartbeat it meant "nothing has
+happened lately", which is the opposite of the claim the rule exists to
+make. So the daemon re-stamps `updated_at` on the snapshots of the sessions
+it believes are live every `HEARTBEAT_INTERVAL` seconds, changing no other
+field. The numbers still only ever change on a hook event; the heartbeat is
+the daemon saying "still here", which is exactly what a reader checking
+`updated_at` is asking.
+
 Stdlib only.
 """
 from __future__ import annotations
@@ -44,12 +60,19 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
 SNAPSHOT_VERSION = 1
 #: A snapshot older than this many seconds is treated as absent.
 STALE_AFTER = 30.0
+#: How often the daemon re-stamps a live session's snapshot (`heartbeat`).
+#: Comfortably under `STALE_AFTER` so a single missed beat — a daemon busy
+#: with a tier-3 scan when the interval elapsed — cannot make a live
+#: session's item blink out. Two beats can be missed before a reader gives
+#: up, which is the margin this number buys.
+HEARTBEAT_INTERVAL = 10.0
 #: `sweep()` removes snapshots older than this; matches the daemon's own
 #: four-hour bound on a leaked session reference (daemon.py, "Lifetime policy").
 SWEEP_AFTER = 4 * 3600.0
@@ -84,6 +107,15 @@ class HudPublisher:
 
     def __init__(self, data_dir) -> None:
         self.data_dir = Path(data_dir)
+        # The `unattributed_gaps` bit this publisher last wrote, so
+        # `heartbeat()` can re-stamp `_daemon.json` without re-opening the
+        # ledger to ask a question whose answer it already published. `None`
+        # until `mark_daemon` has run; the heartbeat then falls back to
+        # reading the file it wrote, and re-stamps nothing if there is no
+        # file either. It never guesses a value — a wrong bit here would put
+        # a "record incomplete" banner on a complete session, or take one
+        # off an incomplete one.
+        self._unattributed_gaps: bool | None = None
 
     # -- writing -----------------------------------------------------------
 
@@ -159,11 +191,55 @@ class HudPublisher:
                 continue
         return removed
 
+    def heartbeat(self, session_ids: Iterable[str]) -> None:
+        """Re-stamp `updated_at` on each listed session's snapshot and on
+        `_daemon.json`, changing nothing else. The daemon calls this every
+        `HEARTBEAT_INTERVAL` seconds for the sessions it believes are live;
+        see the module docstring for why staleness would otherwise mean the
+        wrong thing.
+
+        Writes nothing for a session with no snapshot file (retired, or
+        never started) and nothing for one whose file no longer parses —
+        refreshing a file we cannot read would be vouching for bytes we did
+        not understand. Individual write failures are skipped rather than
+        raised: a heartbeat is housekeeping for a display surface (I6), and
+        one unwritable snapshot must not cost the others theirs.
+        """
+        for session_id in session_ids:
+            try:
+                path = snapshot_path(self.data_dir, session_id)
+            except ValueError:
+                continue
+            snap = read_snapshot(self.data_dir, session_id,
+                                 ignore_staleness=True)
+            if snap is None:
+                continue
+            doc = {"v": SNAPSHOT_VERSION, "percent": snap.percent,
+                   "blocked": snap.blocked, "unverified": snap.unverified,
+                   "hidden": snap.hidden, "updated_at": time.time()}
+            try:
+                self._write(path, doc)
+            except OSError:
+                continue
+        gaps = self._unattributed_gaps
+        if gaps is None:
+            gaps = read_daemon_marker(self.data_dir, ignore_staleness=True)
+        if gaps is not None:
+            try:
+                self.mark_daemon(unattributed_gaps=gaps)
+            except OSError:
+                pass
+
     def mark_daemon(self, *, unattributed_gaps: bool) -> None:
+        gaps = bool(unattributed_gaps)
         self._write(hud_dir(self.data_dir) / _DAEMON_MARKER,
                     {"v": SNAPSHOT_VERSION,
-                     "unattributed_gaps": bool(unattributed_gaps),
+                     "unattributed_gaps": gaps,
                      "updated_at": time.time()})
+        # Only after the write succeeded: remembering a bit we failed to
+        # publish would let a later heartbeat "preserve" a value no reader
+        # ever saw.
+        self._unattributed_gaps = gaps
 
 
 # -- reading -----------------------------------------------------------------
@@ -217,7 +293,12 @@ def read_snapshot(data_dir, session_id: str, *, now: float | None = None,
                     hidden=hidden, updated_at=float(updated_at))
 
 
-def read_daemon_marker(data_dir, *, now: float | None = None) -> bool | None:
+def read_daemon_marker(data_dir, *, now: float | None = None,
+                       ignore_staleness: bool = False) -> bool | None:
+    """The daemon's `unattributed_gaps` bit, or `None` if there is no fresh
+    answer. `ignore_staleness` is for the writer only — `heartbeat()` uses it
+    to carry the bit forward across a publisher that did not write it — and
+    never for a reader, for whom a stale marker means a dead daemon."""
     doc = _load(hud_dir(data_dir) / _DAEMON_MARKER)
     if doc is None:
         return None
@@ -225,6 +306,6 @@ def read_daemon_marker(data_dir, *, now: float | None = None) -> bool | None:
     if not (isinstance(gaps, bool) and _is_num(updated_at)):
         return None
     now = time.time() if now is None else now
-    if now - float(updated_at) > STALE_AFTER:
+    if not ignore_staleness and now - float(updated_at) > STALE_AFTER:
         return None
     return gaps

@@ -14,6 +14,7 @@ import os
 import stat
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -149,12 +150,113 @@ def test_read_returns_none_when_missing(data_dir):
     assert hs.read_snapshot(data_dir, SID) is None
 
 
+def test_sweep_never_removes_the_daemon_marker(data_dir):
+    """`_daemon.json` is the one file in `hud/` that is not a session, and
+    it is what `ambient.py` reads for the unattributed-gaps line. A sweep
+    that retired it because it happened to be old would silently delete the
+    marker out from under a daemon that had just started and was about to
+    heartbeat it."""
+    pub = hs.HudPublisher(data_dir)
+    pub.mark_daemon(unattributed_gaps=True)
+    marker = hs.hud_dir(data_dir) / "_daemon.json"
+    ancient = time.time() - 30 * 24 * 3600
+    os.utime(marker, (ancient, ancient))
+    assert pub.sweep(now=time.time()) == 0
+    assert marker.exists()
+    assert hs.read_daemon_marker(data_dir, ignore_staleness=True) is True
+
+
 def test_daemon_marker_roundtrip_and_staleness(data_dir):
     pub = hs.HudPublisher(data_dir)
     assert hs.read_daemon_marker(data_dir) is None
     pub.mark_daemon(unattributed_gaps=True)
     assert hs.read_daemon_marker(data_dir) is True
     assert hs.read_daemon_marker(data_dir, now=time.time() + 31) is None
+
+
+# -- heartbeat (spec §4.1) ------------------------------------------------
+
+def _freeze(monkeypatch, when: float) -> None:
+    """Make the publisher's own clock read `when`. `hud_snapshot` calls
+    `time.time()` and nothing else from the module, so a stub with that one
+    attribute is the whole surface."""
+    monkeypatch.setattr(hs, "time", SimpleNamespace(time=lambda: when))
+
+
+def test_heartbeat_refreshes_updated_at_and_nothing_else(data_dir):
+    pub = hs.HudPublisher(data_dir)
+    pub.publish(SID, percent=28, blocked=2, unverified=True)
+    pub.set_hidden(SID, True)
+    before = _read(data_dir)
+    old = before["updated_at"] - 25.0
+    path = hs.snapshot_path(data_dir, SID)
+    path.write_text(json.dumps({**before, "updated_at": old}))
+
+    pub.heartbeat([SID])
+
+    after = _read(data_dir)
+    assert validate(after) == []
+    assert after["updated_at"] > old
+    assert abs(after["updated_at"] - time.time()) < 5
+    assert {k: v for k, v in after.items() if k != "updated_at"} \
+        == {k: v for k, v in before.items() if k != "updated_at"}
+    assert after["hidden"] is True and after["percent"] == 28
+    assert after["blocked"] == 2 and after["unverified"] is True
+
+
+def test_heartbeat_keeps_a_quiet_session_readable_past_stale_after(
+        data_dir, monkeypatch):
+    """The bug, end to end: nothing happens in the session for longer than
+    `STALE_AFTER`, and without a heartbeat both readers stop drawing the
+    item even though the daemon is alive and the numbers are still true."""
+    pub = hs.HudPublisher(data_dir)
+    pub.publish(SID, percent=7, blocked=0, unverified=False)
+    later = time.time() + hs.STALE_AFTER + 1
+    assert hs.read_snapshot(data_dir, SID, now=later) is None
+    _freeze(monkeypatch, later)
+    pub.heartbeat([SID])
+    snap = hs.read_snapshot(data_dir, SID, now=later)
+    assert snap is not None and snap.percent == 7
+
+
+def test_heartbeat_skips_ids_with_no_file(data_dir):
+    pub = hs.HudPublisher(data_dir)
+    pub.publish(SID, percent=1, blocked=0, unverified=False)
+    pub.heartbeat([SID, "never-started", "../escape", ""])
+    assert [p.name for p in hs.hud_dir(data_dir).iterdir()] == [f"{SID}.json"]
+
+
+def test_heartbeat_restamps_the_daemon_marker_keeping_the_bool(
+        data_dir, monkeypatch):
+    pub = hs.HudPublisher(data_dir)
+    pub.mark_daemon(unattributed_gaps=True)
+    later = time.time() + hs.STALE_AFTER + 1
+    assert hs.read_daemon_marker(data_dir, now=later) is None
+    _freeze(monkeypatch, later)
+    pub.heartbeat([])
+    assert hs.read_daemon_marker(data_dir, now=later) is True
+
+
+def test_heartbeat_reads_the_marker_back_when_it_did_not_write_it(
+        data_dir, monkeypatch):
+    """A publisher built after the marker (a restart within the same data
+    dir, or the `$privacy` tool's own publisher) must carry the bit
+    forward, not invent one."""
+    hs.HudPublisher(data_dir).mark_daemon(unattributed_gaps=False)
+    fresh = hs.HudPublisher(data_dir)
+    later = time.time() + hs.STALE_AFTER + 1
+    _freeze(monkeypatch, later)
+    fresh.heartbeat([])
+    assert hs.read_daemon_marker(data_dir, now=later) is False
+
+
+def test_heartbeat_writes_no_marker_when_there_is_none(data_dir):
+    hs.HudPublisher(data_dir).heartbeat([SID])
+    assert not (hs.hud_dir(data_dir) / "_daemon.json").exists()
+
+
+def test_heartbeat_interval_leaves_room_for_a_missed_beat():
+    assert hs.HEARTBEAT_INTERVAL * 2 < hs.STALE_AFTER
 
 
 def test_snapshot_never_contains_a_string(data_dir):

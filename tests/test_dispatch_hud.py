@@ -9,6 +9,9 @@ must not fail the hook.
 """
 from __future__ import annotations
 
+import time
+from types import SimpleNamespace
+
 import pytest
 
 from privacy_hud import dispatch, hud_snapshot as hs
@@ -68,6 +71,35 @@ def test_new_state_marks_the_daemon_and_sweeps(tmp_path, monkeypatch):
         assert not (hs.hud_dir(tmp_path) / "stray.json.tmp").exists()
     finally:
         st.ledger.conn.close()
+
+
+def test_a_heartbeat_keeps_a_quiet_session_visible(state, tmp_path, monkeypatch):
+    """Spec §4.1's heartbeat rule, from the hook side. A session starts, then
+    nothing happens for longer than STALE_AFTER -- the user is reading, or
+    away. Before the heartbeat existed the status item vanished at 30 s and
+    stayed gone until the next tool call, which is the daemon reporting
+    "gone" about itself while it was sitting right there."""
+    _start(state)
+    later = time.time() + hs.STALE_AFTER + 5
+    assert hs.read_snapshot(tmp_path, SID, now=later) is None, \
+        "fixture no longer reproduces the staleness this test is about"
+    monkeypatch.setattr(hs, "time", SimpleNamespace(time=lambda: later))
+    state.hud.heartbeat([SID])
+    snap = hs.read_snapshot(tmp_path, SID, now=later)
+    assert snap is not None and snap.percent == 0
+
+
+def test_a_heartbeat_keeps_the_daemon_marker_readable(state, tmp_path, monkeypatch):
+    """`new_state` writes `_daemon.json` once; without a heartbeat it went
+    stale 30 s later and `ambient.py` stopped rendering the
+    unattributed-gaps line for the rest of the daemon's life."""
+    before = hs.read_daemon_marker(tmp_path)
+    assert before in (True, False)
+    later = time.time() + hs.STALE_AFTER + 5
+    assert hs.read_daemon_marker(tmp_path, now=later) is None
+    monkeypatch.setattr(hs, "time", SimpleNamespace(time=lambda: later))
+    state.hud.heartbeat([])
+    assert hs.read_daemon_marker(tmp_path, now=later) is before
 
 
 def test_a_broken_publisher_never_fails_the_hook(state, monkeypatch):
