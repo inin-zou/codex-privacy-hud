@@ -3,6 +3,10 @@
 ![Codex's own status line, under the composer, with the plugin's Privacy item beside the model and working directory](docs/images/banner.png)
 
 [![CI](https://github.com/inin-zou/codex-privacy-hud/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/inin-zou/codex-privacy-hud/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/inin-zou/codex-privacy-hud)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/inin-zou/codex-privacy-hud)](https://github.com/inin-zou/codex-privacy-hud/stargazers)
+
+English | [简体中文](README.zh-CN.md)
 
 > Trace your privacy disclosure the same way you already trace your token usage — live, in every conversation.
 
