@@ -327,15 +327,6 @@ class _Handler(BaseHTTPRequestHandler):
             })
             return
 
-        if parsed.path == "/api/clean_session":
-            sid = body.get("session_id")
-            if not sid:
-                self._send_json(400, {"error": "session_id is required"})
-                return
-            new_id = mcp_tools.start_clean_session(ledger, sid)
-            self._send_json(200, {"session_id": new_id})
-            return
-
         self._send_json(404, {"error": "not found"})
 
 

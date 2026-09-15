@@ -280,7 +280,9 @@
     actionsEl.innerHTML = actions.map((a, i) =>
       `<button class="action" data-i="${i}">[ ${a.text} ]</button>`
     ).join("") + (band(pct) === "danger"
-      ? `<button class="action" data-clean="1">[ Start a clean session ]</button>`
+      // Not an action: a clean context is a new Codex conversation, which
+      // nothing on this page can start (#23).
+      ? `<p class="clean-context-note">Want a clean context? Start a new conversation in Codex. What this session already sent to the model stays sent.</p>`
       : "");
 
     actionsEl.querySelectorAll("button[data-i]").forEach((btn) => {
@@ -296,19 +298,6 @@
           : `Could not apply rule: ${data.error || "unknown error"}`;
       });
     });
-
-    const cleanBtn = actionsEl.querySelector("button[data-clean]");
-    if (cleanBtn) {
-      cleanBtn.addEventListener("click", async () => {
-        const { ok, data } = await postJSON("/api/clean_session", { session_id: sessionId });
-        if (ok) {
-          $("ruleConfirmation").textContent =
-            `New session started: ${data.session_id}. This audit now reflects the new session.`;
-          sessionId = data.session_id;
-          await loadAll();
-        }
-      });
-    }
 
     $("ruleConfirmation").textContent = "";
   }

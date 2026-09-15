@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "privacy-hud"
-version = "0.2.0"
+version = "0.3.0"
 description = "Local-first privacy plugin for the Codex CLI: a session-level disclosure ledger with upstream enforcement."
 requires-python = ">=3.11"
 license = "MIT"

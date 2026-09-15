@@ -536,10 +536,10 @@ def detail(row: ExposureRow) -> str:
       why that field is optional and `None` when unknown, rather than
       defaulted), since fabricating 120 as a hardcoded constant here would
       silently go stale the moment tables.toml's budget_cap is retuned.
-    - `Start a clean session` (design.md §6) is offered only when disclosure
-      is in the red band — a session-level fact this function cannot see
-      from a single row. Only the two source-scoped actions
-      (`Protect future occurrences`, `Block this source`) are rendered.
+    - Only the two source-scoped actions (`Protect future occurrences`,
+      `Block this source`) are rendered. The red-band note pointing at a new
+      Codex conversation (design.md §6) depends on the session's band, which
+      this function cannot see from a single row.
     - The per-action confirmation line ("Rule added: ...") describes what
       happens after a button is pressed; there is no click state in a pure
       render of `row`, so it is not rendered here.

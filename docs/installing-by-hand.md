@@ -106,7 +106,7 @@ privacy-hud doctor
   [ OK ] Daemon               responsive (4 ms round trip)
   [ OK ] Detector deps        transformers 5.16.1, torch 2.14.0
   [ OK ] Tier 3 model         weights present on disk (not loaded)
-  [ OK ] Plugin install       installed, version 0.2.0, matches this checkout
+  [ OK ] Plugin install       installed, version 0.3.0, matches this checkout
 
 Summary: 8 ok, 0 warning(s), 0 failure(s).
 Setup is healthy.

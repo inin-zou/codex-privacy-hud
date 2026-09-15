@@ -30,7 +30,6 @@ from privacy_hud.mcp_tools import (
     hud_set_hidden,
     hud_status,
     list_exposures,
-    start_clean_session,
 )
 
 M = load_matrix()
@@ -207,37 +206,6 @@ def test_apply_policy_rejects_an_unknown_rule_type(led):
     with pytest.raises(ValueError):
         apply_policy(led, "s1", rule_type="not_a_real_rule", selector="x")
     assert led.conn.execute("SELECT count(*) FROM policy").fetchone()[0] == 0
-
-
-# --------------------------------------------------------------------- #
-# start_clean_session
-# --------------------------------------------------------------------- #
-
-def test_start_clean_session_returns_a_different_session_id(led):
-    new_id = start_clean_session(led, "s1")
-    assert isinstance(new_id, str)
-    assert new_id != "s1"
-
-
-def test_start_clean_session_ends_the_old_session(led):
-    start_clean_session(led, "s1")
-    row = led.conn.execute(
-        "SELECT ended_at FROM sessions WHERE session_id='s1'").fetchone()
-    assert row["ended_at"] is not None
-
-
-def test_start_clean_session_nulls_the_old_sessions_value_hashes(led):
-    start_clean_session(led, "s1")
-    rows = led.conn.execute(
-        "SELECT value_hash FROM events WHERE session_id='s1'").fetchall()
-    assert all(r["value_hash"] is None for r in rows)
-
-
-def test_start_clean_session_starts_a_fresh_session_row(led):
-    new_id = start_clean_session(led, "s1")
-    row = led.conn.execute(
-        "SELECT session_id FROM sessions WHERE session_id=?", (new_id,)).fetchone()
-    assert row is not None
 
 
 # --------------------------------------------------------------------- #

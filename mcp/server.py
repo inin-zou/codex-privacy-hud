@@ -2,11 +2,12 @@
 # mcp/server.py
 """Thin stdio MCP wrapper around `privacy_hud.mcp_tools` (Task 13).
 
-Exposes seven tools: the six architecture.md §9 names --
+Exposes six tools: five of those architecture.md §9 names --
 `privacy.get_session_summary`, `privacy.list_exposures`,
-`privacy.get_exposure_detail`, `privacy.update_policy`, `privacy.allow_once`,
-`privacy.start_clean_session` -- plus `privacy.hud_toggle`, added later for the
-status-line item and not in §9. Each is a direct call into the corresponding
+`privacy.get_exposure_detail`, `privacy.update_policy`, `privacy.allow_once` --
+plus `privacy.hud_toggle`, added later for the status-line item. §9's sixth,
+`privacy.start_clean_session`, was removed (#23): it opened a ledger row under
+an id Codex never sends, so nothing was ever recorded against it. Each is a direct call into the corresponding
 function in `src/privacy_hud/mcp_tools.py`. All the
 real logic (I1's no-raw-value guarantee, the consent rule, the policy-table
 write) lives there and is unit-tested in `tests/test_mcp.py` without going
@@ -86,7 +87,7 @@ def _open_ledger() -> Ledger:
 
 
 def build_app():
-    """Construct the FastMCP app and register the seven `privacy.*` tools.
+    """Construct the FastMCP app and register the six `privacy.*` tools.
     Imports `mcp` here (not at module scope) -- see this file's docstring."""
     try:
         from mcp.server.fastmcp import FastMCP
@@ -152,13 +153,6 @@ def build_app():
         mcp_tools.allow_once(ledger, session_id, tool_name=tool_name,
                               tool_input=tool_input, reviewed=reviewed)
         return {"minted": True}
-
-    @app.tool(name="privacy.start_clean_session")
-    def start_clean_session(session_id: str) -> dict:
-        """Design.md §6's red-band "Start a clean session" action. Returns
-        the new session_id the caller should use going forward."""
-        new_id = mcp_tools.start_clean_session(ledger, session_id)
-        return {"session_id": new_id}
 
     @app.tool(name="privacy.hud_toggle")
     def hud_toggle(session_id: str, hidden: bool) -> dict:

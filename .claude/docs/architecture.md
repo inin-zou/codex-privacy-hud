@@ -415,7 +415,7 @@ privacy.list_exposures        → rows for a tab
 privacy.get_exposure_detail   → L3 payload for one flow
 privacy.update_policy         → write mask / block rules
 privacy.allow_once            → mint a one-shot token
-privacy.start_clean_session   → wipe session state and salt
+privacy.hud_toggle            → hide or show the status-line item
 ```
 
 **UI delivery.** Codex Desktop does not currently render MCP Apps inline iframe resources ([openai/codex#21019](https://github.com/openai/codex/issues/21019)), and `tui.status_line` accepts only built-in item identifiers. So:
