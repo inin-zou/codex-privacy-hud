@@ -1,3 +1,4 @@
+import dataclasses
 import json
 
 import pytest
@@ -9,7 +10,7 @@ from privacy_hud.detect.paths import PathDetector
 from privacy_hud.detect.secrets import SecretDetector
 from privacy_hud.detect.model import StubModelDetector
 from privacy_hud.engine import Engine, Observation
-from privacy_hud.minimize import mint_token, consume_token
+from privacy_hud.minimize import mint_token
 
 M = load_matrix()
 
@@ -464,5 +465,5 @@ def test_scan_result_is_immutable(eng):
     # second thread can mutate after the first produced it.
     scan = eng.scan(_obs())
     assert isinstance(scan.findings, tuple)
-    with pytest.raises(Exception):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         scan.findings = ()

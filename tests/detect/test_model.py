@@ -128,7 +128,7 @@ def test_confidence_floor_is_the_mean_over_the_span_not_any_one_token():
     tokens = [tok("B-private_email" if i == 0 else
                   "E-private_email" if i == 4 else "I-private_email",
                   s, a, b, 3 + i)
-              for i, (s, (a, b)) in enumerate(zip(scores, bounds))]
+              for i, (s, (a, b)) in enumerate(zip(scores, bounds, strict=True))]
     assert min(scores) < MIN_SCORE <= sum(scores) / len(scores)
     found = spans_from_tokens(text, tokens)
     assert len(found) == 1

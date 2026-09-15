@@ -938,30 +938,36 @@ def test_the_startup_race_leaves_exactly_one_owner(sock_dir, startup_state):
     umask_before = os.umask(0o022)
     os.umask(umask_before)
 
+    # Defined once, outside the round loop, with each round's shared state
+    # passed in as arguments. A closure over the loop variables only works
+    # because every round joins its threads before rebinding them; binding
+    # at Thread() time makes that correct by construction instead.
+    def attempt(barrier, results_lock, winners, declined, unexpected):
+        barrier.wait()
+        try:
+            started = Daemon(sock_path, startup_state.data_dir,
+                             idle_timeout=3600, poll_interval=0.05,
+                             state=startup_state)
+        except AlreadyRunning as exc:
+            with results_lock:
+                declined.append(exc)
+        except BaseException as exc:          # noqa: BLE001 - reported
+            with results_lock:
+                unexpected.append(exc)
+        else:
+            with results_lock:
+                winners.append(started)
+
     for round_no in range(rounds):
         barrier = threading.Barrier(racers)
         results_lock = threading.Lock()
         winners: list[Daemon] = []
         declined: list[AlreadyRunning] = []
         unexpected: list[BaseException] = []
+        shared = (barrier, results_lock, winners, declined, unexpected)
 
-        def attempt():
-            barrier.wait()
-            try:
-                started = Daemon(sock_path, startup_state.data_dir,
-                                 idle_timeout=3600, poll_interval=0.05,
-                                 state=startup_state)
-            except AlreadyRunning as exc:
-                with results_lock:
-                    declined.append(exc)
-            except BaseException as exc:          # noqa: BLE001 - reported
-                with results_lock:
-                    unexpected.append(exc)
-            else:
-                with results_lock:
-                    winners.append(started)
-
-        threads = [threading.Thread(target=attempt) for _ in range(racers)]
+        threads = [threading.Thread(target=attempt, args=shared)
+                   for _ in range(racers)]
         for thread in threads:
             thread.start()
         for thread in threads:

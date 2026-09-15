@@ -115,12 +115,12 @@ def test_patch_embeds_the_same_golden_file():
     """
     patch = (Path(__file__).parents[1] / "patches" / "privacy-status-line.patch").read_text()
     lines = patch.splitlines()
-    starts = [i for i, l in enumerate(lines)
-              if l.startswith("+++ ") and l.endswith("privacy_status_golden.json")]
+    starts = [i for i, line in enumerate(lines)
+              if line.startswith("+++ ") and line.endswith("privacy_status_golden.json")]
     assert len(starts) == 1, "patch must add privacy_status_golden.json exactly once"
     body = lines[starts[0] + 1:]
-    end = next((i for i, l in enumerate(body) if l.startswith("diff --git")), len(body))
-    embedded = [l[1:] for l in body[:end] if l.startswith("+")]
+    end = next((i for i, line in enumerate(body) if line.startswith("diff --git")), len(body))
+    embedded = [line[1:] for line in body[:end] if line.startswith("+")]
     assert "\n".join(embedded) + "\n" == (MATRIX / "hud_golden.json").read_text()
 
 

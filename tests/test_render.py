@@ -9,6 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from privacy_hud.ledger import ExposureRow, SessionCoverage, SessionSummary
+from privacy_hud.matrix.loader import UnknownKey
 from privacy_hud.mcp_tools import ResolvedSession
 from privacy_hud.render import hud_line, audit, detail, receipt, hud_core
 
@@ -382,5 +383,5 @@ def test_hud_core_is_the_segment_hud_line_embeds():
 
 
 def test_hud_core_rejects_out_of_band_percent():
-    with pytest.raises(Exception):
+    with pytest.raises(UnknownKey):
         hud_core(101)
