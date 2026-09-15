@@ -314,6 +314,7 @@ def test_the_first_turn_without_a_receipt_says_how_to_set_up(tmp_path):
     assert code == 0
     msg = json.loads(out)["systemMessage"]
     assert "not set up" in msg
+    assert "$privacy setup" in msg
     assert "restart Codex" in msg
     assert "permissionDecision" not in out
     # The command names the installer Codex copied in beside the hook -- the

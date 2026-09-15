@@ -87,7 +87,7 @@ def _setup_hint():
         command = "  install.sh --yes  (from the codex-privacy-hud repository)"
     return {"systemMessage": (
         "Privacy HUD is installed but not set up, so nothing is being "
-        "recorded. Run the installer, here or in another terminal:\n"
+        "recorded. Run `$privacy setup` here, or in another terminal:\n"
         + command + "\nthen restart Codex.")}
 
 # Holds the `Popen` handle for the lifetime of this process. Two reasons, both
