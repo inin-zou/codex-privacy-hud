@@ -84,28 +84,27 @@ CI 发布的二进制**未经签名，也未经公证**。安装脚本会自行�
 
 ### 只安装插件：直接用 Codex 命令
 
-如果只需安装插件，可以像安装其他 Codex 插件一样直接运行以下命令，无需安装脚本：
+插件本身的安装方式与其他 Codex 插件相同，无需手动克隆仓库：
 
 ```bash
 codex plugin marketplace add inin-zou/codex-privacy-hud
 codex plugin add codex-privacy-hud@codex-privacy-hud
 ```
 
-这会为 Codex 安装 `$privacy` 技能、hook 和 MCP 服务器。
-守护进程的 Python 环境、检测模型和补丁版 Codex 需要另行安装。
-在这些组件就绪之前，所有 hook 都会回复 `Privacy HUD unavailable — disclosure unverified`。
-此时，`$privacy` 会报告未找到守护进程。
+第一条命令会将本仓库克隆到 Codex 的插件市场存储目录。
+第二条命令会将其复制到插件缓存目录 `~/.codex/plugins/cache/codex-privacy-hud/codex-privacy-hud/<version>/`。
+这样会为 Codex 安装 `$privacy` 技能、hook 和 MCP 服务器。
+`install.sh` 也会随之保存到本机，但不会自动运行。
+此时仍缺少守护进程的 Python 环境、检测模型和补丁版 Codex。
+因此，所有 hook 都会回复 `Privacy HUD unavailable — disclosure unverified`。
+`$privacy` 则会报告未找到守护进程。
+接下来，请按以下步骤操作：
 
-运行 `install.sh`，即可补齐这些组件；已有插件也可以安全地运行此脚本。
-也可以参照 [docs/installing-by-hand.md](docs/installing-by-hand.md) 手动安装。
+1. 运行 `codex`。Codex 0.154 启动时会显示 **Hooks need review**（需要审核 hook），提示你审核插件的八个 hook。选择 **Trust all and continue**（信任全部并继续）。在此之前，插件中的任何内容都不会运行。
+2. 发送任意消息。第一轮交互会显示一行提醒，其中包含插件缓存中的安装脚本路径：`sh ~/.codex/plugins/cache/codex-privacy-hud/codex-privacy-hud/<version>/install.sh --yes`。将该命令粘贴到会话中，让 Codex 执行。Codex 在向工作目录之外写入文件前会征求你的确认。你也可以在另一个终端中运行该命令。这与上方一行安装命令使用的是同一个脚本。已有插件安装也可以安全地再次运行该脚本。`--yes` 会直接下载模型，不再询问。`--no-model` 会跳过模型下载。
+3. 重启 Codex，让补丁版 Codex 和状态行项生效。
 
-下次启动时，请留意两件事。
-Codex 0.154 会显示 **Hooks need review**（需要审核 hook），提示你审核插件的八个 hook。
-请选择 **Trust all and continue**（信任全部并继续）。
-在这些 hook 获得信任之前，插件中的任何内容都不会运行。
-之后，在运行安装脚本之前，每个会话的第一轮交互都会显示一行提醒，其中包含安装命令 `sh <plugin root>/install.sh --yes`（该脚本由 Codex 安装在 hook 旁边）。
-你可以将该命令粘贴到会话中，让 Codex 执行。
-安装完成后，重启 Codex，让补丁版 Codex 和状态行项生效。
+如果你希望手动操作，[docs/installing-by-hand.md](docs/installing-by-hand.md) 列出了脚本执行的每一个步骤。
 
 ### 首次启动
 

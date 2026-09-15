@@ -94,28 +94,39 @@ opens no socket except its own on `127.0.0.1`.
 
 ### Plugin only, from the Codex CLI
 
-The plugin itself installs like any other Codex plugin, with no script:
+The plugin itself installs like any other Codex plugin, with nothing to
+clone:
 
 ```bash
 codex plugin marketplace add inin-zou/codex-privacy-hud
 codex plugin add codex-privacy-hud@codex-privacy-hud
 ```
 
-That gives Codex the `$privacy` skill, the hooks, and the MCP server. It
-does not give you the daemon's Python environment, the detection model, or
-the patched Codex build, so until those exist every hook answers
+The first command clones this repository into Codex's marketplace store;
+the second copies it into the plugin cache,
+`~/.codex/plugins/cache/codex-privacy-hud/codex-privacy-hud/<version>/`.
+That gives Codex the `$privacy` skill, the hooks, and the MCP server, and
+it puts `install.sh` on your machine, but it does not run it: the daemon's
+Python environment, the detection model, and the patched Codex build are
+still missing, so every hook answers
 `Privacy HUD unavailable — disclosure unverified` and `$privacy` reports no
-daemon. Run `install.sh` afterwards to add them (it is safe to run over an
-existing plugin install), or follow
-[docs/installing-by-hand.md](docs/installing-by-hand.md). Two things to
-expect on the next launch. Codex 0.154 opens with **Hooks need review** for
-the plugin's eight hooks; choose **Trust all and continue**, since nothing
-from the plugin runs until they are trusted. Then, until setup has run, the
-first turn of every session shows a one-line reminder with the installer
-command (`sh <plugin root>/install.sh --yes`, the copy Codex installed
-beside the hooks). You can paste that command into the session and let
-Codex run it; when it finishes, restart Codex so the patched build and the
-status item are picked up.
+daemon. From here:
+
+1. Run `codex`. Codex 0.154 opens with **Hooks need review** for the
+   plugin's eight hooks; choose **Trust all and continue**. Nothing from
+   the plugin runs before that.
+2. Send any message. The first turn shows a one-line reminder with the
+   installer's path in the plugin cache:
+   `sh ~/.codex/plugins/cache/codex-privacy-hud/codex-privacy-hud/<version>/install.sh --yes`.
+   Paste it into the session and let Codex run it (Codex asks before it
+   writes outside the working directory), or run it in another terminal.
+   It is the same script as the one-liner above and is safe to run over an
+   existing plugin install; `--yes` downloads the model without asking,
+   `--no-model` skips it.
+3. Restart Codex so the patched build and the status item are picked up.
+
+[docs/installing-by-hand.md](docs/installing-by-hand.md) has every step
+the script performs, if you would rather do them yourself.
 
 ### First launch
 
