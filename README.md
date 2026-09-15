@@ -171,14 +171,21 @@ never appear.
 #### First launch
 
 Open a new terminal (so the `PATH` change is picked up) and run `codex`.
-Under the composer you should see your usual status line plus the new item:
+The status line looks unchanged at first: Codex fires its `SessionStart`
+hook with the first turn, not at boot, so nothing reaches the daemon until
+you send a message. After your first prompt the item appears under the
+composer next to the usual ones:
 
 ```text
-gpt-5.4 · ~/proj · main · Privacy ░░░░░░░░░░  0%
+Privacy ░░░░░░░░░░  0% · gpt-5.4 · ~/proj · Context 96% left
 ```
 
-Nothing is disclosed yet, so it is 0%. The number moves as files, prompts,
-and tool arguments cross into model context. Then:
+It is 0% until something sensitive crosses into model context; the number
+moves as files, prompts, and tool arguments do. (On a machine where the
+daemon is not yet running, that first prompt also starts it, which takes
+about seven seconds to load the model — the reply to that first hook says
+`Privacy HUD unavailable — disclosure unverified`, and the item shows up a
+moment later.) Then:
 
 - `/statusline` — Codex's own picker; tick or untick `privacy` to add or
   remove the item for good. It is saved in `config.toml`.
