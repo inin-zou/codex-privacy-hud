@@ -48,9 +48,10 @@ answerable from the LIVE consent flow (architecture.md §8's state machine,
 reached from the block `systemMessage`'s "Run $privacy" prompt while the
 blocked call's arguments are still in memory), not from this after-the-fact
 audit page reading historical ledger rows. `render.detail()` itself only
-ever renders "Protect future occurrences" / "Block this source" for
-exactly this reason -- this UI matches that, rather than inventing a button
-with no working backend behind it.
+ever renders "Protect future occurrences" for exactly this reason -- this UI
+matches that, rather than inventing a button with no working backend behind
+it. The same test applies to the withdrawn "Block this source" (#38): its
+backend could not name a source, so the button is gone from both surfaces.
 """
 from __future__ import annotations
 

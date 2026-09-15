@@ -68,7 +68,7 @@ The gap: **there is no per-session, content-aware, local record of what an agent
 |---|---|---|
 | **Solo dev on a client codebase** | Agent reads logs/`.env`; unclear what left the machine | Level 1 HUD, `$privacy` before pasting a bug report |
 | **Support/ops engineer** | Triages logs full of real customer PII | `Prevented` tab, minimization on outbound MCP/HTTP |
-| **Privacy-conscious individual** | Personal agent touches personal files | Level 3 detail, `Block this source` |
+| **Privacy-conscious individual** | Personal agent touches personal files | Level 3 detail, `Protect future occurrences` |
 | **Team lead evaluating agents** | Needs an answer to "what does it send?" | Session privacy receipt at `SessionEnd` |
 
 ### Primary scenario (demo narrative)
@@ -186,7 +186,6 @@ Protection   none
 Example      jo•••@acme.com
 
 [ Protect future occurrences ]
-[ Block this source ]
 
 Already disclosed data cannot be recalled from this session.
 ```
@@ -370,7 +369,7 @@ Non-negotiable properties, and the first thing a judge will ask:
 - [ ] Metadata-only SQLite ledger + budget math with the §5.3 invariants tested
 - [ ] `$privacy` skill
 - [ ] Local interactive audit UI: `Exposed / Prevented / All events` + exposure detail
-- [ ] Actions: `Block this source`, `Protect future occurrences`, `Allow once`
+- [ ] Actions: `Protect future occurrences`, `Allow once` (`Block this source` withdrawn, #38)
 - [ ] One real MCP outbound minimization demo, end to end
 
 ### Should

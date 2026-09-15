@@ -288,14 +288,15 @@ the rc file by hand.
   was chosen to satisfy design.md §9's copy rules (no "undo", no "your
   data is protected", no severity adjectives); a paraphrase can silently
   reintroduce exactly the claims those rules forbid.
-- Do not claim protection this tool cannot back up. A
-  `[ Protect future occurrences ]` / `[ Block this source ]` action
-  writes a real, durable rule to the session's policy table, and
-  `Engine.observe()` now consults that table before its own defaults on
-  every subsequent egress observation — a `block_source` rule denies a
-  later call from that source, a `mask` rule forces a rewrite for that
-  data type. It is correct to tell the user the rule is now enforced,
-  not merely recorded. This still does not apply retroactively: data
+- Do not claim protection this tool cannot back up. The
+  `[ Protect future occurrences ]` action writes a real, durable `mask`
+  rule to the session's policy table, and `Engine.observe()` consults that
+  table before its own defaults on every subsequent egress observation, so
+  a later outbound call carrying that data type is rewritten. It is correct
+  to tell the user the rule is now enforced, not merely recorded. There is
+  no source-level action: `Block this source` is withdrawn (#38) because
+  the ledger does not record which file or input data came from, so no rule
+  can name a source. This still does not apply retroactively: data
   already disclosed before the rule was written stays disclosed (design.md
   P4) — the rule only changes what happens on the *next* call, not what
   already happened.

@@ -34,20 +34,19 @@ and a dataclass can never reach `json.dumps` unserialized.
 **`apply_policy` and enforcement — read before wiring UI actions to this.**
 `apply_policy` writes a row to the `policy` table (schema from ledger.py /
 architecture.md §5) exactly as `Engine.observe` needs to read it to make
-"Block this source" / "Protect future occurrences" real. As of commit
-`2387e40`, `Engine.observe` (src/privacy_hud/engine.py) DOES query the
-`policy` table on every egress observation, before falling back to
-`Matrix.default_action()` (the static mask/block table in tables.toml) —
-a user-written `block_source`/`mask` rule outranks the matrix defaults in
-`Engine.observe`'s precedence chain. So a rule written by `apply_policy`
-is durable, correctly shaped, and **enforced on the next matching call** —
-"Block this source" and "Protect future occurrences" are genuinely real,
-not cosmetic: a `block_source` rule denies a later call from that source,
-a `mask` rule forces a rewrite for that data type. This still does not
-apply retroactively (design.md P4): data already disclosed before the
-rule was written stays disclosed — the rule only changes what happens on
-the *next* call, not what already happened, and no caller of this module
+"Protect future occurrences" real. `Engine.observe`
+(src/privacy_hud/engine.py) queries the `policy` table on every egress
+observation, before falling back to `Matrix.default_action()` (the static
+mask/block table in tables.toml): a user-written `mask` rule forces a
+rewrite of a later outbound call carrying a finding of that data type.
+This does not apply retroactively (design.md P4): data already disclosed
+before the rule was written stays disclosed, and no caller of this module
 should claim otherwise.
+
+"Block this source" (`block_source`) is withdrawn (#38): `apply_policy`
+refuses it and `Engine.observe` ignores any such row an older ledger still
+holds. It matched a rule's selector against an observation's `source`,
+which only ever holds fixed labels, so it could not target a source at all.
 
 `get_exposure_detail`'s selector: the `events` table already has a stable,
 unique, integer `id` primary key (see ledger.py's SCHEMA), and every row
@@ -94,7 +93,18 @@ _TAB_KINDS = {
     "All events": _ALL_EVENT_KINDS,
 }
 
-_POLICY_RULE_TYPES = {"mask", "block_source", "allow_dest"}
+_POLICY_RULE_TYPES = {"mask", "allow_dest"}
+
+#: Why `block_source` is refused rather than written (#38). The rule compared
+#: its selector with an observation's `source`, and `dispatch` only ever puts
+#: fixed labels there ("tool input" on every outbound call, the tool name or
+#: "user prompt" on the way in). No selector could mean "this source": one
+#: taken from a tool-output row matched nothing, one taken from an outbound
+#: row denied every outbound call. It stays refused until the ledger records
+#: where data actually came from.
+_BLOCK_SOURCE_WITHDRAWN = (
+    "block_source is not available: the ledger does not yet record which "
+    "file or input data came from, so no rule can target a source (#38)")
 
 #: How close two sessions' last hook events have to be, in seconds, before
 #: "which of these is the caller?" stops being answerable.
@@ -420,22 +430,23 @@ def get_exposure_detail(ledger, session_id: str, event_id: int) -> ExposureRow:
 
 def apply_policy(ledger, session_id: str, *, rule_type: str, selector: str) -> None:
     """Write a forward-looking policy rule (design.md §6's "Protect future
-    occurrences" / "Block this source" actions), scoped to this session.
+    occurrences" action), scoped to this session.
 
     `rule_type` must be one of the schema's own documented values
-    (ledger.py SCHEMA's `policy.rule_type` comment: `mask|block_source|
-    allow_dest`) -- an unrecognized rule_type raises `ValueError` rather
-    than being written silently, since a policy row the engine can never
-    match is worse than an error: it looks like protection was applied
-    when nothing was.
+    (ledger.py SCHEMA's `policy.rule_type` comment) -- an unrecognized
+    rule_type raises `ValueError` rather than being written silently, since
+    a policy row the engine can never match is worse than an error: it looks
+    like protection was applied when nothing was. `block_source` is refused
+    for exactly that reason (`_BLOCK_SOURCE_WITHDRAWN`, #38).
 
-    See this module's top-level docstring: `Engine.observe` now consults
-    this table (ahead of its own matrix defaults) on every subsequent
-    egress observation, so a rule written here is genuinely enforced on
-    the *next* matching call -- not merely recorded. It still does not
-    apply retroactively: data already disclosed before the rule was
-    written stays disclosed (design.md P4).
+    See this module's top-level docstring: `Engine.observe` consults `mask`
+    rules (ahead of its own matrix defaults) on every later egress
+    observation that has a finding of that data type. It does not apply
+    retroactively: data already disclosed before the rule was written stays
+    disclosed (design.md P4).
     """
+    if rule_type == "block_source":
+        raise ValueError(_BLOCK_SOURCE_WITHDRAWN)
     if rule_type not in _POLICY_RULE_TYPES:
         raise ValueError(
             f"unknown rule_type {rule_type!r}; expected one of "

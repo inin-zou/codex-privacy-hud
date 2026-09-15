@@ -288,7 +288,6 @@ DETAIL_EMAIL = (
     "Budget       +6 pts of 120\n"
     "\n"
     "[ Protect future occurrences ]\n"
-    "[ Block this source ]\n"
     "\n"
     "Already disclosed data cannot be recalled from this session."
 )
@@ -303,7 +302,6 @@ DETAIL_MASKED_PATH = (
     "Budget       +0.6 pts of 120\n"
     "\n"
     "[ Protect future occurrences ]\n"
-    "[ Block this source ]\n"
     "\n"
     "Already disclosed data cannot be recalled from this session."
 )
@@ -319,7 +317,6 @@ DETAIL_CREDENTIAL = (
     "Budget       +0 pts of 120\n"
     "\n"
     "[ Protect future occurrences ]\n"
-    "[ Block this source ]\n"
     "\n"
     "Already disclosed data cannot be recalled from this session."
 )

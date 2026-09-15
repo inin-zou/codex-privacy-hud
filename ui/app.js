@@ -271,9 +271,10 @@
       </div>
     `).join("");
 
+    // No source-level action: the ledger does not record which file or
+    // input data came from, so a rule cannot target a source (#38).
     const actions = [
       { text: "Protect future occurrences", rule_type: "mask", selector: row.data_type },
-      { text: "Block this source", rule_type: "block_source", selector: row.source },
     ];
     const pct = summary.percent || 0;
     const actionsEl = $("detailActions");

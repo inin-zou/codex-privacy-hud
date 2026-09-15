@@ -238,19 +238,6 @@ BLOCK_TEMPLATE = (
     "  Run $privacy to review, minimize, or allow once."
 )
 
-# Task 8 policy-fix: a *user-written* `block_source` rule (Ledger's `policy`
-# table, minted by mcp_tools.apply_policy's "Block this source" L3 action)
-# is a different reason for a deny than the built-in credential/default_action
-# path above, and copy must let the user tell them apart (see engine.py's
-# module docstring / task instructions) — hence a distinct template rather
-# than reusing BLOCK_TEMPLATE verbatim.
-POLICY_BLOCK_TEMPLATE = (
-    "PRIVACY HUD blocked a tool call\n\n"
-    "  {tool}  would send data from {source}\n"
-    "  to {destination} — a source-level block rule is in effect.\n\n"
-    "  Run $privacy to review or adjust policy."
-)
-
 REWRITE_TEMPLATE = (
     "PRIVACY HUD masked a tool call\n\n"
     "  {tool}  would send  {label}\n"
@@ -499,28 +486,24 @@ class Engine:
         has_credential = any(f.data_type == "credential" for f in findings)
 
         action = "allow"
-        policy_source_block = False
 
-        # Task 8 policy-fix: a user-written policy rule outranks the
+        # Task 8 policy-fix: a user-written `mask` rule outranks the
         # built-in default. Egress-only (Ruling 3's own logic extends
         # unchanged to user-written policy — an ingress observation's
         # bytes are already in context, so no policy check applies to it
-        # either). Checked in this precedence order:
-        #   1. block_source — denies regardless of what findings turned up
-        #      (a source-level block covers the whole call, not just
-        #      credential-shaped content).
-        #   2. mask — rewrites only when there is something matching to
-        #      mask.
-        # Only when neither matches does this fall through, unchanged, to
-        # the existing Matrix.default_action() logic below.
-        if is_egress:
-            if obs.source in self._policy_selectors(obs.session_id, "block_source"):
-                action = "deny"
-                policy_source_block = True
-            elif findings:
-                mask_selectors = self._policy_selectors(obs.session_id, "mask")
-                if mask_selectors & {f.data_type for f in findings}:
-                    action = "rewrite"
+        # either). It rewrites only when there is something matching to
+        # mask; otherwise this falls through, unchanged, to the
+        # Matrix.default_action() logic below.
+        #
+        # `block_source` rows are deliberately not read (#38). That rule
+        # compared its selector with `obs.source`, which dispatch only ever
+        # fills with fixed labels ("tool input" on every egress call), so it
+        # matched nothing or denied every outbound call. `apply_policy` no
+        # longer writes one; a row an older ledger still holds decides nothing.
+        if is_egress and findings:
+            mask_selectors = self._policy_selectors(obs.session_id, "mask")
+            if mask_selectors & {f.data_type for f in findings}:
+                action = "rewrite"
 
         if action == "allow" and is_egress and has_credential:
             # Ruling 3: default_action is an egress-only policy. An ingress
@@ -577,10 +560,7 @@ class Engine:
 
         if action in ("deny", "rewrite"):
             label = ", ".join(sorted({f.data_type for f in findings})) or "sensitive data"
-            if action == "deny":
-                template = POLICY_BLOCK_TEMPLATE if policy_source_block else BLOCK_TEMPLATE
-            else:
-                template = REWRITE_TEMPLATE
+            template = BLOCK_TEMPLATE if action == "deny" else REWRITE_TEMPLATE
             msg = template.format(tool=obs.tool_name or "tool", label=label,
                                    source=obs.source, destination=dest_kind)
             updated_input = None

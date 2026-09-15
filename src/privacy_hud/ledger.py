@@ -676,7 +676,7 @@ class Ledger:
     def add_policy(self, session_id: str, *, rule_type: str,
                    selector: str) -> None:
         """Record a forward-looking rule for `session_id` (design.md §6's
-        "Protect future occurrences" / "Block this source").
+        "Protect future occurrences").
 
         Scoped to the session that asked for it, never globally: a rule the
         user wrote while looking at one session's disclosures is consent about
