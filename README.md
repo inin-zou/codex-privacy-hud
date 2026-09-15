@@ -115,33 +115,111 @@ Verified end-to-end against a real Codex CLI install on 0.145.0 and 0.153.0.
 
 ### Install (macOS, one command)
 
+#### Before you start
+
+- **macOS** on Apple Silicon or Intel. (Linux and Windows are not packaged; see [Installing by hand](#installing-by-hand) for the fallback pane.)
+- **Codex CLI** already installed and signed in — `codex --version` prints something like `codex-cli 0.154.0`. The installer needs that number to pick the matching patched build.
+- **Python 3.11 or newer** on your `PATH` (`python3 --version`). On a Mac without one: `brew install python@3.12`.
+- About **3 GB of disk** if you want name and address detection (that is the size of the `openai/privacy-filter` weights), and a few minutes.
+
+#### Run it
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/inin-zou/codex-privacy-hud/main/install.sh | sh
 ```
 
-It creates a private virtualenv, asks before downloading the ~2.8 GB
-detection model (the only network access the plugin ever causes; the
-runtime itself is offline), installs the plugin into Codex, records the
-interpreter, fetches the patched Codex build matching `codex --version`,
-and runs `privacy-hud-doctor`. `--yes` skips the question, `--no-model`
-skips the weights (names and addresses then go undetected; doctor says so).
+The script asks exactly one question — whether to download the detection
+model. Everything else is automatic. This is what it does, in the order it
+prints:
 
-> **Status as of 2026-09-15 — read before running this.** The patched
-> build has been executed end to end once, on the maintainer's machine: a
-> locally built `codex-privacy-0.154.0-aarch64-apple-darwin` booted, listed
+| step | what happens | where it lands |
+|---|---|---|
+| 1 | Finds your `codex`, reads its version, checks `python3 >= 3.11` | — |
+| 2 | Creates a private virtualenv and installs the plugin package into it (a few minutes; this pulls `torch` and `transformers`) | `~/.local/share/codex-privacy-hud/venv/` |
+| 3 | **Asks** before downloading the `openai/privacy-filter` weights (~2.8 GB, from Hugging Face, once). Answer `y` for full detection. Answer `n` and you still get credential and path detection, but **names and addresses go undetected** — `privacy-hud-doctor` will say so. | `~/.cache/huggingface/hub/` |
+| 4 | Installs the plugin into Codex (`codex plugin marketplace add` + `codex plugin add`) | Codex's plugin directory |
+| 5 | Records which Python interpreter the daemon must run in | `~/.codex/plugins/data/codex-privacy-hud-…/runtime.json` |
+| 6 | Downloads the patched Codex build for **your exact version**, verifies its SHA-256, unpacks it | `~/.local/share/codex-privacy-hud/<version>/codex` |
+| 7 | Writes a small forwarder named `codex` and, if needed, adds `~/.local/bin` to your shell `PATH` | `~/.local/bin/codex` |
+| 8 | Adds `privacy` to `[tui].status_line` in your Codex config, creating the key with Codex's defaults if you never set one | `~/.codex/config.toml` |
+| 9 | Runs `privacy-hud-doctor` and prints its table — every line should read `OK` or `WARN`, never `FAIL` | — |
+
+Flags: `--yes` answers the model question with yes; `--no-model` skips the
+download without asking. Both are useful for scripted installs, and the
+script needs one of them when there is no terminal to ask on.
+
+Step 3 is the **only network access the plugin ever causes**, and it happens
+here, once, before any Codex session exists. The runtime itself never goes
+online: it sets `HF_HUB_OFFLINE=1` before importing `transformers` and opens
+no socket except its own on `127.0.0.1`.
+
+#### What the forwarder is, and what it is not
+
+Your official `codex` binary is **never modified, moved, or replaced.**
+`~/.local/bin/codex` is a ten-line shell script: it finds the official
+binary on your `PATH`, asks it for its version, and runs the patched build
+of that same version if one is installed — otherwise it runs the official
+binary unchanged. Upgrade Codex with `brew` or `npm` and the forwarder simply
+falls through to the new official version until a matching patched build
+exists; nothing breaks, you just lose the status-line item in the meantime.
+
+If the installer prints a block starting with `!! PATH:`, another `codex`
+comes earlier on your `PATH` than `~/.local/bin`. Put the line it shows
+first in your shell rc file and open a new shell, or the status item will
+never appear.
+
+#### First launch
+
+Open a new terminal (so the `PATH` change is picked up) and run `codex`.
+Under the composer you should see your usual status line plus the new item:
+
+```text
+gpt-5.4 · ~/proj · main · Privacy ░░░░░░░░░░  0%
+```
+
+Nothing is disclosed yet, so it is 0%. The number moves as files, prompts,
+and tool arguments cross into model context. Then:
+
+- `/statusline` — Codex's own picker; tick or untick `privacy` to add or
+  remove the item for good. It is saved in `config.toml`.
+- `$privacy hud off` / `$privacy hud on` — hide or show it for now, without
+  touching your config. `$privacy hud status` tells you which of
+  `absent | stale | hidden | shown` it is in.
+- `$privacy` — the full session audit (Level 2).
+
+The first tool call of a session pays a ~7 s model load before the daemon is
+listening; that window is unmonitored and the item shows `⚠unverified`
+rather than a clean number. See [Known limits](#known-limits).
+
+#### If something is missing
+
+- **`no patched build published for codex <ver> yet`** — there is no
+  release for your Codex version. Everything else installed; the status
+  item will appear once a build for that version is published (rerun the
+  installer then). Until then the fallback pane works:
+  `~/.local/share/codex-privacy-hud/venv/bin/privacy-hud-ambient --watch`
+  in a second terminal.
+- **`!! config.toml: …`** — your `config.toml` has a `[tui]` table or a
+  `status_line` key in a shape the installer will not edit blind. It changed
+  nothing; add `"privacy"` to `[tui].status_line` yourself, using the line
+  it prints.
+- **Doctor shows `FAIL`** — read its fix line; it names the exact command.
+  `privacy-hud-doctor --check-model` goes further and loads the detector
+  for real.
+- To start over: run the [uninstaller](#uninstall), then install again.
+
+> **Status as of 2026-09-15.** The patched build has run end to end on the
+> maintainer's machine — a locally built arm64 binary booted, listed
 > `privacy` in `/statusline`, rendered the item from a snapshot within a
-> second, honoured `$privacy hud off`/`on`, and passed
-> `tests/test_codex_integration.py` (the pty-driven acceptance test) twice.
-> No release has been published yet — the first CI build was still running
-> when this was written. Until it lands, `install.sh` reaches step 6, finds
-> no matching build, prints "no patched build published for codex `<ver>`
-> yet", and falls back to the ambient pane; everything else installs and
-> works. The binary CI publishes is **unsigned and unnotarized**; the
-> installer removes the quarantine attribute itself, and the SHA-256 it
-> verifies protects against a corrupted or truncated download, not against
-> a compromised release. `cargo test -p codex-tui` and the upstream
-> `insta` picker snapshots have still not been run anywhere. Shorten this
-> note once a release exists.
+> second, honoured `$privacy hud off`/`on`, and passed the pty-driven
+> acceptance test twice — but no release has been published yet; the first
+> CI build was still running when this was written. Until it lands, step 6
+> reports no matching build and you get the fallback pane. The binary CI
+> publishes is **unsigned and unnotarized**; the installer removes the
+> quarantine attribute itself, and the SHA-256 it verifies protects against
+> a corrupted download, not against a compromised release. `cargo test -p
+> codex-tui` and the upstream `insta` picker snapshots have not been run
+> anywhere. Shorten this note once a release exists.
 
 ### Uninstall
 
