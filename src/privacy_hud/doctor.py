@@ -64,10 +64,12 @@ were recorded, never that anything can be withdrawn.
 `ambient.py` documents at length — so the ledger is opened through the
 `file:...?mode=ro` URI, which cannot create the file and cannot run the
 `CREATE TABLE IF NOT EXISTS` DDL (or the `chmod`) that `Ledger.__init__`
-would. That is a deliberate deviation from `ambient.py`'s "open a `Ledger`"
-approach: ambient needs `summary()`, the doctor needs three scalars, and a
-diagnostic pointed at a user's real ledger should be *incapable* of writing to
-it rather than merely careful not to.
+would. `ambient.py` no longer opens a `Ledger` for its numbers either — it
+reads `$PLUGIN_DATA/hud/<session_id>.json` (contract A) for those, and opens
+a `Ledger` only to resolve *which* session to show, never for `percent` or
+`blocked`. This module needs three scalars and nothing more, and a
+diagnostic pointed at a user's real ledger should be *incapable* of writing
+to it rather than merely careful not to.
 
 The precise claim, since an approximate one would be the kind of overclaim
 CLAUDE.md §5 forbids: no file this module names is ever created or modified.

@@ -38,7 +38,7 @@ from privacy_hud.ledger import Ledger
 from privacy_hud.matrix.loader import load_matrix
 from privacy_hud import mcp_tools
 
-data_dir = os.environ.get("PLUGIN_DATA", "/tmp")
+data_dir = os.environ["PLUGIN_DATA"]
 explicit = (sys.argv[1] if len(sys.argv) > 1 else "").strip()
 ledger = Ledger(os.path.join(data_dir, "ledger.db"), load_matrix())
 
@@ -117,7 +117,7 @@ resolved = mcp_tools.ResolvedSession(
     session_id, basis,
     tuple(s for s in argv[2].split(",") if s))
 
-data_dir = os.environ.get("PLUGIN_DATA", "/tmp")
+data_dir = os.environ["PLUGIN_DATA"]
 ledger = Ledger(os.path.join(data_dir, "ledger.db"), load_matrix())
 
 summary = mcp_tools.get_session_summary(ledger, session_id)
@@ -165,7 +165,7 @@ from privacy_hud.matrix.loader import load_matrix
 from privacy_hud import mcp_tools, render
 
 session_id, event_id = sys.argv[1], int(sys.argv[2])
-data_dir = os.environ.get("PLUGIN_DATA", "/tmp")
+data_dir = os.environ["PLUGIN_DATA"]
 ledger = Ledger(os.path.join(data_dir, "ledger.db"), load_matrix())
 
 row = mcp_tools.get_exposure_detail(ledger, session_id, event_id)
@@ -211,7 +211,7 @@ sys.path.insert(0, os.path.join(os.environ.get("PLUGIN_ROOT", "."), "src"))
 from privacy_hud import mcp_tools
 
 session_id, arg = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "status")
-data_dir = os.environ.get("PLUGIN_DATA", "/tmp")
+data_dir = os.environ["PLUGIN_DATA"]
 
 out = (mcp_tools.hud_status(data_dir, session_id) if arg == "status"
        else mcp_tools.hud_set_hidden(data_dir, session_id, arg == "off"))

