@@ -37,9 +37,12 @@ jobs:
       - name: Newest upstream Codex version
         id: up
         run: |
-          tag="$(git ls-remote --tags --refs https://github.com/openai/codex 'rust-v*' | awk -F/ '{print $NF}' | sort -V | tail -1)"
+          # Only tags shaped rust-v<major>.<minor>.<patch>: upstream also has
+          # stray ones like rust-v.0.0.2504292236 that sort -V would put last.
+          tag="$(git ls-remote --tags --refs https://github.com/openai/codex 'rust-v*' | awk -F/ '{print $NF}' \
+                   | grep -E '^rust-v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)"
           ver="${tag#rust-v}"
-          printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "unexpected upstream tag: $tag" >&2; exit 1; }
+          [ -n "$ver" ] || { echo "no rust-v<major>.<minor>.<patch> tag found upstream" >&2; exit 1; }
           echo "upstream: $tag"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "ver=$ver" >> "$GITHUB_OUTPUT"
