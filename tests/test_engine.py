@@ -424,11 +424,21 @@ def test_scan_never_touches_the_ledger_on_the_egress_policy_path(eng):
     assert any(f.data_type == "credential" for f in scan.findings)
 
 
-def test_observe_with_a_precomputed_scan_matches_observe_alone(tmp_path):
+def test_observe_with_a_precomputed_scan_matches_observe_alone(tmp_path, monkeypatch):
     # The two call shapes must be interchangeable: the daemon uses the
     # split form, every other caller (and every other test) uses the
     # single-call form, and a divergence between them would be a bug that
     # only ever showed up under concurrency.
+    #
+    # Every row carries `ts`, an epoch second stamped at write time, so the
+    # two observes below must see the same clock or a run that straddles a
+    # second boundary compares two honest ledgers as unequal. It happened on
+    # a slow CI runner; the clock is frozen, nothing else about the rows is.
+    import types
+    from privacy_hud import ledger as ledger_module
+    monkeypatch.setattr(ledger_module, "time",
+                        types.SimpleNamespace(time=lambda: 1_700_000_000.0))
+
     def _fresh():
         led = Ledger(tmp_path / f"l{_fresh.n}.db", M)
         _fresh.n += 1
