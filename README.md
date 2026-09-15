@@ -21,6 +21,8 @@ Token HUD:    How much context has been consumed?
 Privacy HUD:  How much sensitive context has been disclosed?
 ```
 
+![A real Codex 0.154 session running the patched build: one prompt containing a street address, the model's reply, and the Privacy item under the composer already at 5%, beside Codex's own model item](docs/images/codex-privacy-example.png)
+
 ![The Codex Privacy HUD user journey — from the ambient disclosure bar through the session audit, exposure detail, and minimizing a payload before it reaches an external tool](docs/images/user-journey-mockup.png)
 
 **Before you rely on it:** the start of a session is not monitored while the model loads, hosted tools bypass hooks, and detection is heuristic. The HUD marks a session whose record has a known hole rather than showing it as a clean 0%, but it cannot tell you what it missed. Read the [known limits](#known-limits).
