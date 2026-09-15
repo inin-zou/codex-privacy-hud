@@ -47,7 +47,7 @@ It also over-reports on ordinary development text, in ways that inflate the budg
 
 Read a `person` or `date` row on a `Bash` source with that in mind: the exemplar column is there so you can tell at a glance which findings are yours and which are the machine's.
 
-## 8. Which session is being shown is inferred, not read — and both surfaces say so when they cannot be sure.
+## 8. Which session is being shown is inferred, not read — and the audit says so when it cannot be sure.
 
 Codex exposes no session id to a skill, so the session to audit is worked out rather than read: the daemon knows which session fired a hook most recently, and running `$privacy` itself fires one (the skill runs bash, which is a `PreToolUse` in the session you typed in), so the asking session is the most recently active one. Two consequences. With **two sessions active in the same few seconds** the signal cannot separate them — the audit names the other active session in a line above the table instead of picking one silently, its header reads `Most recently active session` rather than `Current session`, and `$privacy <session id>` audits a specific one. With **no daemon to ask**, it falls back to the most recently started session in the ledger and labels it as that, in both the note and the table header, rather than as yours; a session with no daemon is also not being recorded (limit 1), so that is the state in which the numbers mean least.
 

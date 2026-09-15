@@ -86,10 +86,11 @@ Flags: `--yes` answers the model question with yes; `--no-model` skips the
 download without asking. Both are useful for scripted installs, and the
 script needs one of them when there is no terminal to ask on.
 
-Step 3 is the **only network access the plugin ever causes**, and it happens
-here, once, before any Codex session exists. The runtime itself never goes
-online: it sets `HF_HUB_OFFLINE=1` before importing `transformers` and opens
-no socket except its own on `127.0.0.1`.
+Steps 2, 3, and 6 are the **only network access anything here ever causes**:
+the package, the weights, and the patched build, all downloaded by the
+installer, once, before any Codex session exists. The runtime itself never
+goes online: it sets `HF_HUB_OFFLINE=1` before importing `transformers` and
+opens no socket except its own on `127.0.0.1`.
 
 ### First launch
 
@@ -107,8 +108,9 @@ It is 0% until something sensitive crosses into model context; the number
 moves as files, prompts, and tool arguments do. (On a machine where the
 daemon is not yet running, that first prompt also starts it, which takes
 about seven seconds to load the model — the reply to that first hook says
-`Privacy HUD unavailable — disclosure unverified`, and the item shows up a
-moment later.) Then:
+`Privacy HUD unavailable — disclosure unverified`, the item shows up a
+moment later, and that load window is unmonitored: see
+[Known limits](#known-limits).) Then:
 
 - `/statusline` — Codex's own picker; tick or untick `privacy` to add or
   remove the item for good. It is saved in `config.toml`.
@@ -116,10 +118,6 @@ moment later.) Then:
   touching your config. `$privacy hud status` tells you which of
   `absent | stale | hidden | shown` it is in.
 - `$privacy` — the full session audit (Level 2).
-
-The first tool call of a session pays a ~7 s model load before the daemon is
-listening; that window is unmonitored and the item shows `⚠unverified`
-rather than a clean number. See [Known limits](#known-limits).
 
 ## What you see
 
@@ -213,7 +211,7 @@ flowchart TD
     B --> F["Allow, rewrite, or block"]
 ```
 
-The ledger is **event-sourced from hook boundaries**, never by asking a model what is in context. Every byte that can enter model context passes through a small set of chokepoints — `UserPromptSubmit`, `PostToolUse`, `SubagentStart`, `PreToolUse` — which together form a cut of the data-flow graph. We observe the transactions and reconstruct the balance.
+The ledger is **event-sourced from hook boundaries**, never by asking a model what is in context. Every byte that can enter model context from your machine passes through a small set of chokepoints — `UserPromptSubmit`, `PostToolUse`, `SubagentStart`, `PreToolUse` — which together form a cut of the data-flow graph. We observe the transactions and reconstruct the balance.
 
 There is **no second LLM call to audit the first one.** That would re-transmit the sensitive data being audited, cost a round trip per turn, and produce a non-deterministic ledger. See `architecture.md` §3.
 
@@ -251,7 +249,7 @@ Stated up front, because a privacy tool that overclaims is worse than none:
 5. **The status-line item lives in a separately built Codex — never in your official one.** **The plugin never modifies your official Codex binary.** ([details](docs/known-limits.md#5-the-status-line-item-lives-in-a-separately-built-codex--never-in-your-official-one))
 6. **A command that reads a file itself is not inspected.** The engine scans the *text of a tool call*, not what that call will read at runtime. ([details](docs/known-limits.md#6-a-command-that-reads-a-file-itself-is-not-inspected))
 7. **Detection is heuristic.** A determined adversary can encode around regex and NER. ([details](docs/known-limits.md#7-detection-is-heuristic))
-8. **Which session is being shown is inferred, not read — and both surfaces say so when they cannot be sure.** ([details](docs/known-limits.md#8-which-session-is-being-shown-is-inferred-not-read--and-both-surfaces-say-so-when-they-cannot-be-sure))
+8. **Which session is being shown is inferred, not read — and the audit says so when it cannot be sure.** The fallback pane carries no such marker; pin it with `--session-id` when it matters. ([details](docs/known-limits.md#8-which-session-is-being-shown-is-inferred-not-read--and-the-audit-says-so-when-it-cannot-be-sure))
 9. **Nothing recalls disclosed data.** Ever. ([details](docs/known-limits.md#9-nothing-recalls-disclosed-data))
 
 ## Configuration
