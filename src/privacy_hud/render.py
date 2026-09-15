@@ -536,10 +536,11 @@ def detail(row: ExposureRow) -> str:
       why that field is optional and `None` when unknown, rather than
       defaulted), since fabricating 120 as a hardcoded constant here would
       silently go stale the moment tables.toml's budget_cap is retuned.
-    - Only the two source-scoped actions (`Protect future occurrences`,
-      `Block this source`) are rendered. The red-band note pointing at a new
-      Codex conversation (design.md §6) depends on the session's band, which
-      this function cannot see from a single row.
+    - Only `Protect future occurrences` is rendered. The red-band note
+      pointing at a new Codex conversation (design.md §6) depends on the
+      session's band, which this function cannot see from a single row.
+      design.md's `Block this source` is withdrawn (#38): the ledger does not
+      record which file or input data came from, so no rule can target one.
     - The per-action confirmation line ("Rule added: ...") describes what
       happens after a button is pressed; there is no click state in a pure
       render of `row`, so it is not rendered here.
@@ -579,7 +580,6 @@ def detail(row: ExposureRow) -> str:
     lines += [
         "",
         "[ Protect future occurrences ]",
-        "[ Block this source ]",
         "",
         "Already disclosed data cannot be recalled from this session.",
     ]

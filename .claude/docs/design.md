@@ -232,7 +232,6 @@ Protection   none
 Example      jo•••@acme.com
 
 [ Protect future occurrences ]
-[ Block this source ]
 
 Already disclosed data cannot be recalled from this session.
 ```
@@ -246,9 +245,10 @@ support.log → main agent → GitHub MCP
    B0            B1            B3
 ```
 
-**Actions.** Maximum two, always forward-looking:
+**Actions.** One, forward-looking:
 - `Protect future occurrences` — writes a policy rule to mask this data type from this source going forward.
-- `Block this source` — writes a deny rule for the source path.
+
+`Block this source` was meant to write a deny rule for the source path, and is withdrawn (#38). The ledger's `source` holds a fixed label (`tool input` on an outbound call, the tool name or `user prompt` on the way in), never the path the data came from, so no rule could name a source: one written from a tool-output row matched nothing, one written from an outbound row denied every outbound call in the session. It returns when the ledger records where data came from.
 
 In the red band the detail view also shows a note, not an action: `Want a clean context? Start a new conversation in Codex. What this session already sent to the model stays sent.` A clean context is a new Codex conversation, which the plugin cannot start; an earlier `Start a clean session` action opened a ledger row under an id Codex never sends and was removed (#23).
 

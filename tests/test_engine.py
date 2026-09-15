@@ -345,15 +345,17 @@ def test_ingress_is_never_rewritten_only_recorded(eng):
 # .claude/docs/plans/2026-09-03-implementation.md's Task 13 section.
 # ---------------------------------------------------------------------------
 
-def test_a_blocked_source_denies_a_later_egress(eng):
-    # The L3 action is only real if the engine honours it on the next call.
-    from privacy_hud.mcp_tools import apply_policy
-    apply_policy(eng.ledger, "s1", rule_type="block_source", selector="support.log")
+def test_a_stored_block_source_rule_is_not_consulted(eng):
+    # #38: the rule compared its selector with `obs.source`, which dispatch
+    # only ever fills with fixed labels, so it matched nothing or everything.
+    # A rule left in an older ledger must not decide a call -- even one whose
+    # source happens to equal the selector, as this hand-built one does.
+    eng.ledger.add_policy("s1", rule_type="block_source", selector="tool input")
     d = eng.observe(_obs(hook_event="PreToolUse", direction="egress",
-                         source="support.log", destination="mcp_tool",
-                         text="contact jordan@acme.com",
+                         source="tool input", destination="mcp_tool",
+                         text="build is green",
                          tool_name="mcp__github__x"))
-    assert d.action == "deny"
+    assert d.action == "allow"
 
 
 def test_a_mask_policy_rule_rewrites_a_later_egress(eng):
@@ -367,20 +369,16 @@ def test_a_mask_policy_rule_rewrites_a_later_egress(eng):
     assert "jordan@acme.com" not in blob
 
 
-def test_block_source_policy_does_not_affect_egress_from_other_sources(eng):
-    # Precedence check: a block_source rule for an unrelated source must not
-    # change behavior for an egress observation it doesn't match — that
-    # observation still falls through to Matrix.default_action() exactly as
-    # before (no regression to the existing Ruling-3 coverage above).
-    from privacy_hud.mcp_tools import apply_policy
-    apply_policy(eng.ledger, "s1", rule_type="block_source", selector="other.log")
+def test_a_stored_block_source_rule_leaves_the_credential_default_in_force(eng):
+    # Ignoring the withdrawn rule changes nothing the matrix default decides:
+    # a credential crossing to external_net is still denied, with the default's
+    # own wording.
+    eng.ledger.add_policy("s1", rule_type="block_source", selector=".env")
     d = eng.observe(_obs(hook_event="PreToolUse", direction="egress",
                          destination="external_net", source=".env",
                          text=CREDENTIAL_TEXT, tool_name="Bash"))
     assert d.action == "deny"
     assert d.budget_percent == 0
-    # Denied via the existing credential/default_action path, not the
-    # policy-table block_source path (distinguishable by wording).
     assert "block rule" not in (d.system_message or "").lower()
 
 

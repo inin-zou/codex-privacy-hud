@@ -265,7 +265,7 @@ keep the original fail-open behavior.
 *Lives in:* `daemon.py::_deny_for_internal_failure` and `_Handler.handle`.
 
 **User-written policy rules outrank the built-in matrix defaults, and are consulted before
-them: `block_source` (deny) > `mask` (rewrite) > `Matrix.default_action()`.**
+them: `mask` (rewrite) > `Matrix.default_action()`.**
 Two of the three L3 actions — "Block this source" and "Protect future occurrences" — wrote
 durable, correctly-scoped rows to the `policy` table that **nothing ever read**. They were
 cosmetic buttons for most of the build. Closing this was ruled load-bearing rather than
@@ -275,9 +275,22 @@ also **not retroactive** — data disclosed before a rule was written stays disc
 (design.md P4), and the docstrings say so.
 *Lives in:* `engine.py::_policy_selectors`, consulted in `Engine.observe` ahead of
 `Matrix.default_action()`; written by `mcp_tools.py::apply_policy`; pinned by
-`tests/test_engine.py::test_a_blocked_source_denies_a_later_egress`.
+`tests/test_engine.py::test_a_mask_policy_rule_rewrites_a_later_egress`.
 **Two known narrowings:** `selector` matching is exact-string, not glob, though the schema
 comment allows for a path glob; and `allow_dest` is untouched because nothing mints it yet.
+
+**Superseded for `block_source` (#38): it is withdrawn, not enforced.**
+Closing the gap above wired the read but left the rule unable to name anything. A rule's
+selector was compared with an observation's `source`, and `dispatch._build_observation`
+only ever writes fixed labels there — `"tool input"` on every outbound call, the tool name
+or `"user prompt"` on the way in. So a rule written from a tool-output row (`"Bash"`)
+matched nothing, and one written from an outbound row (`"tool input"`) denied every
+outbound call in the session, findings or not, with no ledger row to explain the deny. The
+narrowing recorded above ("exact-string, not glob") described the wrong problem: no glob
+over those labels would have helped either. `apply_policy` now refuses the rule type and
+`Engine.observe` ignores rows older ledgers still hold; the button is gone from `render.detail()`
+and `ui/app.js`. It returns when the ledger records the origin of data rather than a label.
+*Pinned by:* `tests/test_block_source_e2e.py`.
 
 **Deliberately deferred: the hook client's own egress heuristic is weaker than the server's
 detector, and that is accepted.**

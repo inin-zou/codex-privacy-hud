@@ -136,10 +136,12 @@ def build_app():
 
     @app.tool(name="privacy.update_policy")
     def update_policy(session_id: str, rule_type: str, selector: str) -> dict:
-        """Write a "Protect future occurrences" (`rule_type="mask"`) or
-        "Block this source" (`rule_type="block_source"`) rule (design.md
-        §6). See this file's module docstring: `Engine.observe` enforces
-        this rule starting with the next matching call, not retroactively."""
+        """Write a "Protect future occurrences" (`rule_type="mask"`) rule
+        (design.md §6). See this file's module docstring: `Engine.observe`
+        enforces this rule starting with the next matching call, not
+        retroactively. `rule_type="block_source"` is refused (#38): the
+        ledger does not record which file or input data came from, so no
+        rule can name a source."""
         mcp_tools.apply_policy(ledger, session_id, rule_type=rule_type,
                                 selector=selector)
         return {"applied": True, "rule_type": rule_type, "selector": selector}

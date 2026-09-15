@@ -183,11 +183,13 @@ def test_allow_once_does_not_mint_when_not_reviewed(led):
 # apply_policy
 # --------------------------------------------------------------------- #
 
-def test_block_this_source_writes_an_enforceable_rule(led):
-    apply_policy(led, "s1", rule_type="block_source", selector="support.log")
-    rules = [dict(r) for r in led.conn.execute("SELECT * FROM policy")]
-    assert rules[0]["rule_type"] == "block_source"
-    assert rules[0]["selector"] == "support.log"
+@pytest.mark.parametrize("selector", ["support.log", "tool input", "Bash"])
+def test_block_this_source_is_refused_until_origins_exist(led, selector):
+    # #38: no selector a real audit row offers can mean "this source", so a
+    # written rule would be a silent no-op or a session-wide kill switch.
+    with pytest.raises(ValueError, match="#38"):
+        apply_policy(led, "s1", rule_type="block_source", selector=selector)
+    assert led.conn.execute("SELECT count(*) FROM policy").fetchone()[0] == 0
 
 
 def test_protect_future_occurrences_writes_a_mask_rule(led):
@@ -197,7 +199,7 @@ def test_protect_future_occurrences_writes_a_mask_rule(led):
 
 
 def test_apply_policy_scopes_the_rule_to_the_session(led):
-    apply_policy(led, "s1", rule_type="block_source", selector="support.log")
+    apply_policy(led, "s1", rule_type="mask", selector="email")
     row = led.conn.execute("SELECT scope FROM policy").fetchone()
     assert "s1" in row["scope"]
 
