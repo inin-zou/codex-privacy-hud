@@ -1,0 +1,124 @@
+# tests/test_skill_snippets.py
+"""The Python in `skills/privacy/SKILL.md` runs.
+
+Those heredocs are code an agent executes verbatim in a user's session, but
+nothing else ever ran them: a renamed `mcp_tools` function or a changed
+`render.audit` signature would pass every other test and break `$privacy`
+the first time someone typed it. So each block is extracted from the skill
+file exactly as written and run under bash against a seeded ledger, with
+`python3` resolving to this interpreter and `PLUGIN_ROOT` pointing at this
+checkout — the same two things the skill relies on in a real session.
+
+A new heredoc in the skill must get a case here; the inventory test fails
+until it does.
+"""
+from __future__ import annotations
+
+import os
+import re
+import sqlite3
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from privacy_hud.ledger import Ledger
+from privacy_hud.matrix.loader import load_matrix
+
+REPO = Path(__file__).resolve().parents[1]
+SKILL_MD = REPO / "skills" / "privacy" / "SKILL.md"
+
+# Each block is identified by a call only it makes, so reordering or
+# rewording the skill's prose does not break the lookup.
+MARKERS = {
+    "resolve": "mcp_tools.resolve_audit_session(",
+    "audit": "render.audit(",
+    "detail": "render.detail(",
+    "hud": "mcp_tools.hud_set_hidden(",
+}
+
+
+def _python_blocks() -> list[str]:
+    text = SKILL_MD.read_text(encoding="utf-8")
+    blocks = re.findall(r"```bash\n(.*?)```", text, flags=re.S)
+    return [b for b in blocks if "<<'PY'" in b]
+
+
+def _block(name: str) -> str:
+    found = [b for b in _python_blocks() if MARKERS[name] in b]
+    assert len(found) == 1, f"expected one SKILL.md block calling {MARKERS[name]}"
+    return found[0]
+
+
+@pytest.fixture
+def env(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    ledger = Ledger(data / "ledger.db", load_matrix())
+    ledger.start_session("s1", cwd="/r", model="gpt-5")
+    ledger.record("s1", turn_id="t1", kind="exposed", data_type="email",
+                  source="support.log", destination="model_context",
+                  value_hash=b"\x01" * 16, masked_example="jo•••@acme.com",
+                  tool_name="Read", protection=None)
+    ledger.conn.close()
+
+    # `python3` in the skill's shell must be an interpreter that can import
+    # the package's stdlib-only modules; pin it to the one running the tests.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "python3").symlink_to(sys.executable)
+
+    return {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+        "PLUGIN_ROOT": str(REPO),
+        "PLUGIN_DATA": str(data),
+        # Nothing here should read the real Codex home; make sure it cannot.
+        "HOME": str(tmp_path / "home"),
+        "CODEX_HOME": str(tmp_path / "codex-home"),
+    }
+
+
+def _run(block: str, env: dict, **extra: str) -> str:
+    proc = subprocess.run(["bash", "-c", block], env={**env, **extra},
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout
+
+
+def test_every_python_block_has_a_case():
+    covered = set(MARKERS.values())
+    uncovered = [b.splitlines()[0] for b in _python_blocks()
+                 if not any(m in b for m in covered)]
+    assert not uncovered, f"SKILL.md blocks with no test here: {uncovered}"
+    assert len(_python_blocks()) == len(MARKERS)
+
+
+def test_resolve_block_names_the_session(env):
+    out = _run(_block("resolve"), env)
+    # No daemon in the test, so the skill's documented fallback applies.
+    assert "session_id: s1" in out
+    assert "basis: started_at" in out
+
+
+def test_audit_block_prints_the_table(env):
+    out = _run(_block("audit"), env,
+               SESSION_ID="s1", BASIS="started_at", ALSO_ACTIVE="")
+    assert "Privacy Audit" in out
+    # BASIS reached the header: no daemon named the session current.
+    assert "Most recently started session" in out
+    assert "Email ×1        support.log  model_context  [EXPOSED]" in out
+
+
+def test_detail_block_prints_one_row(env):
+    with sqlite3.connect(Path(env["PLUGIN_DATA"]) / "ledger.db") as conn:
+        (event_id,) = conn.execute(
+            "SELECT id FROM events WHERE session_id = 's1'").fetchone()
+    out = _run(_block("detail"), env, SESSION_ID="s1", EVENT_ID=str(event_id))
+    assert "Email ×1\nsupport.log → model_context" in out
+
+
+def test_hud_block_prints_one_state_word(env):
+    out = _run(_block("hud"), env, SESSION_ID="s1")
+    assert out.strip() in {"shown", "hidden", "stale", "absent"}
