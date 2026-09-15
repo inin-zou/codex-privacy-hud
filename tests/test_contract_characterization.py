@@ -18,7 +18,7 @@ So every test here:
   the very refactor it is supposed to police;
 * asserts on a byte-exact golden string (the rendered ASCII *is* the product
   surface -- design.md P6: "every view must have a legible ASCII rendering")
-  or on a byte-exact JSON payload (the six `privacy.*` MCP tools and the local
+  or on a byte-exact JSON payload (the `privacy.*` MCP tools and the local
   UI's endpoints are a public contract).
 
 `_json()` below is the one concession to the refactor: it is the explicit
@@ -462,7 +462,7 @@ def test_hud_line_default_ladder_did_not_move(width):
 
 
 # --------------------------------------------------------------------- #
-# The MCP / JSON contract -- the six `privacy.*` tools are public.
+# The MCP / JSON contract -- the `privacy.*` tools are public.
 # --------------------------------------------------------------------- #
 
 JSON_SUMMARY = {"percent": 6, "exposed_items": 2, "destinations": 2,

@@ -6,13 +6,14 @@ A's HUD snapshot file and redraws `render.hud_line()` in place (design.md §4).
 `tui.status_line` accepts an ordered list of *built-in* status-item
 identifiers only (PRD.md §9, architecture.md §9) — there is no plugin-owned
 renderer, so nothing this package produces can appear under the Codex input
-area without patching and recompiling Codex's own Rust source. Prior art
-confirms the cost of that path: the forked-binary HUDs go stale on every
-upstream Codex release, and `brandonwie/codex-hud`'s *default* mode avoids
-patching entirely by doing exactly what this module does — a second terminal
-pane, polling, one line redrawn in place. We deliberately do not patch the
-Codex binary, and README's known-limits section must keep saying so
-(CLAUDE.md §5: do not claim the plugin injects a native Codex footer).
+area without patching and recompiling Codex's own Rust source. This project
+now does that too: `patches/` adds a `privacy` status-line item, and
+`install.sh` fetches a patched build matching the installed Codex version.
+But a patched build goes stale on every upstream Codex release until one is
+built for it, so this module stays as the fallback — the same approach as
+`brandonwie/codex-hud`'s default mode: a second terminal pane, polling, one
+line redrawn in place. It is only ever a *separate* pane; it does not render
+inside the stock Codex TUI (CLAUDE.md §5: claim no more than the code does).
 
 **Why reading a file rather than asking the daemon or the DB.** The daemon's
 unix socket is the hook hot path, and that path already spends ~280 ms on real

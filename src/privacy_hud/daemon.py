@@ -96,7 +96,7 @@ OP_EVENT = "event"
 OP_ACTIVE_SESSIONS = "active_sessions"
 
 #: Client-side bound for `query_active_sessions`. Deliberately generous
-#: compared with the hook client's 120 ms: the caller is a human running
+#: compared with the hook client's 2 s: the caller is a human running
 #: `$privacy`, not a hook with a 5 s budget, and the daemon answers requests
 #: serially — so a query that arrives while a tier-3 ingress scan is in
 #: flight (~3 s measured) should wait for the true answer rather than
@@ -256,7 +256,7 @@ class _Handler(socketserver.StreamRequestHandler):
     """
 
     # Codex's own hook timeout is 5s (hooks.json) and the client's socket
-    # read timeout is 120ms; there is no reason for this handler to ever
+    # timeout is 2s (`TIMEOUT` in hooks/handler.py); there is no reason for this handler to ever
     # block long on a single line, but bound it anyway so one wedged
     # client can't tie up a worker thread indefinitely. Note: this must be
     # applied via `self.connection.settimeout(...)` in `setup()` —

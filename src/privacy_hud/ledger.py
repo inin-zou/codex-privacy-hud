@@ -297,7 +297,7 @@ class SessionSummary:
 
 #: Exactly the keys `privacy.list_exposures` / `privacy.get_exposure_detail`
 #: have always put on the wire, in order. This tuple, not `dataclasses.asdict`,
-#: is what `ExposureRow.as_dict()` emits: the six MCP tools are a public
+#: is what `ExposureRow.as_dict()` emits: the MCP tools are a public
 #: contract, so their JSON shape must be a decision recorded in one place
 #: rather than a side effect of which fields a dataclass happens to declare.
 #: Adding a field to `ExposureRow` therefore does NOT silently widen the wire
