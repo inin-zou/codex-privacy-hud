@@ -64,6 +64,56 @@ first_codex_on_path() {
 
 official_codex() { first_codex_on_path "$FWD"; }
 
+# Follow symlinks to the real file, in POSIX sh (macOS ships `readlink -f`
+# only since 12.3, and python3 is not something the FAKE test path can rely on).
+real_path() {
+  p="$1"; n=0
+  while [ -L "$p" ] && [ "$n" -lt 20 ]; do
+    t="$(readlink "$p")"
+    case "$t" in /*) p="$t" ;; *) p="$(dirname "$p")/$t" ;; esac
+    n=$((n + 1))
+  done
+  printf '%s\n' "$p"
+}
+
+# The patched tarball carries only `codex`. Codex 0.154 also expects a sibling
+# `codex-code-mode-host` and fails Code Mode closed without it. That host cannot
+# be built by our release job: it links the `v8` crate, whose build script
+# downloads a prebuilt V8 that is not published for every target. It contains
+# no TUI, so the official binary of the same version is exactly right -- link
+# it in next to the patched `codex`, which is where Codex's own lookup checks.
+link_official_host() {
+  dest="$1/codex-code-mode-host"
+  real="$(real_path "$OFFICIAL")"
+  host=""
+  cand="$(dirname "$real")/codex-code-mode-host"
+  [ -x "$cand" ] && host="$cand"
+  if [ -z "$host" ]; then
+    case "$real" in
+      */bin/codex.js)
+        # npm/bun/pnpm layout: the launcher script lives in the package root's
+        # bin/, the binaries in a platform package's vendor/<triple>/bin/.
+        pkgroot="$(dirname "$(dirname "$real")")"
+        case "$TRIPLE" in
+          aarch64-apple-darwin) plat=codex-darwin-arm64 ;;
+          x86_64-apple-darwin) plat=codex-darwin-x64 ;;
+          *) plat="" ;;
+        esac
+        for cand in "$pkgroot/node_modules/@openai/$plat/vendor/$TRIPLE/bin/codex-code-mode-host" \
+                    "$pkgroot/vendor/$TRIPLE/bin/codex-code-mode-host"; do
+          [ -n "$plat" ] && [ -x "$cand" ] && { host="$cand"; break; }
+        done ;;
+    esac
+  fi
+  if [ -n "$host" ]; then
+    ln -sfn "$host" "$dest"
+    log "linked codex-code-mode-host from $host"
+  else
+    log "!! no codex-code-mode-host found beside the official codex; Code Mode"
+    log "!! will be unavailable in the patched build (everything else works)."
+  fi
+}
+
 rc_file() {
   case "${SHELL:-}" in */zsh) echo "$HOME/.zshrc" ;; */bash) echo "$HOME/.bash_profile" ;; *) echo "$HOME/.profile" ;; esac
 }
@@ -261,6 +311,7 @@ if curl -fsSL "$BASE_URL/codex-$VER-hud/$ART" -o "$TMP/$ART" 2>/dev/null || curl
   chmod +x "$SHARE/$VER/codex"
   xattr -d com.apple.quarantine "$SHARE/$VER/codex" 2>/dev/null || true
   add_created "$SHARE/$VER/"
+  link_official_host "$SHARE/$VER"
   mkdir -p "$BIN"
   cat > "$FWD" <<'FWD'
 #!/bin/sh
@@ -380,7 +431,10 @@ fi
 
 if [ "${PRIVACY_HUD_FAKE:-0}" != "1" ]; then
   log "step 9/9: doctor"
-  "$SHARE/venv/bin/privacy-hud-doctor" || true
+  # Codex sets PLUGIN_DATA for its hooks; doctor run from here would otherwise
+  # report it unset and call the setup unusable, which it is not.
+  PLUGIN_DATA="$HOME/.codex/plugins/data/codex-privacy-hud-codex-privacy-hud" \
+    "$SHARE/venv/bin/privacy-hud-doctor" || true
 fi
 
 # Already written after every step that changed anything; this final call

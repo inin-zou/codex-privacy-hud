@@ -290,3 +290,50 @@ def test_release_base_url_without_a_value_is_a_usage_error(home):
     r = run(env, "--release-base-url")
     assert r.returncode == 2
     assert "usage" in r.stderr.lower()
+
+
+def test_the_official_code_mode_host_is_linked_beside_the_patched_codex(home):
+    # Codex 0.154 wants `codex-code-mode-host` next to `codex` and fails Code
+    # Mode closed without it. The tarball cannot carry one (it links a V8
+    # build that is not published for every target), so the installer links
+    # the official binary of the same version -- the host has no TUI and needs
+    # no patch.
+    home, env, rel = home
+    official_dir = Path(env["PATH"].split(":")[0])
+    host = official_dir / "codex-code-mode-host"
+    host.write_text("#!/bin/sh\necho host\n"); host.chmod(0o755)
+    r = run(env, "--yes", "--release-base-url", rel.as_uri())
+    assert r.returncode == 0, r.stderr
+    link = home / f".local/share/codex-privacy-hud/{VER}/codex-code-mode-host"
+    assert link.is_symlink() and link.resolve() == host.resolve()
+    assert "linked codex-code-mode-host" in r.stdout
+
+
+def test_the_host_is_found_through_an_npm_launcher(home, tmp_path):
+    # npm installs put a JS launcher on PATH and the binaries in a platform
+    # package: <root>/node_modules/@openai/codex-darwin-arm64/vendor/<triple>/bin/.
+    home, env, rel = home
+    official_dir = Path(env["PATH"].split(":")[0])
+    root = tmp_path / "lib" / "node_modules" / "@openai" / "codex"
+    (root / "bin").mkdir(parents=True)
+    launcher = root / "bin" / "codex.js"
+    launcher.write_text(f'#!/bin/sh\n[ "$1" = --version ] && echo "codex-cli {VER}" && exit 0\necho official "$@"\n')
+    launcher.chmod(0o755)
+    vendor_bin = root / "node_modules" / "@openai" / "codex-darwin-arm64" / "vendor" / TRIPLE / "bin"
+    vendor_bin.mkdir(parents=True)
+    host = vendor_bin / "codex-code-mode-host"
+    host.write_text("#!/bin/sh\necho host\n"); host.chmod(0o755)
+    (official_dir / "codex").unlink()
+    (official_dir / "codex").symlink_to(launcher)
+    r = run(env, "--yes", "--release-base-url", rel.as_uri())
+    assert r.returncode == 0, r.stderr
+    link = home / f".local/share/codex-privacy-hud/{VER}/codex-code-mode-host"
+    assert link.is_symlink() and link.resolve() == host.resolve()
+
+
+def test_a_missing_host_is_reported_not_fatal(home):
+    home, env, rel = home
+    r = run(env, "--yes", "--release-base-url", rel.as_uri())
+    assert r.returncode == 0, r.stderr
+    assert "no codex-code-mode-host" in r.stdout
+    assert not (home / f".local/share/codex-privacy-hud/{VER}/codex-code-mode-host").exists()
