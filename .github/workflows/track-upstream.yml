@@ -71,8 +71,14 @@ jobs:
           runs="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow release-codex.yml --limit 40 \
                     --json databaseId,displayTitle,status,conclusion,url)"
           in_flight="$(printf '%s' "$runs" | jq '[.[] | select(.status != "completed")] | length')"
+          # Exact titles only: release-codex.yml names a dispatched run
+          # "Release patched Codex <ver>" and a tag-push run "Release patched
+          # Codex codex-<ver>-hud". A substring test would let 5.0.0 match
+          # 15.0.0.
           last="$(printf '%s' "$runs" | jq -c --arg v "${{ steps.up.outputs.ver }}" \
-                    '[.[] | select(.status == "completed" and (.displayTitle | contains($v)))][0] // empty')"
+                    '[.[] | select(.status == "completed"
+                                   and (.displayTitle == "Release patched Codex " + $v
+                                        or .displayTitle == "Release patched Codex codex-" + $v + "-hud"))][0] // empty')"
           if [ "$in_flight" -gt 0 ]; then
             echo "$in_flight release run(s) in flight; checking again next cycle"
             echo "busy=true" >> "$GITHUB_OUTPUT"
