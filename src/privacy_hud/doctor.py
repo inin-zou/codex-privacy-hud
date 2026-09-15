@@ -128,15 +128,23 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import runtime
-from .local_ui_server import _ledger_path
+from . import codex, runtime
+from .runtime import ledger_path as _ledger_path
 
 # `runtime` is imported at module level, unlike `daemon` (see `_socket_path`
 # for why that one is deferred), because it is stdlib-only and imports nothing
-# else from this package: there is no chain through it that a broken detector
-# stack or a missing `transformers` could take down. It is also the module
-# whose literals this file must agree with, and a deferred import would make
-# that agreement conditional.
+# else from this package except `codex`: there is no chain through it that a
+# broken detector stack or a missing `transformers` could take down. It is
+# also the module whose literals this file must agree with, and a deferred
+# import would make that agreement conditional.
+#
+# `_ledger_path` used to come from `local_ui_server`, which imports `render`,
+# `mcp_tools` and the matrix — the whole read stack — into a diagnostic that
+# has to survive a broken install, and which closed a real import cycle
+# (`doctor` -> `local_ui_server` -> `runtime` -> `doctor`). It resolves
+# `$PLUGIN_DATA/ledger.db` and nothing else, so it lives in `runtime` (which
+# already owns "which plugin-data directory") over `codex.LEDGER_NAME`, and
+# `local_ui_server` re-exports it under its old name.
 
 # --------------------------------------------------------------------- #
 # Pinned floors
@@ -158,19 +166,30 @@ MIN_PYTHON = (3, 11)
 MIN_TRANSFORMERS = (5, 16)
 MIN_TORCH = (2, 5)
 
-#: The plugin's name in `.codex-plugin/plugin.json`, which is also the
-#: directory name Codex uses under `plugins/cache/<marketplace>/`.
-PLUGIN_NAME = "codex-privacy-hud"
+# --------------------------------------------------------------------- #
+# Re-exports
+#
+# These names are defined elsewhere now — the Codex facts in `codex.py` (the
+# single place this package knows anything about Codex the platform), the two
+# path-printing helpers in `runtime.py` (which `main` below and
+# `privacy-hud-setup` both need, and which a setup command must not have to
+# import a 1700-line diagnostic to get). They are kept here under their old
+# names rather than renamed at every call site because prose all over this
+# file and several tests name them here: `tests/test_daemon.py` compares
+# `doctor.SOCKET_NAME` against the hook client's literal,
+# `tests/test_hud_contract.py` compares `doctor.PLUGIN_NAME` against the
+# manifest, `tests/test_doctor.py` asserts `doctor.PROBE_EVENT` is harmless
+# and exercises `doctor._shell_path` against a real shell. One definition,
+# two spellings; see the defining module for the why of each value.
+# --------------------------------------------------------------------- #
 
-#: Socket file name inside `$PLUGIN_DATA`. See `_socket_path` for why this
-#: literal exists here as well as in `daemon.py`. All three copies — this one,
-#: `daemon._default_socket_path`'s and `hooks/handler.py`'s — are compared by
-#: `test_the_socket_name_is_the_same_in_all_three_places` in
-#: `tests/test_daemon.py`, so the duplication is checked rather than trusted.
-SOCKET_NAME = "daemon.sock"
-
-#: The harmless probe event. See the module docstring for why this one.
-PROBE_EVENT = "PreCompact"
+PLUGIN_NAME = codex.PLUGIN_NAME
+SOCKET_NAME = codex.SOCKET_NAME
+PROBE_EVENT = codex.PROBE_EVENT
+_codex_home = codex.codex_home
+_codex_data_candidates = codex.codex_data_candidates
+_display_path = runtime.display_path
+_shell_path = runtime.shell_path
 
 #: Default daemon round-trip budget. Same 2.0 s `hooks/handler.py` uses, so
 #: "the doctor says the daemon answers in time" means the same thing the hook
@@ -245,61 +264,6 @@ class Check:
 # small shared helpers
 # --------------------------------------------------------------------- #
 
-def _display_path(path) -> str:
-    """`/Users/x/.codex/...` -> `~/.codex/...`.
-
-    Two reasons. It keeps the report narrow enough to read, and it keeps the
-    account name out of a report a user is likely to paste into a bug tracker
-    — a small thing, but this is a privacy tool and the shell will expand `~`
-    in the remedy lines anyway, so nothing is lost.
-    """
-    text = str(path)
-    home = str(Path.home())
-    if home and text.startswith(home):
-        return "~" + text[len(home):]
-    return text
-
-
-#: Characters that need no shell quoting inside an unquoted word.
-_SHELL_SAFE = frozenset(
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-    "._-/+=:@,")
-
-
-def _shell_path(path) -> str:
-    """A path as it should appear *inside a command the user will paste*.
-
-    `_display_path` is for prose; this is for the `-> ` remedy lines, which
-    are meant to be copied into a shell. The difference is not cosmetic: this
-    very project lives in a directory whose name contains spaces, so an
-    unquoted `codex plugin marketplace add <repo>` silently becomes a
-    three-argument command and the remedy fails in a way that reads as the
-    tool's fault.
-
-    Quoting a home-relative path is where this gets subtle, and the obvious
-    answer is wrong. `~'/Desktop/a b'` does **not** expand: POSIX tilde
-    expansion applies only when no character of the tilde-prefix is quoted,
-    and with no unquoted slash in the word the whole thing is the
-    tilde-prefix. Verified, not assumed. So a home-relative path that needs
-    quoting is emitted as `"$HOME/..."` instead, which expands inside double
-    quotes, tolerates spaces, and still keeps the account name out of the
-    report (see `_display_path`). A path that needs no quoting stays bare and
-    readable.
-    """
-    text = _display_path(path)
-    if text.startswith("~"):
-        rest = text[1:]
-        if set(rest) <= _SHELL_SAFE:
-            return "~" + rest
-        escaped = rest
-        for char in ("\\", '"', "$", "`"):
-            escaped = escaped.replace(char, "\\" + char)
-        return f'"$HOME{escaped}"'
-    if text and set(text) <= _SHELL_SAFE:
-        return text
-    return "'" + text.replace("'", "'\\''") + "'"
-
-
 def _version_tuple(text: str) -> tuple[int, ...]:
     """Leading numeric components of a version string, as a tuple.
 
@@ -364,14 +328,6 @@ def _sha256(path: Path) -> str | None:
         return None
 
 
-def _codex_home() -> Path:
-    """Codex's state directory. `CODEX_HOME` wins, as it does for Codex."""
-    override = os.environ.get("CODEX_HOME")
-    if override:
-        return Path(override).expanduser()
-    return Path.home() / ".codex"
-
-
 def _repo_root() -> Path | None:
     """The source checkout this module was imported from, or `None`.
 
@@ -395,33 +351,18 @@ def _socket_path(data_dir: Path) -> Path:
     valuable exactly when something in that chain is broken, and a
     module-level import would make an unrelated `ImportError` there take down
     the one command that could have explained it. So: use the canonical
-    helper when it is available, and otherwise fall back to the same literal
-    `hooks/handler.py` already hardcodes (it is stdlib-only and never imports
-    this package, so that literal is independently load-bearing regardless).
+    helper when it is available, and otherwise derive it from `codex.py`,
+    which is stdlib-only and imports nothing from this package — so the
+    fallback cannot be taken down by the same broken chain. `daemon`'s helper
+    now reads the name from there too; `hooks/handler.py` still hardcodes it
+    (it is stdlib-only and never imports this package, so that literal is
+    independently load-bearing regardless) and is compared against it.
     """
     try:
         from .daemon import _default_socket_path
         return Path(_default_socket_path(data_dir))
     except Exception:
-        return data_dir / SOCKET_NAME
-
-
-def _codex_data_candidates() -> list[Path]:
-    """Directories under `$CODEX_HOME/plugins/data/` that look like ours.
-
-    This is the answer to the single most expensive misconfiguration this
-    project has hit: `PLUGIN_DATA` is assigned by Codex, and a daemon started
-    against a different value listens on a socket no hook will ever connect
-    to. Reading the real value off disk is what README tells the user to do
-    (`ls ~/.codex/plugins/data/`); this does the same `ls` so the remedy line
-    can name the exact directory instead of describing how to find it.
-    """
-    root = _codex_home() / "plugins" / "data"
-    try:
-        entries = sorted(root.iterdir())
-    except OSError:
-        return []
-    return [p for p in entries if p.is_dir() and PLUGIN_NAME in p.name]
+        return codex.socket_path(data_dir)
 
 
 # --------------------------------------------------------------------- #
@@ -470,7 +411,7 @@ def _plugin_data_export_fix(candidates: list[Path]) -> list[str]:
                 f"export PLUGIN_DATA={_shell_path(candidates[0])}",
                 "Candidates found: " + ", ".join(
                     _display_path(c) for c in candidates)]
-    return [f"ls {_shell_path(_codex_home() / 'plugins' / 'data')} "
+    return [f"ls {_shell_path(codex.plugin_data_root())} "
             "and export the entry for this plugin as PLUGIN_DATA",
             "If that directory is empty, install the plugin first: "
             "codex plugin add codex-privacy-hud@codex-privacy-hud"]
@@ -519,7 +460,8 @@ def check_plugin_data() -> Check:
     # `not raw`, not `raw is None`: `PLUGIN_DATA=` (exported empty, which a
     # half-written shell profile or a `env PLUGIN_DATA= ...` produces) is set
     # and useless. Every resolver in the package already treats it as unset
-    # -- `local_ui_server.resolve_data_dir` tests `if env:` -- so this check
+    # -- `runtime.plugin_data_dir` (a.k.a. `local_ui_server.resolve_data_dir`)
+    # tests `if env:` -- so this check
     # took the "it is set" branch and then called `.parent` on the `None`
     # that `_ledger_path()` correctly returned, crashing the one check whose
     # whole job is to explain this state.
@@ -1427,7 +1369,7 @@ def _installed_plugin_dirs() -> list[tuple[str, str, Path]]:
     list` — see the module docstring for why a diagnostic in *this* project
     does not shell out to an API client.
     """
-    cache = _codex_home() / "plugins" / "cache"
+    cache = codex.plugin_cache_root()
     found: list[tuple[str, str, Path]] = []
     try:
         marketplaces = sorted(cache.iterdir())
@@ -1537,7 +1479,7 @@ def check_plugin_install() -> Check:
             "Plugin install", FAIL,
             "not present in Codex's plugin cache",
             details=[f"Nothing under "
-                     f"{_display_path(codex_home / 'plugins' / 'cache')}"
+                     f"{_display_path(codex.plugin_cache_root())}"
                      f"/*/{PLUGIN_NAME}/. Codex fires no hook for a plugin "
                      "it has not installed, so the ledger stays empty no "
                      "matter what else is running."],
@@ -1570,7 +1512,7 @@ def check_plugin_install() -> Check:
 
     details = [f"{marketplace}/{PLUGIN_NAME} version " + ", ".join(
         sorted({v for _m, v, _p in installed}))
-        + f" in {_display_path(codex_home / 'plugins' / 'cache')}"]
+        + f" in {_display_path(codex.plugin_cache_root())}"]
 
     enabled = _plugin_enabled(marketplace)
     if enabled is False:

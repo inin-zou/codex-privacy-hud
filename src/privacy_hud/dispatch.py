@@ -106,6 +106,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import codex
 from .detect.model import ModelDetector
 from .detect.paths import PathDetector
 from .detect.secrets import SecretDetector
@@ -129,10 +130,14 @@ _log = logging.getLogger(__name__)
 # daemon (SubagentStop, PreCompact, ...) has no Observation defined by the
 # brief's table; we allow (empty hook output) and record nothing, rather
 # than guessing a mapping that was never specified.
-_KNOWN_EVENTS = {
-    "SessionStart", "SessionEnd", "UserPromptSubmit", "PostToolUse",
-    "PreToolUse", "SubagentStart",
-}
+#
+# The names themselves are Codex's, so they live in `codex.py` with the rest
+# of what this package knows about the platform (`codex.KNOWN_EVENTS` is
+# every event Codex sends; this is the subset with a mapping). Kept under the
+# old private name because `tests/matrix/test_matrix_covers_the_code.py`
+# imports it from here to assert the taxonomy covers it, and because a rename
+# would ripple through this file for no gain.
+_KNOWN_EVENTS = codex.OBSERVED_EVENTS
 
 
 @dataclass
@@ -196,8 +201,8 @@ def new_state(data_dir) -> State:
     data_dir = Path(data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
     matrix = load_matrix()
-    ledger = Ledger(data_dir / "ledger.db", matrix)
-    _allow_cross_thread_access(ledger, data_dir / "ledger.db")
+    ledger = Ledger(codex.ledger_path(data_dir), matrix)
+    _allow_cross_thread_access(ledger, codex.ledger_path(data_dir))
     _record_unobserved_hooks(ledger, data_dir)
     detectors = [PathDetector(), SecretDetector(), ModelDetector()]
     hud = HudPublisher(data_dir)
@@ -361,13 +366,6 @@ def _as_text(value) -> str:
         return str(value)
 
 
-def _looks_like_mcp(tool_name: str) -> bool:
-    # Mirrors hooks/handler.py's own `_looks_like_egress` predicate exactly
-    # (`.startswith("mcp")`, not `"mcp__"`) so the daemon's classification
-    # of "this is an MCP tool call" never disagrees with the client's.
-    return tool_name.startswith("mcp")
-
-
 def _get_or_start_engine(state: State, session_id: str, *, cwd: str = "",
                           model: str = "") -> Engine:
     """Return the Engine for `session_id`, creating one (with a fresh,
@@ -446,7 +444,11 @@ def _build_observation(event: str, session_id: str, payload: dict) -> Observatio
                 # Engine.observe call, same as SessionStart/SessionEnd.
                 return None
             text = command
-        elif _looks_like_mcp(tool_name):
+        # `codex.is_mcp_tool` is the same predicate `hooks/handler.py`
+        # applies client-side (`.startswith("mcp")`, not `"mcp__"`), so the
+        # daemon's classification of "this is an MCP tool call" cannot
+        # disagree with the client's fail-closed gate for the same call.
+        elif codex.is_mcp_tool(tool_name):
             destination = "mcp_tool"
             text = json.dumps(tool_input)
         else:
