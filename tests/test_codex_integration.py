@@ -336,23 +336,39 @@ def test_patched_status_line_follows_the_snapshot(codex_tui):
     # 3. Contract B: `hidden` removes the item, and keeps it removed.
     #
     #    What is asserted here is an absence, because that is all the terminal
-    #    can honestly report: ratatui paints by cell diff, so a repaint after
-    #    the item vanishes need not re-emit anything recognisable -- not the
-    #    thread id, not the whole line. Requiring a marker would make the test
-    #    fail for a rendering detail rather than for the behaviour. Instead:
-    #    flush every frame painted before the flip, then watch a full window
-    #    and require that *something* was painted (a process that died would
-    #    otherwise pass an absence test trivially) and that none of it is the
-    #    item.
+    #    can honestly report: ratatui paints by cell diff, so the repaint that
+    #    erases the item need not re-emit anything recognisable -- not the
+    #    thread id, not the whole line -- and an idle TUI paints nothing at all
+    #    afterwards (the first real run of this test proved exactly that: the
+    #    erase landed inside SETTLE and the following five seconds were empty
+    #    bytes). So liveness is proved by provoking a repaint -- one character
+    #    typed into the composer and deleted again echoes back -- and the
+    #    absence is made meaningful by publishing a *new* reading while hidden:
+    #    the item re-reads once a second, so if `hidden` were ignored the new
+    #    number would be painted inside the window.
     publisher.set_hidden(thread_id, True)
-    tui.drain(SETTLE)  # flush frames painted before the flip
+    tui.drain(SETTLE)  # flush the last frame that could still show the item
     tui.clear()
+    publisher.publish(thread_id, percent=29, blocked=2, unverified=False)
+    tui._write(b"x")
+    tui.drain(1.0)
+    tui._write(b"\x7f")  # backspace: leave the composer as we found it
     tui.drain(ITEM_TIMEOUT)
     after = tui.text()
-    assert after, (
-        "codex painted nothing at all after hiding -- it probably died"
+    assert "x" in after, (
+        "codex did not echo a keystroke after hiding -- it probably died"
         f"{_tail(tui)}"
     )
     assert "Privacy " not in after, (
         f"the item survived `hidden`:\n{after[-1200:]}"
+    )
+
+    # 4. And `hidden = False` brings it back, carrying the reading published
+    #    while it was hidden -- the two toggles compose, and `set_hidden`
+    #    touched nothing but the flag.
+    publisher.set_hidden(thread_id, False)
+    tui.clear()
+    back = tui.read_until(lambda t: "Privacy ███░░░░░░░ 29% ⚠2" in t, ITEM_TIMEOUT)
+    assert back is not None, (
+        f"the item did not return after `hidden` was cleared{_tail(tui)}"
     )
