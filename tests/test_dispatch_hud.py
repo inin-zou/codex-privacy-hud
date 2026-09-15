@@ -131,3 +131,15 @@ def test_a_swallowed_hud_failure_is_logged_without_its_payload(
     assert any("hud publish failed" in m and "RuntimeError" in m
                for m in messages), messages
     assert not any("NOTAREALKEY" in m or "creds.env" in m for m in messages)
+
+
+def test_a_session_first_met_without_session_start_gets_a_zero_snapshot(state, tmp_path):
+    # The hook that spawns the daemon is the one it never hears: SessionStart
+    # goes unanswered while the model loads, so the first event the daemon
+    # sees for that session is a prompt or a tool call. Starting the engine
+    # is the moment the daemon learns the session exists, and the item must
+    # not stay blank until something is scored.
+    with state.lock:
+        dispatch._get_or_start_engine(state, SID, cwd="/w", model="m")
+    snap = hs.read_snapshot(tmp_path, SID)
+    assert snap is not None and snap.percent == 0 and snap.blocked == 0
