@@ -4,13 +4,18 @@ name: Claude review
 # with inline notes where a finding has a line. It is advisory: it is not a
 # required check, it never approves or requests changes, and it never pushes.
 #
-# It needs one repository secret, ANTHROPIC_API_KEY. Without it the review job
-# is skipped, not failed, so a fork or a fresh clone gets a quiet PR rather
-# than a red one. Set it with:
+# It needs one repository secret, CLAUDE_CODE_OAUTH_TOKEN: a Claude Code
+# OAuth token, so the reviews draw on the maintainer's Claude subscription
+# rather than on API billing. Without it the review job is skipped, not
+# failed, so a fork or a fresh clone gets a quiet PR rather than a red one.
+# Generate the token and store it with:
 #
-#   gh secret set ANTHROPIC_API_KEY --repo <owner>/<repo>
+#   claude setup-token
+#   gh secret set CLAUDE_CODE_OAUTH_TOKEN --repo <owner>/<repo>
 #
-# or run `claude` and then `/install-github-app`, which sets it for you.
+# To bill an API key instead, replace `claude_code_oauth_token` below with
+# `anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}` and check that secret
+# in the gate job.
 
 on:
   pull_request:
@@ -36,7 +41,7 @@ jobs:
     steps:
       - id: check
         env:
-          KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          KEY: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
         run: |
           if [ -n "$KEY" ]; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "present=false" >> "$GITHUB_OUTPUT"; fi
 
@@ -52,7 +57,7 @@ jobs:
 
       - uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           use_sticky_comment: true
           prompt: |
