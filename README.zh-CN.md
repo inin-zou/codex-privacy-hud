@@ -21,6 +21,8 @@ Token HUD:    How much context has been consumed?
 Privacy HUD:  How much sensitive context has been disclosed?
 ```
 
+![运行补丁版 Codex 0.154 的真实会话：一条包含街道地址的提示词、模型的回复，以及输入框下方已显示 5% 的 Privacy 状态项，与 Codex 自带的模型状态项并排显示](docs/images/codex-privacy-example.png)
+
 ![Codex Privacy HUD 使用流程：从常驻披露条进入会话审计，查看暴露详情，并在数据到达外部工具之前精简发送内容](docs/images/user-journey-mockup.zh-CN.png)
 
 **使用前请先了解：**模型加载期间，会话开头没有监控。托管工具绕过 hook。检测采用启发式方法。如果 HUD 已知某个会话的记录有缺口，则会标记该会话，不会只显示一个看似无事发生的 0%。但 HUD 无法告诉你漏掉了什么。请阅读[已知限制](#已知限制)。
