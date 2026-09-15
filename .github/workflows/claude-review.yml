@@ -94,9 +94,12 @@ jobs:
 
             Report only findings you are confident about, most severe first, each with
             the file and line and a one-sentence reason. Put a finding that maps to a
-            specific line as an inline comment; put the summary in one PR comment.
-            If there is nothing to report, say so in one line. Do not restate the diff,
-            do not praise, do not approve or request changes, and do not push commits.
+            specific line as an inline comment. Then post the summary as one PR comment
+            by running `gh pr comment ${{ github.event.pull_request.number }} --body "..."`;
+            this step is mandatory, and when there is nothing to report the body is the
+            single line `Claude review: nothing to report.` A review that ends without
+            that comment has not finished. Do not restate the diff, do not praise, do
+            not approve or request changes, and do not push commits.
           claude_args: |
             --max-turns 40
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*),Read,Grep,Glob"
