@@ -1,6 +1,6 @@
 # src/privacy_hud/ambient.py
-"""The Level 1 ambient HUD: a standalone companion process that polls the
-ledger and redraws `render.hud_line()` in place (design.md §4).
+"""The Level 1 ambient HUD: a standalone companion process that polls contract
+A's HUD snapshot file and redraws `render.hud_line()` in place (design.md §4).
 
 **Why this is a separate process and not a Codex status item.** Stock Codex's
 `tui.status_line` accepts an ordered list of *built-in* status-item
@@ -14,41 +14,47 @@ pane, polling, one line redrawn in place. We deliberately do not patch the
 Codex binary, and README's known-limits section must keep saying so
 (CLAUDE.md §5: do not claim the plugin injects a native Codex footer).
 
-**Why polling the DB rather than asking the daemon.** The daemon's unix
-socket is the hook hot path, and that path already spends ~280 ms on real
+**Why reading a file rather than asking the daemon or the DB.** The daemon's
+unix socket is the hook hot path, and that path already spends ~280 ms on real
 tier-3 model inference per call. A HUD that redraws every two seconds has no
-business adding load to it. The ledger runs in WAL mode (`PRAGMA
-journal_mode=WAL`, `Ledger.__init__`), so a second connection reading while
-the daemon writes is safe and blocks nobody. "Read-only" here means this
-module never records, updates, or deletes an event: it opens a `Ledger` (whose
-constructor runs `CREATE TABLE IF NOT EXISTS` DDL — a no-op against a ledger
-the daemon already created) and calls `summary()`.
+business adding load to it, and neither does opening sqlite: the daemon
+already writes `hud/<session_id>.json` (contract A, `hud_snapshot.py`) on
+every ledger change, so the redraw loop only ever has to read a sub-kilobyte
+file — microseconds, no daemon required to be answering, no connection to
+hold open against a database the daemon is actively writing. `read_snapshot`
+and `read_daemon_marker` apply the same staleness and schema rules the Codex
+status-line patch applies to the same file, so the two surfaces cannot drift
+apart on what counts as "too old to trust".
 
 That argument bounds the *frequency* of daemon contact, not its existence, and
-there is exactly one question here the ledger cannot answer: **which session**
-these numbers are about. See `_SessionPin` — the reading is polled every two
-seconds, the identity is resolved about once every thirty.
+there is exactly one question here the snapshot file cannot answer: **which
+session** these numbers are about. See `_SessionPin` — the reading is polled
+every two seconds, the identity is resolved about once every thirty, and
+identity resolution is the one path (`_resolve_session_id`, below) still
+allowed to open a `Ledger`.
 
 **Why the file-existence check before opening.** `sqlite3.connect()` CREATES
-a database file that does not exist, so constructing a `Ledger` unconditionally
-would leave an empty `ledger.db` behind wherever `PLUGIN_DATA` happens to point
-— including `/tmp` in an unconfigured shell. A glance-only surface must not
-create state. If the file is not there, there is nothing to show and we show
-nothing.
+a database file that does not exist, so `_resolve_session_id` constructing a
+`Ledger` unconditionally would leave an empty `ledger.db` behind wherever
+`PLUGIN_DATA` happens to point — including `/tmp` in an unconfigured shell. A
+glance-only surface must not create state. If the file is not there, there is
+nothing to resolve and `_resolve_session_id` returns `None` without touching
+sqlite at all.
 
-**Session resolution is imported, never re-derived.** `_ledger_path()` comes
-from `local_ui_server`; *which session to show* comes from
-`mcp_tools.resolve_audit_session`, the same function `$privacy` and the local
-UI use. This module used to call `local_ui_server._latest_session_id` — the
-most recently *started* session — which was left in place when `$privacy`
-moved off it, and that left one machine with two surfaces that could name two
-different sessions: the pane beside the window and the audit typed into it,
-disagreeing about whose numbers were on screen. Two surfaces guessing the same
-wrong answer is a bug; two surfaces giving different answers is a worse one,
-because it makes the user distrust the surface that is right. Duplicating this
-query has already caused one real production bug here (stray test sessions
-shadowing the user's real session); there is one implementation of the whole
-resolution now, and this module calls it.
+**Session resolution is imported, never re-derived.** The plugin-data
+directory comes from `local_ui_server.resolve_data_dir()`; *which session to
+show* comes from `mcp_tools.resolve_audit_session`, the same function
+`$privacy` and the local UI use. This module used to call
+`local_ui_server._latest_session_id` — the most recently *started* session —
+which was left in place when `$privacy` moved off it, and that left one
+machine with two surfaces that could name two different sessions: the pane
+beside the window and the audit typed into it, disagreeing about whose numbers
+were on screen. Two surfaces guessing the same wrong answer is a bug; two
+surfaces giving different answers is a worse one, because it makes the user
+distrust the surface that is right. Duplicating this query has already caused
+one real production bug here (stray test sessions shadowing the user's real
+session); there is one implementation of the whole resolution now, and this
+module calls it.
 
 **What this module does NOT say about session ambiguity.** `resolve_audit_
 session` can come back uncertain — two Codex windows active in the same
@@ -77,14 +83,16 @@ all"; `_line_for()` returning `None` is that decision.
 not the whole space, and treating them as if they were is what let an I7
 self-audit read as a clean pass against a session the daemon had never seen —
 see `ledger.py`'s docstring for the incident. The third state is design.md §4's
-"Engine degraded": a line IS drawn, carrying whatever the ledger actually
+"Engine degraded": a line IS drawn, carrying whatever the snapshot actually
 holds, with `⚠unverified` saying that what it holds is not a complete account.
 It replaces neither of the others. "Disabled" still means there is nothing to
 report on; unverified means there is something to report on and part of it was
 never recorded. The distinction the user needs is between `0%` meaning "nothing
 sensitive was disclosed" and `0%` meaning "I have no idea what was disclosed",
 and for a privacy tool a single glyph is the cheapest honest way to draw it.
-`Ledger.coverage()` decides which one this is; this module never infers it.
+`Ledger.coverage()` decides which one this is when the daemon writes the
+snapshot; this module only ever relays `Snapshot.unverified` verbatim, never
+infers it.
 
 **No colour.** `hud_line` returns plain text, and design.md §3's band colours
 are applied by a client that has the band — a channel this module's inputs do
@@ -96,8 +104,9 @@ scrolling a useless log past the user.
 
 I1: the line is a percentage, a bar, and a count of prevented events. No
 session content, no data value, no path, no file name is ever printed.
-I3: the percentage is `summary()["percent"]` verbatim — the disclosure number
-the ledger already computed — never recomputed from raw event counts.
+I3: `percent` is the ledger's disclosure number, carried verbatim by the
+daemon into the snapshot and read verbatim here — never recomputed from raw
+event counts, and never touched by this module.
 I5: nothing here implies disclosed data can be withdrawn.
 
 Stdlib only.
@@ -109,9 +118,8 @@ import shutil
 import sys
 import time
 
-from . import mcp_tools
-from .ledger import Ledger
-from .local_ui_server import _ledger_path
+from .hud_snapshot import read_daemon_marker, read_snapshot
+from .local_ui_server import resolve_data_dir
 from .matrix.loader import Matrix, load_matrix
 from .render import hud_line
 
@@ -124,8 +132,8 @@ DEFAULT_INTERVAL = 2.0
 RESOLVE_INTERVAL = 30.0
 
 #: Floor for `--watch N`. A zero or negative interval would spin the loop as
-#: fast as sqlite can answer, which is a busy-wait on the same disk the daemon
-#: is writing to — a HUD that costs more than what it reports on.
+#: fast as the filesystem can answer, which is a busy-wait on the same disk
+#: the daemon is writing to — a HUD that costs more than what it reports on.
 MIN_INTERVAL = 0.1
 
 #: Erase-to-end-of-line, so a shorter line never leaves the tail of a longer
@@ -137,13 +145,15 @@ _MATRIX: Matrix | None = None
 
 
 def _matrix() -> Matrix:
-    """Load `tables.toml` once per process rather than once per redraw.
+    """Load `tables.toml` once per process rather than once per resolution.
 
-    A `--watch` loop calls this every interval for the life of the pane; the
-    tables are a packaged, immutable-per-run data file, so re-reading and
-    re-parsing them each tick would be pure waste. Loaded lazily instead of at
-    import time so that importing this module (as `tests` and `--help` do)
-    costs nothing.
+    Only `_resolve_session_id` still needs a `Matrix` (to construct the
+    `Ledger` it asks `mcp_tools.resolve_audit_session` with), and a `--watch`
+    loop calls that on `_SessionPin`'s slower cadence, not every redraw; the
+    tables are a packaged, immutable-per-run data file regardless, so
+    re-reading and re-parsing them on every resolve would still be pure waste.
+    Loaded lazily instead of at import time so that importing this module (as
+    `tests` and `--help` do) costs nothing.
     """
     global _MATRIX
     if _MATRIX is None:
@@ -151,31 +161,22 @@ def _matrix() -> Matrix:
     return _MATRIX
 
 
-def _session_exists(ledger: Ledger, session_id: str) -> bool:
-    """Whether `session_id` is a session the ledger actually knows about.
-
-    Only consulted for an explicit `--session-id`. `Ledger.summary()` answers
-    for an unknown id with a well-formed zero — `percent: 0`, no exposures —
-    and rendering that would put `Disclosure ░░░░░░░░░░ 0%` on screen for a
-    session we have never heard of. A clean-looking number we cannot back is
-    exactly the overclaim CLAUDE.md §5 forbids, so a typo'd or stale id
-    degrades to the "Disabled" state (nothing rendered) instead.
-    """
-    row = ledger.conn.execute(
-        "SELECT 1 FROM sessions WHERE session_id=? LIMIT 1", (session_id,)
-    ).fetchone()
-    return row is not None
-
-
 def _resolve_session_id() -> str | None:
     """Which session this pane is about, per `mcp_tools.resolve_audit_session`.
 
-    Opens and closes its own `Ledger`, rather than reusing `_line_for`'s: the
-    two run on different schedules now (identity ~30 s, reading ~2 s), and
-    threading one connection between them would couple them back together for
-    the sake of a sub-millisecond `sqlite3.connect`. The file-existence check
-    is the same one `_line_for` makes and for the same reason — `connect()`
-    creates the file, and a glance-only surface must not create state.
+    This is the ONLY place in this module that still touches a `Ledger` —
+    everything else reads contract A's snapshot file instead (see the module
+    docstring's "Why reading a file..." paragraph). `mcp_tools` and `Ledger`
+    are imported locally, right here, rather than at module scope, so that
+    grepping this file for `Ledger`/`sqlite` finds exactly one hit and it is
+    this one.
+
+    Opens and closes its own `Ledger`, rather than sharing one with a reading
+    path that no longer exists: identity is resolved on its own schedule
+    (~30 s, vs. the ~2 s redraw), and there is nothing left to couple it to.
+    The file-existence check below is the same guard `_line_for` used to make
+    before it opened sqlite — `connect()` creates the file, and a glance-only
+    surface must not create state.
 
     Returns only an id. `ResolvedSession.basis`/`.note` are deliberately
     dropped here: this surface has nowhere honest to put them (see the module
@@ -186,21 +187,27 @@ def _resolve_session_id() -> str | None:
     all of them are "no id", the same answer as a fresh install, and
     `_line_for` renders that as silence.
     """
-    path = _ledger_path()
-    if not path.exists():
-        return None
-    ledger = None
     try:
-        ledger = Ledger(path, _matrix())
-        return mcp_tools.resolve_audit_session(ledger, path.parent).session_id
+        data_dir = resolve_data_dir()
+        if data_dir is None:
+            return None
+        path = data_dir / "ledger.db"
+        if not path.exists():
+            return None
+        from . import mcp_tools
+        from .ledger import Ledger
+        ledger = None
+        try:
+            ledger = Ledger(path, _matrix())
+            return mcp_tools.resolve_audit_session(ledger, path.parent).session_id
+        finally:
+            if ledger is not None:
+                try:
+                    ledger.conn.close()
+                except Exception:
+                    pass
     except Exception:
         return None
-    finally:
-        if ledger is not None:
-            try:
-                ledger.conn.close()
-            except Exception:
-                pass
 
 
 class _SessionPin:
@@ -212,10 +219,11 @@ class _SessionPin:
     The first is load. Resolution asks the daemon over its unix socket, and
     that socket is the hook hot path — the thing this module's opening
     paragraphs go out of their way not to touch. Asking every two seconds for
-    the life of a pane would put the HUD back on the path it deliberately
-    polls the database to stay off of, and the daemon answers serially, so a
-    query arriving mid-scan waits (`daemon.QUERY_TIMEOUT`, 5 s) — a redraw loop
-    is the wrong place to inherit that.
+    the life of a pane would put the HUD back on that socket, the very path
+    the redraw loop stays off of by reading contract A's snapshot file
+    instead, and the daemon answers serially, so a query arriving mid-scan
+    waits (`daemon.QUERY_TIMEOUT`, 5 s) — a redraw loop is the wrong place to
+    inherit that.
 
     The second is the surface itself. A HUD pane sits beside one Codex window
     and the user reads it out of the corner of their eye. "Most recently
@@ -275,71 +283,45 @@ class _SessionPin:
 
 def _line_for(session_id: str | None, width: int, *,
               explicit: bool = False) -> str | None:
-    """Build the HUD line, or return `None` when there is nothing to show.
+    """Build the HUD line from contract A's snapshot file, or return `None`
+    when there is nothing to show.
 
     `None` is design.md §4's "Disabled" state and the reason this function
     exists: `hud_line` cannot express it (its docstring says so explicitly),
     and it must not be called at all in that case.
 
-    Every failure mode collapses into `None`: no ledger file, no sessions
-    recorded, an unknown explicit session id, a sqlite error, a corrupt row.
-    Note in particular that an out-of-range percent is NOT clamped before
-    reaching `hud_line` — `_check_band` failing loud on a percent outside
-    [0, 100] is a deliberate upstream tripwire, and clamping here would hide a
-    corrupt ledger behind a plausible-looking bar. The exception propagates to
-    `safe_line()`, which turns it into silence rather than a wrong number.
-
-    The connection is opened and closed per call rather than held across a
-    `--watch` loop: opening sqlite is sub-millisecond, holding a reader open
-    for hours against a file the daemon is actively writing buys nothing, and
-    reopening means a ledger created (or replaced) after the HUD started is
-    picked up on the next tick instead of requiring a restart.
+    Every failure mode collapses into `None`: no resolvable data directory, no
+    snapshot for the session, a stale snapshot, a hidden one, an out-of-range
+    or malformed field. `read_snapshot`/`read_daemon_marker` are what enforce
+    all of that (`hud_snapshot.py`'s staleness/schema rules), so this function
+    never sees a bad value to clamp or guess at in the first place — there is
+    no sqlite here to open, corrupt, or hold a connection against.
 
     `session_id` arrives already resolved — `_SessionPin` owns that, on its own
-    much slower schedule — so this function no longer chooses a session, it
-    only reads one. `explicit` says the id came from `--session-id` rather than
-    from resolution, which is the only case that gets the `_session_exists`
-    gate: a typo must degrade to silence, while a live session the daemon named
-    but the ledger has no row for is the genuinely unrecorded case and belongs
-    on screen under `⚠unverified`, which is what `Ledger.coverage` returns for
-    it below.
+    much slower schedule (see `_resolve_session_id`, the one place left that
+    opens a `Ledger`) — so this function never chooses a session, it only
+    reads one. `explicit` says the id came from `--session-id` rather than
+    from resolution; it is kept in the signature because callers still pass
+    it, but it is no longer consulted — an explicit id with no snapshot on
+    disk renders nothing, the same outcome `_session_exists`'s sqlite lookup
+    used to produce, without a ledger to ask.
     """
-    path = _ledger_path()
-    if not path.exists():
-        # Do not let sqlite3.connect() create it — see the module docstring.
+    data_dir = resolve_data_dir()
+    if data_dir is None:
         return None
-
-    ledger = Ledger(path, _matrix())
-    try:
-        if not session_id:
-            # No session resolved. Two very different situations share that
-            # shape, and only one of them is "Disabled": a ledger nothing has
-            # ever used, and a ledger that watched hook events go by unobserved
-            # and recorded not one of them (`Ledger.unattributed_gaps`).
-            # Rendering nothing for the second is how the incident in
-            # `ledger.py`'s docstring stayed invisible for a whole audit.
-            # There is no session to take a percentage from, so the line
-            # carries the ledger's own figure — zero, because that is
-            # genuinely all it holds — under the `⚠unverified` marker that
-            # says the figure is not a reading of anything.
-            if ledger.unattributed_gaps():
-                return hud_line(0, width, 0, unverified=True)
-            return None
-        if explicit and not _session_exists(ledger, session_id):
-            return None
-        sid = session_id
-
-        summary = ledger.summary(sid)
-        coverage = ledger.coverage(sid)
-        # I3: `percent` is the ledger's disclosure number, used verbatim.
-        return hud_line(int(summary.percent), width,
-                        int(summary.prevented),
-                        unverified=not coverage.verified)
-    finally:
-        try:
-            ledger.conn.close()
-        except Exception:
-            pass
+    if not session_id:
+        # No session resolved. A daemon that recorded hook events it could
+        # not attribute says so in `_daemon.json`; that is the one case a
+        # session-less pane must not stay silent about (see ledger.py's
+        # docstring for the incident). Anything else is "Disabled".
+        if read_daemon_marker(data_dir) is True:
+            return hud_line(0, width, 0, unverified=True)
+        return None
+    snap = read_snapshot(data_dir, session_id)
+    if snap is None or snap.hidden:
+        return None
+    # I3: `percent` is the ledger's number, carried verbatim by the daemon.
+    return hud_line(snap.percent, width, snap.blocked, unverified=snap.unverified)
 
 
 def safe_line(pin: _SessionPin | None = None,
@@ -433,7 +415,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="privacy-hud-ambient",
         description="Ambient Level 1 privacy HUD: one line, polled from the "
-                    "local disclosure ledger. Run it in a terminal pane beside "
+                    "local HUD snapshot file. Run it in a terminal pane beside "
                     "your Codex session.",
     )
     # Mutually exclusive so that `--once --watch` is a usage error the user
