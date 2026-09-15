@@ -294,7 +294,7 @@ CREATE TABLE flows (                      -- multi-hop chains for the L3 flow li
 
 CREATE TABLE policy (
   id         INTEGER PRIMARY KEY,
-  scope      TEXT NOT NULL,               -- global|session:<id>
+  scope      TEXT NOT NULL,               -- session:<id>
   rule_type  TEXT NOT NULL,               -- mask|block_source|allow_dest
   selector   TEXT NOT NULL,               -- data_type / path glob / destination
   created_at INTEGER NOT NULL
@@ -306,8 +306,7 @@ CREATE TABLE policy_tokens (              -- one-shot consent, §8
   tool_name  TEXT NOT NULL,
   args_hash  BLOB NOT NULL,
   mode       TEXT NOT NULL,               -- allow_once|minimize
-  expires_at INTEGER NOT NULL,
-  consumed   INTEGER NOT NULL DEFAULT 0
+  expires_at INTEGER NOT NULL
 );
 ```
 
@@ -381,7 +380,7 @@ stateDiagram-v2
     Evaluate --> Allow: no findings
     Evaluate --> Rewrite: policy says mask/minimize
     Evaluate --> CheckToken: findings cross B3/B4
-    CheckToken --> Allow: valid unconsumed token
+    CheckToken --> Allow: valid token
     CheckToken --> Deny: no token
     Deny --> Review: user runs $privacy
     Review --> Mint: user picks allow-once / minimize
@@ -390,7 +389,7 @@ stateDiagram-v2
     Allow --> [*]
 ```
 
-**Token binding.** `args_hash = SHA256(canonical_json(tool_input))`, so a token authorizes exactly one call with exactly those arguments. TTL 120 s, single use, deleted on consumption. A token cannot be replayed, cannot authorize a different payload, and cannot outlive the user's attention.
+**Token binding.** `args_hash = SHA256(canonical_json(tool_input))`, so a token authorizes exactly one call with exactly those arguments. TTL 120 s, single use, deleted on consumption; minting again for the same call replaces the earlier token. A token cannot be replayed, cannot authorize a different payload, and cannot outlive the user's attention.
 
 **Rewrite path.** For Bash and `apply_patch`, `updatedInput` requires a string `command`; for MCP tools it is a replacement arguments object. Two rewrite strategies:
 

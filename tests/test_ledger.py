@@ -1,5 +1,6 @@
 import dataclasses
 import json
+import sqlite3
 
 import pytest
 from privacy_hud.matrix.loader import load_matrix
@@ -328,15 +329,14 @@ def test_a_rule_of_another_type_is_not_returned(led):
     assert led.policy_selectors("s1", "block_source") == set()
 
 
-def test_a_global_rule_applies_to_every_session(led):
-    """`add_policy` mints session scope only, but SCHEMA documents `global` as
-    a first-class scope, so a row of that scope must be honoured rather than
-    silently skipped by a reader that only ever asked for one scope."""
+def test_only_session_scoped_rules_are_read(led):
+    """No writer or action produces a `global` row, so the reader does not
+    honour one: a scope the product does not offer must not change what the
+    engine enforces."""
     led.conn.execute(
         "INSERT INTO policy(scope, rule_type, selector, created_at)"
         " VALUES('global','block_source','support.log',0)")
-    assert led.policy_selectors("s1", "block_source") == {"support.log"}
-    assert led.policy_selectors("anything-else", "block_source") == {"support.log"}
+    assert led.policy_selectors("s1", "block_source") == set()
 
 
 def test_duplicate_rules_collapse_to_one_selector(led):
@@ -393,6 +393,42 @@ def test_a_token_does_not_consume_twice(led):
     _mint(led)
     led.consume_token("s1", tool_name="Bash", args_hash=ARGS)
     assert led.consume_token("s1", tool_name="Bash", args_hash=ARGS) is None
+
+
+def test_a_second_mint_for_the_same_call_replaces_the_first(led):
+    """Two consents for one call are still one pass, and the newer consent's
+    mode is the one spent."""
+    _mint(led, mode="allow_once")
+    _mint(led, mode="minimize")
+    assert led.conn.execute(
+        "SELECT count(*) FROM policy_tokens").fetchone()[0] == 1
+    assert led.consume_token("s1", tool_name="Bash", args_hash=ARGS) == "minimize"
+    assert led.consume_token("s1", tool_name="Bash", args_hash=ARGS) is None
+
+
+def test_a_mint_does_not_replace_a_token_for_another_call(led):
+    _mint(led)
+    _mint(led, args_hash=b"\x09" * 32)
+    _mint(led, "s2")
+    assert led.conn.execute(
+        "SELECT count(*) FROM policy_tokens").fetchone()[0] == 3
+
+
+def test_tokens_work_in_a_ledger_that_still_has_the_consumed_column(tmp_path):
+    """Ledgers created before the column was dropped keep it (SCHEMA is
+    CREATE TABLE IF NOT EXISTS). Its DEFAULT 0 is what lets the new INSERT
+    omit it."""
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE policy_tokens (token TEXT PRIMARY KEY, session_id TEXT NOT"
+        " NULL, tool_name TEXT NOT NULL, args_hash BLOB NOT NULL, mode TEXT NOT"
+        " NULL, expires_at INTEGER NOT NULL, consumed INTEGER NOT NULL DEFAULT 0)")
+    conn.commit()
+    conn.close()
+    old = Ledger(path, M)
+    _mint(old)
+    assert old.consume_token("s1", tool_name="Bash", args_hash=ARGS) == "allow_once"
 
 
 def test_a_token_does_not_authorize_a_different_argument_set(led):
@@ -453,7 +489,7 @@ def test_policy_tokens_hold_no_arguments(led):
     was — `args_hash` is a hash the ledger cannot invert."""
     cols = {r[1] for r in led.conn.execute("PRAGMA table_info(policy_tokens)")}
     assert cols == {"token", "session_id", "tool_name", "args_hash", "mode",
-                    "expires_at", "consumed"}
+                    "expires_at"}
     banned = {"tool_input", "args", "command", "content", "prompt", "text"}
     assert not cols & banned
 
