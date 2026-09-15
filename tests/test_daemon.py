@@ -1543,6 +1543,77 @@ def test_the_exit_waits_for_an_in_flight_request_and_then_stops_waiting(
         daemon._close()
 
 
+# -- the HUD heartbeat (spec §4.1) ---------------------------------------
+
+def _hb_daemon(sock_dir, state, name, **kw):
+    return Daemon(sock_dir / name, state.data_dir, state=state,
+                  idle_timeout=3600.0, linger_grace=3600.0,
+                  session_stale_after=3600.0, **kw)
+
+
+def test_the_serve_loop_heartbeats_the_hud(sock_dir, startup_state, monkeypatch):
+    """The heartbeat is only worth anything if the loop actually runs it, so
+    this drives a real `serve_forever()` rather than calling the helper.
+    What it pins is the wiring: the loop calls `HudPublisher.heartbeat`, and
+    it hands over the sessions `dispatch` believes are live -- not a second
+    registry kept for the HUD's benefit."""
+    calls = []
+    monkeypatch.setattr(type(startup_state.hud), "heartbeat",
+                        lambda self, session_ids: calls.append(list(session_ids)))
+    with startup_state.live_lock:
+        startup_state.live.clear()
+        startup_state.live["heartbeat-session"] = time.monotonic()
+    daemon = _hb_daemon(sock_dir, startup_state, "hb.sock",
+                        poll_interval=0.01, heartbeat_interval=0.0)
+    thread = threading.Thread(target=daemon.serve_forever, daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 5.0
+        while not calls and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        daemon.stop()
+        thread.join(timeout=5.0)
+        with startup_state.live_lock:
+            startup_state.live.clear()
+    assert calls, "the serve loop never called HudPublisher.heartbeat"
+    assert calls[0] == ["heartbeat-session"]
+
+
+def test_the_heartbeat_is_throttled_to_its_interval(sock_dir, startup_state,
+                                                    monkeypatch):
+    """Every accept-loop iteration must not rewrite every snapshot: the loop
+    wakes at least every `ACCEPT_POLL` seconds, and a test drives it far
+    faster than that."""
+    calls = []
+    monkeypatch.setattr(type(startup_state.hud), "heartbeat",
+                        lambda self, session_ids: calls.append(list(session_ids)))
+    daemon = _hb_daemon(sock_dir, startup_state, "hb-throttle.sock",
+                        heartbeat_interval=3600.0)
+    try:
+        daemon._heartbeat_if_due()
+        daemon._heartbeat_if_due()
+        daemon._heartbeat_if_due()
+    finally:
+        daemon._close()
+    assert len(calls) == 1
+
+
+def test_a_failing_heartbeat_never_stops_the_daemon(sock_dir, startup_state,
+                                                    monkeypatch):
+    """I6: the HUD is a display surface. A full disk must cost the status
+    item, never the monitoring."""
+    def boom(self, session_ids):
+        raise RuntimeError("disk full")
+    monkeypatch.setattr(type(startup_state.hud), "heartbeat", boom)
+    daemon = _hb_daemon(sock_dir, startup_state, "hb-boom.sock",
+                        heartbeat_interval=0.0)
+    try:
+        daemon._heartbeat_if_due()   # must not raise
+    finally:
+        daemon._close()
+
+
 # -- what counts as "this session is alive" ------------------------------
 
 def test_events_that_record_nothing_still_count_as_liveness(tmp_path):

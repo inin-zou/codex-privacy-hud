@@ -57,6 +57,7 @@ from __future__ import annotations
 import errno
 import fcntl
 import json
+import logging
 import os
 import socket
 import socketserver
@@ -74,6 +75,9 @@ from .dispatch import (
     live_session_count,
     new_state,
 )
+from .hud_snapshot import HEARTBEAT_INTERVAL
+
+_log = logging.getLogger(__name__)
 
 # -- wire protocol -----------------------------------------------------
 # The `op` values this daemon answers. See the module docstring for both
@@ -786,7 +790,8 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
                  poll_interval: float = ACCEPT_POLL, state: State | None = None,
                  linger_grace: float = LINGER_GRACE,
                  session_stale_after: float = SESSION_STALE_AFTER,
-                 drain_timeout: float = DRAIN_TIMEOUT):
+                 drain_timeout: float = DRAIN_TIMEOUT,
+                 heartbeat_interval: float = HEARTBEAT_INTERVAL):
         """Raises `AlreadyRunning` if another daemon owns `socket_path`, and
         `OSError` for a real startup failure. Either way nothing is left
         behind: the startup lock is released on every failing path, and a
@@ -826,6 +831,7 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
             self.linger_grace = linger_grace
             self.session_stale_after = session_stale_after
             self.drain_timeout = drain_timeout
+            self.heartbeat_interval = heartbeat_interval
 
             # Under the lock: decide whether the socket path is free, and
             # take it. See the class docstring for why doing this under the
@@ -877,6 +883,10 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
         # When the exit condition first became true while requests were
         # still in flight; `None` whenever it is not currently true.
         self._draining_since: float | None = None
+        # `time.monotonic()` of the last HUD heartbeat; `None` so the first
+        # pass through the serve loop beats immediately rather than leaving
+        # `_daemon.json` un-restamped for the first interval.
+        self._last_heartbeat: float | None = None
 
     # -- single-instance startup ------------------------------------------
     def _abort_startup(self) -> None:
@@ -1061,6 +1071,44 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
         return live_session_count(self.state,
                                   stale_after=self.session_stale_after)
 
+    # -- HUD heartbeat ----------------------------------------------------
+    def _heartbeat_if_due(self) -> None:
+        """Every `heartbeat_interval` seconds, re-stamp the HUD snapshots of
+        the sessions `dispatch` believes are live, and `_daemon.json` with
+        them (`hud_snapshot.HudPublisher.heartbeat`).
+
+        This is the writer's half of contract A's staleness rule. Without
+        it, "older than 30 s" meant "nothing has happened lately" — a
+        session whose user paused to read lost its status item, and the
+        daemon marker `ambient.py` reads went stale 30 s after startup and
+        never came back. With it, staleness means what it is documented to
+        mean: the daemon that writes these files is gone.
+
+        The session list is the existing liveness bookkeeping
+        (`dispatch.active_sessions` over `State.live`, with this daemon's
+        own `session_stale_after` cutoff) and not a second registry — two
+        answers to "which sessions are live" would eventually disagree, and
+        the one the HUD used would be the one nothing else tested. Like
+        `active_sessions` itself, this never sweeps: refreshing a display
+        file must not change the daemon's own lifetime accounting.
+
+        Runs in the accept loop, between `handle_request()` calls. It is a
+        handful of sub-kilobyte writes and touches no sqlite, so it cannot
+        delay an accept meaningfully; and I6 applies — a display surface
+        that cannot be written never takes the daemon down with it.
+        """
+        now = time.monotonic()
+        if (self._last_heartbeat is not None
+                and now - self._last_heartbeat < self.heartbeat_interval):
+            return
+        self._last_heartbeat = now
+        try:
+            self.state.hud.heartbeat(
+                sid for sid, _age in active_sessions(
+                    self.state, stale_after=self.session_stale_after))
+        except Exception as exc:  # I6
+            _log.debug("hud heartbeat failed: %s", type(exc).__name__)
+
     # -- exit decision ----------------------------------------------------
     def _exit_due(self) -> bool:
         """Has the lifetime policy said this daemon should go? See
@@ -1118,6 +1166,12 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
         """Serve requests until the lifetime policy says to stop, then close
         the socket and return. See the class docstring for the policy, and
         for why this has no busy loop.
+
+        The loop also carries the HUD heartbeat (`_heartbeat_if_due`). It
+        belongs here rather than on a thread of its own because this loop
+        already wakes at least every `ACCEPT_POLL` seconds for the exit
+        check, so the heartbeat costs no timer, no thread and no lock it
+        does not already hold.
         """
         if poll_interval is not None:
             self.timeout = poll_interval
@@ -1125,10 +1179,12 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
         with self._activity_lock:
             self._last_activity = time.monotonic()
         self._draining_since = None
+        self._last_heartbeat = None
         try:
             while self._running:
                 if self._ready_to_exit():
                     break
+                self._heartbeat_if_due()
                 self.handle_request()
         finally:
             self._close()
@@ -1249,10 +1305,10 @@ def main(argv: list[str] | None = None) -> int:
             failure** -- the caller wanted a daemon there and there
             is one; use it. Nothing was clobbered and no model was
             loaded. `EXIT_ALREADY_RUNNING`.
-    1       Real startup failure: `bind()` refused, `PLUGIN_DATA`
-            unwritable, an `AF_UNIX` path over the kernel's
-            ~104-byte limit, and so on. One line on stderr says
-            which. `EXIT_FAILURE`.
+    1       Real startup failure: `PLUGIN_DATA` unset (no `/tmp` default
+            any more -- spec §6) or unwritable, `bind()` refused, an
+            `AF_UNIX` path over the kernel's ~104-byte limit, and so
+            on. One line on stderr says which. `EXIT_FAILURE`.
     ======  ======================================================
 
     Keeping 3 distinct from 1 is the whole point: a spawner that cannot
@@ -1263,7 +1319,13 @@ def main(argv: list[str] | None = None) -> int:
     by the client surviving a missing daemon, not by this process hiding
     what happened to it.
     """
-    data_dir = Path(os.environ.get("PLUGIN_DATA", "/tmp"))
+    raw = os.environ.get("PLUGIN_DATA")
+    if not raw:
+        print("privacy-hud daemon: PLUGIN_DATA is not set; refusing to start "
+              "(Codex sets it for hooks; export it to run by hand)",
+              file=sys.stderr)
+        return EXIT_FAILURE
+    data_dir = Path(raw)
     socket_path = _default_socket_path(data_dir)
     try:
         daemon = Daemon(socket_path, data_dir)

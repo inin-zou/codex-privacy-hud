@@ -154,6 +154,22 @@ def _bar(pct: int, cells: int) -> str:
     return _FILLED * filled + _EMPTY * (cells - filled)
 
 
+def hud_core(percent: int) -> str:
+    """The segment of the HUD that two renderers must agree on, byte for byte.
+
+    `<10-cell bar> <percent right-aligned to 2>%` — e.g. `███░░░░░░░ 28%`.
+    `hud_line()` (this module) embeds it in the ambient pane's framing, and
+    the Codex status-line patch (`privacy_status.rs`, `render_core`) embeds it
+    after the word `Privacy`. `tests/matrix/hud_golden.json` pins every
+    rounding tie so the Rust port's `round_ties_even` and Python's `round()`
+    cannot drift apart unnoticed. The band check is here, not only in
+    `hud_line`, because this is now the narrowest public entry to the bar.
+    """
+    pct = int(percent)
+    _check_band(pct)
+    return f"{_bar(pct, 10)} {pct:>2}%"
+
+
 def hud_line(percent: int, width: int, blocked: int = 0, *,
              unverified: bool = False) -> str:
     """The ambient L1 HUD line (design.md §4).
@@ -204,12 +220,10 @@ def hud_line(percent: int, width: int, blocked: int = 0, *,
     tail = " ⚠unverified ›" if unverified else " ›"
 
     def full():
-        bar = _bar(pct, 10)
-        return f"PRIVACY  {prefix}Disclosure {bar} {pct:>2}%{full_tail}"
+        return f"PRIVACY  {prefix}Disclosure {hud_core(pct)}{full_tail}"
 
     def mid():
-        bar = _bar(pct, 10)
-        return f"PRIVACY {prefix}{bar} {pct:>2}%{tail}"
+        return f"PRIVACY {prefix}{hud_core(pct)}{tail}"
 
     def compact():
         bar = _bar(pct, 5)

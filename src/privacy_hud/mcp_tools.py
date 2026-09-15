@@ -509,3 +509,49 @@ def start_clean_session(ledger, session_id: str) -> str:
         cwd=(old["cwd"] if old is not None else "") or "",
         model=(old["model"] if old is not None else "") or "")
     return new_id
+
+
+# -- Level 1 toggle (spec §5.4) ---------------------------------------------
+
+def hud_status(data_dir, session_id: str) -> dict:
+    """What the status line would draw for `session_id` right now, and why.
+    Reads contract A only; never opens the ledger.
+
+    `state` is the answer, and it distinguishes the two failures `present:
+    False` used to collapse together:
+
+    * `"absent"` — no snapshot file (no session here, or it ended).
+    * `"stale"` — a file, older than `STALE_AFTER` seconds. Both readers
+      treat it as absent, but it means something entirely different: the
+      daemon that writes it is gone or wedged, which is worth telling a
+      user who just asked why their status item disappeared, because the
+      same daemon is what records their disclosures.
+    * `"hidden"` — fresh, and contract B says do not draw it.
+    * `"shown"` — fresh, and drawn.
+
+    `present` is True only for the last two — it is "would the item be on
+    screen", which is what the `$privacy hud` caller is asking — and
+    `hidden` stays `None` whenever there is no fresh snapshot to ask about.
+    """
+    from .hud_snapshot import read_snapshot
+    snap = read_snapshot(data_dir, session_id)
+    if snap is not None:
+        return {"session_id": session_id, "present": True,
+                "hidden": snap.hidden,
+                "state": "hidden" if snap.hidden else "shown"}
+    # No fresh snapshot. A file that is merely old is a different diagnosis
+    # from no file at all; a malformed one is not a diagnosis at all, and
+    # reads as absent exactly as the status line reads it.
+    aged = read_snapshot(data_dir, session_id, ignore_staleness=True)
+    return {"session_id": session_id, "present": False, "hidden": None,
+            "state": "stale" if aged is not None else "absent"}
+
+
+def hud_set_hidden(data_dir, session_id: str, hidden: bool) -> dict:
+    """Contract B. `$privacy hud off` / `on`. Flips the snapshot's `hidden`
+    flag and nothing else; `/statusline` in Codex is the other, independent
+    switch (whether the item is configured at all). Does not touch
+    config.toml."""
+    from .hud_snapshot import HudPublisher
+    HudPublisher(data_dir).set_hidden(session_id, bool(hidden))
+    return hud_status(data_dir, session_id)

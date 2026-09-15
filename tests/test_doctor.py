@@ -274,13 +274,60 @@ def test_version_tuple_tolerates_real_wheel_versions():
 # PLUGIN_DATA
 # --------------------------------------------------------------------- #
 
-def test_unset_plugin_data_fails_because_everything_defaults_to_tmp(
+def test_unset_plugin_data_fails_because_nothing_is_resolved(
         monkeypatch, tmp_path):
     monkeypatch.delenv("PLUGIN_DATA", raising=False)
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
     check = doctor.check_plugin_data()
     assert check.status == doctor.FAIL
     assert check.fixes
+
+
+def test_empty_plugin_data_fails_the_same_way_unset_does(monkeypatch, tmp_path):
+    """`PLUGIN_DATA=` (exported empty) is set and useless. Every resolver in
+    the package already treats it as unset, so `check_plugin_data` took its
+    "it is set" branch and then called `.parent` on the `None` that
+    `_ledger_path()` correctly returned -- an `AttributeError` reported as
+    the opaque "the check itself failed", in precisely the broken-profile
+    state this check exists to name."""
+    monkeypatch.setenv("PLUGIN_DATA", "")
+    monkeypatch.setattr(runtime, "resolve_data_dir",
+                        lambda explicit=None: (None, ["no codex"], []))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    check = doctor.check_plugin_data()
+    assert check.status == doctor.FAIL
+    assert "not set" in check.summary
+    assert check.fixes
+
+
+def test_unset_plugin_data_fails_cleanly_in_the_checks_that_need_a_data_dir(
+        monkeypatch, tmp_path):
+    """`check_ledger`, `check_runtime_pin` and `check_daemon` all resolve
+    `PLUGIN_DATA` through `local_ui_server._ledger_path()`, which returns
+    `None` once there is no `/tmp` fallback to guess with (spec §6). Left
+    unguarded, each one called `.parent`/`.exists()` on that `None` and
+    crashed with `AttributeError` -- caught by `run_checks()`'s per-check
+    `try/except`, but only into an opaque "the check itself failed
+    (AttributeError)", which is a real regression in diagnostic quality for
+    exactly the fresh-install state this file exists to explain. Each must
+    instead resolve to its own clear, actionable `FAIL`.
+
+    `runtime.resolve_data_dir` is patched directly (as
+    `tests/test_no_tmp_fallback.py` does) so this is genuinely the
+    "no Codex install either" state, not just "env var unset"."""
+    monkeypatch.delenv("PLUGIN_DATA", raising=False)
+    monkeypatch.setattr(runtime, "resolve_data_dir",
+                        lambda explicit=None: (None, ["no codex"], []))
+
+    for check_fn in (doctor.check_ledger, doctor.check_runtime_pin,
+                      doctor.check_daemon):
+        check = check_fn()
+        assert check.status == doctor.FAIL
+        assert "PLUGIN_DATA" in check.summary or any(
+            "PLUGIN_DATA" in d for d in check.details)
+        assert "the check itself failed" not in check.summary
+        assert all("the check itself failed" not in d
+                   for d in check.details)
 
 
 def test_plugin_data_pointing_at_nothing_fails(monkeypatch, tmp_path):

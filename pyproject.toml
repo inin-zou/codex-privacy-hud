@@ -11,9 +11,10 @@ dependencies = []
 
 [project.scripts]
 # The Level 1 ambient HUD: a standalone reader you run yourself in a second
-# terminal pane. It polls $PLUGIN_DATA/ledger.db read-only and redraws one
-# line in place -- it is not a Codex status item and does not render inside
-# the Codex TUI. See src/privacy_hud/ambient.py.
+# terminal pane. It polls $PLUGIN_DATA/hud/<session_id>.json (contract A,
+# src/privacy_hud/hud_snapshot.py) and redraws one line in place -- it is the
+# fallback when no patched Codex build matches the installed version, and
+# does not render inside the Codex TUI. See src/privacy_hud/ambient.py.
 privacy-hud-ambient = "privacy_hud.ambient:main"
 # One-shot health check for the whole setup. Every moving part of this plugin
 # fails silently -- an unstarted daemon, a PLUGIN_DATA the daemon and the hook

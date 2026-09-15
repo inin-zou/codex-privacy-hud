@@ -38,7 +38,7 @@ from privacy_hud.ledger import Ledger
 from privacy_hud.matrix.loader import load_matrix
 from privacy_hud import mcp_tools
 
-data_dir = os.environ.get("PLUGIN_DATA", "/tmp")
+data_dir = os.environ["PLUGIN_DATA"]
 explicit = (sys.argv[1] if len(sys.argv) > 1 else "").strip()
 ledger = Ledger(os.path.join(data_dir, "ledger.db"), load_matrix())
 
@@ -117,7 +117,7 @@ resolved = mcp_tools.ResolvedSession(
     session_id, basis,
     tuple(s for s in argv[2].split(",") if s))
 
-data_dir = os.environ.get("PLUGIN_DATA", "/tmp")
+data_dir = os.environ["PLUGIN_DATA"]
 ledger = Ledger(os.path.join(data_dir, "ledger.db"), load_matrix())
 
 summary = mcp_tools.get_session_summary(ledger, session_id)
@@ -165,7 +165,7 @@ from privacy_hud.matrix.loader import load_matrix
 from privacy_hud import mcp_tools, render
 
 session_id, event_id = sys.argv[1], int(sys.argv[2])
-data_dir = os.environ.get("PLUGIN_DATA", "/tmp")
+data_dir = os.environ["PLUGIN_DATA"]
 ledger = Ledger(os.path.join(data_dir, "ledger.db"), load_matrix())
 
 row = mcp_tools.get_exposure_detail(ledger, session_id, event_id)
@@ -194,6 +194,35 @@ Do not start a second copy if one is already running for this session —
 if a prior `$privacy` invocation in this same conversation already
 printed a URL and that process is still alive, reuse it instead of
 binding a new port.
+
+### `$privacy hud on|off|status`
+
+Hides or shows this session's `Privacy …` item in the Codex status line
+without leaving the session. It does not change `/statusline`; that decides
+whether the item is configured, this decides whether it shows right now.
+
+Replace `on` with `off` to hide the item or `status` to check the current
+state. It prints one word: `shown`, `hidden`, `stale` (a snapshot exists but
+nothing has refreshed it for 30 s — the daemon is gone or wedged, so the
+session is not being recorded either), or `absent` (no snapshot at all).
+Report `stale` as what it is; it is not the same as "off".
+
+```bash
+python3 - "$SESSION_ID" on <<'PY'
+import os, sys
+sys.path.insert(0, os.path.join(os.environ.get("PLUGIN_ROOT", "."), "src"))
+
+from privacy_hud import mcp_tools
+
+session_id, arg = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "status")
+data_dir = os.environ["PLUGIN_DATA"]
+
+out = (mcp_tools.hud_status(data_dir, session_id) if arg == "status"
+       else mcp_tools.hud_set_hidden(data_dir, session_id, arg == "off"))
+# shown | hidden | stale (the daemon that writes it is gone) | absent
+print(out["state"])
+PY
+```
 
 ## What NOT to do
 

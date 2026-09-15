@@ -1,0 +1,20 @@
+name: Patch health
+
+on:
+  schedule: [{ cron: "17 6 * * *" }]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  apply-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Latest upstream tag
+        id: up
+        run: echo "tag=$(git ls-remote --tags --refs https://github.com/openai/codex 'rust-v*' | awk -F/ '{print $NF}' | sort -V | tail -1)" >> "$GITHUB_OUTPUT"
+      - run: git clone --depth 1 --branch "${{ steps.up.outputs.tag }}" https://github.com/openai/codex /tmp/codex
+      - name: Does the patch still apply?
+        run: git -C /tmp/codex apply --check "$GITHUB_WORKSPACE/patches/privacy-status-line.patch"

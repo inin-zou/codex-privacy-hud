@@ -99,6 +99,7 @@ No raw sensitive value is ever logged or printed anywhere in this module.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 import time
@@ -110,11 +111,19 @@ from .detect.paths import PathDetector
 from .detect.secrets import SecretDetector
 from .detect.shell import extract_destinations
 from .engine import Engine, Observation
+from .hud_snapshot import HudPublisher
 from .ledger import Ledger
 from .mask import new_salt
 from .matrix.loader import Matrix, load_matrix
 from .render import receipt as render_receipt
 from .runtime import latch_path
+
+# Every HUD failure below is logged through this at DEBUG and nowhere else.
+# I1: the message carries the exception's *class name* and nothing else --
+# never `str(exc)`, which for an OSError is a path and for a sqlite error can
+# quote a row. A display surface that could not be written is a diagnostic,
+# and a diagnostic that leaks what it was writing about is a disclosure.
+_log = logging.getLogger(__name__)
 
 # Events with a pinned Observation mapping. Anything else that reaches this
 # daemon (SubagentStop, PreCompact, ...) has no Observation defined by the
@@ -134,6 +143,7 @@ class State:
     matrix: Matrix
     ledger: Ledger
     detectors: list
+    hud: HudPublisher
 
     # Guards every touch of `ledger` (a single shared sqlite3 connection is
     # not safe for unserialized concurrent use — see daemon.py for the full
@@ -190,8 +200,15 @@ def new_state(data_dir) -> State:
     _allow_cross_thread_access(ledger, data_dir / "ledger.db")
     _record_unobserved_hooks(ledger, data_dir)
     detectors = [PathDetector(), SecretDetector(), ModelDetector()]
+    hud = HudPublisher(data_dir)
+    try:
+        hud.sweep()
+        hud.mark_daemon(unattributed_gaps=bool(ledger.unattributed_gaps()))
+    except Exception as exc:
+        # I6: housekeeping for a display surface never blocks the daemon.
+        _log.debug("hud startup housekeeping failed: %s", type(exc).__name__)
     return State(data_dir=data_dir, matrix=matrix, ledger=ledger,
-                 detectors=detectors)
+                 detectors=detectors, hud=hud)
 
 
 def _record_unobserved_hooks(ledger: Ledger, data_dir: Path) -> None:
@@ -601,6 +618,24 @@ def active_sessions(state: State, *, stale_after: float
     return fresh
 
 
+def _publish_hud(state: State, session_id: str) -> None:
+    """Contract A, after a ledger change. Reads summary and coverage under
+    the caller's lock and hands the numbers to the publisher. I6: any
+    failure here is swallowed; a hook must never fail because a display
+    file could not be written — but it is swallowed *loudly*, at DEBUG,
+    because a status item that silently stops updating with no way to find
+    out why is how a display bug becomes a "the tool is broken" report.
+    I3: `percent` is the ledger's, verbatim."""
+    try:
+        summary = state.ledger.summary(session_id)
+        coverage = state.ledger.coverage(session_id)
+        state.hud.publish(session_id, percent=int(summary.percent),
+                          blocked=int(summary.prevented),
+                          unverified=not coverage.verified)
+    except Exception as exc:
+        _log.debug("hud publish failed: %s", type(exc).__name__)
+
+
 def _handle_session_start(state: State, session_id: str, payload: dict) -> dict:
     with state.lock:
         salt = new_salt()
@@ -611,6 +646,7 @@ def _handle_session_start(state: State, session_id: str, payload: dict) -> dict:
             ledger=state.ledger, matrix=state.matrix, salt=salt,
             detectors=state.detectors)
         state.started_at[session_id] = time.time()
+        _publish_hud(state, session_id)
     # Outside the lock: `live_lock` and `lock` are never nested (State's
     # `live_lock` comment states the ordering rule this keeps true).
     note_session_live(state, session_id)
@@ -646,6 +682,10 @@ def _handle_session_end(state: State, session_id: str, payload: dict) -> dict:
         # `_get_or_start_engine`, never the old one.
         state.salts.pop(session_id, None)
         state.engines.pop(session_id, None)
+        try:
+            state.hud.retire(session_id)
+        except Exception as exc:
+            _log.debug("hud retire failed: %s", type(exc).__name__)
 
     try:
         minutes = 0
@@ -744,5 +784,6 @@ def dispatch(state: State, payload: dict) -> dict:
         # ordinary case this is a dict lookup.
         engine = _get_or_start_engine(state, session_id, cwd=cwd, model=model)
         decision = engine.observe(obs, scan=scan)
+        _publish_hud(state, session_id)
 
     return _decision_to_output(decision)

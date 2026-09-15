@@ -170,10 +170,12 @@ def _spawn_daemon(data_dir):
     try:
         with open(os.path.join(data_dir, RECEIPT_NAME)) as handle:
             # This file names a program this process is about to execute, so
-            # who can write it matters. `PLUGIN_DATA` defaults to /tmp
-            # everywhere in this plugin when Codex does not set it, and a
-            # world-writable /tmp/runtime.json planted by another local user
-            # would otherwise be an arbitrary-exec hole. `fstat` on the open
+            # who can write it matters. There is no `/tmp` default any more
+            # (spec §6) -- `main()` already returns `{}` before this runs if
+            # `PLUGIN_DATA` is unset -- but this fstat check stays as defence
+            # in depth: a world-writable `runtime.json` planted by another
+            # local user in whatever directory Codex DID assign would
+            # otherwise be an arbitrary-exec hole. `fstat` on the open
             # handle rather than `stat` on the path: the check has to describe
             # the bytes actually read, not a file that may have been swapped
             # since. `write_receipt` creates it 0600, so this never fires on a
@@ -268,7 +270,13 @@ def main():
         payload = json.load(sys.stdin)
     except Exception:
         return {}
-    data_dir = os.environ.get("PLUGIN_DATA", "/tmp")
+    data_dir = os.environ.get("PLUGIN_DATA")
+    if not data_dir:
+        # Codex always sets this for a real hook. By hand, with nothing set,
+        # do nothing rather than write a ledger into whatever directory the
+        # caller happened to be sitting in (spec §6; the old `/tmp` default
+        # is what put a stray ledger.db beside this repo on 2026-09-03).
+        return {}
     sock_path = os.path.join(data_dir, "daemon.sock")
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

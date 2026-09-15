@@ -19,9 +19,12 @@ an inspection.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from privacy_hud import ambient, mcp_tools
+from privacy_hud import hud_snapshot as hs
 from privacy_hud.ledger import Ledger
 from privacy_hud.matrix.loader import load_matrix
 from privacy_hud.render import hud_line
@@ -104,9 +107,27 @@ def _prevent(led, session_id, value_hash):
                protection="blocked")
 
 
+def _publish_snapshot(data_dir, session_id):
+    """Stand in for the daemon (Task 4): turn `session_id`'s current ledger
+    row into contract A's snapshot file (`hud_snapshot.py`), the same way
+    `daemon.py` does on every ledger change. `ambient` now reads only that
+    file, never the ledger, so a test that builds ledger state directly has
+    no daemon to publish it and must do this itself. Returns the summary that
+    was published, for assertions."""
+    led = _ledger(data_dir)
+    summary = led.summary(session_id)
+    coverage = led.coverage(session_id)
+    led.conn.close()
+    hs.HudPublisher(data_dir).publish(
+        session_id, percent=summary.percent, blocked=summary.prevented,
+        unverified=not coverage.verified)
+    return summary
+
+
 def _seed(data_dir, session_id="s1", *, exposures=1, prevented=0,
           started_at=None) -> dict:
-    """Create a ledger with known contents; return that session's summary."""
+    """Create a ledger with known contents, publish the matching snapshot
+    (see `_publish_snapshot`), and return that session's summary."""
     led = _ledger(data_dir)
     led.start_session(session_id, cwd="/repo", model="gpt-5")
     if started_at is not None:
@@ -119,9 +140,8 @@ def _seed(data_dir, session_id="s1", *, exposures=1, prevented=0,
         _expose(led, session_id, bytes([i + 1]) * 16)
     for i in range(prevented):
         _prevent(led, session_id, bytes([100 + i]) * 16)
-    summary = led.summary(session_id)
     led.conn.close()
-    return summary
+    return _publish_snapshot(data_dir, session_id)
 
 
 # --------------------------------------------------------------------- #
@@ -333,24 +353,27 @@ def test_corrupt_database_renders_nothing(data_dir, capsys, no_hud_line):
 
 
 def test_out_of_range_percent_renders_nothing_rather_than_a_wrong_number(
-        data_dir, capsys):
-    # A corrupt score puts the percent outside every band; `hud_line`'s
-    # `_check_band` fails loud on that by design. The HUD must swallow the
-    # failure into silence — never clamp it into a plausible-looking bar.
+        data_dir, capsys, no_hud_line):
+    # A corrupt snapshot -- e.g. a percent outside 0..100, from a future or
+    # buggy writer -- must render nothing rather than a clamped, plausible-
+    # looking bar. `read_snapshot` is what enforces this now (hud_snapshot.py):
+    # `_line_for` never sees the bad value to clamp or guess at.
     _seed(data_dir, "s1", exposures=1)
-    led = _ledger(data_dir)
-    led.conn.execute("UPDATE sessions SET budget_score=-50 WHERE session_id='s1'")
-    led.conn.close()
+    p = hs.snapshot_path(data_dir, "s1")
+    doc = json.loads(p.read_text())
+    doc["percent"] = 150
+    p.write_text(json.dumps(doc))
 
     assert ambient.main(["--once"]) == 0
     assert capsys.readouterr().out == ""
+    assert no_hud_line == []
 
 
-def test_a_raising_ledger_path_degrades_quietly(data_dir, monkeypatch, capsys):
+def test_a_raising_data_dir_degrades_quietly(data_dir, monkeypatch, capsys):
     def _boom():
         raise OSError("data dir unreadable")
 
-    monkeypatch.setattr(ambient, "_ledger_path", _boom)
+    monkeypatch.setattr(ambient, "resolve_data_dir", _boom)
 
     assert ambient.main(["--once"]) == 0
     assert capsys.readouterr().out == ""
@@ -619,6 +642,7 @@ def test_a_session_observed_late_is_marked_unverified(data_dir, capsys):
     led = _ledger(data_dir)
     led.start_session("late", cwd="/repo", model="gpt-5", observed_start=False)
     led.conn.close()
+    _publish_snapshot(data_dir, "late")
 
     ambient.main(["--once"])
 
@@ -641,6 +665,7 @@ def test_the_newest_session_is_unverified_when_hooks_were_dropped_after_it(
     ).fetchone()[0]
     led.note_unobserved_hooks(started + 60)
     led.conn.close()
+    _publish_snapshot(data_dir, "earlier")
 
     ambient.main(["--once"])
 
@@ -651,10 +676,15 @@ def test_a_ledger_holding_only_a_recorded_gap_still_says_something(
         data_dir, capsys):
     """Zero sessions plus a recorded gap is not an idle install — it is an
     install that watched hook events go by and recorded none of them. Rendering
-    nothing here is exactly how the incident stayed invisible."""
+    nothing here is exactly how the incident stayed invisible.
+
+    The daemon is what turns `Ledger.unattributed_gaps()` into the
+    `_daemon.json` marker `ambient` now reads (`hud_snapshot.read_daemon_
+    marker`); this test has no daemon, so it writes the marker directly."""
     led = _ledger(data_dir)
     led.note_unobserved_hooks(1_757_000_000)
     led.conn.close()
+    hs.HudPublisher(data_dir).mark_daemon(unattributed_gaps=True)
 
     assert ambient.main(["--once"]) == 0
 
@@ -681,6 +711,7 @@ def test_the_unverified_line_also_respects_the_width_ladder(
     led = _ledger(data_dir)
     led.start_session("late", cwd="/repo", model="gpt-5", observed_start=False)
     led.conn.close()
+    _publish_snapshot(data_dir, "late")
 
     ambient.main(["--once"])
 
@@ -693,6 +724,7 @@ def test_unverified_copy_is_still_free_of_forbidden_words(data_dir, capsys):
     led = _ledger(data_dir)
     led.start_session("late", cwd="/repo", model="gpt-5", observed_start=False)
     led.conn.close()
+    _publish_snapshot(data_dir, "late")
 
     ambient.main(["--once"])
     captured = capsys.readouterr()
@@ -700,3 +732,55 @@ def test_unverified_copy_is_still_free_of_forbidden_words(data_dir, capsys):
     for text in (captured.out, captured.err):
         for word in BANNED:
             assert word not in text.lower()
+
+
+# --------------------------------------------------------------------- #
+# Contract A: `_line_for` reads the HUD snapshot file, never sqlite.
+# --------------------------------------------------------------------- #
+
+def test_line_is_hud_line_of_the_snapshot(data_dir, monkeypatch):
+    hs.HudPublisher(data_dir).publish("s1", percent=28, blocked=2, unverified=False)
+    monkeypatch.setattr(ambient, "_resolve_session_id", lambda: "s1")
+    assert ambient.safe_line(width=80) == hud_line(28, 80, 2)
+
+
+def test_unverified_flag_reaches_the_line(data_dir, monkeypatch):
+    hs.HudPublisher(data_dir).publish("s1", percent=0, blocked=0, unverified=True)
+    monkeypatch.setattr(ambient, "_resolve_session_id", lambda: "s1")
+    assert ambient.safe_line(width=80) == hud_line(0, 80, 0, unverified=True)
+
+
+def test_hidden_snapshot_renders_nothing(data_dir, monkeypatch, no_hud_line):
+    pub = hs.HudPublisher(data_dir)
+    pub.publish("s1", percent=28, blocked=0, unverified=False)
+    pub.set_hidden("s1", True)
+    monkeypatch.setattr(ambient, "_resolve_session_id", lambda: "s1")
+    assert ambient.safe_line(width=80) is None
+
+
+def test_stale_snapshot_renders_nothing(data_dir, monkeypatch, no_hud_line):
+    hs.HudPublisher(data_dir).publish("s1", percent=28, blocked=0, unverified=False)
+    p = hs.snapshot_path(data_dir, "s1")
+    doc = json.loads(p.read_text()); doc["updated_at"] -= 60; p.write_text(json.dumps(doc))
+    monkeypatch.setattr(ambient, "_resolve_session_id", lambda: "s1")
+    assert ambient.safe_line(width=80) is None
+
+
+def test_no_session_but_daemon_reports_gaps_renders_unverified_zero(data_dir, monkeypatch):
+    hs.HudPublisher(data_dir).mark_daemon(unattributed_gaps=True)
+    monkeypatch.setattr(ambient, "_resolve_session_id", lambda: None)
+    assert ambient.safe_line(width=80) == hud_line(0, 80, 0, unverified=True)
+
+
+def test_no_session_and_no_gaps_renders_nothing(data_dir, monkeypatch, no_hud_line):
+    hs.HudPublisher(data_dir).mark_daemon(unattributed_gaps=False)
+    monkeypatch.setattr(ambient, "_resolve_session_id", lambda: None)
+    assert ambient.safe_line(width=80) is None
+
+
+def test_ambient_never_opens_sqlite(data_dir, monkeypatch):
+    import sqlite3
+    monkeypatch.setattr(sqlite3, "connect", lambda *a, **k: (_ for _ in ()).throw(AssertionError("sqlite opened")))
+    hs.HudPublisher(data_dir).publish("s1", percent=1, blocked=0, unverified=False)
+    monkeypatch.setattr(ambient, "_resolve_session_id", lambda: "s1")
+    assert ambient.safe_line(width=80) == hud_line(1, 80, 0)

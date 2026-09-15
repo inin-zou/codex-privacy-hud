@@ -61,6 +61,16 @@ jobs:
       - name: Run tests
         run: python -m pytest -q
 
+  shell-scripts:
+    name: shell scripts (macos)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e ".[test]"
+      - run: python3 -m pytest tests/test_install_sh.py tests/test_build_script.py -v
+
   commit-messages:
     # CLAUDE.md section 1 forbids AI attribution trailers. Until now that was
     # enforced only by .githooks/commit-msg, which is opt-in per clone and does
