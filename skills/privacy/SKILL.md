@@ -201,15 +201,23 @@ Hides or shows this session's `Privacy …` item in the Codex status line
 without leaving the session. It does not change `/statusline`; that decides
 whether the item is configured, this decides whether it shows right now.
 
-    PYTHONPATH=$PLUGIN_ROOT/src python3 -c "
-    import os, sys
-    from privacy_hud import mcp_tools
-    d = os.environ['PLUGIN_DATA']; sid = '$SESSION_ID'
-    arg = sys.argv[1]
-    out = (mcp_tools.hud_status(d, sid) if arg == 'status'
-           else mcp_tools.hud_set_hidden(d, sid, arg == 'off'))
-    print('hidden' if out['hidden'] else 'shown' if out['present'] else 'no snapshot yet')
-    " on|off|status
+Replace `on` with `off` to hide the item or `status` to check the current state:
+
+```bash
+python3 - "$SESSION_ID" on <<'PY'
+import os, sys
+sys.path.insert(0, os.path.join(os.environ.get("PLUGIN_ROOT", "."), "src"))
+
+from privacy_hud import mcp_tools
+
+session_id, arg = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "status")
+data_dir = os.environ.get("PLUGIN_DATA", "/tmp")
+
+out = (mcp_tools.hud_status(data_dir, session_id) if arg == "status"
+       else mcp_tools.hud_set_hidden(data_dir, session_id, arg == "off"))
+print("hidden" if out["hidden"] else "shown" if out["present"] else "no snapshot yet")
+PY
+```
 
 ## What NOT to do
 

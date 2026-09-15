@@ -514,10 +514,12 @@ def start_clean_session(ledger, session_id: str) -> str:
 # -- Level 1 toggle (spec §5.4) ---------------------------------------------
 
 def hud_status(data_dir, session_id: str) -> dict:
-    """Whether a snapshot exists for `session_id` and whether it is hidden.
-    Reads contract A only; never opens the ledger."""
+    """Whether a fresh snapshot exists for `session_id` and whether it is hidden.
+    Reads contract A only; never opens the ledger. `present` means a fresh
+    snapshot exists — what the status line would draw right now. A stale file
+    (older than STALE_AFTER seconds) reports `present: False, hidden: None`."""
     from .hud_snapshot import read_snapshot
-    snap = read_snapshot(data_dir, session_id, ignore_staleness=True)
+    snap = read_snapshot(data_dir, session_id)
     return {"session_id": session_id, "present": snap is not None,
             "hidden": None if snap is None else snap.hidden}
 

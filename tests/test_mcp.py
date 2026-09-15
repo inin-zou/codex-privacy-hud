@@ -19,6 +19,7 @@ import json
 
 import pytest
 
+from privacy_hud import hud_snapshot as hs
 from privacy_hud.ledger import Ledger
 from privacy_hud.matrix.loader import load_matrix
 from privacy_hud.mcp_tools import (
@@ -26,6 +27,8 @@ from privacy_hud.mcp_tools import (
     apply_policy,
     get_exposure_detail,
     get_session_summary,
+    hud_set_hidden,
+    hud_status,
     list_exposures,
     start_clean_session,
 )
@@ -432,14 +435,29 @@ def test_every_note_obeys_the_copy_rules(two_sessions, tmp_path, monkeypatch):
 # hud_status and hud_set_hidden
 # --------------------------------------------------------------------- #
 
-from privacy_hud import hud_snapshot as hs
-from privacy_hud.mcp_tools import hud_set_hidden, hud_status
-
-
 def test_hud_status_absent_then_present(tmp_path):
     assert hud_status(tmp_path, "s1") == {"session_id": "s1", "present": False, "hidden": None}
     hs.HudPublisher(tmp_path).publish("s1", percent=3, blocked=0, unverified=False)
     assert hud_status(tmp_path, "s1") == {"session_id": "s1", "present": True, "hidden": False}
+
+
+def test_hud_status_stale_snapshot(tmp_path):
+    """A stale snapshot (older than STALE_AFTER) reports present: False."""
+    hs.HudPublisher(tmp_path).publish("s1", percent=3, blocked=0, unverified=False)
+    # Rewrite the file's updated_at to 60 s in the past
+    snap = hs.read_snapshot(tmp_path, "s1", ignore_staleness=True)
+    stale_doc = {"v": hs.SNAPSHOT_VERSION, "percent": snap.percent,
+                 "blocked": snap.blocked, "unverified": snap.unverified,
+                 "hidden": snap.hidden, "updated_at": snap.updated_at - 60.0}
+    path = hs.snapshot_path(tmp_path, "s1")
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    import os
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        import json
+        json.dump(stale_doc, fh, separators=(",", ":"))
+    # Now hud_status should report present: False
+    assert hud_status(tmp_path, "s1") == {"session_id": "s1", "present": False, "hidden": None}
 
 
 def test_hud_set_hidden_round_trip(tmp_path):
