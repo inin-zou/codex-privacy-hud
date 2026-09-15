@@ -22,7 +22,7 @@ that claim, run against a JSON dump of every function's return value.
 
 **Serializing is an explicit step, and the wire format is unchanged.** These
 functions used to return bare dicts assembled from a tuple of string keys
-(`_EVENT_FIELDS` + `_project`), which is what made the six `privacy.*` tools'
+(`_EVENT_FIELDS` + `_project`), which is what made the `privacy.*` tools'
 JSON shape an emergent property of a key list nobody was checking against the
 schema. The shape is now `ExposureRow`/`SessionSummary`, and the two callers
 that put it on a wire — `local_ui_server` (browser JSON) and `mcp/server.py`

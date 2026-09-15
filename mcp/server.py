@@ -2,10 +2,12 @@
 # mcp/server.py
 """Thin stdio MCP wrapper around `privacy_hud.mcp_tools` (Task 13).
 
-Exposes the six tools architecture.md §9 names -- `privacy.get_session_summary`,
-`privacy.list_exposures`, `privacy.get_exposure_detail`, `privacy.update_policy`,
-`privacy.allow_once`, `privacy.start_clean_session` -- each a direct call into
-the corresponding pure function in `src/privacy_hud/mcp_tools.py`. All the
+Exposes seven tools: the six architecture.md §9 names --
+`privacy.get_session_summary`, `privacy.list_exposures`,
+`privacy.get_exposure_detail`, `privacy.update_policy`, `privacy.allow_once`,
+`privacy.start_clean_session` -- plus `privacy.hud_toggle`, added later for the
+status-line item and not in §9. Each is a direct call into the corresponding
+function in `src/privacy_hud/mcp_tools.py`. All the
 real logic (I1's no-raw-value guarantee, the consent rule, the policy-table
 write) lives there and is unit-tested in `tests/test_mcp.py` without going
 through this file at all; this module's only job is the MCP transport.
@@ -84,7 +86,7 @@ def _open_ledger() -> Ledger:
 
 
 def build_app():
-    """Construct the FastMCP app and register the six `privacy.*` tools.
+    """Construct the FastMCP app and register the seven `privacy.*` tools.
     Imports `mcp` here (not at module scope) -- see this file's docstring."""
     try:
         from mcp.server.fastmcp import FastMCP
@@ -106,7 +108,7 @@ def build_app():
     # The three read tools below end in `.as_dict()`. `mcp_tools` returns
     # `ledger.py`'s `SessionSummary`/`ExposureRow` dataclasses, and this is the
     # wire boundary: `ledger._EXPOSURE_JSON_FIELDS` pins which keys an MCP
-    # client sees and in what order, so the six `privacy.*` tools' published
+    # client sees and in what order, so the read tools' published
     # shape is a decision recorded in one place rather than whatever a
     # dataclass happens to declare. Do not drop these calls -- a dataclass
     # handed to the MCP transport is not serializable.
