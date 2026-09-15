@@ -58,7 +58,6 @@ disclosed before the rule was written stays disclosed (design.md P4).
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from privacy_hud import mcp_tools
@@ -67,11 +66,15 @@ from privacy_hud.matrix.loader import load_matrix
 
 
 def _ledger_path() -> Path:
-    """Same convention as `dispatch.new_state()` / `hooks/handler.py`:
-    `$PLUGIN_DATA/ledger.db`, defaulting to `/tmp` exactly like the daemon
-    does, so a locally-run MCP server with no environment configured still
-    finds the same database a locally-run daemon would."""
-    data_dir = Path(os.environ.get("PLUGIN_DATA", "/tmp"))
+    """`$PLUGIN_DATA/ledger.db`, resolved the same way every other reader
+    does (`local_ui_server.resolve_data_dir`). No `/tmp` default (spec §6):
+    a server with nowhere to read from exits with a message rather than
+    inventing an empty ledger in a shared directory."""
+    from privacy_hud.local_ui_server import resolve_data_dir
+    data_dir = resolve_data_dir()
+    if data_dir is None:
+        raise SystemExit("privacy-hud mcp: PLUGIN_DATA is not set and no "
+                          "Codex plugin-data directory was found")
     return data_dir / "ledger.db"
 
 

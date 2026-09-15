@@ -1249,10 +1249,10 @@ def main(argv: list[str] | None = None) -> int:
             failure** -- the caller wanted a daemon there and there
             is one; use it. Nothing was clobbered and no model was
             loaded. `EXIT_ALREADY_RUNNING`.
-    1       Real startup failure: `bind()` refused, `PLUGIN_DATA`
-            unwritable, an `AF_UNIX` path over the kernel's
-            ~104-byte limit, and so on. One line on stderr says
-            which. `EXIT_FAILURE`.
+    1       Real startup failure: `PLUGIN_DATA` unset (no `/tmp` default
+            any more -- spec §6) or unwritable, `bind()` refused, an
+            `AF_UNIX` path over the kernel's ~104-byte limit, and so
+            on. One line on stderr says which. `EXIT_FAILURE`.
     ======  ======================================================
 
     Keeping 3 distinct from 1 is the whole point: a spawner that cannot
@@ -1263,7 +1263,13 @@ def main(argv: list[str] | None = None) -> int:
     by the client surviving a missing daemon, not by this process hiding
     what happened to it.
     """
-    data_dir = Path(os.environ.get("PLUGIN_DATA", "/tmp"))
+    raw = os.environ.get("PLUGIN_DATA")
+    if not raw:
+        print("privacy-hud daemon: PLUGIN_DATA is not set; refusing to start "
+              "(Codex sets it for hooks; export it to run by hand)",
+              file=sys.stderr)
+        return EXIT_FAILURE
+    data_dir = Path(raw)
     socket_path = _default_socket_path(data_dir)
     try:
         daemon = Daemon(socket_path, data_dir)

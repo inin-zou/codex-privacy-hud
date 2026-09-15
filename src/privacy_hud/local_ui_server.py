@@ -80,11 +80,30 @@ _STATIC = {
 }
 
 
-def _ledger_path() -> Path:
+def resolve_data_dir() -> Path | None:
+    """The plugin-data directory, or `None`. `$PLUGIN_DATA` if set; otherwise
+    the single directory Codex assigns this plugin, via `runtime`'s resolver;
+    otherwise nothing. There is no `/tmp` default any more (spec §6): a
+    glance-only surface run by hand must not create a ledger in a shared
+    directory, and "nothing to read" is a state every caller here already
+    renders as silence."""
+    env = os.environ.get("PLUGIN_DATA")
+    if env:
+        return Path(env).expanduser()
+    from . import runtime  # deferred: runtime imports doctor, which imports
+                            # this module's siblings -- see runtime.py's own
+                            # note on `_codex_data_candidates`'s deferred
+                            # import for the same reason.
+    chosen, _notes, _candidates = runtime.resolve_data_dir()
+    return chosen
+
+
+def _ledger_path() -> Path | None:
     """Same convention as `dispatch.new_state()` / `hooks/handler.py` /
-    `mcp/server.py`: `$PLUGIN_DATA/ledger.db`."""
-    data_dir = Path(os.environ.get("PLUGIN_DATA", "/tmp"))
-    return data_dir / "ledger.db"
+    `mcp/server.py`: `$PLUGIN_DATA/ledger.db`, or `None` when there is no
+    resolvable plugin-data directory (see `resolve_data_dir`)."""
+    data_dir = resolve_data_dir()
+    return None if data_dir is None else data_dir / "ledger.db"
 
 
 def _reopen_for_background_thread(ledger: Ledger) -> None:
@@ -180,8 +199,17 @@ class _Handler(BaseHTTPRequestHandler):
         if given:
             return given
         ledger: Ledger = self.server.ledger  # type: ignore[attr-defined]
+        ledger_path = _ledger_path()
+        if ledger_path is None:
+            # Unreachable in practice -- `serve()` already refused to start
+            # without a resolvable data directory -- but the environment
+            # this process reads is not immutable, so this stays a clean
+            # "no session" rather than an AttributeError on `.parent`.
+            print("privacy-hud local-ui: PLUGIN_DATA is not set and no "
+                  "Codex plugin-data directory was found", file=sys.stderr)
+            return None
         return mcp_tools.resolve_audit_session(
-            ledger, _ledger_path().parent).session_id
+            ledger, ledger_path.parent).session_id
 
     def _read_json_body(self) -> dict:
         length = int(self.headers.get("Content-Length", "0") or "0")
@@ -349,8 +377,13 @@ def serve(session_id: str | None = None, *, print_url: bool = True) -> UIServer:
     is used only to build the printed URL's query string (a convenience for
     the browser tab that opens it) -- every request still carries its own
     `session_id`, resolved by `_session_id()` above."""
+    ledger_path = _ledger_path()
+    if ledger_path is None:
+        print("privacy-hud local-ui: PLUGIN_DATA is not set and no Codex "
+              "plugin-data directory was found", file=sys.stderr)
+        raise SystemExit(1)
     matrix = load_matrix()
-    ledger = Ledger(_ledger_path(), matrix)
+    ledger = Ledger(ledger_path, matrix)
     _reopen_for_background_thread(ledger)
     server = UIServer(ledger)
 

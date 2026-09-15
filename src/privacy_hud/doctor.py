@@ -451,14 +451,11 @@ def check_python(version_info=None) -> Check:
 def check_plugin_data() -> Check:
     """`PLUGIN_DATA`: is it set, does it exist, is it the one Codex assigns?
 
-    Unset is a `FAIL`, not a warning, and the reason is the fallback rather
-    than the absence: every component in this plugin defaults to `/tmp`
-    (`_ledger_path`, `daemon.main`, `hooks/handler.py`), so an unset
-    `PLUGIN_DATA` does not produce an error anywhere — it produces a daemon
-    listening on `/tmp/daemon.sock`, a ledger in `/tmp`, and hooks talking to
-    whichever of those Codex's own value does not match. Nothing the plugin
-    promises can happen in that state, and the doctor cannot verify a setup
-    whose location it does not know.
+    Unset is a `FAIL`, not a warning. There is no `/tmp` fallback any more
+    (spec §6: `_ledger_path`, `daemon.main`, `hooks/handler.py` all refuse to
+    guess) -- an unset `PLUGIN_DATA` now means every other component declines
+    to write anything at all, which is exactly why the doctor cannot verify a
+    setup whose location it does not know either.
 
     A value that exists but differs from Codex's assigned directory is a
     `WARN`, not a `FAIL`: running the daemon against a scratch directory is a
@@ -466,7 +463,6 @@ def check_plugin_data() -> Check:
     report is "this works, and it is not what Codex will use".
     """
     raw = os.environ.get("PLUGIN_DATA")
-    data_dir = _ledger_path().parent  # one convention, imported not re-derived
     candidates = _codex_data_candidates()
 
     def _export_fix() -> list[str]:
@@ -486,13 +482,14 @@ def check_plugin_data() -> Check:
     if raw is None:
         return Check(
             "PLUGIN_DATA", FAIL,
-            "not set — every component falls back to /tmp",
+            "not set — nothing is written until it is",
             details=["Codex assigns this value; the daemon and the hook "
                      "client must both use the same one or every hook "
                      "reports unavailable."],
             fixes=_export_fix(),
         )
 
+    data_dir = _ledger_path().parent  # `raw` is set, so this cannot be None
     if not data_dir.is_dir():
         return Check(
             "PLUGIN_DATA", FAIL,
