@@ -48,7 +48,7 @@ codex plugin marketplace add /path/to/codex-privacy-hud --json
 codex plugin add codex-privacy-hud@codex-privacy-hud --json
 ```
 
-The manifest lives at `.claude-plugin/plugin.json` (not `.codex-plugin/` — the OpenAI docs describe that path, but real Codex CLI does not recognize it; `codex plugin marketplace add` fails outright against it. `.claude-plugin/` is what Codex actually loads, confirmed by installing both ways. See `.claude/docs/architecture.md` §7 for the divergence.)
+The plugin manifest is `.codex-plugin/plugin.json` and the marketplace manifest is `.agents/plugins/marketplace.json`, the two paths Codex looks at first. (Codex also accepts the Claude Code layout, `.claude-plugin/`, as a fallback; this project used it until 2026-09-15. An earlier note here said Codex rejected `.codex-plugin/`: that was Codex 0.145 given a `.codex-plugin/plugin.json` with no marketplace manifest beside it, and the error was about the missing marketplace file. With both files in place, Codex 0.154 installs this layout; see `.claude/docs/architecture.md` §7.)
 
 **2. Run the setup step once — from the environment that has `transformers` and `torch`.** This is the whole of the daemon's configuration. It records which Python interpreter the daemon must run in, into the plugin-data directory Codex assigns, and after that Codex's hooks start the daemon themselves.
 
