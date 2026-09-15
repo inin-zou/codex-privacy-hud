@@ -49,3 +49,32 @@ def test_dry_run_does_not_call_rustc_when_target_is_given(tmp_path):
     assert r.returncode == 0, r.stderr
     assert not sentinel.exists(), "the script ran rustc although --target was given"
     assert "codex-privacy-0.154.0-x86_64-unknown-linux-gnu.tar.gz" in r.stdout
+
+
+def test_refuses_to_reset_a_dirty_source_tree(tmp_path):
+    """`--src` can name a checkout somebody is working in, and the script
+    resets it before applying the patch. Uncommitted work must stop the build,
+    not be discarded -- this runs before any clone or cargo."""
+    src = tmp_path / "codex-src"
+    src.mkdir()
+
+    def git(*args):
+        subprocess.run(
+            ["git", "-c", "commit.gpgsign=false", "-C", str(src), *args],
+            check=True, capture_output=True, text=True,
+        )
+
+    git("init", "-q")
+    git("config", "user.email", "test@example.invalid")
+    git("config", "user.name", "test")
+    keep = src / "keep.txt"
+    keep.write_text("committed\n")
+    git("add", "keep.txt")
+    git("commit", "-qm", "seed")
+    keep.write_text("local work\n")
+
+    r = run("0.154.0", "--target", "aarch64-apple-darwin",
+            "--src", str(src), "--out", str(tmp_path / "out"))
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "refusing" in r.stderr, r.stderr
+    assert keep.read_text() == "local work\n", "the script clobbered uncommitted work"

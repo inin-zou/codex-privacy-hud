@@ -289,6 +289,12 @@ def codex_tui(tmp_path):
         yield tui, data_dir
     finally:
         tui.close()
+        # pytest keeps the last three tmp_path trees, so without this the
+        # user's real credentials would sit in /tmp for three more runs.
+        # The explicit unlink first: even if rmtree trips over something
+        # Codex left behind, the copy of auth.json is gone.
+        auth.unlink(missing_ok=True)
+        shutil.rmtree(codex_home, ignore_errors=True)
 
 
 def _tail(tui: Tui, n: int = 1200) -> str:
@@ -320,14 +326,26 @@ def test_patched_status_line_follows_the_snapshot(codex_tui):
         f"is filed under.{_tail(tui)}"
     )
 
-    # 3. Contract B: `hidden` removes the item without stopping the repaints.
+    # 3. Contract B: `hidden` removes the item, and keeps it removed.
+    #
+    #    What is asserted here is an absence, because that is all the terminal
+    #    can honestly report: ratatui paints by cell diff, so a repaint after
+    #    the item vanishes need not re-emit anything recognisable -- not the
+    #    thread id, not the whole line. Requiring a marker would make the test
+    #    fail for a rendering detail rather than for the behaviour. Instead:
+    #    flush every frame painted before the flip, then watch a full window
+    #    and require that *something* was painted (a process that died would
+    #    otherwise pass an absence test trivially) and that none of it is the
+    #    item.
     publisher.set_hidden(thread_id, True)
     tui.drain(SETTLE)  # flush frames painted before the flip
     tui.clear()
-    after = tui.read_until(lambda t: thread_id in t, ITEM_TIMEOUT)
-    assert after is not None, (
-        f"the status line never repainted after hiding{_tail(tui)}"
+    tui.drain(ITEM_TIMEOUT)
+    after = tui.text()
+    assert after, (
+        "codex painted nothing at all after hiding -- it probably died"
+        f"{_tail(tui)}"
     )
     assert "Privacy " not in after, (
-        f"the item survived `hidden`{_tail(tui)}"
+        f"the item survived `hidden`:\n{after[-1200:]}"
     )
