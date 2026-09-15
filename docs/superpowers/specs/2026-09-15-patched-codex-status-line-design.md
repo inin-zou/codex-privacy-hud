@@ -105,8 +105,13 @@ Rules:
   session bound).
 - File mode 0600; directory 0700.
 - `session_id` is the id Codex passes to hooks. The TUI reads its own thread
-  id for the lookup. The plan's first task verifies on 0.154.0 that these are
-  the same string; the design assumes they are.
+  id for the lookup. The plan verifies on 0.154.0 that these are the same
+  string (Task 9, step 5); the design assumes they are.
+- One extra file, `hud/_daemon.json` — `{"v": 1, "unattributed_gaps": bool,
+  "updated_at": float}` — written by the daemon at start. It carries the one
+  bit no per-session file can: whether the ledger holds hook events it
+  watched go by without recording. `ambient.py` used to open sqlite for that
+  single question; with this file it opens sqlite for nothing.
 
 ### 4.2 Contract B — hide/show
 
@@ -280,10 +285,11 @@ the official binary and the user has the fallback pane.
 # codex-privacy-hud forwarder — remove with: install.sh --uninstall
 self="$HOME/.local/bin/codex"
 official=""
-for c in $(command -v -a codex); do            # every codex on PATH, in order
-  [ "$c" = "$self" ] && continue               # skip this forwarder
-  official="$c"; break
+saved_ifs="$IFS"; IFS=:
+for d in $PATH; do                            # every codex on PATH, in order
+  [ -n "$d" ] && [ -x "$d/codex" ] && [ "$d/codex" != "$self" ] && { official="$d/codex"; break; }
 done
+IFS="$saved_ifs"
 [ -x "$official" ] || { echo "codex-privacy-hud: official codex not found" >&2; exit 127; }
 ver="$("$official" --version | awk '{print $2}')"
 patched="$HOME/.local/share/codex-privacy-hud/$ver/codex"
