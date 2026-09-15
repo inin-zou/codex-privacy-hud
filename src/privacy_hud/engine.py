@@ -313,29 +313,16 @@ class Engine:
 
     # -- Task 8 policy-fix: consult the user-written `policy` table --------
     def _policy_selectors(self, session_id: str, rule_type: str) -> set[str]:
-        """Return the `selector`s of every `rule_type` row in the `policy`
-        table that applies to this session: rows scoped `"global"` plus
-        rows scoped `f"session:{session_id}"` (ledger.py SCHEMA's
-        `policy.scope` comment: `global|session:<id>`).
+        """The `selector`s of every user-written `rule_type` rule in force for
+        this session — `Ledger.policy_selectors`, which owns the `policy`
+        table and the scope rule (session rules plus `global` ones).
 
-        `mcp_tools.apply_policy` (the only writer today) always inserts
-        `scope=f"session:{session_id}"` — no caller currently mints a
-        `"global"` row — but the schema documents `global` as a first-class
-        scope, so a rule of that scope (however it eventually gets
-        written) must be honoured identically to a session-scoped one
-        rather than silently ignored because this query only checked one
-        of the two.
-
-        A plain `WHERE ... IN (?, ?)` equality query: a non-matching row
-        just doesn't come back, which is a normal empty result, not an
-        error to catch. No `except` around this query — a malformed
-        `policy` row must fail loud like anything else in this module
-        (I2's sibling constraint for the policy table)."""
-        rows = self.ledger.conn.execute(
-            "SELECT selector FROM policy WHERE rule_type=? AND scope IN (?, ?)",
-            (rule_type, "global", f"session:{session_id}"),
-        ).fetchall()
-        return {r["selector"] for r in rows}
+        Kept as a method here, rather than inlining the ledger call at its two
+        use sites in `observe`, because the engine's contract is that policy is
+        consulted *after* the scan and before the matrix defaults; this name is
+        where that ordering is documented and what `test_engine.py`'s
+        "`scan()` never touches the ledger" guards point at."""
+        return self.ledger.policy_selectors(session_id, rule_type)
 
     def _scan(self, obs: Observation, dest_kind: str, boundary: str) -> tuple[list, bool]:
         """Run every cheap detector unconditionally, then the expensive ones

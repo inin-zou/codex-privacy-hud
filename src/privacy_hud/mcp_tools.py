@@ -62,7 +62,6 @@ by construction and requires no new bookkeeping, so that is what
 """
 from __future__ import annotations
 
-import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -442,10 +441,7 @@ def apply_policy(ledger, session_id: str, *, rule_type: str, selector: str) -> N
         raise ValueError(
             f"unknown rule_type {rule_type!r}; expected one of "
             f"{sorted(_POLICY_RULE_TYPES)}")
-    ledger.conn.execute(
-        "INSERT INTO policy(scope, rule_type, selector, created_at)"
-        " VALUES(?,?,?,?)",
-        (f"session:{session_id}", rule_type, selector, int(time.time())))
+    ledger.add_policy(session_id, rule_type=rule_type, selector=selector)
 
 
 def allow_once(ledger, session_id: str, *, tool_name: str, tool_input,
@@ -497,17 +493,12 @@ def start_clean_session(ledger, session_id: str) -> str:
     the old in-memory salt and mint a new one once it next sees the
     matching real `SessionStart`/`SessionEnd` hook pair for these ids.
     """
-    old = ledger.conn.execute(
-        "SELECT cwd, model FROM sessions WHERE session_id=?",
-        (session_id,)).fetchone()
+    old = ledger.session_origin(session_id)
 
     ledger.end_session(session_id)
 
     new_id = f"{session_id}-clean-{uuid.uuid4().hex[:12]}"
-    ledger.start_session(
-        new_id,
-        cwd=(old["cwd"] if old is not None else "") or "",
-        model=(old["model"] if old is not None else "") or "")
+    ledger.start_session(new_id, cwd=old.cwd, model=old.model)
     return new_id
 
 

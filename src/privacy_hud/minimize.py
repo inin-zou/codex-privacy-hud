@@ -26,8 +26,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import time
 
 from .detect.base import Finding
 from .mask import pseudonym
@@ -177,19 +175,18 @@ def minimize_tool_input(salt: bytes, tool_name: str, tool_input, findings: list[
 # ---------------------------------------------------------------------------
 
 def mint_token(ledger, session_id: str, tool_name: str, tool_input, mode: str) -> str:
-    """Write a one-shot consent token row into `policy_tokens`.
+    """Mint a one-shot consent token for exactly these arguments.
 
-    `args_hash = sha256(canonical_json(tool_input))` binds the token to
-    exactly these arguments — see `consume_token`. TTL is
-    `TOKEN_TTL_SECONDS` (120s) from mint time.
+    This module owns one half of the binding and `Ledger.mint_token` owns the
+    other: `args_hash = sha256(canonical_json(tool_input))` is computed here,
+    so what a token is bound to is decided in the same place `consume_token`
+    recomputes it — the two hashes cannot drift apart into a token that
+    authorizes arguments nobody consented to. The ledger stores that hash and
+    never the arguments. TTL is `TOKEN_TTL_SECONDS` (120s) from mint time.
     """
-    token = os.urandom(16).hex()
-    ledger.conn.execute(
-        "INSERT INTO policy_tokens(token,session_id,tool_name,args_hash,mode,"
-        "expires_at,consumed) VALUES(?,?,?,?,?,?,0)",
-        (token, session_id, tool_name, _args_hash(tool_input), mode,
-         int(time.time()) + TOKEN_TTL_SECONDS))
-    return token
+    return ledger.mint_token(session_id, tool_name=tool_name,
+                             args_hash=_args_hash(tool_input), mode=mode,
+                             ttl_seconds=TOKEN_TTL_SECONDS)
 
 
 def consume_token(ledger, session_id: str, tool_name: str, tool_input) -> str | None:
@@ -201,13 +198,9 @@ def consume_token(ledger, session_id: str, tool_name: str, tool_input) -> str | 
     call with different arguments than it was minted for), when the token
     is expired, or when it was already consumed. Consumption is a delete:
     a second call with identical arguments finds nothing and returns None.
+    `Ledger.consume_token` is where those conditions are enforced; this
+    function's job is to turn a live `tool_input` into the same `args_hash`
+    `mint_token` wrote, so that "same arguments" means one thing.
     """
-    args_hash = _args_hash(tool_input)
-    row = ledger.conn.execute(
-        "SELECT token, mode FROM policy_tokens WHERE session_id=? AND tool_name=?"
-        " AND args_hash=? AND consumed=0 AND expires_at>?",
-        (session_id, tool_name, args_hash, int(time.time()))).fetchone()
-    if row is None:
-        return None
-    ledger.conn.execute("DELETE FROM policy_tokens WHERE token=?", (row["token"],))
-    return row["mode"]
+    return ledger.consume_token(session_id, tool_name=tool_name,
+                                args_hash=_args_hash(tool_input))
