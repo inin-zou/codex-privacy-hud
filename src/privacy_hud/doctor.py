@@ -513,7 +513,14 @@ def check_plugin_data() -> Check:
     raw = os.environ.get("PLUGIN_DATA")
     candidates = _codex_data_candidates()
 
-    if raw is None:
+    # `not raw`, not `raw is None`: `PLUGIN_DATA=` (exported empty, which a
+    # half-written shell profile or a `env PLUGIN_DATA= ...` produces) is set
+    # and useless. Every resolver in the package already treats it as unset
+    # -- `local_ui_server.resolve_data_dir` tests `if env:` -- so this check
+    # took the "it is set" branch and then called `.parent` on the `None`
+    # that `_ledger_path()` correctly returned, crashing the one check whose
+    # whole job is to explain this state.
+    if not raw:
         return Check(
             "PLUGIN_DATA", FAIL,
             "not set — nothing is written until it is",
@@ -523,7 +530,7 @@ def check_plugin_data() -> Check:
             fixes=_plugin_data_export_fix(candidates),
         )
 
-    data_dir = _ledger_path().parent  # `raw` is set, so this cannot be None
+    data_dir = _ledger_path().parent  # `raw` is non-empty, so never None
     if not data_dir.is_dir():
         return Check(
             "PLUGIN_DATA", FAIL,

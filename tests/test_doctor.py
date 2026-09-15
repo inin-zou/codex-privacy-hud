@@ -283,6 +283,23 @@ def test_unset_plugin_data_fails_because_nothing_is_resolved(
     assert check.fixes
 
 
+def test_empty_plugin_data_fails_the_same_way_unset_does(monkeypatch, tmp_path):
+    """`PLUGIN_DATA=` (exported empty) is set and useless. Every resolver in
+    the package already treats it as unset, so `check_plugin_data` took its
+    "it is set" branch and then called `.parent` on the `None` that
+    `_ledger_path()` correctly returned -- an `AttributeError` reported as
+    the opaque "the check itself failed", in precisely the broken-profile
+    state this check exists to name."""
+    monkeypatch.setenv("PLUGIN_DATA", "")
+    monkeypatch.setattr(runtime, "resolve_data_dir",
+                        lambda explicit=None: (None, ["no codex"], []))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    check = doctor.check_plugin_data()
+    assert check.status == doctor.FAIL
+    assert "not set" in check.summary
+    assert check.fixes
+
+
 def test_unset_plugin_data_fails_cleanly_in_the_checks_that_need_a_data_dir(
         monkeypatch, tmp_path):
     """`check_ledger`, `check_runtime_pin` and `check_daemon` all resolve

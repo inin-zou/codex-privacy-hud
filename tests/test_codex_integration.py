@@ -270,9 +270,16 @@ def codex_tui(tmp_path):
     data_dir = tmp_path / "hud-data"
     data_dir.mkdir()
 
+    # These are the user's real credentials. `copyfile` + `chmod` creates the
+    # file with the process umask first -- typically 0644 -- and narrows it
+    # afterwards, so there is a window in which anyone on the machine can read
+    # it. Create it 0600 from the first syscall instead, and O_EXCL so a
+    # pre-existing file (a symlink somebody planted in a shared tmpdir) is an
+    # error rather than a write-through.
     auth = codex_home / "auth.json"
-    shutil.copyfile(REAL_AUTH, auth)
-    os.chmod(auth, 0o600)
+    fd = os.open(auth, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(REAL_AUTH.read_bytes())
     (codex_home / "config.toml").write_text(_config_toml(work), encoding="utf-8")
 
     env = dict(

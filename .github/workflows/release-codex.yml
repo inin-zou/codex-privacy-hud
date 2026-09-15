@@ -24,6 +24,14 @@ jobs:
         run: echo "ver=$(echo '${{ github.ref_name }}' | sed -E 's/^codex-([0-9.]+)-hud.*/\1/')" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@master
         with: { toolchain: 1.95.0, targets: "${{ matrix.target }}" }
+      # Clone before the cache step, not after: rust-cache keys on the
+      # Cargo.lock inside the workspace it is pointed at, and until this
+      # runs that directory does not exist -- so the cache silently fell
+      # back to a lockfile-less key and every build was a cold one.
+      # build-patched-codex.sh reuses a clean existing --src, so cloning
+      # here costs nothing twice.
+      - name: Clone Codex at the tag the build will use
+        run: git clone --depth 1 --branch "rust-v${{ steps.ver.outputs.ver }}" https://github.com/openai/codex "${{ runner.temp }}/codex-src"
       - uses: Swatinem/rust-cache@v2
         with: { workspaces: "${{ runner.temp }}/codex-src/codex-rs" }
       - name: Build

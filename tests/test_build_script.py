@@ -6,7 +6,11 @@ import os
 import subprocess
 from pathlib import Path
 
-SCRIPT = Path(__file__).parents[1] / "scripts" / "build-patched-codex.sh"
+import pytest
+
+ROOT = Path(__file__).parents[1]
+SCRIPT = ROOT / "scripts" / "build-patched-codex.sh"
+WORKFLOW = ROOT / ".github" / "workflows" / "release-codex.yml"
 
 
 def run(*args):
@@ -78,3 +82,22 @@ def test_refuses_to_reset_a_dirty_source_tree(tmp_path):
     assert r.returncode == 1, r.stdout + r.stderr
     assert "refusing" in r.stderr, r.stderr
     assert keep.read_text() == "local work\n", "the script clobbered uncommitted work"
+
+
+def test_the_release_workflow_clones_before_it_warms_the_cache():
+    """`Swatinem/rust-cache` keys on the Cargo.lock inside the workspace it
+    is given. Pointed at a directory the build step creates later, it found
+    no lockfile, fell back to a weaker key, and every release build was a
+    cold one -- an invisible failure, since the build still succeeded."""
+    yaml = pytest.importorskip("yaml")
+    steps = yaml.safe_load(WORKFLOW.read_text())["jobs"]["build"]["steps"]
+    names = [s.get("name") or s.get("uses") for s in steps]
+    clone = next(i for i, s in enumerate(steps)
+                 if "git clone" in (s.get("run") or ""))
+    cache = next(i for i, s in enumerate(steps)
+                 if "rust-cache" in (s.get("uses") or ""))
+    assert clone < cache, names
+    # ...and at the same directory, or the cache still misses.
+    workspace = steps[cache]["with"]["workspaces"]
+    src = workspace[: -len("/codex-rs")]
+    assert steps[clone]["run"].rstrip().endswith(f'"{src}"'), steps[clone]["run"]
