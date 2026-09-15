@@ -376,7 +376,9 @@ def serve(session_id: str | None = None, *, print_url: bool = True) -> UIServer:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
-    host, port = server.server_address[0], server.server_address[1]
+    # `getsockname()`, not `server_address`: the latter is typed to admit
+    # bytes (an AF_UNIX path), which an f-string would render as b'...'.
+    host, port = server.socket.getsockname()[:2]
     query = f"?session_id={session_id}" if session_id else ""
     url = f"http://{host}:{port}/{query}"
     if print_url:

@@ -90,6 +90,7 @@ README's known limits instead.
 from __future__ import annotations
 
 import os
+from typing import Any
 
 from .base import Cost, DetectorProfile, Finding
 
@@ -189,7 +190,9 @@ def spans_from_tokens(text: str, tokens: list[dict], *,
         index = int(index)
         contiguous = (cur is not None and cur["tag"] == tag
                       and prev_index is not None and index == prev_index + 1)
-        if prefix in ("B", "S") or not contiguous:
+        # `cur is None` already makes `contiguous` false; spelled out so the
+        # else branch is visibly working on a group that exists.
+        if prefix in ("B", "S") or not contiguous or cur is None:
             cur = {"tag": tag, "start": int(tok["start"]), "end": int(tok["end"]),
                    "scores": [float(tok["score"])]}
             groups.append(cur)
@@ -264,7 +267,9 @@ class ModelDetector:
                  min_score: float = MIN_SCORE):
         self.model_id = model_id
         self.min_score = min_score
-        self._pipe = None
+        # A transformers pipeline once `_load` succeeds; transformers is an
+        # optional dependency, so there is no type to name here.
+        self._pipe: Any = None
         self.available = self._load()
 
     def _load(self) -> bool:

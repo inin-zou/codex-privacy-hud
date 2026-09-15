@@ -74,3 +74,9 @@ ignore = [
     # setup (`d = tmp / "x"; d.mkdir()`) on one line; no bug class hides here.
     "E702",
 ]
+
+[tool.mypy]
+# The floor from requires-python, so 3.12-only syntax fails here rather than
+# on a user's 3.11. `files` makes a bare `mypy` check what CI checks.
+python_version = "3.11"
+files = ["src"]

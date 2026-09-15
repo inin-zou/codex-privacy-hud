@@ -63,6 +63,7 @@ import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeGuard
 
 SNAPSHOT_VERSION = 1
 #: A snapshot older than this many seconds is treated as absent.
@@ -259,7 +260,7 @@ def _is_int(v) -> bool:
     return isinstance(v, int) and not isinstance(v, bool)
 
 
-def _is_num(v) -> bool:
+def _is_num(v) -> TypeGuard[int | float]:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 

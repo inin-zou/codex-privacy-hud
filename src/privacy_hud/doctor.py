@@ -465,7 +465,8 @@ def check_plugin_data() -> Check:
     # took the "it is set" branch and then called `.parent` on the `None`
     # that `_ledger_path()` correctly returned, crashing the one check whose
     # whole job is to explain this state.
-    if not raw:
+    ledger = _ledger_path()
+    if not raw or ledger is None:
         return Check(
             "PLUGIN_DATA", FAIL,
             "not set — nothing is written until it is",
@@ -475,7 +476,7 @@ def check_plugin_data() -> Check:
             fixes=_plugin_data_export_fix(candidates),
         )
 
-    data_dir = _ledger_path().parent  # `raw` is non-empty, so never None
+    data_dir = ledger.parent
     if not data_dir.is_dir():
         return Check(
             "PLUGIN_DATA", FAIL,
@@ -1113,7 +1114,10 @@ def _pinned_interpreter_note() -> list[str]:
     interpreter is the Runtime pin check's probe of it.
     """
     try:
-        receipt, problem = runtime.load_receipt(_ledger_path().parent)
+        ledger = _ledger_path()
+        if ledger is None:
+            return []
+        receipt, problem = runtime.load_receipt(ledger.parent)
         if receipt is None or problem:
             return []
         python = receipt["python"]
