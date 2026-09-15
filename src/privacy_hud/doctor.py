@@ -158,7 +158,7 @@ MIN_PYTHON = (3, 11)
 MIN_TRANSFORMERS = (5, 16)
 MIN_TORCH = (2, 5)
 
-#: The plugin's name in `.claude-plugin/plugin.json`, which is also the
+#: The plugin's name in `.codex-plugin/plugin.json`, which is also the
 #: directory name Codex uses under `plugins/cache/<marketplace>/`.
 PLUGIN_NAME = "codex-privacy-hud"
 
@@ -179,7 +179,7 @@ DAEMON_TIMEOUT = 2.0
 #: checkout also carries `.git`, `__pycache__`, and a test suite that Codex
 #: never reads and whose divergence means nothing.
 PLUGIN_FILES = (
-    ".claude-plugin/plugin.json",
+    ".codex-plugin/plugin.json",
     "hooks/hooks.json",
     "hooks/handler.py",
 )
@@ -378,7 +378,7 @@ def _repo_root() -> Path | None:
     an honest "cannot check", never a manufactured verdict.
     """
     root = Path(__file__).resolve().parents[2]
-    if (root / ".claude-plugin" / "plugin.json").is_file() and \
+    if (root / ".codex-plugin" / "plugin.json").is_file() and \
             (root / "hooks" / "hooks.json").is_file():
         return root
     return None
@@ -1550,7 +1550,7 @@ def check_plugin_install() -> Check:
     if repo is not None:
         try:
             declared = json.loads(
-                (repo / ".claude-plugin" / "plugin.json").read_text()
+                (repo / ".codex-plugin" / "plugin.json").read_text()
             ).get("version")
         except Exception:
             declared = None

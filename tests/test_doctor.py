@@ -940,10 +940,10 @@ def test_default_run_does_not_load_the_model(isolated_env, monkeypatch):
 
 def _fake_repo(tmp_path, *, version="0.1.0", handler="print('hi')\n") -> Path:
     repo = tmp_path / "repo"
-    (repo / ".claude-plugin").mkdir(parents=True)
+    (repo / ".codex-plugin").mkdir(parents=True)
     (repo / "hooks").mkdir(parents=True)
     (repo / "skills" / "privacy").mkdir(parents=True)
-    (repo / ".claude-plugin" / "plugin.json").write_text(
+    (repo / ".codex-plugin" / "plugin.json").write_text(
         json.dumps({"name": "codex-privacy-hud", "version": version}))
     (repo / "hooks" / "hooks.json").write_text('{"hooks": {}}')
     (repo / "hooks" / "handler.py").write_text(handler)
