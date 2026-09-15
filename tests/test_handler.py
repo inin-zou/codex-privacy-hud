@@ -301,6 +301,49 @@ def test_no_receipt_means_no_spawn(tmp_path):
     assert not (tmp_path / "spawned.txt").exists()
 
 
+SESSION_START = {"hook_event_name": "SessionStart", "session_id": "s1"}
+
+
+def test_the_first_turn_without_a_receipt_says_how_to_set_up(tmp_path):
+    """`codex plugin add` alone installs the skill and the hooks and nothing
+    else; the pre-setup state used to answer only "unavailable", which tells
+    a user who has never read the README nothing. SessionStart fires with the
+    first turn, so that one hook carries the installer command and the
+    reminder to restart Codex afterwards."""
+    code, out = run(SESSION_START, {"PLUGIN_DATA": str(tmp_path)})
+    assert code == 0
+    msg = json.loads(out)["systemMessage"]
+    assert "not set up" in msg
+    assert "restart Codex" in msg
+    assert "permissionDecision" not in out
+    # The command names the installer Codex copied in beside the hook -- the
+    # checkout's own install.sh here -- and never a URL (I2).
+    assert f"sh {HANDLER.parents[1] / 'install.sh'} --yes" in msg
+    assert "://" not in msg
+
+
+def test_only_the_first_turn_carries_the_setup_hint(tmp_path):
+    """Every other hook in a pre-setup session keeps the short answer: a
+    reminder on each tool call would be noise, and the egress deny must not
+    change shape."""
+    _code, out = run(INGRESS, {"PLUGIN_DATA": str(tmp_path)})
+    assert "install.sh" not in out and "unavailable" in out
+    _code, out = run(EGRESS, {"PLUGIN_DATA": str(tmp_path),
+                              "PRIVACY_HUD_NO_SPAWN": "1"})
+    assert "install.sh" not in out
+    assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_a_recorded_setup_never_gets_the_setup_hint(tmp_path):
+    """A receipt means setup ran. If the daemon is still missing after that,
+    the problem is not "run the installer" and saying so would send the user
+    the wrong way; `privacy-hud-doctor` is the tool for that state."""
+    _write_receipt(tmp_path, tmp_path / "deleted-venv" / "bin" / "python3")
+    _code, out = run(SESSION_START, {"PLUGIN_DATA": str(tmp_path)})
+    assert "install.sh" not in out
+    assert "unverified" in out
+
+
 def test_a_receipt_naming_a_deleted_interpreter_does_not_fall_back(tmp_path):
     """The stale-pin case: a removed virtualenv. The client must not retry
     with some other python — a fallback would be exactly the blind daemon this
