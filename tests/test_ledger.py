@@ -4,7 +4,7 @@ import json
 import pytest
 from privacy_hud.matrix.loader import load_matrix
 from privacy_hud.ledger import (EventRow, ExposureRow, Ledger, SessionCoverage,
-                                SessionSummary)
+                                SessionOrigin, SessionSummary)
 
 M = load_matrix()
 
@@ -301,3 +301,184 @@ def test_coverage_is_append_only(led):
         "SELECT id, reason FROM coverage ORDER BY id").fetchall()
     assert [tuple(r) for r in after][:len(before)] == \
         [tuple(r) for r in before]
+
+
+# --------------------------------------------------------------------- #
+# policy: rules the user wrote, and whether the engine can see them
+#
+# These rows are the only ones in this schema that change what happens next
+# rather than describing what already happened. A rule written under a scope
+# the reader never asks for is not an error anywhere — it is silence, and the
+# user was told their data was protected. So both sides of that string live in
+# `ledger.py` now, and the tests below pin the pair, not either half.
+# --------------------------------------------------------------------- #
+
+def test_a_rule_applies_to_the_session_that_wrote_it(led):
+    led.add_policy("s1", rule_type="block_source", selector="support.log")
+    assert led.policy_selectors("s1", "block_source") == {"support.log"}
+
+
+def test_a_rule_does_not_leak_into_another_session(led):
+    led.add_policy("s1", rule_type="mask", selector="email")
+    assert led.policy_selectors("s2", "mask") == set()
+
+
+def test_a_rule_of_another_type_is_not_returned(led):
+    led.add_policy("s1", rule_type="mask", selector="email")
+    assert led.policy_selectors("s1", "block_source") == set()
+
+
+def test_a_global_rule_applies_to_every_session(led):
+    """`add_policy` mints session scope only, but SCHEMA documents `global` as
+    a first-class scope, so a row of that scope must be honoured rather than
+    silently skipped by a reader that only ever asked for one scope."""
+    led.conn.execute(
+        "INSERT INTO policy(scope, rule_type, selector, created_at)"
+        " VALUES('global','block_source','support.log',0)")
+    assert led.policy_selectors("s1", "block_source") == {"support.log"}
+    assert led.policy_selectors("anything-else", "block_source") == {"support.log"}
+
+
+def test_duplicate_rules_collapse_to_one_selector(led):
+    led.add_policy("s1", rule_type="mask", selector="email")
+    led.add_policy("s1", rule_type="mask", selector="email")
+    assert led.policy_selectors("s1", "mask") == {"email"}
+
+
+def test_no_rules_reads_as_no_rules_not_an_error(led):
+    assert led.policy_selectors("s1", "mask") == set()
+
+
+def test_add_policy_writes_the_documented_scope_spelling(led):
+    """The one string the writer and the reader have to agree on."""
+    led.add_policy("s1", rule_type="mask", selector="email")
+    assert led.conn.execute(
+        "SELECT scope FROM policy").fetchone()["scope"] == "session:s1"
+
+
+def test_policy_holds_no_content(led):
+    """I1: a scope, a rule type, a selector the user chose, a timestamp."""
+    cols = {r[1] for r in led.conn.execute("PRAGMA table_info(policy)")}
+    assert cols == {"id", "scope", "rule_type", "selector", "created_at"}
+
+
+# --------------------------------------------------------------------- #
+# policy_tokens: one token authorizes one argument set, once
+#
+# The whole guarantee is a single WHERE clause, and every test below is one
+# way consent could be stretched past what the user gave: a second use, a
+# different argument set, a different tool, another session, or a token that
+# went stale between grant and use.
+# --------------------------------------------------------------------- #
+
+ARGS = b"\xaa" * 32
+OTHER_ARGS = b"\xbb" * 32
+
+
+def _mint(led, session_id="s1", *, tool_name="Bash", args_hash=ARGS,
+          mode="allow_once", ttl_seconds=120):
+    return led.mint_token(session_id, tool_name=tool_name, args_hash=args_hash,
+                          mode=mode, ttl_seconds=ttl_seconds)
+
+
+def test_a_token_consumes_once_for_its_argument_set(led):
+    _mint(led)
+    assert led.consume_token("s1", tool_name="Bash", args_hash=ARGS) == "allow_once"
+
+
+def test_a_token_does_not_consume_twice(led):
+    """The retry loop this defends against is real: a blocked tool call comes
+    back with identical arguments, and exactly one of those attempts was
+    consented to."""
+    _mint(led)
+    led.consume_token("s1", tool_name="Bash", args_hash=ARGS)
+    assert led.consume_token("s1", tool_name="Bash", args_hash=ARGS) is None
+
+
+def test_a_token_does_not_authorize_a_different_argument_set(led):
+    _mint(led)
+    assert led.consume_token("s1", tool_name="Bash",
+                             args_hash=OTHER_ARGS) is None
+
+
+def test_a_rejected_argument_set_does_not_spend_the_token(led):
+    """A near miss must not burn the consent the user actually gave."""
+    _mint(led)
+    led.consume_token("s1", tool_name="Bash", args_hash=OTHER_ARGS)
+    assert led.consume_token("s1", tool_name="Bash", args_hash=ARGS) == "allow_once"
+
+
+def test_a_token_does_not_authorize_a_different_tool(led):
+    _mint(led, tool_name="Bash")
+    assert led.consume_token("s1", tool_name="apply_patch",
+                             args_hash=ARGS) is None
+
+
+def test_a_token_does_not_authorize_another_session(led):
+    _mint(led, "s1")
+    assert led.consume_token("s2", tool_name="Bash", args_hash=ARGS) is None
+
+
+def test_an_expired_token_is_not_consumable(led):
+    _mint(led, ttl_seconds=-1)
+    assert led.consume_token("s1", tool_name="Bash", args_hash=ARGS) is None
+
+
+def test_the_minted_mode_comes_back_verbatim(led):
+    _mint(led, mode="minimize")
+    assert led.consume_token("s1", tool_name="Bash", args_hash=ARGS) == "minimize"
+
+
+def test_no_token_reads_as_none_rather_than_raising(led):
+    assert led.consume_token("s1", tool_name="Bash", args_hash=ARGS) is None
+
+
+def test_tokens_are_opaque_and_unguessable(led):
+    """A bearer credential: a caller who could predict the next one could
+    authorize a call the user never saw."""
+    a, b = _mint(led), _mint(led)
+    assert a != b
+    assert len(a) == 32 and all(c in "0123456789abcdef" for c in a)
+
+
+def test_consuming_removes_the_row(led):
+    _mint(led)
+    led.consume_token("s1", tool_name="Bash", args_hash=ARGS)
+    assert led.conn.execute(
+        "SELECT count(*) FROM policy_tokens").fetchone()[0] == 0
+
+
+def test_policy_tokens_hold_no_arguments(led):
+    """I1: the token row says a call was consented to, never what the call
+    was — `args_hash` is a hash the ledger cannot invert."""
+    cols = {r[1] for r in led.conn.execute("PRAGMA table_info(policy_tokens)")}
+    assert cols == {"token", "session_id", "tool_name", "args_hash", "mode",
+                    "expires_at", "consumed"}
+    banned = {"tool_input", "args", "command", "content", "prompt", "text"}
+    assert not cols & banned
+
+
+# --------------------------------------------------------------------- #
+# session_origin: what a replacement session inherits
+# --------------------------------------------------------------------- #
+
+def test_session_origin_reads_the_recorded_session(led):
+    origin = led.session_origin("s1")
+    assert (origin.cwd, origin.model) == ("/repo", "gpt-5")
+
+
+def test_session_origin_of_an_unknown_session_is_empty_not_an_error(led):
+    """`start_clean_session` must still be able to open a replacement: a
+    retired session with no successor is the worse failure."""
+    assert led.session_origin("nope") == SessionOrigin(cwd="", model="")
+
+
+def test_session_origin_reads_null_columns_as_empty(led):
+    led.conn.execute("UPDATE sessions SET cwd=NULL, model=NULL"
+                      " WHERE session_id='s1'")
+    assert led.session_origin("s1") == SessionOrigin(cwd="", model="")
+
+
+def test_session_origin_is_frozen(led):
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        led.session_origin("s1").cwd = "/elsewhere"

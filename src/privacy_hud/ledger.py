@@ -43,6 +43,7 @@ nothing in the ledger said so. `coverage` is the row that now says so; see
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 import time
 import uuid
@@ -145,6 +146,25 @@ COVERAGE_UNOBSERVED_HOOKS = "unobserved_hooks"
 #: still dedupes it (SQLite treats NULLs as distinct, which would let one daemon
 #: write the same gap twice).
 UNATTRIBUTED_SESSION = ""
+
+#: `policy.scope` for a rule that applies to every session in this ledger.
+#: No caller mints one today (`add_policy` writes session scope), but the
+#: schema documents it as a first-class scope, so `policy_selectors` honours
+#: it: a rule nobody can write is a comment, a rule the reader silently skips
+#: is protection that looks applied and is not.
+POLICY_SCOPE_GLOBAL = "global"
+
+
+def _session_scope(session_id: str) -> str:
+    """`policy.scope` for a rule bound to one session.
+
+    The one place the `session:<id>` spelling from SCHEMA's `policy.scope`
+    comment is built. Writer and reader used to spell it separately, in two
+    modules, and a rule whose scope string does not match the one the reader
+    asks for is silently never enforced — no error, no row, just protection
+    the user was told was applied.
+    """
+    return f"session:{session_id}"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -408,6 +428,26 @@ class EventRow(ExposureRow):
                               for f in fields(ExposureRow)})
 
 
+@dataclass(frozen=True, kw_only=True)
+class SessionOrigin:
+    """Where a session was running, as `Ledger.session_origin` reads it.
+
+    Two strings that are trivially transposable and mean completely different
+    things — a clean session opened with the model in its `cwd` column would
+    file every later disclosure against a working directory that is not one.
+    Named, keyword-only fields make that a construction error, for the same
+    reason `SessionSummary`'s four integers are named.
+
+    Both fields are empty strings when the ledger has no row, or a NULL column,
+    for the session: `start_session` writes what it is given, and "" is what it
+    was always given in that case. Nothing here is serialized — this type does
+    not cross the JSON boundary, so it has no `as_dict()`.
+    """
+
+    cwd: str
+    model: str
+
+
 class Ledger:
     def __init__(self, path: Path, matrix: Matrix, *, observer: str | None = None):
         """`observer` identifies this `Ledger` instance in the `coverage` table.
@@ -653,3 +693,140 @@ class Ledger:
         self.conn.execute(
             "UPDATE events SET value_hash=NULL WHERE session_id=?",
             (session_id,))
+
+    # -- policy and one-shot consent tokens (SCHEMA's last two tables) -----
+    #
+    # Both tables are read and written only through the methods below. They
+    # decide *whether the next call is allowed*, which makes them the one part
+    # of this schema where a caller's hand-written SQL could widen an
+    # authorization rather than merely miscount one — the token invariant in
+    # `consume_token` in particular is a single `WHERE` clause standing between
+    # "the user consented to this call" and "the user consented to something".
+
+    def add_policy(self, session_id: str, *, rule_type: str,
+                   selector: str) -> None:
+        """Record a forward-looking rule for `session_id` (design.md §6's
+        "Protect future occurrences" / "Block this source").
+
+        Scoped to the session that asked for it, never globally: a rule the
+        user wrote while looking at one session's disclosures is consent about
+        that session, and silently widening it to every future session would
+        be a promise they never made. `rule_type` is not validated here —
+        `mcp_tools.apply_policy` owns the closed set of rule types and refuses
+        an unknown one before any row is written.
+
+        Append-only like the rest of this ledger: a rule is a decision the user
+        made at a time, so there is no update path and no retroactive effect.
+        Data disclosed before the rule was written stays disclosed (P4).
+        """
+        self.conn.execute(
+            "INSERT INTO policy(scope, rule_type, selector, created_at)"
+            " VALUES(?,?,?,?)",
+            (_session_scope(session_id), rule_type, selector, int(time.time())))
+
+    def policy_selectors(self, session_id: str, rule_type: str) -> set[str]:
+        """Every `selector` of `rule_type` that applies to `session_id`: the
+        session's own rules plus any `global` ones.
+
+        What this defends is that a user-written rule is actually consulted.
+        `Engine.observe` calls this on every egress observation ahead of its
+        own matrix defaults, so a selector missing from this set is a rule the
+        UI told the user was in force and the engine never saw. Hence both
+        scopes, and hence no `except` around the read: a malformed `policy` row
+        must fail loud, exactly like an unmapped destination (I2), rather than
+        read as "no rules".
+
+        A set, not a list: callers ask "is this source/data_type covered", and
+        duplicate rows for the same selector are the same rule written twice.
+        """
+        rows = self.conn.execute(
+            "SELECT selector FROM policy WHERE rule_type=? AND scope IN (?, ?)",
+            (rule_type, POLICY_SCOPE_GLOBAL, _session_scope(session_id)),
+        ).fetchall()
+        return {r["selector"] for r in rows}
+
+    def mint_token(self, session_id: str, *, tool_name: str, args_hash: bytes,
+                   mode: str, ttl_seconds: int) -> str:
+        """Mint a one-shot consent token and return it (architecture.md §8).
+
+        The token authorizes one thing: a call to `tool_name`, in this session,
+        whose arguments hash to `args_hash`, once, before it expires. Every one
+        of those four is a column here rather than a caller's convention,
+        because each is a way consent could be stretched past what was given —
+        a different tool, another session, different arguments, a retry an hour
+        later.
+
+        `args_hash` arrives already computed (`minimize._args_hash`): the
+        ledger stores a hash, never the arguments, so a token row cannot
+        describe the call it authorized (I1). Which bytes are hashed is the
+        caller's decision and has to match at consumption time, so it lives
+        with the caller that hashes them.
+
+        The token is 16 random bytes from the OS, not a counter or a hash of
+        the row: it is a bearer credential, and one a caller could predict
+        would authorize a call the user never saw.
+        """
+        token = os.urandom(16).hex()
+        self.conn.execute(
+            "INSERT INTO policy_tokens(token,session_id,tool_name,args_hash,mode,"
+            "expires_at,consumed) VALUES(?,?,?,?,?,?,0)",
+            (token, session_id, tool_name, args_hash, mode,
+             int(time.time()) + ttl_seconds))
+        return token
+
+    def consume_token(self, session_id: str, *, tool_name: str,
+                      args_hash: bytes) -> str | None:
+        """Spend the token minted for exactly this call and return its `mode`,
+        or `None` when there is none to spend.
+
+        **This is where "one token, one argument set, once" is enforced**, and
+        it is one condition per way that guarantee could fail:
+
+        * `session_id`/`tool_name`/`args_hash` must all match what was minted.
+          Different arguments are a different call — the whole point of the
+          binding is that consent to `curl https://x.test` is not consent to
+          `curl https://evil.test`, and the arguments are compared by hash so
+          the ledger never has to hold them.
+        * `expires_at>` now: consent granted two minutes ago for a call that
+          was about to happen is not consent for a call that happens later.
+        * Consumption is a `DELETE` of the matching row, so a replayed call
+          with identical arguments finds nothing. A blocked tool call that
+          Codex retries in a loop gets exactly one pass.
+
+        No match is `None`, not an error: "no token" is the ordinary state of
+        almost every call, and the caller's next step (deny) is the safe one.
+        A caller that treated an exception as "no token" would be one `except`
+        away from treating it as "allowed".
+
+        The lookup is by arguments rather than by the token string because the
+        engine never sees a token: it re-hashes the arguments of the call in
+        front of it and asks whether consent exists for *that*. A caller who
+        could present a token id would be authorizing a call by name.
+        """
+        row = self.conn.execute(
+            "SELECT token, mode FROM policy_tokens WHERE session_id=? AND tool_name=?"
+            " AND args_hash=? AND consumed=0 AND expires_at>?",
+            (session_id, tool_name, args_hash, int(time.time()))).fetchone()
+        if row is None:
+            return None
+        self.conn.execute("DELETE FROM policy_tokens WHERE token=?",
+                          (row["token"],))
+        return row["mode"]
+
+    def session_origin(self, session_id: str) -> SessionOrigin:
+        """Where a session was running and under which model — the two fields
+        a replacement session has to inherit.
+
+        Exists for `mcp_tools.start_clean_session`, which retires a session and
+        opens a fresh one that must look like the same work continuing. An
+        unknown session reads as empty strings rather than raising: a clean
+        session started against an id this ledger never saw is still a valid
+        request, and refusing it would leave the caller with a retired session
+        and no replacement.
+        """
+        row = self.conn.execute(
+            "SELECT cwd, model FROM sessions WHERE session_id=?",
+            (session_id,)).fetchone()
+        if row is None:
+            return SessionOrigin(cwd="", model="")
+        return SessionOrigin(cwd=row["cwd"] or "", model=row["model"] or "")
