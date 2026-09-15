@@ -61,6 +61,20 @@ jobs:
       - name: Run tests
         run: python -m pytest -q
 
+  lint:
+    # Rule selection lives in pyproject's [tool.ruff], so a local `ruff check .`
+    # and this job agree. The version is pinned because a ruff upgrade can add
+    # findings to a selected rule set, and that should arrive as its own PR,
+    # not as a red check on an unrelated one.
+    name: lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install ruff==0.16.7
+      - run: ruff check --output-format=github .
+
   shell-scripts:
     name: shell scripts (macos)
     runs-on: macos-14

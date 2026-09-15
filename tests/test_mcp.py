@@ -42,21 +42,21 @@ RAW_SECRET = "sk-live-abcdef0123456789"
 
 @pytest.fixture
 def led(tmp_path):
-    l = Ledger(tmp_path / "l.db", M)
-    l.start_session("s1", cwd="/r", model="gpt-5")
-    l.record("s1", turn_id="t1", kind="exposed", data_type="email",
-              source="support.log", destination="model_context",
-              value_hash=b"\x01" * 16, masked_example="jo•••@acme.com",
-              tool_name="Read", protection=None)
-    l.record("s1", turn_id="t2", kind="prevented", data_type="credential",
-              source="tool input", destination="mcp_tool",
-              value_hash=b"\x02" * 16, masked_example=None,
-              tool_name="mcp__github__x", protection="blocked")
-    l.record("s1", turn_id="t3", kind="local_access", data_type="path",
-              source="terminal output", destination="local",
-              value_hash=b"\x03" * 16, masked_example="/Users/.../app.log",
-              tool_name="Read", protection=None)
-    return l
+    ledger = Ledger(tmp_path / "l.db", M)
+    ledger.start_session("s1", cwd="/r", model="gpt-5")
+    ledger.record("s1", turn_id="t1", kind="exposed", data_type="email",
+                   source="support.log", destination="model_context",
+                   value_hash=b"\x01" * 16, masked_example="jo•••@acme.com",
+                   tool_name="Read", protection=None)
+    ledger.record("s1", turn_id="t2", kind="prevented", data_type="credential",
+                   source="tool input", destination="mcp_tool",
+                   value_hash=b"\x02" * 16, masked_example=None,
+                   tool_name="mcp__github__x", protection="blocked")
+    ledger.record("s1", turn_id="t3", kind="local_access", data_type="path",
+                   source="terminal output", destination="local",
+                   value_hash=b"\x03" * 16, masked_example="/Users/.../app.log",
+                   tool_name="Read", protection=None)
+    return ledger
 
 
 # --------------------------------------------------------------------- #

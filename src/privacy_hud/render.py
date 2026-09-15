@@ -286,7 +286,7 @@ def _tiles_block(summary: SessionSummary) -> str:
         (str(summary.destinations), "destinations"),
         (str(summary.prevented), "prevented"),
     ]
-    blocks = [_tile(v, l) for v, l in tiles]
+    blocks = [_tile(value, label) for value, label in tiles]
     return "\n".join(" ".join(b[i] for b in blocks) for i in range(4))
 
 
@@ -297,7 +297,7 @@ def _tab_bar(exposed_n: int, prevented_n: int, all_n: int, tab: str) -> str:
     sep = "      "
     line = " " + sep.join(texts)
     underline = " "
-    for i, ((name, _n), text) in enumerate(zip(segs, texts)):
+    for i, ((name, _n), text) in enumerate(zip(segs, texts, strict=True)):
         underline += ("─" if name == tab else " ") * len(text)
         if i < len(segs) - 1:
             underline += " " * len(sep)
@@ -320,7 +320,7 @@ def _table(rows: Sequence[ExposureRow]) -> str:
     ]
 
     def fmt(cells):
-        return "  ".join(c.ljust(w) for c, w in zip(cells, widths))
+        return "  ".join(c.ljust(w) for c, w in zip(cells, widths, strict=True))
 
     lines = [fmt(headers)]
     lines.extend(fmt(d) for d in data)

@@ -603,7 +603,7 @@ def test_runtime_imports_are_stdlib_or_explicitly_allowed():
         "Global Constraint I2 (CLAUDE.md §3): undeclared third-party imports "
         "in the runtime package. If this dependency is genuinely local-only, "
         "add it to ALLOWED_THIRD_PARTY in this file and say why in the commit "
-        f"message:\n  " + "\n  ".join(offenders)
+        "message:\n  " + "\n  ".join(offenders)
     )
 
 
@@ -708,7 +708,7 @@ def test_declared_dependencies_stay_on_the_reviewed_allowlist():
     assert not unexpected, (
         "Global Constraint I2 (CLAUDE.md §3): unreviewed optional dependency. "
         "Confirm it makes no outbound request, then add it to "
-        f"ALLOWED_DISTRIBUTIONS in this file:\n  " + "\n  ".join(unexpected)
+        "ALLOWED_DISTRIBUTIONS in this file:\n  " + "\n  ".join(unexpected)
     )
 
 

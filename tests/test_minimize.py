@@ -24,9 +24,9 @@ SALT = new_salt()
 
 @pytest.fixture
 def led(tmp_path):
-    l = Ledger(tmp_path / "l.db", M)
-    l.start_session("s1", cwd="/r", model="gpt-5")
-    return l
+    ledger = Ledger(tmp_path / "l.db", M)
+    ledger.start_session("s1", cwd="/r", model="gpt-5")
+    return ledger
 
 
 # ---------------------------------------------------------------------------

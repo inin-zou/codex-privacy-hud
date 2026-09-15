@@ -31,6 +31,8 @@ rather than silently sorted into whichever class the sniff happens to pick.
 """
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from privacy_hud.detect.base import (
@@ -271,7 +273,7 @@ def test_a_detector_profile_is_immutable():
     """The declaration is read on every scan from a shared, process-wide
     detector list; it must not be something one session can rewrite for
     every other session."""
-    with pytest.raises(Exception):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         PathDetector.profile.tier = 3
 
 

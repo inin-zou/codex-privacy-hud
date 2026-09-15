@@ -11,9 +11,9 @@ M = load_matrix()
 
 @pytest.fixture
 def led(tmp_path):
-    l = Ledger(tmp_path / "ledger.db", M)
-    l.start_session("s1", cwd="/repo", model="gpt-5")
-    return l
+    ledger = Ledger(tmp_path / "ledger.db", M)
+    ledger.start_session("s1", cwd="/repo", model="gpt-5")
+    return ledger
 
 
 def _rec(led, **kw):
@@ -98,7 +98,7 @@ def test_a_mistyped_field_name_is_loud_not_none(led):
     _rec(led)
     row = led.list_events("s1", "exposed")[0]
     with pytest.raises(AttributeError):
-        row.data_typ
+        _ = row.data_typ
     # Subscripting is gone too, so the old stringly-typed spelling cannot
     # quietly come back: there is no `.get()` on these rows to return None.
     with pytest.raises(TypeError):

@@ -1,4 +1,6 @@
 # tests/matrix/test_loader.py
+from itertools import pairwise
+
 import pytest
 from privacy_hud.matrix.loader import load_matrix, UnknownKey
 
@@ -50,5 +52,5 @@ def test_bands_cover_zero_to_hundred_without_gaps():
     covered = sorted((lo, hi) for lo, hi, _ in m.bands)
     assert covered[0][0] == 0
     assert covered[-1][1] == 100
-    for (_, prev_hi), (next_lo, _) in zip(covered, covered[1:]):
+    for (_, prev_hi), (next_lo, _) in pairwise(covered):
         assert next_lo == prev_hi + 1
