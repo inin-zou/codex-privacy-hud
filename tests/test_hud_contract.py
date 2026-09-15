@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from privacy_hud import doctor, hud_snapshot
+from privacy_hud import codex, doctor, hud_snapshot
 
 MATRIX = Path(__file__).parent / "matrix"
 SCHEMA = json.loads((MATRIX / "hud_snapshot.schema.json").read_text())
@@ -175,13 +175,27 @@ def _plugin_data_dirname() -> str:
 
 
 def test_plugin_manifests_agree_on_the_plugin_name():
-    """`doctor.PLUGIN_NAME` is what `_codex_data_candidates` matches a
-    directory on; it is a restatement of the manifest and nothing checks it
-    against the manifest anywhere else."""
+    """`codex.PLUGIN_NAME` (re-exported as `doctor.PLUGIN_NAME`) is what
+    `codex.codex_data_candidates` matches a directory on; it is a restatement
+    of the manifest and nothing checks it against the manifest anywhere
+    else."""
     plugin = _manifest(".codex-plugin/plugin.json")
     marketplace = _manifest(".agents/plugins/marketplace.json")
+    assert codex.PLUGIN_NAME == plugin["name"]
     assert doctor.PLUGIN_NAME == plugin["name"]
     assert [p["name"] for p in marketplace["plugins"]] == [plugin["name"]]
+
+
+def test_codex_module_derives_the_plugin_data_dirname_from_the_manifests():
+    """`codex.py` carries the marketplace name and the `<marketplace>-<plugin>`
+    directory Codex derives from it as constants, because the runtime cannot
+    rely on the checkout existing (Codex runs a copy out of its own cache, and
+    a wheel install ships no manifests at all). This is the pin that makes the
+    constants a restatement rather than a guess -- the same treatment the Rust
+    literal and `install.sh` get in the two tests below."""
+    assert codex.MARKETPLACE_NAME == \
+        _manifest(".agents/plugins/marketplace.json")["name"]
+    assert codex.PLUGIN_DATA_DIRNAME == _plugin_data_dirname()
 
 
 def test_rust_plugin_data_dirname_matches_the_manifests():

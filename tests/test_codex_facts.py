@@ -1,0 +1,122 @@
+# tests/test_codex_facts.py
+"""`privacy_hud/codex.py` — the one module that knows Codex the platform.
+
+Two properties are defended here, and they are the two the module exists for.
+
+**It stays a leaf.** Every other module imports it — `dispatch`, `daemon`,
+`doctor`, `runtime`, `local_ui_server` — precisely so they stop importing each
+other's privates for these facts. The moment it imports one of them back, the
+cycle those deferred imports were dodging is available again, so the
+no-package-imports rule is asserted by AST rather than left to review, the
+same way `tests/test_network_isolation.py` asserts the dependency allowlist.
+
+**Its event set is Codex's, not ours.** `hooks/hooks.json` is what decides
+which events arrive; an event registered there that `codex.KNOWN_EVENTS` does
+not list is a silent gap (it reaches the daemon and falls through to an empty
+allow), and one listed here but not registered is a fact about a Codex that
+is no longer running. The two are compared instead of trusted.
+"""
+from __future__ import annotations
+
+import ast
+import json
+from pathlib import Path
+
+from privacy_hud import codex
+
+REPO = Path(__file__).resolve().parents[1]
+CODEX_PY = REPO / "src" / "privacy_hud" / "codex.py"
+HOOKS_JSON = REPO / "hooks" / "hooks.json"
+
+
+def _imported_modules(path: Path) -> set[str]:
+    """Every module name imported anywhere in `path`, including inside a
+    function body — a deferred import is still an import, and a deferred
+    import of a sibling is exactly the thing this module exists to delete."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names |= {alias.name for alias in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            # `from . import x` / `from .x import y` have level > 0 and a
+            # module of None or "x"; either way it is a package import.
+            if node.level:
+                names.add("." * node.level + (node.module or ""))
+            elif node.module:
+                names.add(node.module)
+    return names
+
+
+def test_codex_module_imports_nothing_from_the_package():
+    """`codex.py` is stdlib-only and imports nothing from `privacy_hud`.
+
+    That is what makes it importable from anywhere. `doctor` -> `runtime` ->
+    `doctor` and `doctor` -> `local_ui_server` -> `runtime` -> `doctor` were
+    both real cycles, broken only by deferred imports that each carried a
+    comment explaining why; the facts they were reaching for live here now,
+    and a leaf with no package imports cannot take part in a cycle at all.
+    """
+    offenders = sorted(name for name in _imported_modules(CODEX_PY)
+                       if name.startswith(".")
+                       or name.split(".")[0] == "privacy_hud")
+    assert not offenders, (
+        "codex.py must import nothing from privacy_hud -- every module in "
+        "the package imports it, so an import back is a cycle: "
+        + ", ".join(offenders))
+
+
+def test_codex_module_imports_only_the_stdlib():
+    import sys
+
+    offenders = sorted(name for name in _imported_modules(CODEX_PY)
+                       if not name.startswith(".")
+                       and name.split(".")[0] not in sys.stdlib_module_names)
+    assert not offenders, offenders
+
+
+def test_known_events_are_exactly_the_events_hooks_json_registers():
+    """`hooks/hooks.json` is the registration; `codex.KNOWN_EVENTS` is what
+    the package believes about it.
+
+    A Codex release that renames an event, or a hook we add and forget to
+    write down, is otherwise invisible: an unregistered event simply never
+    arrives, and an unknown one that does falls through `dispatch.dispatch`
+    to an empty allow with nothing recorded and nothing said.
+    """
+    registered = set(json.loads(HOOKS_JSON.read_text())["hooks"])
+    assert set(codex.KNOWN_EVENTS) == registered
+
+
+def test_the_event_subsets_are_subsets():
+    """Each named subset must name events Codex actually sends. A typo here
+    would be silent in both directions — an egress event that never matches
+    fails *open* on the one path I6 says must fail closed."""
+    assert codex.OBSERVED_EVENTS <= codex.KNOWN_EVENTS
+    assert codex.EGRESS_EVENTS <= codex.KNOWN_EVENTS
+    assert codex.PROBE_EVENT in codex.KNOWN_EVENTS
+
+
+def test_the_probe_event_has_no_observation_mapping():
+    """`doctor`'s round trip must not be able to record anything. It sends
+    `PROBE_EVENT` precisely because `dispatch` has no `Observation` for it, so
+    `dispatch()` returns an empty allow before it touches the ledger, creates
+    a session, builds an `Engine` or runs a detector. Keeping the probe out of
+    `OBSERVED_EVENTS` is what makes that true; `tests/test_doctor.py` asserts
+    the other half (it is not a lifecycle event either)."""
+    assert codex.PROBE_EVENT not in codex.OBSERVED_EVENTS
+
+
+def test_dispatch_and_doctor_use_the_same_objects():
+    """The aliases are aliases, not copies. `dispatch._KNOWN_EVENTS` and
+    `doctor`'s four re-exports keep their old names because tests and prose
+    all over the tree name them there; what must not come back is a second
+    definition drifting from this one."""
+    from privacy_hud import dispatch, doctor
+
+    assert dispatch._KNOWN_EVENTS is codex.OBSERVED_EVENTS
+    assert doctor.SOCKET_NAME is codex.SOCKET_NAME
+    assert doctor.PLUGIN_NAME is codex.PLUGIN_NAME
+    assert doctor.PROBE_EVENT is codex.PROBE_EVENT
+    assert doctor._codex_home is codex.codex_home
+    assert doctor._codex_data_candidates is codex.codex_data_candidates
