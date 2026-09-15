@@ -286,7 +286,7 @@ privacy.list_exposures
 privacy.get_exposure_detail
 privacy.update_policy
 privacy.allow_once
-privacy.start_clean_session
+privacy.hud_toggle
 ```
 
 ### 7.6 The `ask` workaround
@@ -353,7 +353,7 @@ Non-negotiable properties, and the first thing a judge will ask:
 - Detection runs **locally**; no content is sent anywhere for classification.
 - The ledger is **metadata-only** — types, counts, sources, destinations, timestamps, masked exemplars.
 - No telemetry, no analytics, no network calls from the plugin itself except to `127.0.0.1`.
-- `privacy.start_clean_session` wipes session-scoped state and salt.
+- A session's salt is discarded at `SessionEnd`, and its stored value hashes are nulled then.
 - Ledger DB is `0600`, under `PLUGIN_DATA`.
 - The tool must survive its own audit: running Privacy HUD on Privacy HUD produces zero exposures.
 

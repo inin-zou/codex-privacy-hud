@@ -246,10 +246,11 @@ support.log → main agent → GitHub MCP
    B0            B1            B3
 ```
 
-**Actions.** Maximum three, always forward-looking:
+**Actions.** Maximum two, always forward-looking:
 - `Protect future occurrences` — writes a policy rule to mask this data type from this source going forward.
 - `Block this source` — writes a deny rule for the source path.
-- `Start a clean session` — only offered when disclosure is in the red band.
+
+In the red band the detail view also shows a note, not an action: `Want a clean context? Start a new conversation in Codex. What this session already sent to the model stays sent.` A clean context is a new Codex conversation, which the plugin cannot start; an earlier `Start a clean session` action opened a ledger row under an id Codex never sends and was removed (#23).
 
 Every action shows a confirmation of what rule it wrote, in plain terms: `Rule added: mask email from support.log. Applies from the next tool call.`
 

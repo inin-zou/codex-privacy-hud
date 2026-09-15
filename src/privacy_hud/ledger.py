@@ -419,24 +419,6 @@ class EventRow(ExposureRow):
                               for f in fields(ExposureRow)})
 
 
-@dataclass(frozen=True, kw_only=True)
-class SessionOrigin:
-    """Where a session was running, as `Ledger.session_origin` reads it.
-
-    Two strings that are trivially transposable and mean completely different
-    things — a clean session opened with the model in its `cwd` column would
-    file every later disclosure against a working directory that is not one.
-    Named, keyword-only fields make that a construction error, for the same
-    reason `SessionSummary`'s four integers are named.
-
-    Both fields are empty strings when the ledger has no row, or a NULL column,
-    for the session: `start_session` writes what it is given, and "" is what it
-    was always given in that case. Nothing here is serialized — this type does
-    not cross the JSON boundary, so it has no `as_dict()`.
-    """
-
-    cwd: str
-    model: str
 
 
 class Ledger:
@@ -470,8 +452,7 @@ class Ledger:
         not observed. Only `dispatch._get_or_start_engine` passes it — the one
         code path that knows the session began before the daemon did. The
         default is True because every other caller genuinely is at a session's
-        beginning (a real `SessionStart` hook, or `mcp_tools.
-        start_clean_session` minting a brand-new id), and defaulting to False
+        beginning (a real `SessionStart` hook), and defaulting to False
         would flag every one of them with a gap that does not exist.
 
         Both writes are `INSERT OR IGNORE`, which is what makes this idempotent
@@ -817,21 +798,3 @@ class Ledger:
         self.conn.execute("DELETE FROM policy_tokens WHERE token=?",
                           (row["token"],))
         return row["mode"]
-
-    def session_origin(self, session_id: str) -> SessionOrigin:
-        """Where a session was running and under which model — the two fields
-        a replacement session has to inherit.
-
-        Exists for `mcp_tools.start_clean_session`, which retires a session and
-        opens a fresh one that must look like the same work continuing. An
-        unknown session reads as empty strings rather than raising: a clean
-        session started against an id this ledger never saw is still a valid
-        request, and refusing it would leave the caller with a retired session
-        and no replacement.
-        """
-        row = self.conn.execute(
-            "SELECT cwd, model FROM sessions WHERE session_id=?",
-            (session_id,)).fetchone()
-        if row is None:
-            return SessionOrigin(cwd="", model="")
-        return SessionOrigin(cwd=row["cwd"] or "", model=row["model"] or "")

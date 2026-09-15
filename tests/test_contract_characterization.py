@@ -32,6 +32,8 @@ changed behaviour. That is a bug, not a rebaseline.
 from __future__ import annotations
 
 import json
+import sqlite3
+import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -583,6 +585,29 @@ def ui(tmp_path, monkeypatch):
 def _get(base, path):
     with urllib.request.urlopen(base + path, timeout=10) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def test_ui_offers_no_clean_session_endpoint(ui, tmp_path):
+    """#23: the endpoint minted a session id Codex never sends, so the audit
+    it switched to stayed at 0% while disclosures kept landing on the real id.
+    A clean context is a new Codex conversation, which nothing here can start;
+    the endpoint must not come back."""
+    def sessions() -> int:
+        conn = sqlite3.connect(Path(tmp_path) / "ledger.db")
+        try:
+            return conn.execute("SELECT count(*) FROM sessions").fetchone()[0]
+        finally:
+            conn.close()
+
+    before = sessions()
+    req = urllib.request.Request(
+        ui + "/api/clean_session", method="POST",
+        data=json.dumps({"session_id": SESSION}).encode("utf-8"),
+        headers={"Content-Type": "application/json"})
+    with pytest.raises(urllib.error.HTTPError) as err:
+        urllib.request.urlopen(req, timeout=10)
+    assert err.value.code == 404
+    assert sessions() == before
 
 
 def test_ui_summary_endpoint_json_is_byte_identical(ui):

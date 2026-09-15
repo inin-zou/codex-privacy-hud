@@ -62,7 +62,6 @@ by construction and requires no new bookkeeping, so that is what
 """
 from __future__ import annotations
 
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -470,36 +469,7 @@ def allow_once(ledger, session_id: str, *, tool_name: str, tool_input,
     mint_token(ledger, session_id, tool_name, tool_input, mode="allow_once")
 
 
-def start_clean_session(ledger, session_id: str) -> str:
-    """Design.md §6's "Start a clean session" action (offered only in the
-    red band). Properly retires `session_id` -- via `Ledger.end_session`,
-    which nulls every stored `value_hash` for it (the on-disk half of "the
-    old salt must not stay discoverable": no salted hash computed under
-    the old session's salt survives past this call) and stamps
-    `ended_at` -- then opens a brand-new session row under a fresh id and
-    returns it, rather than reusing `session_id` or leaving the old row
-    looking still-active.
 
-    Scope note: this function receives only a `Ledger`, never the
-    daemon's in-memory `dispatch.State` -- the actual per-session salt
-    bytes (`mask.new_salt()`) live in `State.salts`, held by a running
-    daemon process, and are outside what any `mcp_tools` function can
-    reach or discard directly (see dispatch.py's session/salt lifecycle
-    docstring: a salt is retired only when the daemon itself processes a
-    `SessionEnd` hook event for that `session_id`). Calling this does the
-    part reachable from the ledger alone -- closing out the stored,
-    salt-derived hashes and starting a fresh session row -- and returns
-    the new id so a caller can begin using it; a live daemon will drop
-    the old in-memory salt and mint a new one once it next sees the
-    matching real `SessionStart`/`SessionEnd` hook pair for these ids.
-    """
-    old = ledger.session_origin(session_id)
-
-    ledger.end_session(session_id)
-
-    new_id = f"{session_id}-clean-{uuid.uuid4().hex[:12]}"
-    ledger.start_session(new_id, cwd=old.cwd, model=old.model)
-    return new_id
 
 
 # -- Level 1 toggle (spec §5.4) ---------------------------------------------

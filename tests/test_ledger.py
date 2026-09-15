@@ -5,7 +5,7 @@ import sqlite3
 import pytest
 from privacy_hud.matrix.loader import load_matrix
 from privacy_hud.ledger import (EventRow, ExposureRow, Ledger, SessionCoverage,
-                                SessionOrigin, SessionSummary)
+                                SessionSummary)
 
 M = load_matrix()
 
@@ -492,29 +492,3 @@ def test_policy_tokens_hold_no_arguments(led):
                     "expires_at"}
     banned = {"tool_input", "args", "command", "content", "prompt", "text"}
     assert not cols & banned
-
-
-# --------------------------------------------------------------------- #
-# session_origin: what a replacement session inherits
-# --------------------------------------------------------------------- #
-
-def test_session_origin_reads_the_recorded_session(led):
-    origin = led.session_origin("s1")
-    assert (origin.cwd, origin.model) == ("/repo", "gpt-5")
-
-
-def test_session_origin_of_an_unknown_session_is_empty_not_an_error(led):
-    """`start_clean_session` must still be able to open a replacement: a
-    retired session with no successor is the worse failure."""
-    assert led.session_origin("nope") == SessionOrigin(cwd="", model="")
-
-
-def test_session_origin_reads_null_columns_as_empty(led):
-    led.conn.execute("UPDATE sessions SET cwd=NULL, model=NULL"
-                      " WHERE session_id='s1'")
-    assert led.session_origin("s1") == SessionOrigin(cwd="", model="")
-
-
-def test_session_origin_is_frozen(led):
-    with pytest.raises(dataclasses.FrozenInstanceError):
-        led.session_origin("s1").cwd = "/elsewhere"
