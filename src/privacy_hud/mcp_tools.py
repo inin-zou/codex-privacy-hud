@@ -509,3 +509,24 @@ def start_clean_session(ledger, session_id: str) -> str:
         cwd=(old["cwd"] if old is not None else "") or "",
         model=(old["model"] if old is not None else "") or "")
     return new_id
+
+
+# -- Level 1 toggle (spec §5.4) ---------------------------------------------
+
+def hud_status(data_dir, session_id: str) -> dict:
+    """Whether a snapshot exists for `session_id` and whether it is hidden.
+    Reads contract A only; never opens the ledger."""
+    from .hud_snapshot import read_snapshot
+    snap = read_snapshot(data_dir, session_id, ignore_staleness=True)
+    return {"session_id": session_id, "present": snap is not None,
+            "hidden": None if snap is None else snap.hidden}
+
+
+def hud_set_hidden(data_dir, session_id: str, hidden: bool) -> dict:
+    """Contract B. `$privacy hud off` / `on`. Flips the snapshot's `hidden`
+    flag and nothing else; `/statusline` in Codex is the other, independent
+    switch (whether the item is configured at all). Does not touch
+    config.toml."""
+    from .hud_snapshot import HudPublisher
+    HudPublisher(data_dir).set_hidden(session_id, bool(hidden))
+    return hud_status(data_dir, session_id)

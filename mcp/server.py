@@ -158,6 +158,11 @@ def build_app():
         new_id = mcp_tools.start_clean_session(ledger, session_id)
         return {"session_id": new_id}
 
+    @app.tool(name="privacy.hud_toggle")
+    def hud_toggle(session_id: str, hidden: bool) -> dict:
+        """Hide or show this session's line in the Codex status bar."""
+        return mcp_tools.hud_set_hidden(_ledger_path().parent, session_id, hidden)
+
     return app
 
 

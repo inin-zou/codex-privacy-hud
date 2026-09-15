@@ -195,6 +195,22 @@ if a prior `$privacy` invocation in this same conversation already
 printed a URL and that process is still alive, reuse it instead of
 binding a new port.
 
+### `$privacy hud on|off|status`
+
+Hides or shows this session's `Privacy …` item in the Codex status line
+without leaving the session. It does not change `/statusline`; that decides
+whether the item is configured, this decides whether it shows right now.
+
+    PYTHONPATH=$PLUGIN_ROOT/src python3 -c "
+    import os, sys
+    from privacy_hud import mcp_tools
+    d = os.environ['PLUGIN_DATA']; sid = '$SESSION_ID'
+    arg = sys.argv[1]
+    out = (mcp_tools.hud_status(d, sid) if arg == 'status'
+           else mcp_tools.hud_set_hidden(d, sid, arg == 'off'))
+    print('hidden' if out['hidden'] else 'shown' if out['present'] else 'no snapshot yet')
+    " on|off|status
+
 ## What NOT to do
 
 - Do not call the audit "your session" when step 1 printed a `note:` line.

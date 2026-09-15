@@ -426,3 +426,30 @@ def test_every_note_obeys_the_copy_rules(two_sessions, tmp_path, monkeypatch):
         low = note.lower()
         for word in forbidden:
             assert word not in low, f"{word!r} in {note!r}"
+
+
+# --------------------------------------------------------------------- #
+# hud_status and hud_set_hidden
+# --------------------------------------------------------------------- #
+
+from privacy_hud import hud_snapshot as hs
+from privacy_hud.mcp_tools import hud_set_hidden, hud_status
+
+
+def test_hud_status_absent_then_present(tmp_path):
+    assert hud_status(tmp_path, "s1") == {"session_id": "s1", "present": False, "hidden": None}
+    hs.HudPublisher(tmp_path).publish("s1", percent=3, blocked=0, unverified=False)
+    assert hud_status(tmp_path, "s1") == {"session_id": "s1", "present": True, "hidden": False}
+
+
+def test_hud_set_hidden_round_trip(tmp_path):
+    hs.HudPublisher(tmp_path).publish("s1", percent=3, blocked=0, unverified=False)
+    assert hud_set_hidden(tmp_path, "s1", True)["hidden"] is True
+    assert hs.read_snapshot(tmp_path, "s1").hidden is True
+    assert hud_set_hidden(tmp_path, "s1", False)["hidden"] is False
+    assert hs.read_snapshot(tmp_path, "s1").percent == 3   # numbers untouched
+
+
+def test_hud_toggle_output_carries_no_content(tmp_path):
+    out = hud_set_hidden(tmp_path, "s1", True)
+    assert set(out) == {"session_id", "present", "hidden"}
