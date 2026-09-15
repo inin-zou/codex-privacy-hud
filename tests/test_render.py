@@ -4,17 +4,22 @@ and layouts these functions must reproduce.
 
 The banned-word test is the gate: this is a privacy tool, and it must never
 claim more than it can back up (design.md §9)."""
+import json
 from dataclasses import replace
+from pathlib import Path
 
 from privacy_hud.ledger import ExposureRow, SessionCoverage, SessionSummary
 from privacy_hud.mcp_tools import ResolvedSession
-from privacy_hud.render import hud_line, audit, detail, receipt
+from privacy_hud.render import hud_line, audit, detail, receipt, hud_core
+
+import pytest
 
 # Extended past the brief's list per task-11 instructions: "dangerous" and
 # "critical" are scanner-vocabulary adjectives we reject even though the
 # facts alone are alarming enough (design.md §7).
 BANNED = ("undo", "revoke", "remove from context", "your data is protected",
           "100% secure", "threat", "dangerous", "critical")
+GOLDEN = json.loads((Path(__file__).parent / "matrix" / "hud_golden.json").read_text())
 # `ExposureRow`/`SessionSummary` rather than the dicts these used to be: the
 # renderer's input is typed (see ledger.py's read-contract dataclasses). Same
 # field values, same assertions — only the carrier changed.
@@ -363,3 +368,19 @@ def test_no_subtitle_implies_recall_or_editorializes():
         low = audit(SUMMARY, [ROW], "Exposed", resolved=r).lower()
         for word in BANNED:
             assert word not in low, (word, r.basis)
+
+
+def test_hud_core_matches_golden_for_every_case():
+    for g in GOLDEN:
+        assert hud_core(g["percent"]) == g["core"], g
+
+
+def test_hud_core_is_the_segment_hud_line_embeds():
+    for pct in (0, 28, 63, 100):
+        assert hud_core(pct) in hud_line(pct, 80)
+        assert hud_core(pct) in hud_line(pct, 45)      # mid rung too
+
+
+def test_hud_core_rejects_out_of_band_percent():
+    with pytest.raises(Exception):
+        hud_core(101)
