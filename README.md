@@ -1,6 +1,6 @@
 # Codex Privacy HUD
 
-![Codex's own status line, under the composer, with the plugin's Privacy item beside the model and working directory](docs/images/banner.png)
+![A real Codex 0.154 session running the patched build: one prompt containing a street address, the model's reply, and the Privacy item under the composer already at 5%, beside Codex's own model item](docs/images/banner.png)
 
 [![CI](https://github.com/inin-zou/codex-privacy-hud/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/inin-zou/codex-privacy-hud/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/inin-zou/codex-privacy-hud)](LICENSE)
@@ -20,8 +20,6 @@ Detection runs on your own machine, via [`openai/privacy-filter`](https://huggin
 Token HUD:    How much context has been consumed?
 Privacy HUD:  How much sensitive context has been disclosed?
 ```
-
-![A real Codex 0.154 session running the patched build: one prompt containing a street address, the model's reply, and the Privacy item under the composer already at 5%, beside Codex's own model item](docs/images/codex-privacy-example.png)
 
 ![The Codex Privacy HUD user journey — from the ambient disclosure bar through the session audit, exposure detail, and minimizing a payload before it reaches an external tool](docs/images/user-journey-mockup.png)
 
