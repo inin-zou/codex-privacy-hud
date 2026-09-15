@@ -5,6 +5,7 @@ real `Daemon` on a temp socket and drives it exactly the way
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import shutil
@@ -20,6 +21,8 @@ from pathlib import Path
 import pytest
 
 import privacy_hud.daemon as daemon_mod
+import privacy_hud.dispatch as dispatch_mod
+from privacy_hud import doctor
 from privacy_hud.daemon import (
     EXIT_ALREADY_RUNNING,
     EXIT_FAILURE,
@@ -1897,7 +1900,7 @@ def test_a_request_with_no_op_is_still_dispatched_as_an_event(running_daemon):
 def test_the_hook_client_still_sends_the_event_op_literally():
     """`hooks/handler.py` imports nothing from this package, so its `op` is a
     literal. Checked rather than trusted, the same treatment `daemon.sock`
-    gets."""
+    gets in `test_the_socket_name_is_the_same_in_all_three_places` below."""
     source = (Path(__file__).resolve().parent.parent
               / "hooks" / "handler.py").read_text(encoding="utf-8")
     assert f'"op": "{OP_EVENT}"' in source
@@ -1923,3 +1926,115 @@ def test_active_sessions_reports_ages_not_timestamps(tmp_path):
     note_session_live(st, "s")
     (_sid, age), = active_sessions(st, stale_after=3600)
     assert 0 <= age < 5
+
+
+# --------------------------------------------------------------------- #
+# cross-unit literals the stdlib-only hook client cannot import
+# --------------------------------------------------------------------- #
+
+HANDLER = Path(__file__).resolve().parent.parent / "hooks" / "handler.py"
+
+
+def _handler_tree() -> ast.Module:
+    return ast.parse(HANDLER.read_text(encoding="utf-8"), str(HANDLER))
+
+
+def _handler_socket_literal() -> str:
+    """The filename `hooks/handler.py` joins onto `$PLUGIN_DATA` to find the
+    daemon, by AST.
+
+    Parsed rather than imported: that file has a `__main__` guard and reads
+    stdin, the same reason `tests/test_runtime.py` parses its constants. The
+    join with `RECEIPT_NAME` in the same function is not a string literal and
+    so cannot be confused for this one.
+    """
+    main = next(node for node in _handler_tree().body
+                if isinstance(node, ast.FunctionDef) and node.name == "main")
+    names = [node.args[1].value for node in ast.walk(main)
+             if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Attribute)
+             and node.func.attr == "join"
+             and len(node.args) == 2
+             and isinstance(node.args[0], ast.Name)
+             and node.args[0].id == "data_dir"
+             and isinstance(node.args[1], ast.Constant)
+             and isinstance(node.args[1].value, str)]
+    assert len(names) == 1, "main() must join exactly one literal onto data_dir"
+    return names[0]
+
+
+def test_the_socket_name_is_the_same_in_all_three_places():
+    """`daemon.sock` is written by `_default_socket_path`, restated as a
+    literal by the hook client (stdlib-only, it can import nothing from this
+    package) and restated again by `doctor.SOCKET_NAME` (which must be able
+    to name the file when the package is too broken to import).
+
+    Drift is silent and total: the client connects to a path nothing listens
+    on, spawns a daemon per cooldown window, and every hook in the session is
+    answered unverified while the doctor reports a socket that is fine. Three
+    comments name this test — `doctor.SOCKET_NAME`'s, `runtime.RECEIPT_NAME`'s
+    and the `op` test's above — so it must keep comparing all three copies.
+    """
+    literal = _handler_socket_literal()
+    assert literal == doctor.SOCKET_NAME
+    assert daemon_mod._default_socket_path(Path("/any/plugin/data")).name == literal
+
+
+def _handler_latch_fields() -> set[str]:
+    """Every field `hooks/handler.py` can write into the spawn latch: the
+    literal keys of the dict `_latch` dumps, plus the keywords it is called
+    with."""
+    tree = _handler_tree()
+    fields = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_latch":
+            fields |= {key.value for dict_node in ast.walk(node)
+                       if isinstance(dict_node, ast.Dict)
+                       for key in dict_node.keys
+                       if isinstance(key, ast.Constant)
+                       and isinstance(key.value, str)}
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "_latch"):
+            fields |= {kw.arg for kw in node.keywords if kw.arg}
+    return fields
+
+
+def _dispatch_latch_fields() -> set[str]:
+    """Every field `dispatch._record_unobserved_hooks` reads back out of it."""
+    source = Path(dispatch_mod.__file__).read_text(encoding="utf-8")
+    fn = next(node for node in ast.walk(ast.parse(source))
+              if isinstance(node, ast.FunctionDef)
+              and node.name == "_record_unobserved_hooks")
+    fields = set()
+    for node in ast.walk(fn):
+        if (isinstance(node, ast.Subscript)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "record"
+                and isinstance(node.slice, ast.Constant)
+                and isinstance(node.slice.value, str)):
+            fields.add(node.slice.value)
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "record"
+                and node.args and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)):
+            fields.add(node.args[0].value)
+    return fields
+
+
+def test_dispatch_reads_only_latch_fields_the_hook_client_writes():
+    """The reader's half of the spawn latch's field set.
+
+    `tests/test_handler.py::test_the_latch_records_infrastructure_only` pins
+    what the writer may put in the file (I1: infrastructure only). This pins
+    the other end: a field this daemon reads but the client never writes is a
+    coverage gap that reports itself as silence — `_record_unobserved_hooks`
+    swallows every failure by design, so a renamed field would stop recording
+    the unobserved-hook window without a single symptom.
+    """
+    written = _handler_latch_fields()
+    read = _dispatch_latch_fields()
+    assert written, "the hook client must write a latch"
+    assert read, "the daemon must read one"
+    assert read <= written
