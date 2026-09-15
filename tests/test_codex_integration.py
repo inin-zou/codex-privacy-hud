@@ -372,3 +372,32 @@ def test_patched_status_line_follows_the_snapshot(codex_tui):
     assert back is not None, (
         f"the item did not return after `hidden` was cleared{_tail(tui)}"
     )
+
+
+def test_statusline_picker_lists_the_privacy_item(codex_tui):
+    """`/statusline` is the in-session switch the spec promises (§5.3): the
+    picker enumerates `StatusLineItem`, so `privacy` must be in it, described,
+    and previewed with the placeholder bar. Typing filters the picker, which
+    also keeps this independent of where the item sits in the list."""
+    tui, _data_dir = codex_tui
+    booted = tui.read_until(
+        lambda t: "Ask Codex" in t and UUID.search(t) is not None, BOOT_TIMEOUT
+    )
+    assert booted is not None, f"codex never reached its prompt{_tail(tui)}"
+
+    tui.clear()
+    tui._write(b"/statusline")
+    tui.drain(0.5)
+    tui._write(b"\r")
+    opened = tui.read_until(lambda t: "status line" in t.lower(), ITEM_TIMEOUT)
+    assert opened is not None, f"/statusline did not open a picker{_tail(tui)}"
+
+    tui._write(b"privacy")
+    listed = tui.read_until(
+        lambda t: "privacy" in t and "Privacy HUD plugin" in t, ITEM_TIMEOUT
+    )
+    assert listed is not None, (
+        f"the picker never showed the privacy item{_tail(tui)}"
+    )
+    tui._write(b"\x1b")  # Esc: close without changing the configuration
+    tui.drain(0.5)

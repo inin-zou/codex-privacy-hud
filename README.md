@@ -126,17 +126,22 @@ interpreter, fetches the patched Codex build matching `codex --version`,
 and runs `privacy-hud-doctor`. `--yes` skips the question, `--no-model`
 skips the weights (names and addresses then go undetected; doctor says so).
 
-> **Status as of 2026-09-15 — read before running this.** No release has
-> been published yet, and the patched Codex build has never been executed
-> end to end. `install.sh` will therefore reach step 6, find no matching
-> build, print "no patched build published for codex `<ver>` yet", and fall
-> back to the ambient pane — everything else installs and works, but there
-> is no status-line item until the first CI release lands. When it does,
-> the binary it publishes is **unsigned and unnotarized**; the installer
-> removes the quarantine attribute itself, and the SHA-256 it verifies
-> protects against a corrupted or truncated download, not against a
-> compromised release. Delete this note once a release exists and has been
-> run.
+> **Status as of 2026-09-15 — read before running this.** The patched
+> build has been executed end to end once, on the maintainer's machine: a
+> locally built `codex-privacy-0.154.0-aarch64-apple-darwin` booted, listed
+> `privacy` in `/statusline`, rendered the item from a snapshot within a
+> second, honoured `$privacy hud off`/`on`, and passed
+> `tests/test_codex_integration.py` (the pty-driven acceptance test) twice.
+> No release has been published yet — the first CI build was still running
+> when this was written. Until it lands, `install.sh` reaches step 6, finds
+> no matching build, prints "no patched build published for codex `<ver>`
+> yet", and falls back to the ambient pane; everything else installs and
+> works. The binary CI publishes is **unsigned and unnotarized**; the
+> installer removes the quarantine attribute itself, and the SHA-256 it
+> verifies protects against a corrupted or truncated download, not against
+> a compromised release. `cargo test -p codex-tui` and the upstream
+> `insta` picker snapshots have still not been run anywhere. Shorten this
+> note once a release exists.
 
 ### Uninstall
 
