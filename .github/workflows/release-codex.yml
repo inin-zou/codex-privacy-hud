@@ -1,4 +1,7 @@
 name: Release patched Codex
+# The version in the run name is what track-upstream.yml reads back to tell
+# this version's runs from another's.
+run-name: Release patched Codex ${{ inputs.codex_version || github.ref_name }}
 
 # Two ways in. Pushing a tag `codex-<version>-hud` builds that version and
 # attaches the tarballs to the tag's release. `workflow_dispatch` with a

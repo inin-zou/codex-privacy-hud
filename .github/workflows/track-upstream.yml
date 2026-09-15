@@ -57,24 +57,53 @@ jobs:
             echo "needed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Is a release build already running?
+      # Two things the release history decides. Any run still in flight
+      # means wait, so two-hour builds never overlap. And if this version's
+      # newest finished run did not succeed, do not start another: a build
+      # that fails for a reason the patch check cannot see (compile error,
+      # toolchain bump, a flaky clone) would otherwise be re-dispatched every
+      # six hours with nobody told. That case gets an issue instead, and a
+      # person re-runs the build by hand once it is fixed.
+      - name: What does the release history say?
         if: steps.have.outputs.needed == 'true'
-        id: busy
+        id: history
         run: |
-          n=0
-          for st in in_progress queued waiting; do
-            c="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow release-codex.yml --status "$st" --json databaseId --jq length)"
-            n=$((n + c))
-          done
-          if [ "$n" -gt 0 ]; then
-            echo "$n release run(s) in flight; checking again next cycle"
+          runs="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow release-codex.yml --limit 40 \
+                    --json databaseId,displayTitle,status,conclusion,url)"
+          in_flight="$(printf '%s' "$runs" | jq '[.[] | select(.status != "completed")] | length')"
+          last="$(printf '%s' "$runs" | jq -c --arg v "${{ steps.up.outputs.ver }}" \
+                    '[.[] | select(.status == "completed" and (.displayTitle | contains($v)))][0] // empty')"
+          if [ "$in_flight" -gt 0 ]; then
+            echo "$in_flight release run(s) in flight; checking again next cycle"
             echo "busy=true" >> "$GITHUB_OUTPUT"
           else
             echo "busy=false" >> "$GITHUB_OUTPUT"
           fi
+          if [ -n "$last" ] && [ "$(printf '%s' "$last" | jq -r .conclusion)" != "success" ]; then
+            echo "newest finished build for ${{ steps.up.outputs.ver }} ended in $(printf '%s' "$last" | jq -r .conclusion); not re-dispatching"
+            echo "last_failed=true" >> "$GITHUB_OUTPUT"
+            echo "last_url=$(printf '%s' "$last" | jq -r .url)" >> "$GITHUB_OUTPUT"
+            echo "last_conclusion=$(printf '%s' "$last" | jq -r .conclusion)" >> "$GITHUB_OUTPUT"
+          else
+            echo "last_failed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open an issue if the last build for it failed
+        if: steps.history.outputs.last_failed == 'true'
+        run: |
+          title="release build failed for Codex ${{ steps.up.outputs.ver }}"
+          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number --jq length)"
+          if [ "$existing" -gt 0 ]; then
+            echo "issue already open: $title"
+            exit 0
+          fi
+          body="The patch applies to \`${{ steps.up.outputs.tag }}\`, but the newest release build for it ended in **${{ steps.history.outputs.last_conclusion }}**: ${{ steps.history.outputs.last_url }}
+
+          This workflow will not start another build for ${{ steps.up.outputs.ver }} on its own. Read that run's log, fix what it names (a compile error against the new Codex source, a toolchain change, a flaky step), merge, then re-run \"Release patched Codex\" from the Actions tab with \`codex_version=${{ steps.up.outputs.ver }}\`. Once the tarballs exist, this issue can be closed."
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
 
       - name: Does the patch apply to it?
-        if: steps.have.outputs.needed == 'true' && steps.busy.outputs.busy == 'false'
+        if: steps.have.outputs.needed == 'true' && steps.history.outputs.busy == 'false' && steps.history.outputs.last_failed == 'false'
         id: apply
         run: |
           git clone --depth 1 --branch "${{ steps.up.outputs.tag }}" https://github.com/openai/codex "${{ runner.temp }}/codex"
