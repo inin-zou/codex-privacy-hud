@@ -92,6 +92,23 @@ installer, once, before any Codex session exists. The runtime itself never
 goes online: it sets `HF_HUB_OFFLINE=1` before importing `transformers` and
 opens no socket except its own on `127.0.0.1`.
 
+### Plugin only, from the Codex CLI
+
+The plugin itself installs like any other Codex plugin, with no script:
+
+```bash
+codex plugin marketplace add inin-zou/codex-privacy-hud
+codex plugin add codex-privacy-hud@codex-privacy-hud
+```
+
+That gives Codex the `$privacy` skill, the hooks, and the MCP server. It
+does not give you the daemon's Python environment, the detection model, or
+the patched Codex build, so until those exist every hook answers
+`Privacy HUD unavailable — disclosure unverified` and `$privacy` reports no
+daemon. Run `install.sh` afterwards to add them (it is safe to run over an
+existing plugin install), or follow
+[docs/installing-by-hand.md](docs/installing-by-hand.md).
+
 ### First launch
 
 Open a new terminal (so the `PATH` change is picked up) and run `codex`.

@@ -82,6 +82,23 @@ CI 发布的二进制**未经签名，也未经公证**。安装脚本会自行�
 
 这里的所有操作都**只在第 2、3、6 步访问网络**：安装脚本在任何 Codex 会话开始之前，一次性下载软件包、模型权重和补丁版构建。运行时绝不联网：导入 `transformers` 前会设置 `HF_HUB_OFFLINE=1`，且只打开连接自身 `127.0.0.1` 地址的套接字。
 
+### 只安装插件：直接用 Codex 命令
+
+如果只需安装插件，可以像安装其他 Codex 插件一样直接运行以下命令，无需安装脚本：
+
+```bash
+codex plugin marketplace add inin-zou/codex-privacy-hud
+codex plugin add codex-privacy-hud@codex-privacy-hud
+```
+
+这会为 Codex 安装 `$privacy` 技能、hook 和 MCP 服务器。
+守护进程的 Python 环境、检测模型和补丁版 Codex 需要另行安装。
+在这些组件就绪之前，所有 hook 都会回复 `Privacy HUD unavailable — disclosure unverified`。
+此时，`$privacy` 会报告未找到守护进程。
+
+运行 `install.sh`，即可补齐这些组件；已有插件也可以安全地运行此脚本。
+也可以参照 [docs/installing-by-hand.md](docs/installing-by-hand.md) 手动安装。
+
 ### 首次启动
 
 打开新终端，让 `PATH` 变更生效。运行 `codex`。
