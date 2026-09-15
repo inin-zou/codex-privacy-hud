@@ -265,6 +265,11 @@ class _Handler(socketserver.StreamRequestHandler):
     # declaring one here would silently do nothing.
     request_timeout = 5.0
 
+    # Only ever constructed by `Daemon`, whose `state` and
+    # `_request_finished` this handler uses; `BaseRequestHandler` types it as
+    # a plain `BaseServer`.
+    server: Daemon
+
     def setup(self) -> None:
         super().setup()
         self.connection.settimeout(self.request_timeout)

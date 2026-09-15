@@ -49,7 +49,7 @@ reader can check.
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -234,6 +234,7 @@ def hud_line(percent: int, width: int, blocked: int = 0, *,
         # The glyph, not a suffix — see the docstring's truncation argument.
         return f"{'⚠' if unverified else _DOT} {pct:>2}%"
 
+    ladder: tuple[Callable[[], str], ...]
     if width >= 52:
         ladder = (full, mid, compact, dot)
     elif width >= 40:
@@ -484,8 +485,9 @@ def audit(summary: SessionSummary, rows: Sequence[ExposureRow], tab: str, *,
     # Session-scope first, event-scope second: "we were not watching" is a
     # bigger caveat than "one event got the fast path only", and reading them
     # in the other order invites treating the first as a footnote to it.
-    incomplete = coverage is not None and not coverage.verified
-    if incomplete:
+    incomplete = False
+    if coverage is not None and not coverage.verified:
+        incomplete = True
         lines.append(_coverage_banner(coverage))
         lines.append("")
 

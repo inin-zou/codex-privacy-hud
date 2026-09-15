@@ -346,7 +346,8 @@ class Engine:
         Reading two attributes per detector per scan is free next to the
         regex pass it precedes.
         """
-        cheap, expensive = [], []
+        cheap: list = []
+        expensive: list = []
         for d in self.detectors:
             (cheap if profile_of(d).cost is Cost.CHEAP else expensive).append(d)
 

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 
 from .detect.base import Finding
 from .mask import pseudonym
@@ -51,7 +52,7 @@ def _args_hash(tool_input) -> bytes:
 # Span rewriting
 # ---------------------------------------------------------------------------
 
-def minimize_text(salt: bytes, text: str, findings: list[Finding]) -> str:
+def minimize_text(salt: bytes, text: str, findings: Sequence[Finding]) -> str:
     """Replace each finding's span with its pseudonym.
 
     Findings are applied right-to-left by offset (`start` descending) so
@@ -75,7 +76,7 @@ def minimize_text(salt: bytes, text: str, findings: list[Finding]) -> str:
     return out
 
 
-def _matching_findings(value: str, findings: list[Finding]) -> list[Finding]:
+def _matching_findings(value: str, findings: Sequence[Finding]) -> list[Finding]:
     """Findings whose recorded span is valid *within this particular string*.
 
     A dict-shaped tool_input can have several string fields; a flat list of
@@ -89,7 +90,7 @@ def _matching_findings(value: str, findings: list[Finding]) -> list[Finding]:
             if 0 <= f.start <= f.end <= len(value) and value[f.start:f.end] == f.value]
 
 
-def minimize_tool_input(salt: bytes, tool_name: str, tool_input, findings: list[Finding], *,
+def minimize_tool_input(salt: bytes, tool_name: str, tool_input, findings: Sequence[Finding], *,
                          text: str | None = None):
     """Rewrite a tool call's arguments for outbound delivery.
 

@@ -105,6 +105,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from . import codex
 from .detect.model import ModelDetector
@@ -328,7 +329,7 @@ def _deny(reason: str | None) -> dict:
 
 
 def _allow_with_rewrite(updated_input, message: str | None) -> dict:
-    out = {"hookSpecificOutput": {
+    out: dict[str, Any] = {"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
         "permissionDecision": "allow",
         "updatedInput": updated_input,
