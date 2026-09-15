@@ -14,7 +14,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Latest upstream tag
         id: up
-        run: echo "tag=$(git ls-remote --tags --refs https://github.com/openai/codex 'rust-v*' | awk -F/ '{print $NF}' | sort -V | tail -1)" >> "$GITHUB_OUTPUT"
+        # Only tags shaped rust-v<major>.<minor>.<patch>; upstream also has
+        # stray ones like rust-v.0.0.2504292236 that sort -V would put last.
+        run: echo "tag=$(git ls-remote --tags --refs https://github.com/openai/codex 'rust-v*' | awk -F/ '{print $NF}' | grep -E '^rust-v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)" >> "$GITHUB_OUTPUT"
       - run: git clone --depth 1 --branch "${{ steps.up.outputs.tag }}" https://github.com/openai/codex /tmp/codex
       - name: Does the patch still apply?
         run: git -C /tmp/codex apply --check "$GITHUB_WORKSPACE/patches/privacy-status-line.patch"
