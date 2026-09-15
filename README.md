@@ -314,7 +314,13 @@ Stated up front, because a privacy tool that overclaims is worse than none:
 - **The status line shows no `privacy` item after upgrading Codex** — the
   forwarder found no patched build for the new version and ran your official
   binary unchanged, so nothing broke and the item is simply gone for now.
-  Rerun the installer once a build for that version is published.
+  A workflow checks for new Codex releases every six hours and publishes a
+  build when the patch still applies, so a version that has been out for a
+  day usually has one; rerun the installer (or `$privacy setup`) to pick it
+  up. If there is none, an issue says why:
+  `patch needs rebasing for Codex <version>` when the patch no longer
+  applies, or `release build failed for Codex <version>` when it applied
+  but the build did not finish.
 - **`!! config.toml: …`** — your `config.toml` has a `[tui]` table or a
   `status_line` key in a shape the installer will not edit blind. It changed
   nothing; add `"privacy"` to `[tui].status_line` yourself, using the line

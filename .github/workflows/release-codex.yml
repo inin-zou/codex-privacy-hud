@@ -1,15 +1,57 @@
 name: Release patched Codex
+# The version in the run name is what track-upstream.yml reads back to tell
+# this version's runs from another's.
+run-name: Release patched Codex ${{ inputs.codex_version || github.ref_name }}
 
+# Two ways in. Pushing a tag `codex-<version>-hud` builds that version and
+# attaches the tarballs to the tag's release. `workflow_dispatch` with a
+# version does the same and creates the tag itself; that is how
+# track-upstream.yml starts a build, since a tag pushed by GITHUB_TOKEN
+# would not trigger this workflow.
 on:
   push:
     tags: ["codex-*-hud*"]
+  workflow_dispatch:
+    inputs:
+      codex_version:
+        description: "Codex version to build, e.g. 0.155.0 (the release is tagged codex-<version>-hud)"
+        required: true
+        type: string
 
 permissions:
   contents: write
 
+# One build per version at a time; a second request for the same version
+# waits rather than racing the first to the release assets.
+concurrency:
+  # The same key whichever way a version arrives: a dispatch for 0.155.0
+  # and a push of the tag codex-0.155.0-hud both group as that tag name.
+  group: release-codex-${{ inputs.codex_version && format('codex-{0}-hud', inputs.codex_version) || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
+  version:
+    name: version
+    runs-on: ubuntu-latest
+    outputs:
+      ver: ${{ steps.ver.outputs.ver }}
+    steps:
+      - id: ver
+        env:
+          INPUT_VER: ${{ inputs.codex_version }}
+          REF: ${{ github.ref_name }}
+        run: |
+          if [ -n "$INPUT_VER" ]; then
+            ver="$INPUT_VER"
+          else
+            ver="$(printf '%s' "$REF" | sed -E 's/^codex-([0-9.]+)-hud.*/\1/')"
+          fi
+          printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "not a Codex version: $ver" >&2; exit 1; }
+          echo "ver=$ver" >> "$GITHUB_OUTPUT"
+
   build:
     name: build (${{ matrix.target }})
+    needs: version
     strategy:
       fail-fast: false
       matrix:
@@ -19,9 +61,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Derive Codex version from tag
-        id: ver
-        run: echo "ver=$(echo '${{ github.ref_name }}' | sed -E 's/^codex-([0-9.]+)-hud.*/\1/')" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@master
         with: { toolchain: 1.95.0, targets: "${{ matrix.target }}" }
       # Clone before the cache step, not after: rust-cache keys on the
@@ -31,11 +70,11 @@ jobs:
       # build-patched-codex.sh reuses a clean existing --src, so cloning
       # here costs nothing twice.
       - name: Clone Codex at the tag the build will use
-        run: git clone --depth 1 --branch "rust-v${{ steps.ver.outputs.ver }}" https://github.com/openai/codex "${{ runner.temp }}/codex-src"
+        run: git clone --depth 1 --branch "rust-v${{ needs.version.outputs.ver }}" https://github.com/openai/codex "${{ runner.temp }}/codex-src"
       - uses: Swatinem/rust-cache@v2
         with: { workspaces: "${{ runner.temp }}/codex-src/codex-rs" }
       - name: Build
-        run: scripts/build-patched-codex.sh "${{ steps.ver.outputs.ver }}" --target "${{ matrix.target }}" --out dist --src "${{ runner.temp }}/codex-src"
+        run: scripts/build-patched-codex.sh "${{ needs.version.outputs.ver }}" --target "${{ matrix.target }}" --out dist --src "${{ runner.temp }}/codex-src"
       - uses: actions/upload-artifact@v4
         with:
           name: codex-privacy-${{ matrix.target }}
@@ -44,16 +83,20 @@ jobs:
 
   publish:
     name: publish
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
-      - name: Attach to this tag's release
+      # On a tag push the tag exists and this attaches to it; on a dispatch
+      # the action creates the tag at the commit that ran, then the release.
+      - name: Attach to the version's release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: codex-${{ needs.version.outputs.ver }}-hud
+          target_commitish: ${{ github.sha }}
           files: dist/*
           prerelease: false
       - name: Also publish under the rolling 'latest' release

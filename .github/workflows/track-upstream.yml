@@ -1,0 +1,142 @@
+name: Track upstream Codex
+
+# Every six hours: what is the newest Codex release, and do we have a
+# patched build for it? If not, and the patch still applies cleanly, start
+# release-codex.yml for that version. If the patch no longer applies, open
+# one issue (never a duplicate) so a person rebases it; users on the new
+# Codex keep working meanwhile, since the forwarder falls through to the
+# official binary. Nothing here rebuilds a version that already has its
+# tarballs.
+#
+# GitHub pauses scheduled workflows on repositories with no commits for 60
+# days; the Actions tab shows a button to re-enable this one when that
+# happens.
+
+on:
+  schedule: [{ cron: "23 */6 * * *" }]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+  issues: write
+
+concurrency:
+  group: track-upstream
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Newest upstream Codex version
+        id: up
+        run: |
+          tag="$(git ls-remote --tags --refs https://github.com/openai/codex 'rust-v*' | awk -F/ '{print $NF}' | sort -V | tail -1)"
+          ver="${tag#rust-v}"
+          printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "unexpected upstream tag: $tag" >&2; exit 1; }
+          echo "upstream: $tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "ver=$ver" >> "$GITHUB_OUTPUT"
+
+      - name: Do we already have it?
+        id: have
+        run: |
+          n="$(gh release view "codex-${{ steps.up.outputs.ver }}-hud" --repo "$GITHUB_REPOSITORY" \
+                --json assets --jq '[.assets[].name | select(endswith(".tar.gz"))] | length' 2>/dev/null || echo 0)"
+          if [ "$n" -ge 2 ]; then
+            echo "codex-${{ steps.up.outputs.ver }}-hud already has $n tarballs; nothing to do"
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "codex-${{ steps.up.outputs.ver }}-hud has $n tarballs; a build is needed"
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Two things the release history decides. Any run still in flight
+      # means wait, so two-hour builds never overlap. And if this version's
+      # newest finished run did not succeed, do not start another: a build
+      # that fails for a reason the patch check cannot see (compile error,
+      # toolchain bump, a flaky clone) would otherwise be re-dispatched every
+      # six hours with nobody told. That case gets an issue instead, and a
+      # person re-runs the build by hand once it is fixed.
+      - name: What does the release history say?
+        if: steps.have.outputs.needed == 'true'
+        id: history
+        run: |
+          runs="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow release-codex.yml --limit 40 \
+                    --json databaseId,displayTitle,status,conclusion,url)"
+          in_flight="$(printf '%s' "$runs" | jq '[.[] | select(.status != "completed")] | length')"
+          # Exact titles only: release-codex.yml names a dispatched run
+          # "Release patched Codex <ver>" and a tag-push run "Release patched
+          # Codex codex-<ver>-hud". A substring test would let 5.0.0 match
+          # 15.0.0.
+          last="$(printf '%s' "$runs" | jq -c --arg v "${{ steps.up.outputs.ver }}" \
+                    '[.[] | select(.status == "completed"
+                                   and (.displayTitle == "Release patched Codex " + $v
+                                        or .displayTitle == "Release patched Codex codex-" + $v + "-hud"))][0] // empty')"
+          if [ "$in_flight" -gt 0 ]; then
+            echo "$in_flight release run(s) in flight; checking again next cycle"
+            echo "busy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "busy=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -n "$last" ] && [ "$(printf '%s' "$last" | jq -r .conclusion)" != "success" ]; then
+            echo "newest finished build for ${{ steps.up.outputs.ver }} ended in $(printf '%s' "$last" | jq -r .conclusion); not re-dispatching"
+            echo "last_failed=true" >> "$GITHUB_OUTPUT"
+            echo "last_url=$(printf '%s' "$last" | jq -r .url)" >> "$GITHUB_OUTPUT"
+            echo "last_conclusion=$(printf '%s' "$last" | jq -r .conclusion)" >> "$GITHUB_OUTPUT"
+          else
+            echo "last_failed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open an issue if the last build for it failed
+        if: steps.history.outputs.last_failed == 'true'
+        run: |
+          title="release build failed for Codex ${{ steps.up.outputs.ver }}"
+          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number --jq length)"
+          if [ "$existing" -gt 0 ]; then
+            echo "issue already open: $title"
+            exit 0
+          fi
+          body="The patch applies to \`${{ steps.up.outputs.tag }}\`, but the newest release build for it ended in **${{ steps.history.outputs.last_conclusion }}**: ${{ steps.history.outputs.last_url }}
+
+          This workflow will not start another build for ${{ steps.up.outputs.ver }} on its own. Read that run's log, fix what it names (a compile error against the new Codex source, a toolchain change, a flaky step), merge, then re-run \"Release patched Codex\" from the Actions tab with \`codex_version=${{ steps.up.outputs.ver }}\`. Once the tarballs exist, this issue can be closed."
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+
+      - name: Does the patch apply to it?
+        if: steps.have.outputs.needed == 'true' && steps.history.outputs.busy == 'false' && steps.history.outputs.last_failed == 'false'
+        id: apply
+        run: |
+          git clone --depth 1 --branch "${{ steps.up.outputs.tag }}" https://github.com/openai/codex "${{ runner.temp }}/codex"
+          if git -C "${{ runner.temp }}/codex" apply --check "$GITHUB_WORKSPACE/patches/privacy-status-line.patch"; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Start the release build
+        if: steps.apply.outputs.ok == 'true'
+        run: |
+          gh workflow run release-codex.yml --repo "$GITHUB_REPOSITORY" -f "codex_version=${{ steps.up.outputs.ver }}"
+          echo "started release-codex.yml for ${{ steps.up.outputs.ver }}"
+
+      - name: Open an issue if the patch no longer applies
+        if: steps.apply.outputs.ok == 'false'
+        run: |
+          title="patch needs rebasing for Codex ${{ steps.up.outputs.ver }}"
+          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number --jq length)"
+          if [ "$existing" -gt 0 ]; then
+            echo "issue already open: $title"
+            exit 0
+          fi
+          body="Upstream published \`${{ steps.up.outputs.tag }}\` and \`patches/privacy-status-line.patch\` no longer applies to it (\`git apply --check\` failed in [this run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)).
+
+          Until it is rebased there is no patched build for this version: \`install.sh\` reports \`no patched build published\`, and the forwarder runs the official binary, so users lose the status-line item and nothing else.
+
+          To fix: \`scripts/build-patched-codex.sh ${{ steps.up.outputs.ver }} --dry-run\`, rebase the patch per \`patches/README.md\`, merge, and this workflow starts the build on its next run (or run it by hand from the Actions tab)."
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
