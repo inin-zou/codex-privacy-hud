@@ -21,7 +21,7 @@ Token HUD:    How much context has been consumed?
 Privacy HUD:  How much sensitive context has been disclosed?
 ```
 
-![Codex Privacy HUD 的用户旅程——从环境披露条，到会话审计、暴露详情，再到在一份负载到达外部工具之前将其最小化](docs/images/user-journey-mockup.png)
+![Codex Privacy HUD 的用户旅程——从环境披露条，到会话审计、暴露详情，再到在一份负载到达外部工具之前将其最小化](docs/images/user-journey-mockup.zh-CN.png)
 
 **在依赖它之前，**请阅读[已知限制](#已知限制)。其中最重要的一条：在模型加载期间，会话的开头**不受监控**。对于记录存在已知缺口的会话，HUD 会给它加上标记（`⚠unverified`），而不是把它显示成干净的 0%，但它无法告诉你它漏掉了什么。托管工具会绕过本地 hook，而且检测是启发式的。一个夸大其词的隐私工具比没有更糟，所以这些限制是被完整陈述的，而不是放在脚注里。
 
