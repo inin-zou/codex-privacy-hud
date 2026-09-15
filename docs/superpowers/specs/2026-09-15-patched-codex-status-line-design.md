@@ -266,7 +266,7 @@ then `git apply patches/privacy-status-line.patch`, `cargo build --release
 
 **CI** (`.github/workflows/release-codex.yml`): on tag
 `codex-<ver>-hud.<n>`, matrix `macos-14` (aarch64-apple-darwin) and
-`macos-13` (x86_64-apple-darwin), run the script, upload both tarballs and
+`macos-15-intel` (x86_64-apple-darwin; `macos-13` was retired on 2025-12-04), run the script, upload both tarballs and
 checksums to a GitHub Release. `Swatinem/rust-cache` for dependencies.
 Also a daily `git apply --check` job against the latest upstream tag so a
 broken patch is known the day it breaks.
