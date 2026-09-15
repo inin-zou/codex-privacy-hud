@@ -469,9 +469,6 @@ def allow_once(ledger, session_id: str, *, tool_name: str, tool_input,
     mint_token(ledger, session_id, tool_name, tool_input, mode="allow_once")
 
 
-
-
-
 # -- Level 1 toggle (spec §5.4) ---------------------------------------------
 
 def hud_status(data_dir, session_id: str) -> dict:

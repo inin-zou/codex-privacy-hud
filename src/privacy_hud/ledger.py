@@ -419,8 +419,6 @@ class EventRow(ExposureRow):
                               for f in fields(ExposureRow)})
 
 
-
-
 class Ledger:
     def __init__(self, path: Path, matrix: Matrix, *, observer: str | None = None):
         """`observer` identifies this `Ledger` instance in the `coverage` table.
