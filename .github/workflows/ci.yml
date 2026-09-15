@@ -59,7 +59,17 @@ jobs:
           pip install -e ".[test]"
 
       - name: Run tests
-        run: python -m pytest -q
+        run: python -m pytest -q -m "not slow"
+
+  shell-scripts:
+    name: shell scripts (macos)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e ".[test]"
+      - run: python3 -m pytest tests/test_install_sh.py tests/test_build_script.py -v
 
   commit-messages:
     # CLAUDE.md section 1 forbids AI attribution trailers. Until now that was

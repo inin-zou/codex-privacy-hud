@@ -1,0 +1,40 @@
+name: Release patched Codex
+
+on:
+  push:
+    tags: ["codex-*-hud*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14, target: aarch64-apple-darwin }
+          - { os: macos-13, target: x86_64-apple-darwin }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Derive Codex version from tag
+        id: ver
+        run: echo "ver=$(echo '${{ github.ref_name }}' | sed -E 's/^codex-([0-9.]+)-hud.*/\1/')" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
+        with: { toolchain: 1.95.0, targets: "${{ matrix.target }}" }
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: "${{ runner.temp }}/codex-src/codex-rs" }
+      - name: Build
+        run: scripts/build-patched-codex.sh "${{ steps.ver.outputs.ver }}" --target "${{ matrix.target }}" --out dist --src "${{ runner.temp }}/codex-src"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          prerelease: false
+      - name: Also publish under the rolling 'latest' release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: latest
+          files: dist/*
