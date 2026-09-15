@@ -9,6 +9,7 @@ must not fail the hook.
 """
 from __future__ import annotations
 
+import logging
 import time
 from types import SimpleNamespace
 
@@ -112,3 +113,21 @@ def test_a_broken_publisher_never_fails_the_hook(state, monkeypatch):
     assert isinstance(out, dict)
     end = dispatch.dispatch(state, {"hook_event_name": "SessionEnd", "session_id": SID})
     assert "systemMessage" in end
+
+
+def test_a_swallowed_hud_failure_is_logged_without_its_payload(
+        state, monkeypatch, caplog):
+    """I6 says the hook survives; it does not say the failure vanishes. The
+    message names the exception class and nothing else -- an exception's own
+    text is untrusted content here (an OSError's is a path), so it is the
+    one thing that must not reach a log line."""
+    def boom(*a, **k):
+        raise RuntimeError("sk-proj-NOTAREALKEY at /Users/someone/creds.env")
+
+    monkeypatch.setattr(state.hud, "publish", boom)
+    with caplog.at_level(logging.DEBUG, logger="privacy_hud.dispatch"):
+        _start(state)
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("hud publish failed" in m and "RuntimeError" in m
+               for m in messages), messages
+    assert not any("NOTAREALKEY" in m or "creds.env" in m for m in messages)

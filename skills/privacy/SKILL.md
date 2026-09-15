@@ -201,7 +201,11 @@ Hides or shows this session's `Privacy …` item in the Codex status line
 without leaving the session. It does not change `/statusline`; that decides
 whether the item is configured, this decides whether it shows right now.
 
-Replace `on` with `off` to hide the item or `status` to check the current state:
+Replace `on` with `off` to hide the item or `status` to check the current
+state. It prints one word: `shown`, `hidden`, `stale` (a snapshot exists but
+nothing has refreshed it for 30 s — the daemon is gone or wedged, so the
+session is not being recorded either), or `absent` (no snapshot at all).
+Report `stale` as what it is; it is not the same as "off".
 
 ```bash
 python3 - "$SESSION_ID" on <<'PY'
@@ -215,7 +219,8 @@ data_dir = os.environ["PLUGIN_DATA"]
 
 out = (mcp_tools.hud_status(data_dir, session_id) if arg == "status"
        else mcp_tools.hud_set_hidden(data_dir, session_id, arg == "off"))
-print("hidden" if out["hidden"] else "shown" if out["present"] else "no snapshot yet")
+# shown | hidden | stale (the daemon that writes it is gone) | absent
+print(out["state"])
 PY
 ```
 

@@ -435,14 +435,22 @@ def test_every_note_obeys_the_copy_rules(two_sessions, tmp_path, monkeypatch):
 # hud_status and hud_set_hidden
 # --------------------------------------------------------------------- #
 
-def test_hud_status_absent_then_present(tmp_path):
-    assert hud_status(tmp_path, "s1") == {"session_id": "s1", "present": False, "hidden": None}
+def test_hud_status_absent_then_shown_then_hidden(tmp_path):
+    assert hud_status(tmp_path, "s1") == {
+        "session_id": "s1", "present": False, "hidden": None, "state": "absent"}
     hs.HudPublisher(tmp_path).publish("s1", percent=3, blocked=0, unverified=False)
-    assert hud_status(tmp_path, "s1") == {"session_id": "s1", "present": True, "hidden": False}
+    assert hud_status(tmp_path, "s1") == {
+        "session_id": "s1", "present": True, "hidden": False, "state": "shown"}
+    hs.HudPublisher(tmp_path).set_hidden("s1", True)
+    assert hud_status(tmp_path, "s1") == {
+        "session_id": "s1", "present": True, "hidden": True, "state": "hidden"}
 
 
 def test_hud_status_stale_snapshot(tmp_path):
-    """A stale snapshot (older than STALE_AFTER) reports present: False."""
+    """A stale snapshot (older than STALE_AFTER) is not drawn -- `present:
+    False` -- but it is a different diagnosis from having no file at all:
+    the daemon that writes it is gone or wedged, so the session is not being
+    recorded either. `state` is what carries that distinction."""
     hs.HudPublisher(tmp_path).publish("s1", percent=3, blocked=0, unverified=False)
     # Rewrite the file's updated_at to 60 s in the past
     snap = hs.read_snapshot(tmp_path, "s1", ignore_staleness=True)
@@ -456,18 +464,22 @@ def test_hud_status_stale_snapshot(tmp_path):
     with os.fdopen(fd, "w") as fh:
         import json
         json.dump(stale_doc, fh, separators=(",", ":"))
-    # Now hud_status should report present: False
-    assert hud_status(tmp_path, "s1") == {"session_id": "s1", "present": False, "hidden": None}
+    # Not drawn, and the reason is nameable.
+    assert hud_status(tmp_path, "s1") == {
+        "session_id": "s1", "present": False, "hidden": None, "state": "stale"}
 
 
 def test_hud_set_hidden_round_trip(tmp_path):
     hs.HudPublisher(tmp_path).publish("s1", percent=3, blocked=0, unverified=False)
-    assert hud_set_hidden(tmp_path, "s1", True)["hidden"] is True
+    off = hud_set_hidden(tmp_path, "s1", True)
+    assert off["hidden"] is True and off["state"] == "hidden"
     assert hs.read_snapshot(tmp_path, "s1").hidden is True
-    assert hud_set_hidden(tmp_path, "s1", False)["hidden"] is False
+    on = hud_set_hidden(tmp_path, "s1", False)
+    assert on["hidden"] is False and on["state"] == "shown"
     assert hs.read_snapshot(tmp_path, "s1").percent == 3   # numbers untouched
 
 
 def test_hud_toggle_output_carries_no_content(tmp_path):
     out = hud_set_hidden(tmp_path, "s1", True)
-    assert set(out) == {"session_id", "present", "hidden"}
+    assert set(out) == {"session_id", "present", "hidden", "state"}
+    assert out["state"] in {"absent", "stale", "hidden", "shown"}

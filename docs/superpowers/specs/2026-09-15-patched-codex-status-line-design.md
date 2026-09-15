@@ -239,8 +239,12 @@ the list, is checked or unchecked there, and the choice survives restarts.
 ### 5.4 `$privacy hud on|off|status` (extend `mcp_tools.py`)
 
 New MCP tool `privacy_hud_toggle(session_id, hidden: bool)` → contract B.
-The skill gains the subcommand. `status` reports whether the snapshot exists
-and whether it is hidden. Does not touch `config.toml`; does not know
+The skill gains the subcommand. `status` reports one of four words
+(amended 2026-09-15): `shown`, `hidden`, `stale` (a snapshot exists but
+nothing has refreshed it inside `STALE_AFTER` — the daemon is gone or
+wedged, which also means the session is not being recorded) and `absent`
+(no snapshot at all). The first two are the only ones for which `present`
+is true. Does not touch `config.toml`; does not know
 `/statusline` exists. The two toggles compose: `/statusline` decides whether
 the item is configured, `$privacy hud` decides whether it currently shows.
 

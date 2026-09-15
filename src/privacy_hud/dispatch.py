@@ -99,6 +99,7 @@ No raw sensitive value is ever logged or printed anywhere in this module.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 import time
@@ -116,6 +117,13 @@ from .mask import new_salt
 from .matrix.loader import Matrix, load_matrix
 from .render import receipt as render_receipt
 from .runtime import latch_path
+
+# Every HUD failure below is logged through this at DEBUG and nowhere else.
+# I1: the message carries the exception's *class name* and nothing else --
+# never `str(exc)`, which for an OSError is a path and for a sqlite error can
+# quote a row. A display surface that could not be written is a diagnostic,
+# and a diagnostic that leaks what it was writing about is a disclosure.
+_log = logging.getLogger(__name__)
 
 # Events with a pinned Observation mapping. Anything else that reaches this
 # daemon (SubagentStop, PreCompact, ...) has no Observation defined by the
@@ -196,8 +204,9 @@ def new_state(data_dir) -> State:
     try:
         hud.sweep()
         hud.mark_daemon(unattributed_gaps=bool(ledger.unattributed_gaps()))
-    except Exception:
-        pass  # I6: housekeeping for a display surface never blocks the daemon
+    except Exception as exc:
+        # I6: housekeeping for a display surface never blocks the daemon.
+        _log.debug("hud startup housekeeping failed: %s", type(exc).__name__)
     return State(data_dir=data_dir, matrix=matrix, ledger=ledger,
                  detectors=detectors, hud=hud)
 
@@ -613,15 +622,18 @@ def _publish_hud(state: State, session_id: str) -> None:
     """Contract A, after a ledger change. Reads summary and coverage under
     the caller's lock and hands the numbers to the publisher. I6: any
     failure here is swallowed; a hook must never fail because a display
-    file could not be written. I3: `percent` is the ledger's, verbatim."""
+    file could not be written — but it is swallowed *loudly*, at DEBUG,
+    because a status item that silently stops updating with no way to find
+    out why is how a display bug becomes a "the tool is broken" report.
+    I3: `percent` is the ledger's, verbatim."""
     try:
         summary = state.ledger.summary(session_id)
         coverage = state.ledger.coverage(session_id)
         state.hud.publish(session_id, percent=int(summary.percent),
                           blocked=int(summary.prevented),
                           unverified=not coverage.verified)
-    except Exception:
-        pass
+    except Exception as exc:
+        _log.debug("hud publish failed: %s", type(exc).__name__)
 
 
 def _handle_session_start(state: State, session_id: str, payload: dict) -> dict:
@@ -672,8 +684,8 @@ def _handle_session_end(state: State, session_id: str, payload: dict) -> dict:
         state.engines.pop(session_id, None)
         try:
             state.hud.retire(session_id)
-        except Exception:
-            pass
+        except Exception as exc:
+            _log.debug("hud retire failed: %s", type(exc).__name__)
 
     try:
         minutes = 0
