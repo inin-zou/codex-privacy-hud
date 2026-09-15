@@ -22,13 +22,29 @@ jobs:
       - name: Derive Codex version from tag
         id: ver
         run: echo "ver=$(echo '${{ github.ref_name }}' | sed -E 's/^codex-([0-9.]+)-hud.*/\1/')" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with: { toolchain: 1.95.0, targets: "${{ matrix.target }}" }
       - uses: Swatinem/rust-cache@v2
         with: { workspaces: "${{ runner.temp }}/codex-src/codex-rs" }
       - name: Build
         run: scripts/build-patched-codex.sh "${{ steps.ver.outputs.ver }}" --target "${{ matrix.target }}" --out dist --src "${{ runner.temp }}/codex-src"
-      - uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codex-privacy-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Attach to this tag's release
+        uses: softprops/action-gh-release@v2
         with:
           files: dist/*
           prerelease: false
