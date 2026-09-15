@@ -396,6 +396,12 @@ def _get_or_start_engine(state: State, session_id: str, *, cwd: str = "",
     engine = Engine(ledger=state.ledger, matrix=state.matrix, salt=salt,
                      detectors=state.detectors)
     state.engines[session_id] = engine
+    # A session the daemon first meets here -- typically the one whose
+    # SessionStart hook spawned this daemon and got no answer -- has no
+    # snapshot yet, so the status-line item stays blank until the first
+    # observation lands. Publish the ledger's zero now: the item then shows
+    # 0% from the first hook rather than nothing. Same call as SessionStart.
+    _publish_hud(state, session_id)
     return engine
 
 
