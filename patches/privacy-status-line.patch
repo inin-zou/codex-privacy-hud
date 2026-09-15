@@ -114,15 +114,27 @@ index f45ae82..243c401 100644
              status_line_workspace_headline_pending_request_id: None,
              next_status_line_workspace_headline_request_id: 0,
 diff --git a/codex-rs/tui/src/chatwidget/status_surfaces.rs b/codex-rs/tui/src/chatwidget/status_surfaces.rs
-index 17f437c..1257474 100644
+index 17f437c..2ba4e47 100644
 --- a/codex-rs/tui/src/chatwidget/status_surfaces.rs
 +++ b/codex-rs/tui/src/chatwidget/status_surfaces.rs
-@@ -657,6 +657,21 @@ impl ChatWidget {
+@@ -657,6 +657,33 @@ impl ChatWidget {
          }
      }
  
 +    /// Repaints the status line while the `privacy` item is configured, so the
 +    /// plugin's snapshot file is picked up within one `READ_INTERVAL`.
++    ///
++    /// This deliberately keeps a 1 Hz frame schedule alive for as long as the
++    /// item is configured, which its sibling above does not: the workspace
++    /// headline is pushed here by an async callback when it arrives, so that
++    /// one needs no timer at all. A file on disk pushes nothing. The plugin
++    /// writes `hud/<thread>.json` from another process, and the only ways to
++    /// notice are to poll it or to watch the filesystem -- and a watcher is a
++    /// thread, a platform-specific dependency and a new failure mode for a
++    /// feature whose entire cost budget is one `read_to_string` of well under
++    /// a kilobyte. One scheduled frame per second, only while the user has
++    /// switched the item on, is the cheaper of the two. `is_due()` is checked
++    /// first so the throttle, not this hook, decides when a read happens.
 +    pub(super) fn refresh_status_line_if_privacy_due(&mut self) {
 +        if self.privacy_status.is_due()
 +            && self
@@ -139,7 +151,7 @@ index 17f437c..1257474 100644
      pub(crate) fn set_status_line_workspace_headline(
          &mut self,
          request_id: u64,
-@@ -787,6 +802,12 @@ impl ChatWidget {
+@@ -787,6 +814,12 @@ impl ChatWidget {
                  .and_then(|usage| usage.estimated_usage_usd_micros)
                  .and_then(format_estimated_usd_micros),
              StatusLineItem::SessionId => self.thread_id.map(|id| id.to_string()),
@@ -152,7 +164,7 @@ index 17f437c..1257474 100644
              StatusLineItem::FastMode => self
                  .model_catalog
                  .try_list_models()
-@@ -859,6 +880,7 @@ impl ChatWidget {
+@@ -859,6 +892,7 @@ impl ChatWidget {
              StatusSurfacePreviewItem::FastMode => StatusLineItem::FastMode,
              StatusSurfacePreviewItem::RawOutput => StatusLineItem::RawOutput,
              StatusSurfacePreviewItem::WorkspaceHeadline => StatusLineItem::WorkspaceHeadline,
@@ -174,10 +186,10 @@ index 3d9650d..3da7f5b 100644
  mod resize_reflow_cap;
 diff --git a/codex-rs/tui/src/privacy_status.rs b/codex-rs/tui/src/privacy_status.rs
 new file mode 100644
-index 0000000..154c3a6
+index 0000000..91b3828
 --- /dev/null
 +++ b/codex-rs/tui/src/privacy_status.rs
-@@ -0,0 +1,277 @@
+@@ -0,0 +1,327 @@
 +//! `privacy` status-line item: reads the Codex Privacy HUD plugin's snapshot
 +//! file (contract A) and renders `Privacy ███░░░░░░░ 28%`.
 +//!
@@ -303,16 +315,25 @@ index 0000000..154c3a6
 +    }
 +
 +    fn current_at(&mut self, thread_id: Option<&str>, now: Instant) -> Option<PrivacyReading> {
-+        let thread_id = thread_id?;
++        // `now` is this call's clock reading, and EVERY path out of here
++        // stamps `last_read` with it -- including the two that answer `None`
++        // without touching the disk. `is_due()` is the gate on the per-frame
++        // refresh hook, so a path that consults the clock without stamping it
++        // leaves `is_due()` permanently true: while there is no usable thread
++        // id (the window between startup and the first thread) the hook would
++        // rebuild and repaint the status line on every single frame.
++        let throttled = self
++            .last_read
++            .is_some_and(|last| now.duration_since(last) < READ_INTERVAL);
++        let Some(thread_id) = thread_id else {
++            return self.forget(now);
++        };
 +        if thread_id.is_empty() || thread_id.contains('/') || thread_id.starts_with('.') {
-+            return None;
++            return self.forget(now);
 +        }
 +        // A thread switch must never show the previous session's number, so the
 +        // throttle only applies while the id is unchanged.
 +        let same_thread = self.last_thread.as_deref() == Some(thread_id);
-+        let throttled = self
-+            .last_read
-+            .is_some_and(|last| now.duration_since(last) < READ_INTERVAL);
 +        if same_thread && throttled {
 +            return self.cached;
 +        }
@@ -325,6 +346,17 @@ index 0000000..154c3a6
 +            .ok()
 +            .and_then(|text| parse_snapshot(&text, now_unix.as_secs_f64()));
 +        self.cached
++    }
++
++    /// Stamp the clock, drop the cache, and answer `None`: there is no thread
++    /// whose reading this could be. Clearing `last_thread` too means the next
++    /// usable id re-reads immediately rather than being throttled against a
++    /// cache that belongs to nobody.
++    fn forget(&mut self, now: Instant) -> Option<PrivacyReading> {
++        self.last_read = Some(now);
++        self.last_thread = None;
++        self.cached = None;
++        None
 +    }
 +}
 +
@@ -393,6 +425,36 @@ index 0000000..154c3a6
 +        let mut src = PrivacyStatusSource::with_data_dir(dir.path().to_path_buf());
 +        assert!(src.current(None).is_none());
 +        assert!(src.current(Some("nope")).is_none());
++    }
++
++    #[test]
++    fn every_path_that_reads_the_clock_also_stamps_it() {
++        // `is_due()` gates the per-frame refresh hook. A path that returns
++        // early without stamping leaves it true forever, so the hook rebuilds
++        // and repaints the status line on every frame for as long as there is
++        // no usable thread id.
++        let dir = data_dir_with(&[(".hidden", 40)]);
++        let mut src = PrivacyStatusSource::with_data_dir(dir.path().to_path_buf());
++        assert!(src.is_due(), "nothing read yet");
++        assert!(src.current(None).is_none());
++        assert!(!src.is_due(), "current(None) consulted the clock");
++        assert!(src.cached.is_none(), "and cached nothing");
++
++        let mut unsafe_id = PrivacyStatusSource::with_data_dir(dir.path().to_path_buf());
++        assert!(unsafe_id.current(Some(".hidden")).is_none());
++        assert!(!unsafe_id.is_due(), "an unsafe id consulted the clock");
++        assert!(unsafe_id.cached.is_none(), "and cached nothing");
++    }
++
++    #[test]
++    fn a_usable_id_after_an_unusable_one_is_not_throttled() {
++        // The flip side of stamping the clock on those paths: the stamp must
++        // not then hide a real reading behind the throttle.
++        let dir = data_dir_with(&[("sid", 63)]);
++        let mut src = PrivacyStatusSource::with_data_dir(dir.path().to_path_buf());
++        let start = Instant::now();
++        assert!(src.current_at(None, start).is_none());
++        assert_eq!(src.current_at(Some("sid"), start).unwrap().percent, 63);
 +    }
 +
 +    fn unix_now() -> f64 {
