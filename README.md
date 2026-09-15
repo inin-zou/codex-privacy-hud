@@ -123,10 +123,6 @@ rather than a clean number. See [Known limits](#known-limits).
 
 ## What you see
 
-```text
-PRIVACY  Disclosure ███░░░░░░░ 28%  ›
-```
-
 **Level 1 — Ambient.** One item in Codex's own status line, under the composer:
 
 ```text
@@ -265,7 +261,7 @@ Stated up front, because a privacy tool that overclaims is worse than none:
 | `/statusline` inside Codex | Ticks or unticks the `privacy` item for good. The choice is saved in `config.toml`. |
 | `$privacy hud on\|off\|status` | Hides or shows the item for now, without touching your config. `status` prints `absent`, `stale`, `hidden`, or `shown`. |
 | `[tui].status_line` in `~/.codex/config.toml` | The list of status-line items Codex renders. The installer adds `"privacy"` to it. |
-| `install.sh --yes` / `--no-model` / `--uninstall` / `--purge` | `--yes` answers the model question with yes, `--no-model` skips the download, `--uninstall` removes what the installer created, `--purge` also removes the ledger and the weights. |
+| `install.sh --yes` / `--no-model` / `--release-base-url URL` / `--uninstall` / `--purge` | `--yes` answers the model question with yes, `--no-model` skips the download, `--release-base-url` fetches the patched build from somewhere other than this repository's GitHub releases, `--uninstall` removes what the installer created, `--purge` also removes the ledger and the weights. |
 | `PRIVACY_HUD_NO_SPAWN=1` | Turns daemon auto-start off entirely, for a sandbox where the spawn cannot succeed. |
 | `privacy-hud-ambient --watch [N]` / `--once` / `--session-id <id>` | Runs the fallback pane: redraw every N seconds, print one line and exit, or pin the pane to one session. |
 
