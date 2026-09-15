@@ -1,5 +1,5 @@
 # src/privacy_hud/daemon.py
-"""Long-lived unix-socket server. Pays Presidio-scale detection cost once
+"""Long-lived unix-socket server. Pays the model-load cost of detection once
 per daemon lifetime instead of once per hook invocation (architecture.md
 §2's "Process model").
 
