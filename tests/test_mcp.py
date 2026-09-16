@@ -210,6 +210,21 @@ def test_apply_policy_rejects_an_unknown_rule_type(led):
     assert led.conn.execute("SELECT count(*) FROM policy").fetchone()[0] == 0
 
 
+@pytest.mark.parametrize("rule_type,selector", [
+    ("block_path", ".env"),
+    ("block_command", "git log"),
+])
+def test_an_origin_rule_is_written(led, rule_type, selector):
+    apply_policy(led, "s1", rule_type=rule_type, selector=selector)
+    assert led.policy_selectors("s1", rule_type) == {selector}
+
+
+def test_block_source_is_still_refused(led):
+    # #38: the old rule type named a label, not a source. It stays refused.
+    with pytest.raises(ValueError, match="#38"):
+        apply_policy(led, "s1", rule_type="block_source", selector=".env")
+
+
 # --------------------------------------------------------------------- #
 # Cross-cutting: no raw sensitive value leaves ANY function, ever.
 # --------------------------------------------------------------------- #

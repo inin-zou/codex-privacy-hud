@@ -271,11 +271,18 @@
       </div>
     `).join("");
 
-    // No source-level action: the ledger does not record which file or
-    // input data came from, so a rule cannot target a source (#38).
     const actions = [
       { text: "Protect future occurrences", rule_type: "mask", selector: row.data_type },
     ];
+    // A source-level rule is offered only when the row names a real origin
+    // (#40): source_kind is null when `source` is a bare tool label.
+    if (row.source_kind === "path") {
+      actions.push({ text: `Block values read from ${row.source}`,
+                     rule_type: "block_path", selector: row.source });
+    } else if (row.source_kind === "command") {
+      actions.push({ text: `Block values from \`${row.source}\` output`,
+                     rule_type: "block_command", selector: row.source });
+    }
     const pct = summary.percent || 0;
     const actionsEl = $("detailActions");
     actionsEl.innerHTML = actions.map((a, i) =>

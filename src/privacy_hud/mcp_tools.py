@@ -45,8 +45,14 @@ should claim otherwise.
 
 "Block this source" (`block_source`) is withdrawn (#38): `apply_policy`
 refuses it and `Engine.observe` ignores any such row an older ledger still
-holds. It matched a rule's selector against an observation's `source`,
-which only ever holds fixed labels, so it could not target a source at all.
+holds. It matched a rule's selector against the *outbound* observation's
+`source` at enforcement time, which is always the fixed label `"tool
+input"` -- never the file or command a value came from -- so no selector
+could target a source at all. `block_path`/`block_command` (#40) are the
+replacement: they match a rule's selector against the `Origin` a finding's
+value was first seen with (Task 2/3's `source_kind`/`source` on the
+*ingress* row), independent of what the later outbound call's own `source`
+says.
 
 `get_exposure_detail`'s selector: the `events` table already has a stable,
 unique, integer `id` primary key (see ledger.py's SCHEMA), and every row
@@ -93,18 +99,22 @@ _TAB_KINDS = {
     "All events": _ALL_EVENT_KINDS,
 }
 
-_POLICY_RULE_TYPES = {"mask", "allow_dest"}
+_POLICY_RULE_TYPES = {"mask", "allow_dest", "block_path", "block_command"}
 
 #: Why `block_source` is refused rather than written (#38). The rule compared
 #: its selector with an observation's `source`, and `dispatch` only ever puts
 #: fixed labels there ("tool input" on every outbound call, the tool name or
 #: "user prompt" on the way in). No selector could mean "this source": one
 #: taken from a tool-output row matched nothing, one taken from an outbound
-#: row denied every outbound call. It stays refused until the ledger records
-#: where data actually came from.
+#: row denied every outbound call. It stays refused permanently, not just
+#: until origins existed (#40): `block_path`/`block_command` are the real
+#: replacement, matched against `Origin` values the ledger now records
+#: (Task 2/3) -- reviving the `block_source` name would revive the same
+#: confusion it caused the first time.
 _BLOCK_SOURCE_WITHDRAWN = (
     "block_source is not available: the ledger does not yet record which "
-    "file or input data came from, so no rule can target a source (#38)")
+    "file or input data came from, so no rule can target a source (#38) "
+    "— use block_path or block_command, which name a real origin (#40)")
 
 #: How close two sessions' last hook events have to be, in seconds, before
 #: "which of these is the caller?" stops being answerable.

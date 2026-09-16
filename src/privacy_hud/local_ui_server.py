@@ -47,11 +47,14 @@ it could hold raw sensitive values). That means "Allow once" is only ever
 answerable from the LIVE consent flow (architecture.md §8's state machine,
 reached from the block `systemMessage`'s "Run $privacy" prompt while the
 blocked call's arguments are still in memory), not from this after-the-fact
-audit page reading historical ledger rows. `render.detail()` itself only
-ever renders "Protect future occurrences" for exactly this reason -- this UI
-matches that, rather than inventing a button with no working backend behind
-it. The same test applies to the withdrawn "Block this source" (#38): its
-backend could not name a source, so the button is gone from both surfaces.
+audit page reading historical ledger rows. `render.detail()` itself never
+renders an "Allow once" button for exactly this reason -- this UI matches
+that, rather than inventing a button with no working backend behind it.
+The withdrawn "Block this source" (`block_source`, #38) stays gone from
+both surfaces for a different reason: it named a label, not a source. Its
+replacement, `block_path`/`block_command` (#40), IS offered here and in
+`render.detail()`, but only on a row whose `source_kind` names a real
+origin -- never on a row whose `source` is a bare tool label.
 """
 from __future__ import annotations
 
@@ -137,6 +140,19 @@ def _latest_session_id(ledger: Ledger) -> str | None:
     one-line alias onto that function's own fallback so the two cannot drift
     back apart. Returns only an id, no session content."""
     return mcp_tools._most_recently_started(ledger)
+
+
+def _rule_confirmation(rule_type: str, selector: str) -> str:
+    """design.md §6: every action confirms what rule it wrote, in plain
+    terms -- and, for an origin rule, what it cannot do. Only byte-identical
+    values match, so a model that summarizes what it read still sends it;
+    saying so here is cheaper than a user discovering it later."""
+    if rule_type in ("block_path", "block_command"):
+        return (f"Rule added: block values from {selector}. Applies to later "
+                "outbound calls. Only exact values match — if the model "
+                "summarizes or rewrites the content, it still leaves.")
+    return (f"Rule added: {rule_type} {selector}. "
+            "Applies from the next tool call.")
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -321,10 +337,7 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             self._send_json(200, {
                 "applied": True,
-                # design.md §6: every action shows a confirmation of what
-                # rule it wrote, in plain terms.
-                "message": f"Rule added: {rule_type} {selector}. "
-                           "Applies from the next tool call.",
+                "message": _rule_confirmation(rule_type, selector),
             })
             return
 
