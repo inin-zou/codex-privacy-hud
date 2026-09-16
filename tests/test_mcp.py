@@ -184,9 +184,11 @@ def test_allow_once_does_not_mint_when_not_reviewed(led):
 # --------------------------------------------------------------------- #
 
 @pytest.mark.parametrize("selector", ["support.log", "tool input", "Bash"])
-def test_block_this_source_is_refused_until_origins_exist(led, selector):
-    # #38: no selector a real audit row offers can mean "this source", so a
-    # written rule would be a silent no-op or a session-wide kill switch.
+def test_block_source_is_refused_for_any_selector(led, selector):
+    # #38: block_source names a label, not a source, so no selector -- not
+    # even one shaped like a real origin -- makes a rule written that way
+    # able to match one. Refused unconditionally, not contingent on whether
+    # the ledger happens to record an origin for this particular value.
     with pytest.raises(ValueError, match="#38"):
         apply_policy(led, "s1", rule_type="block_source", selector=selector)
     assert led.conn.execute("SELECT count(*) FROM policy").fetchone()[0] == 0

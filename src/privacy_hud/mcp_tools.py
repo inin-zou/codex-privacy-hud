@@ -106,15 +106,17 @@ _POLICY_RULE_TYPES = {"mask", "allow_dest", "block_path", "block_command"}
 #: fixed labels there ("tool input" on every outbound call, the tool name or
 #: "user prompt" on the way in). No selector could mean "this source": one
 #: taken from a tool-output row matched nothing, one taken from an outbound
-#: row denied every outbound call. It stays refused permanently, not just
-#: until origins existed (#40): `block_path`/`block_command` are the real
-#: replacement, matched against `Origin` values the ledger now records
-#: (Task 2/3) -- reviving the `block_source` name would revive the same
-#: confusion it caused the first time.
+#: row denied every outbound call. That is still true today and is why the
+#: type stays refused permanently, not just until origins existed: the type
+#: itself names a label, not a source, regardless of what the ledger now
+#: records. `block_path`/`block_command` (#40) are the real replacement --
+#: matched against `Origin` values the ledger records since Task 2/3 --
+#: rather than a repair of `block_source`, because reviving the name would
+#: revive the confusion it caused the first time.
 _BLOCK_SOURCE_WITHDRAWN = (
-    "block_source is not available: the ledger does not yet record which "
-    "file or input data came from, so no rule can target a source (#38) "
-    "— use block_path or block_command, which name a real origin (#40)")
+    "block_source is not available: it names a label, not a source, so no "
+    "rule written that way could ever match an origin (#38) — use "
+    "block_path or block_command, which name a real origin (#40)")
 
 #: How close two sessions' last hook events have to be, in seconds, before
 #: "which of these is the caller?" stops being answerable.
