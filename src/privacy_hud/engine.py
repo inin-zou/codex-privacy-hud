@@ -400,10 +400,25 @@ class Engine:
     def _remember_origins(self, obs: Observation, findings: Sequence[Finding]) -> None:
         """Record where each finding's value entered this session from.
 
-        Only when the observation names an origin: a `PreToolUse`'s source
-        is `tool input`, which is a label, not a place.
+        Two things must hold, and #36 made the second one load-bearing.
+
+        The observation must name an origin — on most events `source` is a
+        fixed label (`tool input`), which is a place-shaped word for
+        something that is not a place.
+
+        And the call must already have run. A `PreToolUse` has not: since
+        #36 a local read reaches here with a PATH origin, but its findings
+        are matches against the *text of a command that has not executed*,
+        so the only value they carry is the low-entropy tier-0 pattern
+        literal the text matched (`.pem`, `.env`) — never a byte of the
+        file. Mapping that literal to the path in the command would make
+        every later call mentioning any `.pem` look like it carries data
+        from that one file, and a `block_path` rule on it would deny calls
+        that never touched it while naming it as the source. The map
+        answers "where did this value enter the session"; a call that has
+        not run is not an answer to that.
         """
-        if obs.origin is None:
+        if obs.origin is None or obs.hook_event == "PreToolUse":
             return
         for f in findings:
             self._origins.setdefault(value_hash(self.salt, f.value), obs.origin)
@@ -620,7 +635,8 @@ class Engine:
                     notice = READ_NOTICE_TEMPLATE.format(path=path)
 
         # #40: remember where each of this observation's findings came from
-        # (a no-op unless obs.origin is set — PostToolUse ingress only), then
+        # (a no-op unless obs.origin is set and the call has already run —
+        # PostToolUse ingress only; see `_remember_origins`), then
         # check whether an egress carries a value from a blocked origin
         # before any other policy. Per-value, not per-session: a deny here
         # always produces a finding (I3/I4's "prevented" classification), and

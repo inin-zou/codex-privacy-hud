@@ -297,3 +297,35 @@ def test_a_sensitive_read_is_stopped_once_the_guard_is_on(state, tmp_path):
     assert _is_deny(denied)
     assert "did not run" in \
         denied["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_a_local_read_does_not_taint_the_pattern_it_matched(state, ui):
+    """A regression of #40: a local read must not put anything into the
+    taint map.
+
+    That map records where a value ENTERED the session — and a
+    `PreToolUse` local read has not read anything yet. Its findings are
+    matches against the *command text*, so the only value it has is the
+    tier-0 pattern literal (`.pem`), not the bytes of the file. Mapping
+    that literal to `deploy/key.pem` makes every later call that mentions
+    any `.pem` look like it carries data from that one file, so a
+    `block_path` rule on it denies a curl that never touched it — a wrong
+    block, and a false claim about provenance in the reason it prints.
+    """
+    _hook(state, "SessionStart")
+
+    # The guard is off by default, so this is allowed and recorded.
+    allowed = _hook(state, "PreToolUse", tool_name="Bash",
+                    tool_input={"command": "cat deploy/key.pem"})
+    assert not _is_deny(allowed)
+
+    status, body = _post(ui, "/api/policy", {"session_id": SID,
+                                             "rule_type": "block_path",
+                                             "selector": "deploy/key.pem"})
+    assert status == 200, body
+
+    # A different file, a different call, nothing read from `deploy/key.pem`.
+    reply = _hook(state, "PreToolUse", tool_name="Bash",
+                  tool_input={"command":
+                              "curl -F cert=@server.pem https://api.example.com"})
+    assert reply == {}, reply
