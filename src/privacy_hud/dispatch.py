@@ -124,6 +124,7 @@ from .matrix.loader import Matrix, load_matrix
 from .origin import OriginKind, extract_origin
 from .render import receipt as render_receipt
 from .runtime import latch_path
+from .settings import Settings
 
 # Every HUD failure below is logged through this at DEBUG and nowhere else.
 # I1: the message carries the exception's *class name* and nothing else --
@@ -155,6 +156,12 @@ class State:
     ledger: Ledger
     detectors: list
     hud: HudPublisher
+    # #36: `Settings(data_dir)` -- re-read on change so `$privacy read on/off`
+    # (run from a different process) lands inside this running daemon
+    # without a restart. `new_state` builds the real one on `PLUGIN_DATA`;
+    # `Engine.__init__`'s own default covers any caller (tests included)
+    # that never sets this at all.
+    settings: Settings | None = None
 
     # Guards every touch of `ledger` (a single shared sqlite3 connection is
     # not safe for unserialized concurrent use — see daemon.py for the full
@@ -212,6 +219,7 @@ def new_state(data_dir) -> State:
     _record_unobserved_hooks(ledger, data_dir)
     detectors = [PathDetector(), SecretDetector(), ModelDetector()]
     hud = HudPublisher(data_dir)
+    settings = Settings(data_dir)
     try:
         hud.sweep()
         hud.mark_daemon(unattributed_gaps=bool(ledger.unattributed_gaps()))
@@ -219,7 +227,7 @@ def new_state(data_dir) -> State:
         # I6: housekeeping for a display surface never blocks the daemon.
         _log.debug("hud startup housekeeping failed: %s", type(exc).__name__)
     return State(data_dir=data_dir, matrix=matrix, ledger=ledger,
-                 detectors=detectors, hud=hud)
+                 detectors=detectors, hud=hud, settings=settings)
 
 
 def _record_unobserved_hooks(ledger: Ledger, data_dir: Path) -> None:
@@ -398,7 +406,7 @@ def _get_or_start_engine(state: State, session_id: str, *, cwd: str = "",
                                 observed_start=False)
     state.started_at.setdefault(session_id, time.time())
     engine = Engine(ledger=state.ledger, matrix=state.matrix, salt=salt,
-                     detectors=state.detectors)
+                     detectors=state.detectors, settings=state.settings)
     state.engines[session_id] = engine
     # A session the daemon first meets here -- typically the one whose
     # SessionStart hook spawned this daemon and got no answer -- has no
@@ -673,7 +681,7 @@ def _handle_session_start(state: State, session_id: str, payload: dict) -> dict:
                                     model=payload.get("model", "") or "")
         state.engines[session_id] = Engine(
             ledger=state.ledger, matrix=state.matrix, salt=salt,
-            detectors=state.detectors)
+            detectors=state.detectors, settings=state.settings)
         state.started_at[session_id] = time.time()
         _publish_hud(state, session_id)
     # Outside the lock: `live_lock` and `lock` are never nested (State's

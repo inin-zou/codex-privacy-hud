@@ -102,6 +102,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .detect.base import Cost, Finding, is_available, profile_of
+from .detect.paths import is_sensitive_path
 from .mask import mask, value_hash
 from .matrix.loader import UnknownKey
 from .minimize import consume_token, minimize_tool_input
@@ -281,13 +282,47 @@ ORIGIN_BLOCK_TEMPLATE = (
     "  does not override it. The rule ends with the session."
 )
 
+# The one thing this plugin can say without qualification: the call is
+# stopped before it runs, so there is nothing to recall (I5 is satisfied by
+# the fact, not by careful wording).
+READ_BLOCK_TEMPLATE = (
+    "PRIVACY HUD blocked a read\n\n"
+    "  {tool}  would read  {path}\n\n"
+    "  Reads of known-sensitive paths are blocked. This one did not run,\n"
+    "  so nothing from it reached the model.\n\n"
+    "  Run `$privacy read off` to allow them again."
+)
+
+# Shown once per session, not once per path: this is how the feature is
+# discovered, and a line on every read would be noise.
+READ_NOTICE_TEMPLATE = (
+    "PRIVACY HUD: this session read {path} — a path it can stop before it\n"
+    "reaches the model. Turn that on with `$privacy read on`."
+)
+
+
+class _PermissiveSettings:
+    """The "off" default for `Engine(settings=...)`: every existing caller
+    and test that builds an `Engine` without a settings object keeps
+    behaving exactly as before this task -- I6, applied to our own default
+    rather than just to Settings' file-read failure mode."""
+
+    deny_read = False
+
 
 class Engine:
-    def __init__(self, *, ledger, matrix, salt: bytes, detectors: list):
+    def __init__(self, *, ledger, matrix, salt: bytes, detectors: list,
+                 settings=None):
         self.ledger = ledger
         self.matrix = matrix
         self.salt = salt
         self.detectors = detectors
+        # #36: an object exposing `.deny_read`, not the concrete `Settings`
+        # class -- this is what lets a test pass a tiny double instead of a
+        # real file on disk. `None` means "no settings object was given",
+        # and defaults to the permissive answer (I6): a guard that was never
+        # configured must not start blocking on a guess.
+        self.settings = settings if settings is not None else _PermissiveSettings()
         # Fail at wiring time, not at the first scan of the first session.
         # `profile_of` raises `UndeclaredDetector` for a detector that has
         # not declared its tier and cost, and this loop is what makes that
@@ -305,6 +340,11 @@ class Engine:
         #: worthless. A daemon replaced mid-session therefore starts empty,
         #: which allows rather than denies (I6, and known limit 3).
         self._origins: dict[bytes, Origin] = {}
+        #: #36: the read-guard discoverability notice fires once per
+        #: session, not once per path -- same per-session lifetime as
+        #: `_origins` above, and for the same reason: it lives on the
+        #: Engine because `dispatch` builds one Engine per session.
+        self._read_notice_shown = False
 
     # -- Ruling 2: destination normalization --------------------------
     def _normalize_destination(self, destination: str) -> str:
@@ -561,6 +601,23 @@ class Engine:
 
         action = "allow"
         blocked_origin = None
+        read_block: str | None = None
+        notice: str | None = None
+
+        # #36: the read guard -- the one interception point that acts BEFORE
+        # the bytes exist, rather than recording them after. Ahead of the
+        # egress-only policy block below on purpose: this is a local read
+        # (`Ruling 3` never applies to it), and it must be decided before
+        # anything downstream assumes `action` is still "allow".
+        if obs.hook_event == "PreToolUse" and obs.direction == "local":
+            path = obs.origin.value if obs.origin else ""
+            if is_sensitive_path(path):
+                if self.settings.deny_read:
+                    action = "deny"
+                    read_block = path
+                elif not self._read_notice_shown:
+                    self._read_notice_shown = True
+                    notice = READ_NOTICE_TEMPLATE.format(path=path)
 
         # #40: remember where each of this observation's findings came from
         # (a no-op unless obs.origin is set — PostToolUse ingress only), then
@@ -619,13 +676,13 @@ class Engine:
 
         if dest_kind == "local":
             # Ruling 1: local always classifies as local_access, overriding
-            # whatever `direction` the caller supplied, and taking priority
-            # over any blocking decision above (which never arises for a
-            # local read in practice, since B0 is never egress-blocking).
-            # The read guard's next step adds the check that makes that
-            # blocking decision reachable for a local read -- see Ruling 1's
-            # exception in this module's docstring.
-            classify_direction = "local"
+            # whatever `direction` the caller supplied -- except for #36's
+            # amendment: a local read the read guard above denied classifies
+            # as `prevented`, through the same `PreToolUse/blocked` taxonomy
+            # entry an egress deny uses, not as `local_access`. Without this
+            # a blocked read and an ordinary one would write the same ledger
+            # row, and the audit could never show that anything was stopped.
+            classify_direction = "blocked" if action == "deny" else "local"
         elif action == "deny":
             classify_direction = "blocked"
         elif action == "rewrite":
@@ -648,6 +705,14 @@ class Engine:
                 source_kind=obs.origin.kind.value if obs.origin else None)
 
         pct = self.ledger.summary(obs.session_id).percent
+
+        if action == "deny" and read_block is not None:
+            # #36: the read guard's own template -- takes `tool`/`path`, not
+            # the egress templates' `label`/`destination`/`origin_phrase`.
+            msg = READ_BLOCK_TEMPLATE.format(tool=obs.tool_name or "tool",
+                                              path=read_block)
+            return Decision(action, reason=msg, system_message=msg,
+                             budget_percent=pct, degraded=degraded)
 
         if action in ("deny", "rewrite"):
             label = ", ".join(sorted({f.data_type for f in findings})) or "sensitive data"
@@ -685,4 +750,5 @@ class Engine:
                              budget_percent=pct, updated_input=updated_input,
                              degraded=degraded)
 
-        return Decision("allow", budget_percent=pct, degraded=degraded)
+        return Decision("allow", system_message=notice, budget_percent=pct,
+                         degraded=degraded)

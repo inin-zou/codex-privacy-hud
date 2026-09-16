@@ -610,3 +610,64 @@ def test_an_ingress_observation_is_never_denied_by_an_origin_rule(eng):
     eng.ledger.add_policy("s1", rule_type="block_path", selector=".env")
     d = _read_from(eng, DOTENV)
     assert d.action == "allow"
+
+
+# ---------------------------------------------------------------------------
+# #36: the read guard -- deny a local read of a known-sensitive path.
+# ---------------------------------------------------------------------------
+
+class _Settings:
+    def __init__(self, deny_read=False):
+        self.deny_read = deny_read
+
+
+def _read(path=".env"):
+    return _obs(hook_event="PreToolUse", direction="local", source=path,
+                destination="local", text=f"cat {path}", tool_name="Bash",
+                origin=Origin(path, OriginKind.PATH))
+
+
+def test_a_sensitive_read_is_denied_when_the_guard_is_on(eng):
+    eng.settings = _Settings(deny_read=True)
+    d = eng.observe(_read(".env"))
+    assert d.action == "deny"
+    assert "would read  .env" in (d.system_message or "")
+
+
+def test_the_same_read_is_allowed_when_the_guard_is_off(eng):
+    eng.settings = _Settings(deny_read=False)
+    assert eng.observe(_read(".env")).action == "allow"
+
+
+def test_an_ordinary_read_is_allowed_with_the_guard_on(eng):
+    eng.settings = _Settings(deny_read=True)
+    assert eng.observe(_read("src/main.py")).action == "allow"
+
+
+def test_a_template_is_allowed_with_the_guard_on(eng):
+    eng.settings = _Settings(deny_read=True)
+    assert eng.observe(_read(".env.example")).action == "allow"
+
+
+def test_a_denied_read_is_prevented_and_costs_nothing(eng):
+    eng.settings = _Settings(deny_read=True)
+    before = eng.ledger.summary("s1").percent
+    eng.observe(_read(".env"))
+    assert eng.ledger.summary("s1").percent == before          # I4
+    kinds = [r["kind"] for r in eng.ledger.conn.execute("SELECT kind FROM events")]
+    assert kinds and set(kinds) == {"prevented"}               # I3
+
+
+def test_the_notice_is_shown_once_per_session(eng):
+    """It exists to make the feature discoverable, not to narrate every
+    read: a line on every `cat .env` is noise, and noise gets ignored."""
+    eng.settings = _Settings(deny_read=False)
+    first = eng.observe(_read(".env"))
+    second = eng.observe(_read("config/.env"))
+    assert "$privacy read on" in (first.system_message or "")
+    assert second.system_message is None
+
+
+def test_no_notice_for_an_ordinary_read(eng):
+    eng.settings = _Settings(deny_read=False)
+    assert eng.observe(_read("src/main.py")).system_message is None

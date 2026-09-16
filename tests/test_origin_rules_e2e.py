@@ -266,3 +266,24 @@ def test_the_page_escapes_the_origin_it_prints_on_a_button(ui):
               if "<button" in line and "data-i=" in line]
     assert button, "the action button template moved; re-pin this test"
     assert all("escapeHTML(a.text)" in line for line in button), button
+
+
+# --------------------------------------------------------------------- #
+# #36: the read guard, through the real hook path.
+# --------------------------------------------------------------------- #
+
+def test_a_sensitive_read_is_stopped_once_the_guard_is_on(state, tmp_path):
+    from privacy_hud.settings import Settings
+
+    _hook(state, "SessionStart")
+    allowed = _hook(state, "PreToolUse", tool_name="Bash",
+                    tool_input={"command": "cat .env"})
+    assert allowed == {} or not _is_deny(allowed)
+
+    Settings(tmp_path).set_deny_read(True)
+
+    denied = _hook(state, "PreToolUse", tool_name="Bash",
+                   tool_input={"command": "cat .env"})
+    assert _is_deny(denied)
+    assert "did not run" in \
+        denied["hookSpecificOutput"]["permissionDecisionReason"]
