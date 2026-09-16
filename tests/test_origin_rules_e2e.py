@@ -248,3 +248,21 @@ def test_protect_future_occurrences_is_still_offered(state, ui):
                                              "selector": "credential"})
     assert status == 200, body
     assert state.ledger.policy_selectors(SID, "mask") == {"credential"}
+
+
+def test_the_page_escapes_the_origin_it_prints_on_a_button(ui):
+    """`row.source` reaches an action label, and since #40 that is a real
+    file path or command rather than one of a few fixed labels — so a file
+    named `<img src=x onerror=...>.env` would run script in the audit page
+    if the label went into `innerHTML` raw.
+
+    Pinned on the served asset because that is what the browser runs. The
+    stake is higher here than the usual one: this page is served from the
+    daemon, but script in the tab runs in the browser and can reach the
+    network, which the daemon itself never does (I2).
+    """
+    script = _app_js(ui)
+    button = [line for line in script.splitlines()
+              if "<button" in line and "data-i=" in line]
+    assert button, "the action button template moved; re-pin this test"
+    assert all("escapeHTML(a.text)" in line for line in button), button

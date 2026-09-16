@@ -285,8 +285,15 @@
     }
     const pct = summary.percent || 0;
     const actionsEl = $("detailActions");
+    // `escapeHTML` because an action's text now carries `row.source`, which
+    // since #40 is a real file path or command rather than one of a few
+    // fixed labels -- so a file named `<img src=x onerror=...>.env` would
+    // otherwise run script in this page. Every other row-derived string here
+    // is escaped the same way; this one was safe only while `source` was a
+    // label. It matters more here than in a normal page: script in this tab
+    // can reach the network, which the daemon itself never does (I2).
     actionsEl.innerHTML = actions.map((a, i) =>
-      `<button class="action" data-i="${i}">[ ${a.text} ]</button>`
+      `<button class="action" data-i="${i}">[ ${escapeHTML(a.text)} ]</button>`
     ).join("") + (band(pct) === "danger"
       // Not an action: a clean context is a new Codex conversation, which
       // nothing on this page can start (#23).
