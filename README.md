@@ -288,6 +288,10 @@ Stated up front, because a privacy tool that overclaims is worse than none:
 7. **Detection is heuristic.** A determined adversary can encode around regex and NER. ([details](docs/known-limits.md#7-detection-is-heuristic))
 8. **Which session is being shown is inferred, not read — and the audit says so when it cannot be sure.** The fallback pane carries no such marker; pin it with `--session-id` when it matters. ([details](docs/known-limits.md#8-which-session-is-being-shown-is-inferred-not-read--and-the-audit-says-so-when-it-cannot-be-sure))
 9. **Nothing recalls disclosed data.** Ever. ([details](docs/known-limits.md#9-nothing-recalls-disclosed-data))
+10. **A source rule matches only byte-identical values.** A model that summarizes or rewrites what it read defeats it. The promise is "this value does not leave unchanged", not "nothing about this file leaves". ([details](docs/known-limits.md#10-a-source-rule-matches-only-byte-identical-values))
+11. **Origin extraction is best-effort.** `cat .env` is recognised; `python -c "open('.env')"` is not. A row with no origin offers no rule, rather than one that would not work. ([details](docs/known-limits.md#11-origin-extraction-is-best-effort))
+12. **The taint map dies with the daemon.** A daemon replaced mid-session loses it, and source rules stop matching with no error. ([details](docs/known-limits.md#12-the-taint-map-dies-with-the-daemon))
+13. **No policy rule can be removed within the session that wrote it.** True of `Protect future occurrences` since long before source rules existed. A new Codex conversation is the only clean slate. ([details](docs/known-limits.md#13-no-policy-rule-can-be-removed-within-the-session-that-wrote-it))
 
 ## Configuration
 
@@ -349,7 +353,7 @@ You want this if there is no `install.sh` for your platform, if you are on Linux
 | doc | what it covers | read it when |
 |---|---|---|
 | [`docs/installing-by-hand.md`](docs/installing-by-hand.md) | Each install step run by hand, the `privacy-hud-setup` and `privacy-hud-doctor` commands, and the fallback pane. | You cannot use `install.sh`, or you want to control each step. |
-| [`docs/known-limits.md`](docs/known-limits.md) | The nine limits in full, with the measurements behind them. | You are deciding how far to trust a number the HUD shows. |
+| [`docs/known-limits.md`](docs/known-limits.md) | All thirteen limits in full, with the measurements behind them. | You are deciding how far to trust a number the HUD shows. |
 | [`patches/README.md`](patches/README.md) | The one-item Codex status-line patch and how to regenerate it against a new tag. | You want to audit or rebuild the patched Codex binary. |
 | [`.claude/docs/architecture.md`](.claude/docs/architecture.md) | Component map, process model, ledger schema, hook dispatch, and the consent loop. | You are working on the plugin itself. |
 

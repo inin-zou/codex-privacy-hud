@@ -120,6 +120,12 @@ SECRET_FRAGMENTS = (
     "hunter2", "s3cr3t", "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "ghp_XXXXXXXXXXXXXXXX", "sk-proj-LIVEKEY123", "id_rsa",
     "admin:hunter2", "AKIAIOSFODNN7EXAMPLE",
+    # Secrets shaped like paths, which is what makes them dangerous here:
+    # `_looks_like_a_path` accepts a token carrying `/` or `.`, so a secret
+    # that happens to carry one defeats it on its own. Only knowing that the
+    # token arrived as an UNRECOGNIZED option's value keeps it out.
+    "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc123",
 )
 
 #: (command, the origin it must yield). The list deliberately spans BOTH
@@ -150,6 +156,16 @@ SECRET_COMMANDS = [
     ("head -n 5 /etc/passwd", Origin("/etc/passwd", OriginKind.PATH)),
     ("tail -n 20 app.log", Origin("app.log", OriginKind.PATH)),
     ("grep -i hunter2 config/.env", Origin("config/.env", OriginKind.PATH)),
+    # -- PATH branch: the secret rides in an option the table does NOT know,
+    #    and is itself shaped like a path. The table cannot list every option
+    #    of every program, so a candidate that arrived straight after an
+    #    unrecognized option is doubtful, and the spec's "never guess" rule
+    #    makes a doubtful candidate a COMMAND origin rather than a wrong path.
+    ("tail --format wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY /var/log/app.log",
+     Origin("tail", OriginKind.COMMAND)),
+    ("head --unknown eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc123 app.log",
+     Origin("head", OriginKind.COMMAND)),
+    ("less --opt s3cr3t/key /etc/hosts", Origin("less", OriginKind.COMMAND)),
 ]
 
 
@@ -168,3 +184,20 @@ def test_an_origin_never_carries_argument_text(command, expected):
     assert origin == expected
     for secret in SECRET_FRAGMENTS:
         assert secret not in origin.value
+
+
+# --- a flag the table does not know must not shift the file window -------
+
+def test_a_zero_arity_flag_before_the_pattern_still_finds_the_file():
+    """The other half of the doubt rule: an unrecognized flag that takes no
+    value leaves the file exactly where it was, and the file is NOT the
+    token that followed the flag, so it stays trustworthy."""
+    assert _bash("grep -i KEY .env") == Origin(".env", OriginKind.PATH)
+
+
+def test_end_of_options_restores_positional_reading():
+    """`--` says "no more options". Without that case the marker was read as
+    an unknown option, and the file right after it became doubtful."""
+    assert _bash("cat -- .env") == Origin(".env", OriginKind.PATH)
+    assert _bash("cat -- -weird-name.log") == \
+        Origin("-weird-name.log", OriginKind.PATH)

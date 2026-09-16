@@ -71,9 +71,13 @@ Within the commands it does read, it errs the same way: a candidate that is not 
 
 A daemon replaced mid-session loses it, and source rules stop matching with no error. The ledger marks such a session `⚠unverified` (limit 2 already detects a replaced daemon), but that marker means "this session's record has a hole", not "your rules stopped applying" — state both, separately.
 
-## 13. A source rule cannot be removed within the session that wrote it.
+## 13. No policy rule can be removed within the session that wrote it.
 
-There is no removal path: nothing deletes a policy row, and an "allow once" token does not override a source rule — an origin deny is decided before the token is consulted, and the token path only runs on a call that is otherwise allowed. What limits the rule is the session: `Ledger.add_policy` scopes it to `session:<id>`, so it applies until that session ends and not after. A rule written by mistake is lived with for the rest of the session.
+There is no removal path for any of them: nothing deletes a policy row — no `remove_policy`, no `DELETE FROM policy` anywhere in the code. This is **not new with source rules**; it has always been true of `Protect future occurrences` (a `mask` rule) as well, and was simply never written down. A rule written by mistake is lived with.
+
+For a source rule there is also no way around it in the moment: an "allow once" token does not override one, because an origin deny is decided before the token is consulted and the token path only runs on a call that is otherwise allowed.
+
+What limits every rule is the session. `Ledger.add_policy` scopes it to `session:<id>`, so it applies until that session ends and not after — a new Codex conversation starts with none of them. That is the only escape, and it is the same one the red band already points at for context: what the old session sent stays sent.
 
 ## Note on tests
 

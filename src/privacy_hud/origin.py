@@ -145,6 +145,64 @@ VALUE_OPTIONS: dict[str, dict[str, int]] = {
                   "--type": 1, "--state": 1},
 }
 
+#: Options that take NO value, per program. Needed for the same reason
+#: `VALUE_OPTIONS` is: a token following an option is trustworthy as a
+#: positional only when we know the option did not take it. Knowing an option
+#: is boolean says exactly that, so `tail -f app.log` keeps its file while
+#: `tail --format <secret> app.log` does not (see `_Positional.trusted`).
+#: Unlisted options are treated as doubtful, which costs an origin — never a
+#: leak.
+BOOLEAN_OPTIONS: dict[str, frozenset[str]] = {
+    "grep": frozenset({
+        "-i", "-v", "-n", "-r", "-R", "-l", "-L", "-c", "-w", "-x", "-q",
+        "-s", "-a", "-I", "-o", "-E", "-F", "-G", "-P", "-z", "-H", "-h",
+        "--ignore-case", "--invert-match", "--line-number", "--recursive",
+        "--files-with-matches", "--files-without-match", "--count",
+        "--word-regexp", "--line-regexp", "--quiet", "--silent",
+        "--no-filename", "--with-filename", "--only-matching",
+        "--extended-regexp", "--fixed-strings", "--basic-regexp",
+        "--perl-regexp", "--null-data", "--text", "--binary-files",
+    }),
+    "head": frozenset({"-q", "-v", "-z", "--quiet", "--silent", "--verbose",
+                       "--zero-terminated"}),
+    "tail": frozenset({"-f", "-F", "-q", "-v", "-z", "--follow", "--quiet",
+                       "--silent", "--verbose", "--zero-terminated",
+                       "--retry"}),
+    "cat": frozenset({"-n", "-b", "-s", "-E", "-T", "-A", "-v", "-e", "-t",
+                      "-u", "--number", "--number-nonblank",
+                      "--squeeze-blank", "--show-ends", "--show-tabs",
+                      "--show-all", "--show-nonprinting"}),
+    "less": frozenset({"-N", "-S", "-R", "-F", "-X", "-i", "-I", "-M", "-m",
+                       "-n", "-q", "-Q", "-r", "-s", "-u", "-U", "-w", "-G"}),
+    "more": frozenset({"-d", "-f", "-l", "-p", "-c", "-s", "-u"}),
+    "bat": frozenset({"-p", "-A", "-n", "-f", "--plain", "--show-all",
+                      "--number", "--force-colorization", "--list-themes",
+                      "--no-config"}),
+    "jq": frozenset({"-r", "-c", "-n", "-s", "-e", "-a", "-S", "-j", "-M",
+                     "-C", "--raw-output", "--compact-output", "--null-input",
+                     "--slurp", "--exit-status", "--sort-keys", "--tab",
+                     "--join-output", "--ascii-output", "--raw-input", "-R",
+                     "--monochrome-output", "--color-output"}),
+    "yq": frozenset({"-r", "-n", "-e", "-N", "-P", "-C", "-M", "-i",
+                     "--raw-output", "--null-input", "--exit-status",
+                     "--no-colors", "--colors", "--inplace"}),
+    "strings": frozenset({"-a", "-f", "-o", "-v", "--all", "--print-file-name",
+                          "--help", "--version"}),
+    "xxd": frozenset({"-b", "-E", "-i", "-p", "-r", "-u"}),
+    "od": frozenset({"-a", "-b", "-c", "-d", "-f", "-i", "-l", "-o", "-s",
+                     "-x", "-v"}),
+    "rg": frozenset({
+        "-i", "-v", "-n", "-N", "-l", "-c", "-w", "-x", "-q", "-s", "-S",
+        "-F", "-L", "-p", "-z", "-u", "-uu", "-uuu", "--ignore-case",
+        "--invert-match", "--line-number", "--no-line-number",
+        "--files-with-matches", "--count", "--word-regexp", "--line-regexp",
+        "--quiet", "--case-sensitive", "--smart-case", "--fixed-strings",
+        "--hidden", "--no-ignore", "--follow", "--search-zip", "--json",
+    }),
+    "egrep": frozenset({"-i", "-v", "-n", "-r", "-l", "-c", "-w", "-x", "-q",
+                        "-o", "-H", "-h"}),
+}
+
 #: Options through which a pattern verb takes its pattern. With one of these
 #: present the pattern is no longer the first positional, so the file is
 #: (`grep -e KEY .env`), and the usual one-token skip must not apply.
@@ -202,8 +260,44 @@ def _tokens(command: str) -> list[str] | None:
         return None
 
 
+#: `--`: everything after it is positional, however it is spelled.
+END_OF_OPTIONS = "--"
+
+
+def _attached_short_value(token: str, value_options: dict[str, int]) -> bool:
+    """Whether `token` is a short option carrying its value attached.
+
+    `head -n5 config/.env` writes the `5` into the option itself, so the
+    option takes nothing from the tokens after it and the file that follows
+    stays trustworthy. Long options do this with `=`, which is handled where
+    the token is split.
+    """
+    return (len(token) > 2 and token[0] == "-" and token[1] != "-"
+            and token[:2] in value_options)
+
+
+@dataclass(frozen=True)
+class _Positional:
+    """One positional token, and whether it can be trusted as one.
+
+    `trusted` is False for a token that arrived straight after an option
+    `VALUE_OPTIONS` does not know. Such a token is either a real positional
+    (the option took no value) or that option's value (it did) — and nothing
+    in the command line says which. `_looks_like_a_path` cannot separate them
+    either: a secret carrying `/` or `.` passes it, which is how
+    `tail --format wJalrXUtnFEMI/K7MDENG/... /var/log/app.log` put an AWS key
+    in `events.source`. The table can never list every option of every
+    program, so the doubt has to be carried rather than resolved.
+    """
+
+    value: str
+    trusted: bool
+
+
 def _split_arguments(tokens: list[str],
-                     value_options: dict[str, int]) -> tuple[list[str], set[str]]:
+                     value_options: dict[str, int],
+                     boolean_options: frozenset[str] = frozenset(),
+                     ) -> tuple[list[_Positional], set[str]]:
     """`(positional tokens, option names seen)`.
 
     A token is positional only if it is neither an option nor an option's
@@ -211,20 +305,40 @@ def _split_arguments(tokens: list[str],
     what let `grep -A 3 <secret> .env` return the secret: `3` took the
     pattern's place and the secret took the file's.
     """
-    positionals: list[str] = []
+    positionals: list[_Positional] = []
     options: set[str] = set()
     pending = 0
+    after_unknown_option = False
+    end_of_options = False
     for token in tokens:
         if pending:
             pending -= 1
             continue
-        if token.startswith("-"):
+        if not end_of_options and token == END_OF_OPTIONS:
+            end_of_options = True
+            after_unknown_option = False
+            continue
+        if token.startswith("-") and not end_of_options:
             name, separator, _ = token.partition("=")
             options.add(name)
-            if not separator:  # `--opt=value` carries its value already
-                pending = value_options.get(name, 0)
+            if separator:  # `--opt=value` carries its value already
+                after_unknown_option = False
+            elif name in value_options:
+                # A known value option consumes its own value, so whatever
+                # follows that value is a real positional.
+                pending = value_options[name]
+                after_unknown_option = False
+            elif name in boolean_options or _attached_short_value(
+                    name, value_options):
+                # Known to take nothing (`tail -f`), or a short option
+                # carrying its value attached (`head -n5`): either way the
+                # next token is the command's own, not this option's.
+                after_unknown_option = False
+            else:
+                after_unknown_option = True
             continue
-        positionals.append(token)
+        positionals.append(_Positional(token, trusted=not after_unknown_option))
+        after_unknown_option = False
     return positionals, options
 
 
@@ -288,8 +402,9 @@ def extract_origin(tool_name: str, tool_input: dict) -> Origin | None:
         return None
 
     program = tokens[0].rsplit("/", 1)[-1]
-    positionals, options = _split_arguments(tokens[1:],
-                                            VALUE_OPTIONS.get(program, {}))
+    positionals, options = _split_arguments(
+        tokens[1:], VALUE_OPTIONS.get(program, {}),
+        BOOLEAN_OPTIONS.get(program, frozenset()))
 
     if program in READ_VERBS:
         # `grep PATTERN FILE`: the pattern holds the first positional, so
@@ -297,12 +412,14 @@ def extract_origin(tool_name: str, tool_input: dict) -> Origin | None:
         # `-e`/`-f`, in which case the file is the first after all.
         skip = int(program in PATTERN_THEN_PATH_VERBS
                    and not (options & PATTERN_OPTIONS))
-        if len(positionals) > skip and _looks_like_a_path(positionals[skip]):
-            return Origin(value=positionals[skip], kind=OriginKind.PATH)
+        if len(positionals) > skip:
+            candidate = positionals[skip]
+            if candidate.trusted and _looks_like_a_path(candidate.value):
+                return Origin(value=candidate.value, kind=OriginKind.PATH)
 
     if program in SUBCOMMAND_PROGRAMS and positionals:
-        if _SUBCOMMAND.match(positionals[0]):
-            return Origin(value=f"{program} {positionals[0]}",
+        if positionals[0].trusted and _SUBCOMMAND.match(positionals[0].value):
+            return Origin(value=f"{program} {positionals[0].value}",
                           kind=OriginKind.COMMAND)
 
     return Origin(value=program, kind=OriginKind.COMMAND)
