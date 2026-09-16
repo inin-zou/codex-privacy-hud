@@ -366,8 +366,17 @@ def _decision_to_output(decision) -> dict:
         # instead, same as a `deny`, using the message engine.py already
         # crafted for exactly this case.
         return _deny(decision.system_message or decision.reason)
-    # "allow" (and ingress observations, which Ruling 3 never denies):
-    # no hook-specific output needed, Codex proceeds normally.
+    # "allow" (and ingress observations, which Ruling 3 never denies): no
+    # permission decision needed, Codex proceeds normally either way. But
+    # #36's once-per-session read-guard notice rides on exactly this branch
+    # (a local read is never denied unless the guard is on), and an allow
+    # with a message must still surface it -- same bare `{"systemMessage":
+    # ...}` shape `_handle_session_end` already uses, not the
+    # `hookSpecificOutput` wrapper `_allow_with_rewrite` needs for its
+    # `updatedInput`. An allow with no message keeps returning `{}` exactly
+    # as before.
+    if decision.system_message:
+        return {"systemMessage": decision.system_message}
     return _allow()
 
 

@@ -120,10 +120,20 @@ def _is_deny(reply):
 
 
 def _read_secret_through_bash(state):
-    """A real `cat .env` turn: PreToolUse (local, no observation), then the
+    """A real `cat .env` turn: PreToolUse (local -- #36's guard is off by
+    default, so the read is allowed, and it is also this session's first
+    sensitive read, so the reply carries the once-per-session read-guard
+    notice), a second local read of the same sensitive path that stays
+    silent (the notice already fired for this session), then the
     PostToolUse whose output carries a credential."""
-    assert _hook(state, "PreToolUse", tool_name="Bash",
-                 tool_input={"command": "cat .env"}) == {}
+    first = _hook(state, "PreToolUse", tool_name="Bash",
+                  tool_input={"command": "cat .env"})
+    assert "$privacy read on" in first.get("systemMessage", "")
+
+    second = _hook(state, "PreToolUse", tool_name="Bash",
+                   tool_input={"command": "cat .env"})
+    assert second == {}
+
     _hook(state, "PostToolUse", tool_name="Bash",
           tool_input={"command": "cat .env"},
           tool_response=f"OPENAI_API_KEY={SECRET}\n")
