@@ -8,7 +8,13 @@ was extracted from .claude/docs/plans/2026-09-03-implementation.md — see
 task-8-report.md for the full account):
 
   Ruling 1 — a `local` destination always classifies as `local_access`,
-             never `exposed`, regardless of the caller-supplied `direction`.
+             never `exposed`, regardless of the caller-supplied `direction`
+             -- with one exception (#36): a local read the engine DENIES
+             classifies as `prevented`, through the existing
+             `"PreToolUse/blocked"` taxonomy entry, not `local_access`.
+             Without that exception a blocked read and an ordinary one
+             would write the same ledger row, and the audit could never
+             show that anything was stopped.
   Ruling 2 — destinations are normalized to the bare kinds
              `[destination_boundary]` in tables.toml understands
              (local/model_context/subagent/mcp_tool/external_net) before any

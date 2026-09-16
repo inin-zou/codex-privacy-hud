@@ -182,3 +182,28 @@ def test_a_payload_with_no_origin_keeps_the_tool_name(state):
     row = state.ledger.conn.execute(
         "SELECT source, source_kind FROM events").fetchone()
     assert (row["source"], row["source_kind"]) == ("WebFetch", None)
+
+
+def test_a_local_read_of_a_path_reaches_the_ledger(state):
+    """Before #36 a local PreToolUse returned early and was never scored.
+    The read itself is now an observation, so that the engine can decide
+    about it -- with the guard off it is simply allowed and recorded."""
+    _hook(state, "SessionStart")
+    assert _hook(state, "PreToolUse", tool_name="Bash",
+                 tool_input={"command": "cat .env"}) == {}
+    row = state.ledger.conn.execute(
+        "SELECT kind, source, source_kind FROM events").fetchone()
+    assert row is not None, "a local read now produces a row"
+    assert (row["kind"], row["source"], row["source_kind"]) == \
+        ("local_access", ".env", "path")
+
+
+@pytest.mark.parametrize("command", ["env", "python -c \"open('.env')\""])
+def test_a_local_command_with_no_path_still_returns_early(state, command):
+    """A COMMAND origin or none at all must not build an Observation: there
+    is nothing to decide, and `Engine.observe` would raise UnknownKey."""
+    _hook(state, "SessionStart")
+    assert _hook(state, "PreToolUse", tool_name="Bash",
+                 tool_input={"command": command}) == {}
+    assert state.ledger.conn.execute(
+        "SELECT count(*) FROM events").fetchone()[0] == 0

@@ -121,7 +121,7 @@ from .hud_snapshot import HudPublisher
 from .ledger import Ledger
 from .mask import new_salt
 from .matrix.loader import Matrix, load_matrix
-from .origin import extract_origin
+from .origin import OriginKind, extract_origin
 from .render import receipt as render_receipt
 from .runtime import latch_path
 
@@ -446,17 +446,23 @@ def _build_observation(event: str, session_id: str, payload: dict) -> Observatio
             dests = extract_destinations(command)
             destination = dests[0] if dests else "external_net"
             if destination == "local":
-                # No boundary is crossed. tables.toml's taxonomy has no
-                # "PreToolUse/local" entry and policy_defaults has no
-                # "local" entry either — by design, not omission: Ruling 1
-                # (local always classifies as local_access) was written
-                # against PostToolUse local reads (tables.toml only ever
-                # defines "PostToolUse/local"), and Engine.observe would
-                # raise UnknownKey (I2: never silently caught) if we built
-                # an Observation here anyway. A local Bash command has
-                # nothing for the engine to score — allow without an
-                # Engine.observe call, same as SessionStart/SessionEnd.
-                return None
+                # #36: a local read is no longer nothing to score. When the
+                # origin names a file, the engine decides whether reading it
+                # is allowed -- the one interception point that acts BEFORE
+                # the bytes exist, rather than recording them after.
+                #
+                # Everything else local still returns early: a COMMAND
+                # origin or none at all leaves nothing to decide, and
+                # `Engine.observe` would raise UnknownKey for a row the
+                # taxonomy does not define (I2: never silently caught).
+                origin = extract_origin(tool_name, tool_input)
+                if origin is None or origin.kind is not OriginKind.PATH:
+                    return None
+                return Observation(
+                    session_id=session_id, turn_id=turn_id, hook_event=event,
+                    direction="local", source=origin.value,
+                    destination="local", text=command, tool_name=tool_name,
+                    tool_input=tool_input, origin=origin)
             text = command
         # `codex.is_mcp_tool` is the same predicate `hooks/handler.py`
         # applies client-side (`.startswith("mcp")`, not `"mcp__"`), so the
