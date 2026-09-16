@@ -623,8 +623,14 @@ class Engine:
         # (a no-op unless obs.origin is set — PostToolUse ingress only), then
         # check whether an egress carries a value from a blocked origin
         # before any other policy. Per-value, not per-session: a deny here
-        # always has a finding behind it (I3/I4's "prevented" row), and a
-        # finding with no taint entry allows rather than denies (I6).
+        # always produces a finding (I3/I4's "prevented" classification), and
+        # a finding with no taint entry allows rather than denies (I6). That
+        # is not a promise that the ledger always gains a row explaining the
+        # deny -- `Ledger.record`'s dedupe on (session_id, value_hash,
+        # destination) only increments `count` on a repeat key, so a deny
+        # whose value already has a row under a different `kind` (e.g. an
+        # earlier, unguarded `local_access` read) leaves that row as it was.
+        # See known-limits.md #17.
         self._remember_origins(obs, findings)
 
         # Task 8 policy-fix: a user-written `mask` rule outranks the

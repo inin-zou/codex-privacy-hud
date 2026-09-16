@@ -79,6 +79,26 @@ For a source rule there is also no way around it in the moment: an "allow once" 
 
 What limits every rule is the session. `Ledger.add_policy` scopes it to `session:<id>`, so it applies until that session ends and not after — a new Codex conversation starts with none of them. That is the only escape, and it is the same one the red band already points at for context: what the old session sent stays sent.
 
+## 14. Only reads it can recognise are stopped.
+
+`cat .env` is; `python -c "open('.env')"` is not. This is limit 6's root cause seen from the other side — the engine reads the text of a tool call, not what the call will do. And within what it can read: the pattern behind `.env` requires a start of string or a separator (whitespace, `/`, `=`, a quote) just before it, so `prod.env` is not matched — the guard covers the paths those patterns name, not every file that looks like an env file.
+
+## 15. A template file is never blocked.
+
+`.env.example` is committed to be read, and blocking it stops ordinary work while the user's only escape is turning the guard off — so the guard carves it out, even one that really holds a key. Detection still flags it, so such a file still shows up in the audit.
+
+## 16. Nothing is blocked until you turn it on.
+
+The default records the read and mentions the guard once per session; it stops nothing. `$privacy read status` says which state you are in.
+
+## 17. A blocked read can leave no trace in the audit, in one sequence.
+
+The ledger dedupes on `(session_id, value_hash, destination)` (`ledger.py`'s `record`): if a row for that exact key already exists, the write only increments its `count` — the `kind` of the existing row does not change. So if the same path was already read with the guard off (recorded as `local_access`), turning the guard on and reading it again denies the call, but the ledger still shows only that one `local_access` row with its count incremented — no `prevented` row appears. Enforcement holds; the evidence does not. This is pre-existing on the egress side too: an allowed egress followed by a denied one for the same value and destination dedupes the same way. It matters here because the feature's own discovery path — read, see the notice, turn the guard on, read again — walks straight into it.
+
+## 18. A blocked read's row does not name the file.
+
+The finding behind a blocked read is the tier-0 pattern that matched the command text (`.pem`, `.env`, `id_rsa`, …), not the path itself, so its `value_hash` is a hash of that pattern text. `cat deploy/key1.pem` and `cat deploy/key2.pem` both record `.pem` at the same `destination` and dedupe into one row. You can see that something was blocked; you cannot see which file.
+
 ## Note on tests
 
 `cargo test -p codex-tui` and the upstream `insta` picker snapshots have not been run anywhere.

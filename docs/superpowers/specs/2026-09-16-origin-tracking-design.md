@@ -30,7 +30,7 @@ curl -d key=sk-proj-… PreToolUse    finding sk-proj-…  ->  hash 7f3a9c…
 
 ### Decisions taken, and why
 
-**Enforcement is per value, not per session.** A rule denies an outbound call that carries a value tainted from that origin; it does not deny every outbound call after the origin was read. Two reasons. Enforcement and accounting are then the same event: a deny always has a finding, so the ledger always has a row explaining it — the session-wide variant is exactly #38's kill switch, which denied calls with no findings and left the audit unable to say why. And design.md P1: a privacy tool that interrupts constantly gets disabled within a day.
+**Enforcement is per value, not per session.** A rule denies an outbound call that carries a value tainted from that origin; it does not deny every outbound call after the origin was read. Two reasons. Enforcement and accounting are then the same event: a deny always produces a finding, which is what the session-wide variant #38's kill switch lacked — that denied calls with no findings and left the audit unable to say why. This is not the same as saying the ledger always ends up with a row that explains a given deny: `Ledger.record` dedupes on `(session_id, value_hash, destination)` and only increments `count` on a repeat key, so a deny whose value already has a row from an earlier, differently-classified call (e.g. an earlier `local_access` read of the same value) leaves that row's `kind` unchanged — the deny happened, but the ledger shows no new row saying so (known limit 17). And design.md P1: a privacy tool that interrupts constantly gets disabled within a day.
 
 The cost is stated in the copy rather than hidden: only byte-identical values match.
 
