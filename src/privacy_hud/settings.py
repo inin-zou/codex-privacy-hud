@@ -74,7 +74,13 @@ class Settings:
 
     @property
     def deny_read(self) -> bool:
-        return bool(self._load().get("deny_read", DEFAULTS["deny_read"]))
+        # `is True`, not `bool(...)`. This file is what the docs name as the
+        # toggle's home, so a user does hand-edit it -- and `bool("false")`
+        # and `bool("off")` are both True, which would turn blocking ON for
+        # someone writing either to turn it off. Only the JSON literal
+        # `true` counts; a string, a number, a typo reads as off, which is
+        # the direction I6 requires this feature to fail in.
+        return self._load().get("deny_read", DEFAULTS["deny_read"]) is True
 
     def set_deny_read(self, enabled: bool) -> None:
         """Write the flag, keeping every other key the file holds."""

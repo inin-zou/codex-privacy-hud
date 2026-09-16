@@ -1,6 +1,8 @@
 import json
 import os
 
+import pytest
+
 from privacy_hud.settings import Settings
 
 
@@ -75,3 +77,14 @@ def test_writing_does_not_lose_an_unrelated_key(tmp_path):
     Settings(tmp_path).set_deny_read(True)
     data = json.loads((tmp_path / "settings.json").read_text())
     assert data == {"kept": 1, "deny_read": True}
+
+
+@pytest.mark.parametrize("written", ["false", "off", "no", "true", "on", 1, 0])
+def test_only_a_real_true_turns_blocking_on(tmp_path, written):
+    """I6 again, from the other side: a hand-edited `settings.json` is the
+    file the docs name as the toggle's home, so a user writing
+    `{"deny_read": "false"}` to turn blocking OFF must not turn it on.
+    `bool("false")` is True, so anything that is not the JSON literal
+    `true` — a string, a number, a typo — reads as off."""
+    (tmp_path / "settings.json").write_text(json.dumps({"deny_read": written}))
+    assert Settings(tmp_path).deny_read is False
