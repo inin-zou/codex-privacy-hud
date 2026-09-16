@@ -172,9 +172,13 @@ def test_a_command_with_no_readable_path_records_its_program_name(state):
 
 
 def test_a_payload_with_no_origin_keeps_the_tool_name(state):
+    # The finding has to come from a CHEAP tier: this fixture builds the real
+    # detector stack, and CI installs no `transformers`, so tier 3 finds
+    # nothing there. An email (tier 3 only) made this pass locally and fail on
+    # every CI Python -- the row it asserts on was never written.
     _hook(state, "SessionStart")
     _hook(state, "PostToolUse", tool_name="WebFetch",
-          tool_response="jordan@acme.com")
+          tool_response="OPENAI_API_KEY=sk-proj-Ab3xY9zQw1Er5Ty7Ui0OpAs2Df4Gh6Jk8Lm")
     row = state.ledger.conn.execute(
         "SELECT source, source_kind FROM events").fetchone()
     assert (row["source"], row["source_kind"]) == ("WebFetch", None)
