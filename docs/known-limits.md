@@ -57,6 +57,18 @@ The ambient line (limit 5) resolves the same way, so the pane beside your window
 
 Ever.
 
+## 10. A source rule matches only byte-identical values.
+
+A model that summarizes, rewrites, or quotes part of what it read defeats it, and that is a likely path rather than an exotic one. The rule's promise is "this value does not leave unchanged", not "nothing about this file leaves".
+
+## 11. Origin extraction is best-effort.
+
+`cat .env` is recognised; `python -c "open('.env')"` is not. A row with no origin offers no rule, rather than offering one that would not work.
+
+## 12. The taint map dies with the daemon.
+
+A daemon replaced mid-session loses it, and source rules stop matching with no error. The ledger marks such a session `⚠unverified` (limit 2 already detects a replaced daemon), but that marker means "this session's record has a hole", not "your rules stopped applying" — state both, separately.
+
 ## Note on tests
 
 `cargo test -p codex-tui` and the upstream `insta` picker snapshots have not been run anywhere.

@@ -166,7 +166,7 @@ API credential ×1     .env             none             [PREVENTED]
 
 标签页：`Exposed`（已暴露）· `Prevented`（已阻止）· `All events`（全部事件）。
 
-**Level 3：暴露详情。** 查看单条数据流、脱敏后的证据，以及一项面向后续披露的措施：`Protect future occurrences`（在后续出站调用中对该类数据脱敏）。此操作不具备撤销已披露数据的功能：已经披露的数据无法收回。
+**Level 3：暴露详情。** 查看单条数据流、脱敏后的证据，以及面向后续披露的补救措施（`Protect future occurrences`；对于标明真实来源的行，还可使用 `Block values read from <file>`）。这些措施无法撤销披露——已经披露的数据无法收回，且来源规则仅匹配未经改动就向外发送的值。
 
 ## 工作原理
 

@@ -203,7 +203,7 @@ API credential ×1     .env             none             [PREVENTED]
 
 Tabs: `Exposed` · `Prevented` · `All events`.
 
-**Level 3 — Exposure detail.** One flow, its masked evidence, and one forward-looking remedy (`Protect future occurrences`, which masks that data type on later outbound calls). Never an undo — already disclosed data cannot be recalled.
+**Level 3 — Exposure detail.** One flow, its masked evidence, and forward-looking remedies (`Protect future occurrences`; on a row that names a real origin, `Block values read from <file>`). Never an undo — already disclosed data cannot be recalled, and a source rule only matches values that leave unchanged.
 
 ## How it works
 
