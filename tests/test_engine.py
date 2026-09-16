@@ -535,6 +535,26 @@ def test_an_untainted_value_is_not_denied_after_a_daemon_restart(eng):
     assert d.action == "allow"
 
 
+def test_a_blocked_origin_does_not_deny_a_different_untainted_finding(eng):
+    """Enforcement is per value, not per session (#38's exact shape): a
+    non-empty taint map plus a rule in force must not deny an egress whose
+    findings are real but come from a different, untainted value.
+
+    Distinct from test_a_blocked_path_does_not_deny_an_unrelated_egress
+    (whose egress has ZERO findings) and from
+    test_an_untainted_value_is_not_denied_after_a_daemon_restart (whose
+    taint map is EMPTY): here the map is non-empty (.env holds
+    CREDENTIAL_TEXT), a block_path rule is in force, and the egress text
+    genuinely has a finding (StubModelDetector fires on the email at
+    `subagent`) -- just not one whose value_hash is in the taint map."""
+    _read_from(eng, DOTENV)
+    eng.ledger.add_policy("s1", rule_type="block_path", selector=".env")
+    d = eng.observe(_obs(hook_event="PreToolUse", direction="egress",
+                         source="tool input", destination="subagent",
+                         text="contact jordan@acme.com", tool_name="Task"))
+    assert d.action == "allow"
+
+
 def test_a_denied_call_records_a_prevented_row_worth_zero(eng):
     _read_from(eng, DOTENV)
     eng.ledger.add_policy("s1", rule_type="block_path", selector=".env")
