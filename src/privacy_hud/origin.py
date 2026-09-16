@@ -29,6 +29,7 @@ answers one question and holds no state.
 """
 from __future__ import annotations
 
+import os
 import re
 import shlex
 from dataclasses import dataclass
@@ -264,6 +265,33 @@ def _tokens(command: str) -> list[str] | None:
 END_OF_OPTIONS = "--"
 
 
+def _collapse_home(path: str) -> str:
+    """`/Users/jordan/project/.env` -> `~/project/.env`.
+
+    `runtime.display_path`'s reason, applied one layer deeper: an origin is
+    persisted in `events.source`, served by the local UI API and printed in
+    the audit and on a rule button, so the account name must not ride into
+    the ledger on a path. A masked path exemplar already reads
+    `/Users/•••/app.log`; an origin that kept the name verbatim would be the
+    one place it survived.
+
+    Only YOUR home collapses. `/Users/alice/Downloads/patient-intake.csv`
+    stays as it is -- known limit 7 calls that exact row one you want, and
+    this module does not decide what is sensitive, only what the origin is.
+
+    `runtime.display_path` is not reused because this module is a stdlib-only
+    leaf (`budget.py`'s rule) and `runtime` is not: importing it here to save
+    four lines would drag the whole runtime into the detection path.
+    """
+    home = os.environ.get("HOME") or ""
+    if not home or not path.startswith(home):
+        return path
+    rest = path[len(home):]
+    if rest and not rest.startswith("/"):
+        return path  # `/Users/jordanish/...` merely shares a prefix
+    return "~" + rest
+
+
 def _attached_short_value(token: str, value_options: dict[str, int]) -> bool:
     """Whether `token` is a short option carrying its value attached.
 
@@ -388,7 +416,7 @@ def extract_origin(tool_name: str, tool_input: dict) -> Origin | None:
     for key in PATH_KEYS:
         value = tool_input.get(key)
         if isinstance(value, str) and value:
-            return Origin(value=value, kind=OriginKind.PATH)
+            return Origin(value=_collapse_home(value), kind=OriginKind.PATH)
 
     if tool_name != "Bash":
         return None
@@ -415,7 +443,8 @@ def extract_origin(tool_name: str, tool_input: dict) -> Origin | None:
         if len(positionals) > skip:
             candidate = positionals[skip]
             if candidate.trusted and _looks_like_a_path(candidate.value):
-                return Origin(value=candidate.value, kind=OriginKind.PATH)
+                return Origin(value=_collapse_home(candidate.value),
+                              kind=OriginKind.PATH)
 
     if program in SUBCOMMAND_PROGRAMS and positionals:
         if positionals[0].trusted and _SUBCOMMAND.match(positionals[0].value):

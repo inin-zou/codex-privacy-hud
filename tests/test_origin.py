@@ -201,3 +201,35 @@ def test_end_of_options_restores_positional_reading():
     assert _bash("cat -- .env") == Origin(".env", OriginKind.PATH)
     assert _bash("cat -- -weird-name.log") == \
         Origin("-weird-name.log", OriginKind.PATH)
+
+
+# --- the account name never reaches the ledger ---------------------------
+
+def test_a_path_under_your_home_is_collapsed(monkeypatch):
+    """`events.source` is persisted, served by the local API and rendered in
+    the audit, so the account name must not ride into it on a path.
+
+    The project already holds this line twice — `runtime.display_path`
+    collapses `$HOME` "to keep the account name out of a report", and a
+    masked path exemplar reads `/Users/•••/app.log` — so an origin that kept
+    `/Users/jordan/...` verbatim would be the one place it leaked.
+    """
+    monkeypatch.setenv("HOME", "/Users/jordan")
+    assert extract_origin("Read", {"file_path": "/Users/jordan/.ssh/id_rsa"}) == \
+        Origin("~/.ssh/id_rsa", OriginKind.PATH)
+    assert _bash("cat /Users/jordan/project/.env") == \
+        Origin("~/project/.env", OriginKind.PATH)
+
+
+def test_another_persons_home_is_left_alone(monkeypatch):
+    """Only YOUR home collapses. `/Users/someone-else/...` is exactly the row
+    known limit 7 says you want to see, so it stays readable."""
+    monkeypatch.setenv("HOME", "/Users/jordan")
+    assert _bash("cat /Users/alice/Downloads/patient-intake-2026.csv") == \
+        Origin("/Users/alice/Downloads/patient-intake-2026.csv", OriginKind.PATH)
+
+
+def test_a_path_outside_home_is_unchanged(monkeypatch):
+    monkeypatch.setenv("HOME", "/Users/jordan")
+    assert _bash("head -n 5 /etc/passwd") == \
+        Origin("/etc/passwd", OriginKind.PATH)

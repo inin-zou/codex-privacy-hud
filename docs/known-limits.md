@@ -63,7 +63,7 @@ A model that summarizes, rewrites, or quotes part of what it read defeats it, an
 
 ## 11. Origin extraction is best-effort.
 
-`cat .env` is recognised; `python -c "open('.env')"` is not. A row with no origin offers no rule, rather than offering one that would not work.
+`cat .env` is recognised; `python -c "open('.env')"` is not. A path under your own home directory is recorded as `~/…`: the account name is kept out of the ledger, the same way `runtime.display_path` keeps it out of a report and a masked exemplar reads `/Users/•••/app.log`. Another account's home is left as it is — that is a row you want to be able to read. A row with no origin offers no rule, rather than offering one that would not work.
 
 Within the commands it does read, it errs the same way: a candidate that is not shaped like a path (`cat Makefile`, or a file named by an option the extractor does not know) is recorded as the command, not as a file. The cost of guessing wrong runs the other way — `events.source` is persisted, served and rendered, so an option value taken for a filename would put an argument, possibly a credential, into the ledger (I1).
 
