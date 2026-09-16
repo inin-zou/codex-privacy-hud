@@ -502,6 +502,28 @@ def check_plugin_data() -> Check:
     return check
 
 
+def check_read_guard() -> Check:
+    """The read guard toggle (`#36`): on or off, read from
+    `$PLUGIN_DATA/settings.json` via `settings.Settings`.
+
+    `OK` either way -- off is the default and a legitimate choice, not a
+    fault, so this check exists only to make an otherwise invisible file
+    answerable (see `settings.py`'s module docstring), the same reason
+    `$privacy read status` exists. No `FAIL`/`WARN` branch here needs a
+    fix: `Settings` already fails open (I6) on a missing, corrupt, or
+    unreadable file, so there is nothing this check could catch that
+    would call for one.
+    """
+    from .settings import Settings
+    ledger = _ledger_path()
+    if ledger is None:
+        return _plugin_data_unset_check("Read guard")
+    data_dir = ledger.parent
+    if Settings(data_dir).deny_read:
+        return Check("Read guard", OK, "on — sensitive-path reads denied")
+    return Check("Read guard", OK, "off (default) — reads are not blocked")
+
+
 def check_ledger() -> Check:
     """Ledger presence, readability, session count, most recent session age.
 
@@ -1604,6 +1626,7 @@ def run_checks(*, load_model: bool = False,
     checks = [
         ("Python", check_python),
         ("PLUGIN_DATA", check_plugin_data),
+        ("Read guard", check_read_guard),
         ("Ledger", check_ledger),
         ("Runtime pin", lambda: check_runtime_pin(probe_timeout)),
         ("Daemon", lambda: check_daemon(timeout)),

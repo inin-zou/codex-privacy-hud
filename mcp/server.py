@@ -2,10 +2,12 @@
 # mcp/server.py
 """Thin stdio MCP wrapper around `privacy_hud.mcp_tools` (Task 13).
 
-Exposes six tools: five of those architecture.md §9 names --
+Exposes eight tools: five of those architecture.md §9 names --
 `privacy.get_session_summary`, `privacy.list_exposures`,
 `privacy.get_exposure_detail`, `privacy.update_policy`, `privacy.allow_once` --
-plus `privacy.hud_toggle`, added later for the status-line item. §9's sixth,
+plus `privacy.hud_toggle`, added later for the status-line item, and
+`privacy.read_guard_status` / `privacy.read_guard_set`, added later still for
+the read-guard toggle (#36 Task 2). §9's sixth,
 `privacy.start_clean_session`, was removed (#23): it opened a ledger row under
 an id Codex never sends, so nothing was ever recorded against it. Each is a direct call into the corresponding
 function in `src/privacy_hud/mcp_tools.py`. All the
@@ -87,7 +89,7 @@ def _open_ledger() -> Ledger:
 
 
 def build_app():
-    """Construct the FastMCP app and register the six `privacy.*` tools.
+    """Construct the FastMCP app and register the eight `privacy.*` tools.
     Imports `mcp` here (not at module scope) -- see this file's docstring."""
     try:
         from mcp.server.fastmcp import FastMCP
@@ -163,6 +165,21 @@ def build_app():
     def hud_toggle(session_id: str, hidden: bool) -> dict:
         """Hide or show this session's line in the Codex status bar."""
         return mcp_tools.hud_set_hidden(_ledger_path().parent, session_id, hidden)
+
+    @app.tool(name="privacy.read_guard_status")
+    def read_guard_status() -> dict:
+        """Whether reads of known-sensitive paths are currently blocked
+        (`#36`). The toggle lives in `$PLUGIN_DATA/settings.json`, not
+        Codex's own config, so this is how a caller finds out what it
+        says."""
+        return mcp_tools.read_guard_status(_ledger_path().parent)
+
+    @app.tool(name="privacy.read_guard_set")
+    def read_guard_set(enabled: bool) -> dict:
+        """Turn the read guard on or off. Takes effect for the running
+        daemon immediately -- no restart required (`settings.py`'s
+        mtime cache)."""
+        return mcp_tools.read_guard_set(_ledger_path().parent, enabled)
 
     return app
 

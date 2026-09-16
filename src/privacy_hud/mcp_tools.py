@@ -536,3 +536,25 @@ def hud_set_hidden(data_dir, session_id: str, hidden: bool) -> dict:
     from .hud_snapshot import HudPublisher
     HudPublisher(data_dir).set_hidden(session_id, bool(hidden))
     return hud_status(data_dir, session_id)
+
+
+# -- Read guard toggle (#36, Task 2) -----------------------------------------
+
+def read_guard_status(data_dir) -> dict:
+    """Whether reads of known-sensitive paths are blocked (`#36`).
+
+    `settings.json` is not a file the user can see from Codex, so this and
+    `privacy-hud-doctor` are how they find out what it says.
+    """
+    from .settings import Settings
+    return {"deny_read": Settings(data_dir).deny_read}
+
+
+def read_guard_set(data_dir, enabled: bool) -> dict:
+    """`$privacy read off` / `on`. Writes the toggle in `settings.json`
+    (see `settings.py`) and returns the state that resulted, the same
+    shape `read_guard_status` returns -- so a caller never has to make a
+    second call just to confirm what it set."""
+    from .settings import Settings
+    Settings(data_dir).set_deny_read(enabled)
+    return read_guard_status(data_dir)

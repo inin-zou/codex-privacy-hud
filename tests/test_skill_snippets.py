@@ -37,6 +37,7 @@ MARKERS = {
     "audit": "render.audit(",
     "detail": "render.detail(",
     "hud": "mcp_tools.hud_set_hidden(",
+    "read": "mcp_tools.read_guard_status(",
 }
 
 
@@ -149,3 +150,9 @@ def test_detail_block_prints_one_row(env):
 def test_hud_block_prints_one_state_word(env):
     out = _run(_block("hud"), env, SESSION_ID="s1")
     assert out.strip() in {"shown", "hidden", "stale", "absent"}
+
+
+def test_read_block_prints_on_or_off(env):
+    # No settings.json written yet in this env -- I6's default applies.
+    out = _run(_block("read"), env)
+    assert out.strip() == "off"
