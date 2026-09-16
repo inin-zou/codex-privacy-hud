@@ -92,13 +92,14 @@ Global constraints this module must not violate:
 from __future__ import annotations
 
 import threading
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .detect.base import Cost, Finding, is_available, profile_of
 from .mask import mask, value_hash
 from .matrix.loader import UnknownKey
 from .minimize import consume_token, minimize_tool_input
-from .origin import Origin
+from .origin import Origin, OriginKind
 
 # --- Ruling 4: bound the synchronous deep scan --------------------------
 #
@@ -251,6 +252,17 @@ REWRITE_TEMPLATE = (
     "Run $privacy to review or adjust policy."
 )
 
+# A deny that a user's own origin rule caused reads differently from the
+# built-in credential default, and the copy must let them tell the two
+# apart: this one names the file or command the value came from, which is
+# the fact the user acted on when they wrote the rule.
+ORIGIN_BLOCK_TEMPLATE = (
+    "PRIVACY HUD blocked a tool call\n\n"
+    "  {tool}  would send  {label}\n"
+    "  read from {origin}.\n\n"
+    "  Run $privacy to review or adjust policy."
+)
+
 
 class Engine:
     def __init__(self, *, ledger, matrix, salt: bytes, detectors: list):
@@ -268,6 +280,13 @@ class Engine:
         # is a silent misclassification.
         for d in detectors:
             profile_of(d)
+        #: value_hash -> where that value entered this session from (#40).
+        #: Lives on the Engine because `dispatch` builds one Engine per
+        #: session around that session's salt: once the salt is gone the
+        #: hashes are incomparable, so a map that outlived it would be
+        #: worthless. A daemon replaced mid-session therefore starts empty,
+        #: which allows rather than denies (I6, and known limit 3).
+        self._origins: dict[bytes, Origin] = {}
 
     # -- Ruling 2: destination normalization --------------------------
     def _normalize_destination(self, destination: str) -> str:
@@ -315,6 +334,38 @@ class Engine:
         where that ordering is documented and what `test_engine.py`'s
         "`scan()` never touches the ledger" guards point at."""
         return self.ledger.policy_selectors(session_id, rule_type)
+
+    # -- Task 4 (#40): the taint map, and the deny --------------------------
+    _ORIGIN_RULE_TYPES = {OriginKind.PATH: "block_path",
+                          OriginKind.COMMAND: "block_command"}
+
+    def _remember_origins(self, obs: Observation, findings: Sequence[Finding]) -> None:
+        """Record where each finding's value entered this session from.
+
+        Only when the observation names an origin: a `PreToolUse`'s source
+        is `tool input`, which is a label, not a place.
+        """
+        if obs.origin is None:
+            return
+        for f in findings:
+            self._origins.setdefault(value_hash(self.salt, f.value), obs.origin)
+
+    def _blocked_origin(self, session_id: str, findings: Sequence[Finding]) -> Origin | None:
+        """The origin of the first finding whose source the user has blocked.
+
+        A finding with no entry is *not* evidence of anything: it may have
+        entered before this Engine existed, or through a read the detectors
+        did not flag. It allows (I6 covers engine failure, not absent
+        evidence).
+        """
+        for f in findings:
+            origin = self._origins.get(value_hash(self.salt, f.value))
+            if origin is None:
+                continue
+            rule_type = self._ORIGIN_RULE_TYPES[origin.kind]
+            if origin.value in self._policy_selectors(session_id, rule_type):
+                return origin
+        return None
 
     def _scan(self, obs: Observation, dest_kind: str, boundary: str) -> tuple[list, bool]:
         """Run every cheap detector unconditionally, then the expensive ones
@@ -491,6 +542,15 @@ class Engine:
         has_credential = any(f.data_type == "credential" for f in findings)
 
         action = "allow"
+        blocked_origin = None
+
+        # #40: remember where each of this observation's findings came from
+        # (a no-op unless obs.origin is set — PostToolUse ingress only), then
+        # check whether an egress carries a value from a blocked origin
+        # before any other policy. Per-value, not per-session: a deny here
+        # always has a finding behind it (I3/I4's "prevented" row), and a
+        # finding with no taint entry allows rather than denies (I6).
+        self._remember_origins(obs, findings)
 
         # Task 8 policy-fix: a user-written `mask` rule outranks the
         # built-in default. Egress-only (Ruling 3's own logic extends
@@ -505,10 +565,14 @@ class Engine:
         # fills with fixed labels ("tool input" on every egress call), so it
         # matched nothing or denied every outbound call. `apply_policy` no
         # longer writes one; a row an older ledger still holds decides nothing.
-        if is_egress and findings:
-            mask_selectors = self._policy_selectors(obs.session_id, "mask")
-            if mask_selectors & {f.data_type for f in findings}:
-                action = "rewrite"
+        if is_egress:
+            blocked_origin = self._blocked_origin(obs.session_id, findings)
+            if blocked_origin is not None:
+                action = "deny"
+            elif findings:
+                mask_selectors = self._policy_selectors(obs.session_id, "mask")
+                if mask_selectors & {f.data_type for f in findings}:
+                    action = "rewrite"
 
         if action == "allow" and is_egress and has_credential:
             # Ruling 3: default_action is an egress-only policy. An ingress
@@ -566,9 +630,14 @@ class Engine:
 
         if action in ("deny", "rewrite"):
             label = ", ".join(sorted({f.data_type for f in findings})) or "sensitive data"
-            template = BLOCK_TEMPLATE if action == "deny" else REWRITE_TEMPLATE
-            msg = template.format(tool=obs.tool_name or "tool", label=label,
-                                   source=obs.source, destination=dest_kind)
+            if action == "deny":
+                template = ORIGIN_BLOCK_TEMPLATE if blocked_origin else BLOCK_TEMPLATE
+            else:
+                template = REWRITE_TEMPLATE
+            msg = template.format(
+                tool=obs.tool_name or "tool", label=label,
+                source=obs.source, destination=dest_kind,
+                origin=blocked_origin.value if blocked_origin else "")
             updated_input = None
             if action == "rewrite":
                 # Task 12: every "rewrite" Decision returned by this engine

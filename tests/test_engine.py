@@ -11,6 +11,7 @@ from privacy_hud.detect.secrets import SecretDetector
 from privacy_hud.detect.model import StubModelDetector
 from privacy_hud.engine import Engine, Observation
 from privacy_hud.minimize import mint_token
+from privacy_hud.origin import Origin, OriginKind
 
 M = load_matrix()
 
@@ -465,3 +466,92 @@ def test_scan_result_is_immutable(eng):
     assert isinstance(scan.findings, tuple)
     with pytest.raises(dataclasses.FrozenInstanceError):
         scan.findings = ()
+
+
+# ---------------------------------------------------------------------------
+# Task 4: the taint map, and the deny (#40).
+# ---------------------------------------------------------------------------
+
+DOTENV = Origin(value=".env", kind=OriginKind.PATH)
+
+
+def _read_from(eng, origin, text=CREDENTIAL_TEXT):
+    """An ingress observation that taints `text`'s findings with `origin`."""
+    return eng.observe(_obs(hook_event="PostToolUse", direction="ingress",
+                            source=origin.value, destination="model_context",
+                            text=text, tool_name="Bash", origin=origin))
+
+
+def test_a_blocked_path_denies_a_later_egress_carrying_its_value(eng):
+    _read_from(eng, DOTENV)
+    eng.ledger.add_policy("s1", rule_type="block_path", selector=".env")
+    d = eng.observe(_obs(hook_event="PreToolUse", direction="egress",
+                         source="tool input", destination="mcp_tool",
+                         text=CREDENTIAL_TEXT, tool_name="mcp__slack__post"))
+    assert d.action == "deny"
+    assert "read from .env" in (d.system_message or "")
+
+
+def test_a_blocked_path_does_not_deny_an_unrelated_egress(eng):
+    _read_from(eng, DOTENV)
+    eng.ledger.add_policy("s1", rule_type="block_path", selector=".env")
+    d = eng.observe(_obs(hook_event="PreToolUse", direction="egress",
+                         source="tool input", destination="mcp_tool",
+                         text="the build is green", tool_name="mcp__github__x"))
+    assert d.action == "allow"
+
+
+def test_a_blocked_command_denies_a_value_from_that_command(eng):
+    env_cmd = Origin(value="env", kind=OriginKind.COMMAND)
+    _read_from(eng, env_cmd)
+    eng.ledger.add_policy("s1", rule_type="block_command", selector="env")
+    d = eng.observe(_obs(hook_event="PreToolUse", direction="egress",
+                         source="tool input", destination="mcp_tool",
+                         text=CREDENTIAL_TEXT, tool_name="mcp__slack__post"))
+    assert d.action == "deny"
+
+
+def test_a_path_rule_does_not_match_a_command_of_the_same_name(eng):
+    # A credential bound for an MCP tool is denied by the built-in default
+    # either way, so the assertion is on the wording, not on the action:
+    # a `block_path` rule must not match a COMMAND origin of the same name.
+    _read_from(eng, Origin(value="env", kind=OriginKind.COMMAND))
+    eng.ledger.add_policy("s1", rule_type="block_path", selector="env")
+    d = eng.observe(_obs(hook_event="PreToolUse", direction="egress",
+                         source="tool input", destination="mcp_tool",
+                         text=CREDENTIAL_TEXT, tool_name="mcp__slack__post"))
+    # Denied by the credential default, never by the path rule.
+    assert "read from" not in (d.system_message or "")
+
+
+def test_an_untainted_value_is_not_denied_after_a_daemon_restart(eng):
+    """I6: an absent taint entry is absence of evidence, not engine failure.
+    Denying on absence would block every outbound call after a restart --
+    #38's kill switch by another route."""
+    eng.ledger.add_policy("s1", rule_type="block_path", selector=".env")
+    d = eng.observe(_obs(hook_event="PreToolUse", direction="egress",
+                         source="tool input", destination="subagent",
+                         text="contact jordan@acme.com", tool_name="Task"))
+    assert d.action == "allow"
+
+
+def test_a_denied_call_records_a_prevented_row_worth_zero(eng):
+    _read_from(eng, DOTENV)
+    eng.ledger.add_policy("s1", rule_type="block_path", selector=".env")
+    before = eng.ledger.summary("s1").percent
+    d = eng.observe(_obs(hook_event="PreToolUse", direction="egress",
+                         source="tool input", destination="mcp_tool",
+                         text=CREDENTIAL_TEXT, tool_name="mcp__slack__post"))
+    assert d.action == "deny"
+    assert eng.ledger.summary("s1").percent == before  # I4
+    kinds = [r["kind"] for r in eng.ledger.conn.execute(
+        "SELECT kind FROM events WHERE destination='mcp_tool'")]
+    assert kinds == ["prevented"]
+
+
+def test_an_ingress_observation_is_never_denied_by_an_origin_rule(eng):
+    """Ruling 3: policy is egress-only."""
+    _read_from(eng, DOTENV)
+    eng.ledger.add_policy("s1", rule_type="block_path", selector=".env")
+    d = _read_from(eng, DOTENV)
+    assert d.action == "allow"
