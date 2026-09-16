@@ -458,7 +458,7 @@ def _build_observation(event: str, session_id: str, payload: dict) -> Observatio
         tool_input = payload.get("tool_input")
         if not isinstance(tool_input, dict):
             tool_input = {}
-        if tool_name == "Bash":
+        if tool_name == codex.SHELL_TOOL:
             command = tool_input.get("command", "") or ""
             dests = extract_destinations(command)
             destination = dests[0] if dests else "external_net"
@@ -489,11 +489,22 @@ def _build_observation(event: str, session_id: str, payload: dict) -> Observatio
             destination = "mcp_tool"
             text = json.dumps(tool_input)
         else:
-            # Not pinned by the mapping table (a non-Bash, non-MCP tool,
-            # e.g. a local file Write/Edit): `extract_origin` has no way to
-            # name a path or command for an arbitrary tool_input shape, so
-            # there is no origin to score against — nothing to decide, and
-            # no Engine.observe call to make.
+            # A non-shell, non-MCP tool (`apply_patch`, or one a plugin
+            # added). Not scored, and NOT read-guarded — deliberately.
+            #
+            # `extract_origin` would in fact name a path here if the call
+            # carried one of `origin.PATH_KEYS`: that loop runs for any
+            # tool, ahead of the command parsing. What stops us using it is
+            # that nothing says such a path was *read*. Codex's only native
+            # writer is `codex.PATCH_TOOL`, and a tool that takes a
+            # `file_path` is as likely to write it as to read it — so
+            # denying one under "blocked a read" would be a false block
+            # with false copy, which the spec weighs as the worse error.
+            #
+            # This costs no coverage on Codex today: `codex.SHELL_TOOL` is
+            # how a file gets read, and the guard has that branch. Known
+            # limit 14 states the confinement rather than leaving it to be
+            # discovered from here.
             return None
         return Observation(
             session_id=session_id, turn_id=turn_id, hook_event=event,

@@ -239,7 +239,9 @@ support.log → main agent → GitHub MCP
 
 ### The read guard
 
-Every rule above applies on the way out. One thing can be stopped on the way **in**: a tool call that reads a known-sensitive path — `.env`, `id_rsa`, `deploy/key.pem` — fires `PreToolUse` before it runs, so the call can be denied. The command does not execute, so nothing from that file reaches the model.
+Every rule above applies on the way out. One thing can be stopped on the way **in**: a shell command that reads a known-sensitive path — `.env`, `id_rsa`, `deploy/key.pem` — fires `PreToolUse` before it runs, so the call can be denied. The command does not execute, so nothing from that file reaches the model.
+
+The shell is the whole of it, because that is how Codex reads a file: it has no native file-read tool, so the model runs `cat`. Any other tool is allowed unexamined — limit 14.
 
 It is **off by default**. As installed, a recognised read of such a path is recorded and the guard mentions itself once per session; nothing is blocked. The commands:
 
@@ -251,7 +253,7 @@ $privacy read status    # prints `on` or `off`
 
 The setting is written to `~/.codex/plugins/data/codex-privacy-hud-…/settings.json`, not `config.toml`. A change applies to a running session with no restart. That file is not one you see from inside Codex, so `$privacy read status` and `privacy-hud-doctor` are how you find out what it says.
 
-What it does not cover is limits 14–18 below: it stops the reads it can recognise (`cat .env`, but not `wc -l .env`), never blocks a template file such as `.env.example`, and writes an audit row naming the pattern that matched rather than the file.
+What it does not cover is limits 14–18 below: it acts only on shell commands, and only the reads it can recognise there (`cat .env`, but not `wc -l .env`); it never blocks a template file such as `.env.example`; and it writes an audit row naming the pattern that matched rather than the file.
 
 ### The ledger
 
@@ -308,7 +310,7 @@ Stated up front, because a privacy tool that overclaims is worse than none:
 11. **Origin extraction is best-effort.** `cat .env` is recognised; `python -c "open('.env')"` is not. A row with no origin offers no rule, rather than one that would not work. ([details](docs/known-limits.md#11-origin-extraction-is-best-effort))
 12. **The taint map dies with the daemon.** A daemon replaced mid-session loses it, and source rules stop matching with no error. ([details](docs/known-limits.md#12-the-taint-map-dies-with-the-daemon))
 13. **No policy rule can be removed within the session that wrote it.** True of `Protect future occurrences` since long before source rules existed. A new Codex conversation is the only clean slate. ([details](docs/known-limits.md#13-no-policy-rule-can-be-removed-within-the-session-that-wrote-it))
-14. **Only a command whose read the extractor recognises is stopped.** `cat .env` is. `wc -l .env`, `source .env`, `cp .env /tmp/x`, `strings id_rsa`, `head -5 .env` and `python -c "open('.env')"` are not — no deny, no notice, no row. Limit 11 holds the mechanism. ([details](docs/known-limits.md#14-only-a-command-whose-read-the-extractor-recognises-is-stopped))
+14. **Only a shell command whose read the extractor recognises is stopped.** The guard sees one tool — the shell — because that is how Codex reads a file; any other tool is allowed unexamined. Within the shell, `cat .env` is stopped; `wc -l .env`, `source .env`, `cp .env /tmp/x`, `strings id_rsa`, `head -5 .env` and `python -c "open('.env')"` are not — no deny, no notice, no row. Limit 11 holds the mechanism. ([details](docs/known-limits.md#14-only-a-shell-command-whose-read-the-extractor-recognises-is-stopped))
 15. **A template file is never blocked**, even one that really holds a key. Detection still flags it. ([details](docs/known-limits.md#15-a-template-file-is-never-blocked))
 16. **Nothing is blocked until you turn it on.** The default records the read and mentions the guard once per session; it stops nothing. ([details](docs/known-limits.md#16-nothing-is-blocked-until-you-turn-it-on))
 17. **A blocked read can leave a record that says the opposite, in one sequence.** Read with the guard off, turn it on, read again: the ledger dedupes on `(session_id, value_hash, destination)`, so the deny lands as a `count` increment on the earlier row. What stays is one `local_access` row saying the first file was read twice and nothing was blocked. No `prevented` row is written, so the status item's blocked badge stays `0` through a deny that did happen. ([details](docs/known-limits.md#17-a-blocked-read-can-leave-a-record-that-says-the-opposite-in-one-sequence))

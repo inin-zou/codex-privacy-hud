@@ -211,3 +211,31 @@ def test_a_local_command_with_no_path_still_returns_early(state, command):
                  tool_input={"command": command}) == {}
     assert state.ledger.conn.execute(
         "SELECT count(*) FROM events").fetchone()[0] == 0
+
+
+def test_a_non_shell_tool_carrying_a_path_is_not_read_guarded(state, tmp_path):
+    """Known limit 14's first clause, pinned as a DECISION rather than left
+    to be found. `extract_origin` does resolve a path here -- PATH_KEYS runs
+    for any tool, ahead of the command parsing -- so the guard could act on
+    it. It deliberately does not: nothing says such a path is being *read*,
+    Codex's only native writer is `apply_patch`, and denying a write under
+    "PRIVACY HUD blocked a read" is the false block the spec weighs as worse
+    than a miss.
+
+    This costs no coverage on Codex, which has no native file-read tool (see
+    `codex.SHELL_TOOL`). If that changes, this test is the one that must be
+    argued with -- not quietly deleted."""
+    from privacy_hud import origin, settings
+
+    settings.Settings(tmp_path).set_deny_read(True)
+    _hook(state, "SessionStart")
+
+    tool_input = {"file_path": ".env"}
+    assert origin.extract_origin("SomePluginTool", tool_input) is not None, \
+        "fixture no longer reproduces the case this test is about"
+
+    reply = _hook(state, "PreToolUse", tool_name="SomePluginTool",
+                  tool_input=tool_input)
+    assert reply == {}, "allowed, unexamined -- no deny, no notice"
+    assert state.ledger.conn.execute(
+        "SELECT count(*) FROM events").fetchone()[0] == 0

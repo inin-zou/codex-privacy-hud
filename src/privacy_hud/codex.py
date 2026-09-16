@@ -118,6 +118,45 @@ EGRESS_EVENTS = frozenset({"PreToolUse"})
 #: docstring for the full argument.
 PROBE_EVENT = "PreCompact"
 
+# --------------------------------------------------------------------- #
+# Tool names                                                            #
+# --------------------------------------------------------------------- #
+#
+# Codex does not send the tool name the model called. It maps its internal
+# tool identity through `codex_core::tools::hook_names::HookToolName` to a
+# hook-facing name, which is why the shell tool — internally `exec_command`
+# / `unified_exec` — arrives here as `Bash`. Only the two below are
+# evidenced; the full mapping is not recoverable from a stripped build, so
+# treat this as "the names we have seen", never as "the names that exist".
+#
+# Evidence, so a later reader can re-check rather than re-guess:
+#   * real hook payloads recorded in a ledger — `Bash` and `apply_patch`
+#     are the only non-null `events.tool_name` values written by live
+#     sessions (`Read` appears twice, uncorroborated; see below)
+#   * the patched Codex 0.154.0 binary's symbol table:
+#     `codex_core::tools::handlers::*` is `apply_patch`, `shell_spec`,
+#     `unified_exec`, `view_image`, `plan`, `mcp`, … — with **no
+#     read/view/edit/write file tool of any kind**
+#   * Codex's own trace log (`$CODEX_HOME/logs_2.sqlite`) records
+#     `tool_name` as `exec_command` / `exec` and nothing file-shaped
+
+#: Codex's shell tool as hooks see it. Codex has no native file-read tool:
+#: the model reads a file by shelling out (`cat`, `sed -n`), so a read
+#: reaches us as this name with the command in `tool_input["command"]`.
+#: That is what confines `origin.extract_origin`'s command parsing — and
+#: the #36 read guard built on it — to this one tool.
+SHELL_TOOL = "Bash"
+
+#: Codex's only native writer. Its `tool_input` is a string payload, not a
+#: path key, so `origin.extract_origin` yields no PATH origin for it and
+#: the read guard cannot mistake a patch for a read. If that shape ever
+#: changes, `tests/test_codex_facts.py` is where it must be noticed.
+PATCH_TOOL = "apply_patch"
+
+#: Tool names whose `updatedInput` Codex requires to be a plain string
+#: `command` rather than a dict, per architecture.md §8's "Rewrite path".
+STRING_COMMAND_TOOLS = frozenset({SHELL_TOOL, PATCH_TOOL})
+
 
 def is_mcp_tool(tool_name: str) -> bool:
     """Is `tool_name` one of Codex's MCP tool calls?

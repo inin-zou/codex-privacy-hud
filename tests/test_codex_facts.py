@@ -120,3 +120,32 @@ def test_dispatch_and_doctor_use_the_same_objects():
     assert doctor.PROBE_EVENT is codex.PROBE_EVENT
     assert doctor._codex_home is codex.codex_home
     assert doctor._codex_data_candidates is codex.codex_data_candidates
+
+
+def test_the_tool_name_facts_have_one_definition():
+    """`minimize` and `origin` branch on Codex's tool names; before this
+    they each held their own literal. A fact about Codex belongs here (§2),
+    and a second copy is how `block_source` drifted into never matching."""
+    from privacy_hud import minimize, origin
+
+    assert minimize._STRING_COMMAND_TOOLS is codex.STRING_COMMAND_TOOLS
+    assert codex.SHELL_TOOL in codex.STRING_COMMAND_TOOLS
+    assert codex.PATCH_TOOL in codex.STRING_COMMAND_TOOLS
+    # `origin` reads a command only out of the shell tool; anything else
+    # falls to PATH_KEYS or to no origin at all.
+    assert origin.extract_origin(codex.SHELL_TOOL, {"command": "cat .env"}) \
+        is not None
+    assert origin.extract_origin("NotAShell", {"command": "cat .env"}) is None
+
+
+def test_the_patch_tool_yields_no_path_origin():
+    """Codex's only native writer takes a string payload, not a path key --
+    which is the whole reason the read guard cannot mistake a patch for a
+    read. If Codex ever gives `apply_patch` a `file_path`, this fails, and
+    known limit 14's reasoning has to be revisited rather than discovered
+    by a user whose write was refused under "blocked a read"."""
+    from privacy_hud import origin
+
+    assert origin.extract_origin(
+        codex.PATCH_TOOL,
+        {"input": "*** Begin Patch\n*** Update File: .env\n"}) is None

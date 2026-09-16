@@ -79,9 +79,11 @@ For a source rule there is also no way around it in the moment: an "allow once" 
 
 What limits every rule is the session. `Ledger.add_policy` scopes it to `session:<id>`, so it applies until that session ends and not after — a new Codex conversation starts with none of them. That is the only escape, and it is the same one the red band already points at for context: what the old session sent stays sent.
 
-## 14. Only a command whose read the extractor recognises is stopped.
+## 14. Only a shell command whose read the extractor recognises is stopped.
 
-The guard acts on the path `origin.extract_origin` reads out of the command text — limit 11 holds that mechanism and its "never guess" rule. A command it does not resolve to a path is allowed: no deny, no notice, no ledger row. This is limit 6's root cause seen from the other side; the engine reads the text of a tool call, not what the call will do.
+**The guard covers one tool: the shell.** A read reaches the guard only as a `Bash` tool call, because that is how Codex reads a file — it has no native file-read tool, so the model shells out to `cat` or `sed -n`. Any other tool is allowed unexamined, including one a plugin adds that takes a file path and reads it. The plugin does not enumerate the tools Codex can send, and a path in an unknown tool's arguments is as likely to be written as read, so blocking on one would risk refusing a write under a message that says "blocked a read".
+
+Within the shell, the guard acts on the path `origin.extract_origin` reads out of the command text — limit 11 holds that mechanism and its "never guess" rule. A command it does not resolve to a path is allowed: no deny, no notice, no ledger row. This is limit 6's root cause seen from the other side; the engine reads the text of a tool call, not what the call will do.
 
 Ordinary shell forms that are not stopped, in three groups:
 
