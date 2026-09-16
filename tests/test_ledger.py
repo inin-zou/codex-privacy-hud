@@ -492,3 +492,79 @@ def test_policy_tokens_hold_no_arguments(led):
                     "expires_at"}
     banned = {"tool_input", "args", "command", "content", "prompt", "text"}
     assert not cols & banned
+
+
+def test_an_older_ledger_gains_the_source_kind_column(tmp_path):
+    """The schema is applied with CREATE TABLE IF NOT EXISTS, which does not
+    add columns to a database that already exists. Without the migration,
+    every insert against a pre-existing ledger raises OperationalError."""
+    import sqlite3
+
+    from privacy_hud.ledger import Ledger
+    from privacy_hud.matrix.loader import load_matrix
+
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.executescript("""
+        CREATE TABLE sessions (
+          session_id TEXT PRIMARY KEY, started_at INTEGER NOT NULL,
+          ended_at INTEGER, cwd TEXT, model TEXT,
+          budget_score REAL NOT NULL DEFAULT 0,
+          budget_cap REAL NOT NULL DEFAULT 120);
+        CREATE TABLE events (
+          id INTEGER PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions,
+          turn_id TEXT, ts INTEGER NOT NULL, kind TEXT NOT NULL,
+          data_type TEXT NOT NULL, source TEXT NOT NULL,
+          destination TEXT NOT NULL, boundary TEXT NOT NULL,
+          count INTEGER NOT NULL DEFAULT 1, value_hash BLOB,
+          masked_example TEXT, budget_delta REAL NOT NULL DEFAULT 0,
+          protection TEXT, tool_name TEXT,
+          UNIQUE(session_id, value_hash, destination));
+        INSERT INTO sessions(session_id, started_at) VALUES ('s1', 1);
+        INSERT INTO events(session_id, ts, kind, data_type, source,
+                           destination, boundary)
+             VALUES ('s1', 1, 'exposed', 'email', 'Bash', 'model_context', 'B1');
+    """)
+    conn.commit()
+    conn.close()
+
+    led = Ledger(path, load_matrix())
+    columns = {r["name"] for r in led.conn.execute("PRAGMA table_info(events)")}
+    assert "source_kind" in columns
+    # The row written before the migration keeps NULL: nothing knows where
+    # it came from, and a guess would be worse than an absence.
+    assert led.conn.execute(
+        "SELECT source_kind FROM events WHERE id=1").fetchone()[0] is None
+    led.conn.close()
+
+
+def test_migrating_twice_is_a_no_op(tmp_path):
+    from privacy_hud.ledger import Ledger
+    from privacy_hud.matrix.loader import load_matrix
+
+    path = tmp_path / "twice.db"
+    Ledger(path, load_matrix()).conn.close()
+    led = Ledger(path, load_matrix())
+    columns = [r["name"] for r in led.conn.execute("PRAGMA table_info(events)")]
+    assert columns.count("source_kind") == 1
+    led.conn.close()
+
+
+def test_record_stores_the_source_kind(led):
+    led.start_session("s1", cwd="/w", model="m")
+    led.record("s1", turn_id="t1", kind="exposed", data_type="credential",
+               source=".env", destination="model_context",
+               value_hash=b"\x01" * 16, masked_example=None,
+               tool_name="Bash", protection=None, source_kind="path")
+    row = led.conn.execute("SELECT source, source_kind FROM events").fetchone()
+    assert (row["source"], row["source_kind"]) == (".env", "path")
+
+
+def test_record_defaults_source_kind_to_null(led):
+    led.start_session("s1", cwd="/w", model="m")
+    led.record("s1", turn_id="t1", kind="exposed", data_type="email",
+               source="Bash", destination="model_context",
+               value_hash=b"\x02" * 16, masked_example="jo•••@acme.com",
+               tool_name="Bash", protection=None)
+    assert led.conn.execute(
+        "SELECT source_kind FROM events").fetchone()["source_kind"] is None

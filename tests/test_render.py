@@ -26,7 +26,7 @@ GOLDEN = json.loads((Path(__file__).parent / "matrix" / "hud_golden.json").read_
 # field values, same assertions — only the carrier changed.
 ROW = ExposureRow(id=1, turn_id="t1", ts=1757000000, kind="exposed",
                   data_type="email", count=12, source="support.log",
-                  destination="model context", boundary="B1",
+                  source_kind=None, destination="model context", boundary="B1",
                   masked_example="jo•••@acme.com", budget_delta=9.0,
                   protection=None, tool_name="Read")
 SUMMARY = SessionSummary(percent=28, exposed_items=4, destinations=2,

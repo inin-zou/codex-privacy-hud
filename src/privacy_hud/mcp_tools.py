@@ -409,9 +409,9 @@ def get_exposure_detail(ledger, session_id: str, event_id: int) -> ExposureRow:
     accept one type, not two.
     """
     row = ledger.conn.execute(
-        "SELECT id, turn_id, ts, kind, data_type, source, destination,"
-        " boundary, count, masked_example, budget_delta, protection,"
-        " tool_name FROM events WHERE session_id=? AND id=?",
+        "SELECT id, turn_id, ts, kind, data_type, source, source_kind,"
+        " destination, boundary, count, masked_example, budget_delta,"
+        " protection, tool_name FROM events WHERE session_id=? AND id=?",
         (session_id, event_id)).fetchone()
     if row is None:
         raise LookupError(
