@@ -15,6 +15,10 @@ def _bash(command: str):
     ("head -n5 config/.env", "config/.env"),
     ("tail -f /var/log/app.log", "/var/log/app.log"),
     ("grep KEY .env", ".env"),
+    ("egrep ERROR /var/log/app.log", "/var/log/app.log"),
+    ("rg TODO src/main.py", "src/main.py"),
+    ("jq . a.json", "a.json"),
+    ("yq .foo config.yaml", "config.yaml"),
 ])
 def test_a_read_command_yields_the_path_it_reads(command, expected):
     assert _bash(command) == Origin(value=expected, kind=OriginKind.PATH)
