@@ -1,12 +1,16 @@
 import dataclasses
 import json
+import re
 import sqlite3
+from pathlib import Path
 
 import pytest
 from privacy_hud.matrix.loader import load_matrix
-from privacy_hud.ledger import (EventRow, ExposureRow, Ledger, SessionCoverage,
-                                SessionSummary)
+from privacy_hud.ledger import (SCHEMA, EventRow, ExposureRow, Ledger,
+                                SessionCoverage, SessionSummary)
+from privacy_hud.mcp_tools import _POLICY_RULE_TYPES
 
+REPO = Path(__file__).resolve().parents[1]
 M = load_matrix()
 
 
@@ -70,6 +74,21 @@ def test_end_session_nulls_value_hashes(led):
 def test_schema_has_no_raw_content_columns(led):
     cols = {r[1] for r in led.conn.execute("PRAGMA table_info(events)")}
     assert not cols & {"content", "prompt", "raw_value", "snippet", "text"}
+
+
+@pytest.mark.parametrize("source", ["schema", "architecture"])
+def test_the_documented_policy_rule_types_are_the_ones_that_exist(source):
+    """`mcp_tools.apply_policy`'s docstring sends a reader to the SCHEMA
+    comment for the list of rule types it accepts, and architecture.md §5
+    repeats the same table, so neither is decoration. Both listed
+    `mask|block_source|allow_dest`: a type `apply_policy` refuses outright
+    (#38) and neither of the two that ship (#40)."""
+    text = SCHEMA if source == "schema" else (
+        REPO / ".claude" / "docs" / "architecture.md").read_text(encoding="utf-8")
+    documented = re.findall(r"rule_type +TEXT NOT NULL, +-- *(\S+)", text)
+    assert documented, "no documented rule_type list found"
+    for listed in documented:
+        assert set(listed.split("|")) == _POLICY_RULE_TYPES
 
 
 # --------------------------------------------------------------------- #

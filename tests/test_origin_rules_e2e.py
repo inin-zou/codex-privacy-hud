@@ -165,12 +165,47 @@ def test_blocking_the_file_a_secret_came_from_denies_sending_it(state, ui):
         assert _hook(state, "PreToolUse", **CLEAN_EGRESS[call]) == {}
 
 
-def test_the_page_offers_the_action_only_for_a_row_with_an_origin(ui):
+def _app_js(ui: str) -> str:
     with urllib.request.urlopen(f"{ui}/app.js", timeout=10) as resp:
-        script = resp.read().decode("utf-8")
+        return resp.read().decode("utf-8")
+
+
+def test_the_page_offers_the_action_only_for_a_row_with_an_origin(ui):
+    script = _app_js(ui)
     assert "block_path" in script
     assert "source_kind" in script
     assert "block_source" not in script
+
+
+def test_the_page_sends_block_command_for_a_command_origin_row(ui):
+    """The command branch of the page is a separate branch feeding a
+    DIFFERENT rule_type, and it is the one no test reached: a typo in it
+    writes a rule `Engine._blocked_origin` never matches while the user
+    reads a confirmation for protection that is not in force. Pinned on the
+    served asset, not the file on disk, because that is what the browser
+    runs -- and beside the path branch, since swapping the two would
+    satisfy either assertion alone."""
+    script = _app_js(ui)
+    path_branch = 'row.source_kind === "path"'
+    command_branch = 'row.source_kind === "command"'
+    assert path_branch in script and command_branch in script
+    assert script.index(path_branch) < script.index(command_branch)
+
+    path_arm = script[script.index(path_branch):script.index(command_branch)]
+    # The command arm is the rest of that `if`: up to its closing brace.
+    rest = script[script.index(command_branch):]
+    command_arm = rest[:rest.index("\n    }")]
+    assert 'rule_type: "block_path"' in path_arm
+    assert "Block values read from ${row.source}" in path_arm
+    # Same wording as `render.detail()` and the engine's deny message: a
+    # command origin is named as output, never as a file that was read.
+    assert 'rule_type: "block_command"' in command_arm
+    assert "Block values from \\`${row.source}\\` output" in command_arm
+    assert "block_path" not in command_arm
+    # Whichever branch fired, the selector is the row's own `source` --
+    # what `Engine` matched the taint against, not a re-derived string.
+    assert path_arm.count("selector: row.source") == 1
+    assert command_arm.count("selector: row.source") == 1
 
 
 # --------------------------------------------------------------------- #

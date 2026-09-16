@@ -293,10 +293,25 @@ the rc file by hand.
   rule to the session's policy table, and `Engine.observe()` consults that
   table before its own defaults on every subsequent egress observation, so
   a later outbound call carrying that data type is rewritten. It is correct
-  to tell the user the rule is now enforced, not merely recorded. There is
-  no source-level action: `Block this source` is withdrawn (#38) because
-  the ledger does not record which file or input data came from, so no rule
-  can name a source. This still does not apply retroactively: data
-  already disclosed before the rule was written stays disclosed (design.md
-  P4) — the rule only changes what happens on the *next* call, not what
-  already happened.
+  to tell the user the rule is now enforced, not merely recorded.
+- A row whose `source` names a real origin — a file the value was read
+  from, or the command whose output carried it — gets a second action, and
+  `render.detail()` prints it as one of two labels (#40):
+  `[ Block values read from <path> ]`, which writes a `block_path` rule, or
+  ``[ Block values from `<command>` output ]``, a `block_command` rule.
+  Both are enforced per *value*: `Engine.observe()` remembers which origin
+  each value entered the session from and denies a later outbound call
+  carrying one of them. A row with no origin — `source` is a bare tool
+  label like `Bash` — offers neither, because no rule could name it, and
+  `apply_policy` refuses the withdrawn `block_source` type outright (#38).
+- State the limit whenever you describe a source rule: **only
+  byte-identical values match** (known limit 10). A model that summarizes,
+  rewrites, or quotes part of what it read defeats it. The promise is
+  "this value does not leave unchanged", not "nothing about this file
+  leaves". Two more facts, if the user asks: a source rule is scoped to the
+  session (`Ledger.add_policy` writes `session:<id>`) and ends with it, and
+  nothing removes one before then — there is no removal path, and an
+  "allow once" token does not override one (known limit 13).
+- None of these rules applies retroactively: data already disclosed before
+  the rule was written stays disclosed (design.md P4) — a rule only changes
+  what happens on the *next* call, not what already happened.

@@ -511,6 +511,41 @@ def test_a_blocked_command_denies_a_value_from_that_command(eng):
     assert d.action == "deny"
 
 
+def test_a_command_origin_is_named_as_output_not_as_a_file_read(eng):
+    """A command origin is not a file: "read from `git log`" describes a
+    file that does not exist, and the button the user pressed said
+    "from `git log` output". Same fact, same words (design.md §9)."""
+    _read_from(eng, Origin(value="git log", kind=OriginKind.COMMAND))
+    eng.ledger.add_policy("s1", rule_type="block_command", selector="git log")
+    d = eng.observe(_obs(hook_event="PreToolUse", direction="egress",
+                         source="tool input", destination="mcp_tool",
+                         text=CREDENTIAL_TEXT, tool_name="mcp__slack__post"))
+    assert d.action == "deny"
+    assert "from `git log` output" in (d.system_message or "")
+    assert "read from" not in (d.system_message or "")
+
+
+def test_the_origin_deny_promises_no_adjustment_that_does_not_exist(eng):
+    """An origin deny is final within its session: it is decided before the
+    consent-token check, which only runs on an `allow`, and nothing removes
+    a policy row (there is no `remove_policy`, no `DELETE FROM policy`). So
+    the message must not send the user off to "adjust policy"; it states
+    the two things that are true -- the rule outranks an allow-once, and it
+    is scoped to this session (`Ledger.add_policy` writes `session:<id>`)."""
+    _read_from(eng, DOTENV)
+    eng.ledger.add_policy("s1", rule_type="block_path", selector=".env")
+    mint_token(eng.ledger, "s1", "mcp__slack__post", {"text": CREDENTIAL_TEXT},
+               "allow_once")
+    d = eng.observe(_obs(hook_event="PreToolUse", direction="egress",
+                         source="tool input", destination="mcp_tool",
+                         text=CREDENTIAL_TEXT, tool_name="mcp__slack__post",
+                         tool_input={"text": CREDENTIAL_TEXT}))
+    message = d.system_message or ""
+    assert d.action == "deny"
+    assert "adjust policy" not in message
+    assert "this session" in message
+
+
 def test_a_path_rule_does_not_match_a_command_of_the_same_name(eng):
     # A credential bound for an MCP tool is denied by the built-in default
     # either way, so the assertion is on the wording, not on the action:

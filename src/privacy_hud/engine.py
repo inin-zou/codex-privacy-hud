@@ -99,7 +99,7 @@ from .detect.base import Cost, Finding, is_available, profile_of
 from .mask import mask, value_hash
 from .matrix.loader import UnknownKey
 from .minimize import consume_token, minimize_tool_input
-from .origin import Origin, OriginKind
+from .origin import Origin, OriginKind, origin_phrase
 
 # --- Ruling 4: bound the synchronous deep scan --------------------------
 #
@@ -255,12 +255,24 @@ REWRITE_TEMPLATE = (
 # A deny that a user's own origin rule caused reads differently from the
 # built-in credential default, and the copy must let them tell the two
 # apart: this one names the file or command the value came from, which is
-# the fact the user acted on when they wrote the rule.
+# the fact the user acted on when they wrote the rule. `{origin_phrase}`
+# rather than a hardcoded "read from", because a command origin is not a
+# file -- `origin.origin_phrase` owns the wording for both kinds, and the
+# button the user pressed took its label from the same place.
+#
+# It does not end in "Run $privacy to review or adjust policy" like the
+# other two. That would promise an adjustment this call cannot get: an
+# origin deny is decided above, before the consent-token branch, which only
+# runs when the action is still "allow", so an allow-once token does not
+# override a standing rule; and no code path removes a policy row. What is
+# left is what is true -- the rule holds for the rest of this session, and
+# `Ledger.add_policy` scopes it to `session:<id>`, so it does not outlive it.
 ORIGIN_BLOCK_TEMPLATE = (
     "PRIVACY HUD blocked a tool call\n\n"
     "  {tool}  would send  {label}\n"
-    "  read from {origin}.\n\n"
-    "  Run $privacy to review or adjust policy."
+    "  {origin_phrase}.\n\n"
+    "  A source rule you wrote for this session denies this call; allow once\n"
+    "  does not override it. The rule ends with the session."
 )
 
 
@@ -634,10 +646,12 @@ class Engine:
                 template = ORIGIN_BLOCK_TEMPLATE if blocked_origin else BLOCK_TEMPLATE
             else:
                 template = REWRITE_TEMPLATE
+            phrase = (origin_phrase(blocked_origin.value, blocked_origin.kind)
+                      if blocked_origin else "")
             msg = template.format(
                 tool=obs.tool_name or "tool", label=label,
                 source=obs.source, destination=dest_kind,
-                origin=blocked_origin.value if blocked_origin else "")
+                origin_phrase=phrase)
             updated_input = None
             if action == "rewrite":
                 # Task 12: every "rewrite" Decision returned by this engine

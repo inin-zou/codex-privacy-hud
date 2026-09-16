@@ -80,6 +80,33 @@ def test_detail_omits_example_line_when_no_exemplar_exists():
     assert "None" not in out
 
 
+def test_detail_offers_no_source_action_for_a_bare_tool_label():
+    # `source_kind is None` means `source` is a tool name, not an origin:
+    # there is nothing a rule could name, so no button is offered (#40).
+    assert "Block values" not in detail(ROW)
+
+
+def test_detail_golden_for_a_path_origin_row():
+    row = replace(ROW, source=".env", source_kind="path")
+    assert detail(row).endswith(
+        "\n[ Protect future occurrences ]\n"
+        "[ Block values read from .env ]\n"
+        "\nAlready disclosed data cannot be recalled from this session.")
+
+
+def test_detail_golden_for_a_command_origin_row():
+    """The command branch feeds a DIFFERENT rule_type (`block_command`) to
+    `apply_policy`, and until this golden existed nothing rendered it: a
+    slip here would show the user a confirmation for a rule the engine
+    never matches. The wording is the engine's too -- a command origin is
+    named as output, not as a file that was read (`origin.origin_phrase`)."""
+    row = replace(ROW, source="git log", source_kind="command")
+    assert detail(row).endswith(
+        "\n[ Protect future occurrences ]\n"
+        "[ Block values from `git log` output ]\n"
+        "\nAlready disclosed data cannot be recalled from this session.")
+
+
 def test_no_view_contains_forbidden_copy():
     views = [hud_line(28, 80), audit(SUMMARY, [ROW], "Exposed"),
              detail(ROW), receipt("s1", SUMMARY, [ROW], 41)]

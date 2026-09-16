@@ -55,6 +55,7 @@ from typing import TYPE_CHECKING
 
 from .ledger import ExposureRow, SessionCoverage, SessionSummary
 from .matrix.loader import load_matrix
+from .origin import OriginKind, origin_phrase
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     # Type-only, and deliberately so: `audit()` reads three attributes off a
@@ -583,10 +584,16 @@ def detail(row: ExposureRow) -> str:
         lines.append(f"{'Budget':<12} {contrib}")
 
     lines += ["", "[ Protect future occurrences ]"]
+    # An unrecognised `source_kind` offers nothing, rather than a button
+    # whose rule would never match (#40). The wording comes from
+    # `origin.origin_phrase`, which the engine's deny message also uses, so
+    # the button and the refusal it leads to cannot describe the same
+    # origin in two different ways.
     if row.source_kind == "path":
-        lines.append(f"[ Block values read from {row.source} ]")
+        lines.append(f"[ Block values {origin_phrase(row.source, OriginKind.PATH)} ]")
     elif row.source_kind == "command":
-        lines.append(f"[ Block values from `{row.source}` output ]")
+        lines.append(
+            f"[ Block values {origin_phrase(row.source, OriginKind.COMMAND)} ]")
 
     lines += [
         "",
