@@ -98,6 +98,7 @@ from .detect.base import Cost, Finding, is_available, profile_of
 from .mask import mask, value_hash
 from .matrix.loader import UnknownKey
 from .minimize import consume_token, minimize_tool_input
+from .origin import Origin
 
 # --- Ruling 4: bound the synchronous deep scan --------------------------
 #
@@ -185,6 +186,10 @@ class Observation:
     # Optional/defaulted for backward compatibility with callers (and
     # existing tests) built before Task 12 that only ever passed `text`.
     tool_input: dict | str | None = None
+    #: Where this observation's data came from (`origin.extract_origin`),
+    #: when it can be named. `None` means the source is a bare label -- a
+    #: tool name or `user prompt` -- and no rule can target the row.
+    origin: Origin | None = None
 
 
 @dataclass(frozen=True)
@@ -554,7 +559,8 @@ class Engine:
                 value_hash=value_hash(self.salt, f.value),
                 masked_example=mask(f.data_type, f.value),
                 tool_name=obs.tool_name,
-                protection=protection)
+                protection=protection,
+                source_kind=obs.origin.kind.value if obs.origin else None)
 
         pct = self.ledger.summary(obs.session_id).percent
 
