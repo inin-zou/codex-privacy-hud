@@ -79,9 +79,17 @@ For a source rule there is also no way around it in the moment: an "allow once" 
 
 What limits every rule is the session. `Ledger.add_policy` scopes it to `session:<id>`, so it applies until that session ends and not after — a new Codex conversation starts with none of them. That is the only escape, and it is the same one the red band already points at for context: what the old session sent stays sent.
 
-## 14. Only reads it can recognise are stopped.
+## 14. Only a command whose read the extractor recognises is stopped.
 
-`cat .env` is; `python -c "open('.env')"` is not. This is limit 6's root cause seen from the other side — the engine reads the text of a tool call, not what the call will do. And within what it can read: the pattern behind `.env` requires a start of string or a separator (whitespace, `/`, `=`, a quote) just before it, so `prod.env` is not matched — the guard covers the paths those patterns name, not every file that looks like an env file.
+The guard acts on the path `origin.extract_origin` reads out of the command text — limit 11 holds that mechanism and its "never guess" rule. A command it does not resolve to a path is allowed: no deny, no notice, no ledger row. This is limit 6's root cause seen from the other side; the engine reads the text of a tool call, not what the call will do.
+
+Ordinary shell forms that are not stopped, in three groups:
+
+- **The verb is not one of the read verbs.** `wc -l .env`, `source .env`, `. .env`, `cp .env /tmp/x` and `openssl rsa -in key.pem` all put the file's bytes somewhere; none of them is `cat`. So does `python -c "open('.env')"`.
+- **The argument is not shaped like a path.** `strings id_rsa` and `cat id_rsa` record the command, not the file: a bare word with no `/` and no extension is not taken for a filename, for the reason limit 11 gives — an option value mistaken for one would be persisted in `events.source` (I1). `strings ./id_rsa` and `xxd ~/.ssh/id_rsa` are stopped.
+- **The flag is not one the extractor knows for that verb.** `head -5 .env` is allowed; `head -n 5 .env` is stopped.
+
+And within the paths it does resolve: the pattern behind `.env` requires a start of string or a separator (whitespace, `/`, `=`, a quote) just before it, so `prod.env` is not matched — the guard covers the paths those patterns name, not every file that looks like an env file.
 
 ## 15. A template file is never blocked.
 
@@ -91,13 +99,19 @@ What limits every rule is the session. `Ledger.add_policy` scopes it to `session
 
 The default records the read and mentions the guard once per session; it stops nothing. `$privacy read status` says which state you are in.
 
-## 17. A blocked read can leave no trace in the audit, in one sequence.
+## 17. A blocked read can leave a record that says the opposite, in one sequence.
 
-The ledger dedupes on `(session_id, value_hash, destination)` (`ledger.py`'s `record`): if a row for that exact key already exists, the write only increments its `count` — the `kind` of the existing row does not change. So if the same path was already read with the guard off (recorded as `local_access`), turning the guard on and reading it again denies the call, but the ledger still shows only that one `local_access` row with its count incremented — no `prevented` row appears. Enforcement holds; the evidence does not. This is pre-existing on the egress side too: an allowed egress followed by a denied one for the same value and destination dedupes the same way. It matters here because the feature's own discovery path — read, see the notice, turn the guard on, read again — walks straight into it.
+The ledger dedupes on `(session_id, value_hash, destination)` (`ledger.py`'s `record`): if a row for that exact key already exists, the write only increments its `count` — the `kind` of the existing row does not change. So if the same path was already read with the guard off (recorded as `local_access`), turning the guard on and reading it again denies the call, but the ledger still shows only that one `local_access` row with its count incremented — no `prevented` row appears. What is left is not silence. `cat deploy/key1.pem` with the guard off, then `cat deploy/key2.pem` with it on, leaves one row reading `local_access`, `source=deploy/key1.pem`, `count=2`, `protection=NULL` — a record that says key1 was read twice and nothing was blocked. Both halves of that are wrong, and nothing in the audit contradicts them.
+
+It carries into the number on screen. `Ledger.summary` computes `prevented` as `COUNT(*)` of rows whose `kind` is `prevented`, and `dispatch` passes that straight to the status item as `blocked`. No `prevented` row was written, so the badge stays `0` through a deny that did happen.
+
+Enforcement holds; the evidence does not. This is pre-existing on the egress side too: an allowed egress followed by a denied one for the same value and destination dedupes the same way. It matters here because the feature's own discovery path — read, see the notice, turn the guard on, read again — walks straight into it.
 
 ## 18. A blocked read's row does not name the file.
 
 The finding behind a blocked read is the tier-0 pattern that matched the command text (`.pem`, `.env`, `id_rsa`, …), not the path itself, so its `value_hash` is a hash of that pattern text. `cat deploy/key1.pem` and `cat deploy/key2.pem` both record `.pem` at the same `destination` and dedupe into one row. You can see that something was blocked; you cannot see which file.
+
+The count on screen goes with it. Two clean denies of those two files — no earlier `local_access` row, so limit 17 does not apply — write one `prevented` row with `count=2`, and `Ledger.summary` counts rows, not calls: `prevented=1`, so the status item's blocked badge reads `1` for two denied reads. The badge counts distinct patterns blocked, not reads stopped, and under-counts by however many files share a pattern.
 
 ## Note on tests
 

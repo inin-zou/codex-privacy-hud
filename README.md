@@ -237,6 +237,22 @@ So the audit shows **flows**, not findings:
 support.log → main agent → GitHub MCP
 ```
 
+### The read guard
+
+Every rule above applies on the way out. One thing can be stopped on the way **in**: a tool call that reads a known-sensitive path — `.env`, `id_rsa`, `deploy/key.pem` — fires `PreToolUse` before it runs, so the call can be denied. The command does not execute, so nothing from that file reaches the model.
+
+It is **off by default**. As installed, a recognised read of such a path is recorded and the guard mentions itself once per session; nothing is blocked. The commands:
+
+```text
+$privacy read on        # deny recognised reads of known-sensitive paths
+$privacy read off       # go back to recording them
+$privacy read status    # prints `on` or `off`
+```
+
+The setting is written to `~/.local/share/codex-privacy-hud/settings.json`, not `config.toml`. A change applies to a running session with no restart. That file is not one you see from inside Codex, so `$privacy read status` and `privacy-hud-doctor` are how you find out what it says.
+
+What it does not cover is limits 14–18 below: it stops the reads it can recognise (`cat .env`, but not `wc -l .env`), never blocks a template file such as `.env.example`, and writes an audit row naming the pattern that matched rather than the file.
+
 ### The ledger
 
 ```mermaid
@@ -292,11 +308,11 @@ Stated up front, because a privacy tool that overclaims is worse than none:
 11. **Origin extraction is best-effort.** `cat .env` is recognised; `python -c "open('.env')"` is not. A row with no origin offers no rule, rather than one that would not work. ([details](docs/known-limits.md#11-origin-extraction-is-best-effort))
 12. **The taint map dies with the daemon.** A daemon replaced mid-session loses it, and source rules stop matching with no error. ([details](docs/known-limits.md#12-the-taint-map-dies-with-the-daemon))
 13. **No policy rule can be removed within the session that wrote it.** True of `Protect future occurrences` since long before source rules existed. A new Codex conversation is the only clean slate. ([details](docs/known-limits.md#13-no-policy-rule-can-be-removed-within-the-session-that-wrote-it))
-14. **Only reads it can recognise are stopped.** `cat .env` is; `python -c "open('.env')"` is not — the same gap as limit 6, seen from the read side. ([details](docs/known-limits.md#14-only-reads-it-can-recognise-are-stopped))
+14. **Only a command whose read the extractor recognises is stopped.** `cat .env` is. `wc -l .env`, `source .env`, `cp .env /tmp/x`, `strings id_rsa`, `head -5 .env` and `python -c "open('.env')"` are not — no deny, no notice, no row. Limit 11 holds the mechanism. ([details](docs/known-limits.md#14-only-a-command-whose-read-the-extractor-recognises-is-stopped))
 15. **A template file is never blocked**, even one that really holds a key. Detection still flags it. ([details](docs/known-limits.md#15-a-template-file-is-never-blocked))
 16. **Nothing is blocked until you turn it on.** The default records the read and mentions the guard once per session; it stops nothing. ([details](docs/known-limits.md#16-nothing-is-blocked-until-you-turn-it-on))
-17. **A blocked read can leave no trace in the audit, in one sequence.** Read with the guard off, turn it on, read again: the ledger dedupes on `(session_id, value_hash, destination)`, so the deny lands as a `count` increment on the earlier row, not a new `prevented` row. Enforcement holds; the evidence does not. ([details](docs/known-limits.md#17-a-blocked-read-can-leave-no-trace-in-the-audit-in-one-sequence))
-18. **A blocked read's row does not name the file.** It rides on the pattern that matched (`.pem`, `.env`, …), so two different files that match the same pattern dedupe into one row. You can see something was blocked; not which file. ([details](docs/known-limits.md#18-a-blocked-reads-row-does-not-name-the-file))
+17. **A blocked read can leave a record that says the opposite, in one sequence.** Read with the guard off, turn it on, read again: the ledger dedupes on `(session_id, value_hash, destination)`, so the deny lands as a `count` increment on the earlier row. What stays is one `local_access` row saying the first file was read twice and nothing was blocked. No `prevented` row is written, so the status item's blocked badge stays `0` through a deny that did happen. ([details](docs/known-limits.md#17-a-blocked-read-can-leave-a-record-that-says-the-opposite-in-one-sequence))
+18. **A blocked read's row does not name the file.** It rides on the pattern that matched (`.pem`, `.env`, …), so two different files that match the same pattern dedupe into one row. You can see something was blocked; not which file. The badge counts rows, so two denied reads of two `.pem` files read as `1`. ([details](docs/known-limits.md#18-a-blocked-reads-row-does-not-name-the-file))
 
 ## Configuration
 
@@ -304,6 +320,7 @@ Stated up front, because a privacy tool that overclaims is worse than none:
 |---|---|
 | `/statusline` inside Codex | Ticks or unticks the `privacy` item for good. The choice is saved in `config.toml`. |
 | `$privacy hud on\|off\|status` | Hides or shows the item for now, without touching your config. `status` prints `absent`, `stale`, `hidden`, or `shown`. |
+| `$privacy read on\|off\|status` | Turns the read guard on or off — see [The read guard](#the-read-guard). On, a recognised read of a known-sensitive path is denied before it runs; off (the default), it is recorded. `status` prints `on` or `off`. Saved in `settings.json` under `~/.local/share/codex-privacy-hud/`, and applies to a running session immediately. |
 | `$privacy setup` | Runs the installer that came with the plugin, for an install made with `codex plugin add` alone. Asks once to run outside the sandbox. |
 | `[tui].status_line` in `~/.codex/config.toml` | The list of status-line items Codex renders. The installer adds `"privacy"` to it. |
 | `install.sh --yes` / `--no-model` / `--release-base-url URL` / `--uninstall` / `--purge` | `--yes` answers the model question with yes, `--no-model` skips the download, `--release-base-url` fetches the patched build from somewhere other than this repository's GitHub releases, `--uninstall` removes what the installer created, `--purge` also removes the ledger and the weights. |
