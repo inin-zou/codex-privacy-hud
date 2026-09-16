@@ -1,4 +1,5 @@
 import json
+import os
 
 from privacy_hud.settings import Settings
 
@@ -21,6 +22,34 @@ def test_a_change_is_seen_without_a_restart(tmp_path):
     live = Settings(tmp_path)
     assert live.deny_read is False
     Settings(tmp_path).set_deny_read(True)          # another process writes
+    assert live.deny_read is True
+
+
+def test_a_same_tick_rewrite_is_still_seen(tmp_path):
+    """Closes the gap `test_a_change_is_seen_without_a_restart` leaves open:
+    that test goes from "no file" to "file exists", which invalidates any
+    cache because the cache starts empty -- it pins nothing about comparing
+    `(mtime, size)` instead of `mtime` alone. This test forces the actual
+    same-tick collision that motivated that choice: `live` has already
+    cached a real `(mtime, size)` stamp from an existing file, a second
+    write changes the value, and `os.utime` then pins the second write's
+    mtime to be bit-identical to the first write's -- so only `size`
+    differs, and a mtime-only cache would report no change at all.
+    """
+    path = tmp_path / "settings.json"
+    live = Settings(tmp_path)
+    Settings(tmp_path).set_deny_read(False)
+    assert live.deny_read is False          # primes the cache with a real stamp
+    first_mtime, first_size = path.stat().st_mtime, path.stat().st_size
+
+    Settings(tmp_path).set_deny_read(True)  # a second process writes a change
+    os.utime(path, (first_mtime, first_mtime))  # force an identical mtime
+    # `{"deny_read": false}` and `{"deny_read": true}` serialize to different
+    # byte counts, so the collision this forces is genuinely a
+    # same-mtime-different-size one -- exactly the case (mtime, size) is for,
+    # not a same-mtime-same-size case no cache key could distinguish.
+    assert path.stat().st_size != first_size
+
     assert live.deny_read is True
 
 
