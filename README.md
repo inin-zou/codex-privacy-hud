@@ -249,7 +249,7 @@ $privacy read off       # go back to recording them
 $privacy read status    # prints `on` or `off`
 ```
 
-The setting is written to `~/.local/share/codex-privacy-hud/settings.json`, not `config.toml`. A change applies to a running session with no restart. That file is not one you see from inside Codex, so `$privacy read status` and `privacy-hud-doctor` are how you find out what it says.
+The setting is written to `~/.codex/plugins/data/codex-privacy-hud-…/settings.json`, not `config.toml`. A change applies to a running session with no restart. That file is not one you see from inside Codex, so `$privacy read status` and `privacy-hud-doctor` are how you find out what it says.
 
 What it does not cover is limits 14–18 below: it stops the reads it can recognise (`cat .env`, but not `wc -l .env`), never blocks a template file such as `.env.example`, and writes an audit row naming the pattern that matched rather than the file.
 
@@ -320,7 +320,7 @@ Stated up front, because a privacy tool that overclaims is worse than none:
 |---|---|
 | `/statusline` inside Codex | Ticks or unticks the `privacy` item for good. The choice is saved in `config.toml`. |
 | `$privacy hud on\|off\|status` | Hides or shows the item for now, without touching your config. `status` prints `absent`, `stale`, `hidden`, or `shown`. |
-| `$privacy read on\|off\|status` | Turns the read guard on or off — see [The read guard](#the-read-guard). On, a recognised read of a known-sensitive path is denied before it runs; off (the default), it is recorded. `status` prints `on` or `off`. Saved in `settings.json` under `~/.local/share/codex-privacy-hud/`, and applies to a running session immediately. |
+| `$privacy read on\|off\|status` | Turns the read guard on or off — see [The read guard](#the-read-guard). On, a recognised read of a known-sensitive path is denied before it runs; off (the default), it is recorded. `status` prints `on` or `off`. Saved in `settings.json` under `~/.codex/plugins/data/codex-privacy-hud-…/`, and applies to a running session immediately. |
 | `$privacy setup` | Runs the installer that came with the plugin, for an install made with `codex plugin add` alone. Asks once to run outside the sandbox. |
 | `[tui].status_line` in `~/.codex/config.toml` | The list of status-line items Codex renders. The installer adds `"privacy"` to it. |
 | `install.sh --yes` / `--no-model` / `--release-base-url URL` / `--uninstall` / `--purge` | `--yes` answers the model question with yes, `--no-model` skips the download, `--release-base-url` fetches the patched build from somewhere other than this repository's GitHub releases, `--uninstall` removes what the installer created, `--purge` also removes the ledger and the weights. |

@@ -212,7 +212,7 @@ $privacy read off       # 恢复为只记录这些读取
 $privacy read status    # 输出 `on` 或 `off`
 ```
 
-设置写入 `~/.local/share/codex-privacy-hud/settings.json`，而非 `config.toml`。更改会应用于正在运行的会话，无需重启。在 Codex 内无法查看该文件，因此需要通过 `$privacy read status` 和 `privacy-hud-doctor` 查看设置状态。
+设置写入 `~/.codex/plugins/data/codex-privacy-hud-…/settings.json`，而非 `config.toml`。更改会应用于正在运行的会话，无需重启。在 Codex 内无法查看该文件，因此需要通过 `$privacy read status` 和 `privacy-hud-doctor` 查看设置状态。
 
 读取防护未覆盖的情况见下文已知限制第 14–18 条：它只能阻止可识别的读取（如 `cat .env`，但不包括 `wc -l .env`），不会拦截 `.env.example` 这样的模板文件，写入的审计行记录的是匹配到的模式，而非文件名。
 
@@ -276,7 +276,7 @@ flowchart TD
 |---|---|
 | Codex 内的 `/statusline` | 勾选或取消勾选 `privacy` 状态行项，持久生效。选择保存到 `config.toml`。 |
 | `$privacy hud on\|off\|status` | 临时隐藏或显示状态行项，不改动配置。`status` 输出 `absent`、`stale`、`hidden` 或 `shown`。 |
-| `$privacy read on\|off\|status` | 开启或关闭读取防护，见[读取防护](#读取防护)。开启时，对已知敏感路径的可识别读取会在执行前被拒绝；关闭时（默认），只记录读取。`status` 输出 `on` 或 `off`。设置保存在 `~/.local/share/codex-privacy-hud/` 下的 `settings.json` 中，对正在运行的会话立即生效。 |
+| `$privacy read on\|off\|status` | 开启或关闭读取防护，见[读取防护](#读取防护)。开启时，对已知敏感路径的可识别读取会在执行前被拒绝；关闭时（默认），只记录读取。`status` 输出 `on` 或 `off`。设置保存在 `~/.codex/plugins/data/codex-privacy-hud-…/` 下的 `settings.json` 中，对正在运行的会话立即生效。 |
 | `$privacy setup` | 运行插件自带的安装脚本，适用于仅通过 `codex plugin add` 安装插件的情况。会请求一次在沙箱外运行的权限。 |
 | `~/.codex/config.toml` 中的 `[tui].status_line` | 指定 Codex 显示的状态行项列表。安装脚本会在其中加入 `"privacy"`。 |
 | `install.sh --yes` / `--no-model` / `--release-base-url URL` / `--uninstall` / `--purge` | `--yes` 自动同意下载模型。`--no-model` 跳过下载。`--release-base-url` 从本仓库 GitHub releases 之外的位置获取补丁版构建。`--uninstall` 移除安装脚本创建的内容。`--purge` 还会移除账本和模型权重。 |
