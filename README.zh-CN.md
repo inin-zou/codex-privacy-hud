@@ -200,6 +200,24 @@ API credential ×1     .env             none             [PREVENTED]
 support.log → main agent → GitHub MCP
 ```
 
+### 读取防护
+
+上述规则都适用于数据向外发送时。数据**进入**时，有一种操作可以被阻止：读取已知敏感路径（如 `.env`、`id_rsa`、`deploy/key.pem`）的 shell 命令会在执行前触发 `PreToolUse`，因此可以被拒绝。命令不会执行，该文件中的任何内容都不会到达模型。
+
+防护范围仅限 shell，因为 Codex 就是这样读文件的：它没有原生的读文件工具，模型通过执行 `cat` 来读取。其他工具一律放行，不作检查，见已知限制第 14 条。
+
+读取防护**默认关闭**。安装后，对这类路径的可识别读取会被记录，防护功能每个会话会提示一次自身的存在；不会拦截任何操作。命令如下：
+
+```text
+$privacy read on        # 拒绝对已知敏感路径的可识别读取
+$privacy read off       # 恢复为只记录这些读取
+$privacy read status    # 输出 `on` 或 `off`
+```
+
+设置写入 `~/.codex/plugins/data/codex-privacy-hud-…/settings.json`，而非 `config.toml`。更改会应用于正在运行的会话，无需重启。在 Codex 内无法查看该文件，因此需要通过 `$privacy read status` 和 `privacy-hud-doctor` 查看设置状态。
+
+读取防护未覆盖的情况见下文已知限制第 14–18 条：它只作用于 shell 命令，且只能阻止其中可识别的读取（如 `cat .env`，但不包括 `wc -l .env`）；不会拦截 `.env.example` 这样的模板文件；写入的审计行记录的是匹配到的模式，而非文件名。
+
 ### 账本
 
 ```mermaid
@@ -248,6 +266,11 @@ flowchart TD
 11. **来源提取会尽力识别，但不保证成功。** 能识别 `cat .env`，但不能识别 `python -c "open('.env')"`。没有来源的行不提供规则，以免提供无法生效的规则。（[详情](docs/known-limits.md#11-origin-extraction-is-best-effort)）
 12. **污点映射随守护进程终止而丢失。** 如果在会话中途替换守护进程，映射就会丢失，来源规则会停止匹配，且不会报错。（[详情](docs/known-limits.md#12-the-taint-map-dies-with-the-daemon)）
 13. **任何策略规则都无法在写入它的会话中移除。** 早在来源规则出现之前，`Protect future occurrences` 就已如此。只有新建 Codex 对话才能从没有这些规则的状态开始。（[详情](docs/known-limits.md#13-no-policy-rule-can-be-removed-within-the-session-that-wrote-it)）
+14. **只有提取器能识别其读取操作的 shell 命令才会被拦截。** 防护只看一种工具——shell，因为 Codex 就是这样读文件的；其他工具一律放行，不作检查。在 shell 之内，`cat .env` 会被拦截；`wc -l .env`、`source .env`、`cp .env /tmp/x`、`strings id_rsa`、`head -5 .env` 和 `python -c "open('.env')"` 则不会：不拒绝、不提示，也不写入记录。具体机制见第 11 条。（[详情](docs/known-limits.md#14-only-a-shell-command-whose-read-the-extractor-recognises-is-stopped)）
+15. **模板文件永远不会被拦截。** 即使其中确实包含密钥也一样，但检测仍会将其标记出来。（[详情](docs/known-limits.md#15-a-template-file-is-never-blocked)）
+16. **只有手动开启防护后，读取才会被拦截。** 默认只记录读取，并在每个会话中提示一次防护功能，不会拦截任何读取。（[详情](docs/known-limits.md#16-nothing-is-blocked-until-you-turn-it-on)）
+17. **在特定操作顺序下，被拦截的读取可能留下与实际情况相反的记录。** 先在防护关闭时读取，再开启防护并再次读取：账本按 `(session_id, value_hash, destination)` 去重，因此这次拒绝只会增加原有行的 `count`。最终保留的是一行 `local_access` 记录，表示第一次读取的文件被读取了两次，且没有任何操作被拦截。由于没有写入 `prevented` 行，即使确实发生了拒绝，状态行项的拦截计数仍为 `0`。（[详情](docs/known-limits.md#17-a-blocked-read-can-leave-a-record-that-says-the-opposite-in-one-sequence)）
+18. **被拦截读取的记录不包含文件名。** 记录依据的是匹配到的模式（`.pem`、`.env` 等），因此两个匹配同一模式的不同文件会被去重为一行。你能看到有读取被拦截，但无法知道是哪个文件。计数标记统计的是行数，因此对两个 `.pem` 文件的两次读取均被拒绝时，显示的计数为 `1`。（[详情](docs/known-limits.md#18-a-blocked-reads-row-does-not-name-the-file)）
 
 ## 配置
 
@@ -255,6 +278,7 @@ flowchart TD
 |---|---|
 | Codex 内的 `/statusline` | 勾选或取消勾选 `privacy` 状态行项，持久生效。选择保存到 `config.toml`。 |
 | `$privacy hud on\|off\|status` | 临时隐藏或显示状态行项，不改动配置。`status` 输出 `absent`、`stale`、`hidden` 或 `shown`。 |
+| `$privacy read on\|off\|status` | 开启或关闭读取防护，见[读取防护](#读取防护)。开启时，对已知敏感路径的可识别读取会在执行前被拒绝；关闭时（默认），只记录读取。`status` 输出 `on` 或 `off`。设置保存在 `~/.codex/plugins/data/codex-privacy-hud-…/` 下的 `settings.json` 中，对正在运行的会话立即生效。 |
 | `$privacy setup` | 运行插件自带的安装脚本，适用于仅通过 `codex plugin add` 安装插件的情况。会请求一次在沙箱外运行的权限。 |
 | `~/.codex/config.toml` 中的 `[tui].status_line` | 指定 Codex 显示的状态行项列表。安装脚本会在其中加入 `"privacy"`。 |
 | `install.sh --yes` / `--no-model` / `--release-base-url URL` / `--uninstall` / `--purge` | `--yes` 自动同意下载模型。`--no-model` 跳过下载。`--release-base-url` 从本仓库 GitHub releases 之外的位置获取补丁版构建。`--uninstall` 移除安装脚本创建的内容。`--purge` 还会移除账本和模型权重。 |
@@ -286,7 +310,7 @@ curl -fsSL https://raw.githubusercontent.com/inin-zou/codex-privacy-hud/main/ins
 | 文档 | 内容 | 适用情况 |
 |---|---|---|
 | [`docs/installing-by-hand.md`](docs/installing-by-hand.md) | 手动执行各安装步骤，使用 `privacy-hud-setup` 和 `privacy-hud-doctor` 命令，以及使用伴随窗格。 | 无法使用 `install.sh`，或希望控制每一步。 |
-| [`docs/known-limits.md`](docs/known-limits.md) | 十三条限制的完整说明，以及相应的测量依据。 | 判断 HUD 显示的数值在多大程度上可信。 |
+| [`docs/known-limits.md`](docs/known-limits.md) | 十八条限制的完整说明，以及相应的测量依据。 | 判断 HUD 显示的数值在多大程度上可信。 |
 | [`patches/README.md`](patches/README.md) | 只增加一个 Codex 状态行项的补丁，以及如何针对新 tag 重新生成补丁。 | 审计或重新构建补丁版 Codex 二进制。 |
 | [`.claude/docs/architecture.md`](.claude/docs/architecture.md) | 组件关系、进程模型、账本结构、hook 分发和授权循环。 | 开发插件本身。 |
 

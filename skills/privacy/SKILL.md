@@ -224,6 +224,40 @@ print(out["state"])
 PY
 ```
 
+### `$privacy read on|off|status`
+
+Turns the read guard on or off (`#36`): when on, a tool call that reads a
+known-sensitive path is denied before its bytes reach the model, rather
+than being allowed and then recorded. The default is off — a blocked
+read never runs, but nothing is blocked until the user turns this on.
+
+Replace `on` with `off` to turn it off or `status` to check the current
+state. It prints one word: `on` or `off`. This setting lives in
+`$PLUGIN_DATA/settings.json`, not `config.toml`, and a change here is
+picked up by the running daemon immediately — no restart needed.
+
+If a second line follows that word, the file could not be written: the
+word is what the setting still says, not what the user asked for. Report
+both, and do not describe the guard as having changed.
+
+```bash
+python3 - on <<'PY'
+import os, sys
+sys.path.insert(0, os.path.join(os.environ.get("PLUGIN_ROOT", "."), "src"))
+
+from privacy_hud import mcp_tools
+
+arg = sys.argv[1] if len(sys.argv) > 1 else "status"
+data_dir = os.environ["PLUGIN_DATA"]
+
+out = (mcp_tools.read_guard_status(data_dir) if arg == "status"
+       else mcp_tools.read_guard_set(data_dir, arg == "on"))
+print("on" if out["deny_read"] else "off")
+if out.get("error"):          # the write failed; the line above is still true
+    print(out["error"])
+PY
+```
+
 ### `$privacy setup`
 
 For an install that came from `codex plugin add` alone: the first turn of

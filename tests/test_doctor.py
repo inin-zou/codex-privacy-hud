@@ -1118,7 +1118,7 @@ def test_a_check_that_raises_becomes_a_failure_not_a_traceback(monkeypatch,
     assert "RuntimeError" in ledger.summary
     text = doctor.format_report(checks)
     assert "something private" not in text
-    assert len(checks) == 8
+    assert len(checks) == 9
 
 
 def test_report_is_plain_text_with_no_escape_sequences(isolated_env):

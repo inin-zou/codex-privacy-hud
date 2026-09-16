@@ -32,3 +32,28 @@ class PathDetector:
             for m in pat.finditer(text):
                 out.append(Finding("path", m.group(1), m.start(1), m.end(1)))
         return out
+
+
+#: Suffixes that make a path a template rather than the file it stands in
+#: for: `.env.example` is committed to the repository precisely so it can be
+#: read. `PATTERNS` matches them (`\.env(\.[\w-]+)?` covers `.env.example`),
+#: and for DETECTION that is right -- a template that really does hold a key
+#: should still be noticed, and noticing costs 2.0 budget points. Blocking
+#: one costs a command that does not run and a user whose only escape is
+#: turning the guard off, so the guard is narrower than the detector here.
+TEMPLATE_SUFFIXES = (".example", ".sample", ".template", ".dist")
+
+
+def is_sensitive_path(path: str) -> bool:
+    """Whether reading `path` is worth stopping (`#36`'s deny list).
+
+    Narrower than `PathDetector.scan`, and deliberately so -- see
+    `TEMPLATE_SUFFIXES`. Takes one path, not a blob of text: the caller has
+    already resolved which file a tool call would read (`origin.py`), so
+    this does not go looking for paths inside a string.
+    """
+    if not path:
+        return False
+    if path.endswith(TEMPLATE_SUFFIXES):
+        return False
+    return any(pattern.search(path) for pattern in PATTERNS)

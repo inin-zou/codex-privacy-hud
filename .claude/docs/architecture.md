@@ -416,7 +416,11 @@ privacy.get_exposure_detail   → L3 payload for one flow
 privacy.update_policy         → write mask / block rules
 privacy.allow_once            → mint a one-shot token
 privacy.hud_toggle            → hide or show the status-line item
+privacy.read_guard_status     → is the read guard on (#36)
+privacy.read_guard_set        → turn it on or off
 ```
+
+`read_guard_set` returns the same shape `read_guard_status` does, plus an `error` string when `settings.json` could not be written — the caller is the `$privacy` skill's heredoc, where a raised `PermissionError` would be a traceback and no statement of what the setting now says. Reads still fail open: this is not a hook path (I6).
 
 **UI delivery.** Codex Desktop does not currently render MCP Apps inline iframe resources ([openai/codex#21019](https://github.com/openai/codex/issues/21019)), and `tui.status_line` accepts only built-in item identifiers. So:
 

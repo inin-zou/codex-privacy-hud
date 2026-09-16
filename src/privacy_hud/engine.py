@@ -8,7 +8,13 @@ was extracted from .claude/docs/plans/2026-09-03-implementation.md — see
 task-8-report.md for the full account):
 
   Ruling 1 — a `local` destination always classifies as `local_access`,
-             never `exposed`, regardless of the caller-supplied `direction`.
+             never `exposed`, regardless of the caller-supplied `direction`
+             -- with one exception (#36): a local read the engine DENIES
+             classifies as `prevented`, through the existing
+             `"PreToolUse/blocked"` taxonomy entry, not `local_access`.
+             Without that exception a blocked read and an ordinary one
+             would write the same ledger row, and the audit could never
+             show that anything was stopped.
   Ruling 2 — destinations are normalized to the bare kinds
              `[destination_boundary]` in tables.toml understands
              (local/model_context/subagent/mcp_tool/external_net) before any
@@ -96,6 +102,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .detect.base import Cost, Finding, is_available, profile_of
+from .detect.paths import is_sensitive_path
 from .mask import mask, value_hash
 from .matrix.loader import UnknownKey
 from .minimize import consume_token, minimize_tool_input
@@ -275,13 +282,47 @@ ORIGIN_BLOCK_TEMPLATE = (
     "  does not override it. The rule ends with the session."
 )
 
+# The one thing this plugin can say without qualification: the call is
+# stopped before it runs, so there is nothing to recall (I5 is satisfied by
+# the fact, not by careful wording).
+READ_BLOCK_TEMPLATE = (
+    "PRIVACY HUD blocked a read\n\n"
+    "  {tool}  would read  {path}\n\n"
+    "  Reads of known-sensitive paths are blocked. This one did not run,\n"
+    "  so nothing from it reached the model.\n\n"
+    "  Run `$privacy read off` to allow them again."
+)
+
+# Shown once per session, not once per path: this is how the feature is
+# discovered, and a line on every read would be noise.
+READ_NOTICE_TEMPLATE = (
+    "PRIVACY HUD: this session read {path} — a path it can stop before it\n"
+    "reaches the model. Turn that on with `$privacy read on`."
+)
+
+
+class _PermissiveSettings:
+    """The "off" default for `Engine(settings=...)`: every existing caller
+    and test that builds an `Engine` without a settings object keeps
+    behaving exactly as before this task -- I6, applied to our own default
+    rather than just to Settings' file-read failure mode."""
+
+    deny_read = False
+
 
 class Engine:
-    def __init__(self, *, ledger, matrix, salt: bytes, detectors: list):
+    def __init__(self, *, ledger, matrix, salt: bytes, detectors: list,
+                 settings=None):
         self.ledger = ledger
         self.matrix = matrix
         self.salt = salt
         self.detectors = detectors
+        # #36: an object exposing `.deny_read`, not the concrete `Settings`
+        # class -- this is what lets a test pass a tiny double instead of a
+        # real file on disk. `None` means "no settings object was given",
+        # and defaults to the permissive answer (I6): a guard that was never
+        # configured must not start blocking on a guess.
+        self.settings = settings if settings is not None else _PermissiveSettings()
         # Fail at wiring time, not at the first scan of the first session.
         # `profile_of` raises `UndeclaredDetector` for a detector that has
         # not declared its tier and cost, and this loop is what makes that
@@ -299,6 +340,11 @@ class Engine:
         #: worthless. A daemon replaced mid-session therefore starts empty,
         #: which allows rather than denies (I6, and known limit 3).
         self._origins: dict[bytes, Origin] = {}
+        #: #36: the read-guard discoverability notice fires once per
+        #: session, not once per path -- same per-session lifetime as
+        #: `_origins` above, and for the same reason: it lives on the
+        #: Engine because `dispatch` builds one Engine per session.
+        self._read_notice_shown = False
 
     # -- Ruling 2: destination normalization --------------------------
     def _normalize_destination(self, destination: str) -> str:
@@ -354,10 +400,25 @@ class Engine:
     def _remember_origins(self, obs: Observation, findings: Sequence[Finding]) -> None:
         """Record where each finding's value entered this session from.
 
-        Only when the observation names an origin: a `PreToolUse`'s source
-        is `tool input`, which is a label, not a place.
+        Two things must hold, and #36 made the second one load-bearing.
+
+        The observation must name an origin — on most events `source` is a
+        fixed label (`tool input`), which is a place-shaped word for
+        something that is not a place.
+
+        And the call must already have run. A `PreToolUse` has not: since
+        #36 a local read reaches here with a PATH origin, but its findings
+        are matches against the *text of a command that has not executed*,
+        so the only value they carry is the low-entropy tier-0 pattern
+        literal the text matched (`.pem`, `.env`) — never a byte of the
+        file. Mapping that literal to the path in the command would make
+        every later call mentioning any `.pem` look like it carries data
+        from that one file, and a `block_path` rule on it would deny calls
+        that never touched it while naming it as the source. The map
+        answers "where did this value enter the session"; a call that has
+        not run is not an answer to that.
         """
-        if obs.origin is None:
+        if obs.origin is None or obs.hook_event == "PreToolUse":
             return
         for f in findings:
             self._origins.setdefault(value_hash(self.salt, f.value), obs.origin)
@@ -555,13 +616,37 @@ class Engine:
 
         action = "allow"
         blocked_origin = None
+        read_block: str | None = None
+        notice: str | None = None
+
+        # #36: the read guard -- the one interception point that acts BEFORE
+        # the bytes exist, rather than recording them after. Ahead of the
+        # egress-only policy block below on purpose: this is a local read
+        # (`Ruling 3` never applies to it), and it must be decided before
+        # anything downstream assumes `action` is still "allow".
+        if obs.hook_event == "PreToolUse" and obs.direction == "local":
+            path = obs.origin.value if obs.origin else ""
+            if is_sensitive_path(path):
+                if self.settings.deny_read:
+                    action = "deny"
+                    read_block = path
+                elif not self._read_notice_shown:
+                    self._read_notice_shown = True
+                    notice = READ_NOTICE_TEMPLATE.format(path=path)
 
         # #40: remember where each of this observation's findings came from
-        # (a no-op unless obs.origin is set — PostToolUse ingress only), then
+        # (a no-op unless obs.origin is set and the call has already run —
+        # PostToolUse ingress only; see `_remember_origins`), then
         # check whether an egress carries a value from a blocked origin
         # before any other policy. Per-value, not per-session: a deny here
-        # always has a finding behind it (I3/I4's "prevented" row), and a
-        # finding with no taint entry allows rather than denies (I6).
+        # always produces a finding (I3/I4's "prevented" classification), and
+        # a finding with no taint entry allows rather than denies (I6). That
+        # is not a promise that the ledger always gains a row explaining the
+        # deny -- `Ledger.record`'s dedupe on (session_id, value_hash,
+        # destination) only increments `count` on a repeat key, so a deny
+        # whose value already has a row under a different `kind` (e.g. an
+        # earlier, unguarded `local_access` read) leaves that row as it was.
+        # See known-limits.md #17.
         self._remember_origins(obs, findings)
 
         # Task 8 policy-fix: a user-written `mask` rule outranks the
@@ -613,10 +698,13 @@ class Engine:
 
         if dest_kind == "local":
             # Ruling 1: local always classifies as local_access, overriding
-            # whatever `direction` the caller supplied, and taking priority
-            # over any blocking decision above (which never arises for a
-            # local read in practice, since B0 is never egress-blocking).
-            classify_direction = "local"
+            # whatever `direction` the caller supplied -- except for #36's
+            # amendment: a local read the read guard above denied classifies
+            # as `prevented`, through the same `PreToolUse/blocked` taxonomy
+            # entry an egress deny uses, not as `local_access`. Without this
+            # a blocked read and an ordinary one would write the same ledger
+            # row, and the audit could never show that anything was stopped.
+            classify_direction = "blocked" if action == "deny" else "local"
         elif action == "deny":
             classify_direction = "blocked"
         elif action == "rewrite":
@@ -639,6 +727,14 @@ class Engine:
                 source_kind=obs.origin.kind.value if obs.origin else None)
 
         pct = self.ledger.summary(obs.session_id).percent
+
+        if action == "deny" and read_block is not None:
+            # #36: the read guard's own template -- takes `tool`/`path`, not
+            # the egress templates' `label`/`destination`/`origin_phrase`.
+            msg = READ_BLOCK_TEMPLATE.format(tool=obs.tool_name or "tool",
+                                              path=read_block)
+            return Decision(action, reason=msg, system_message=msg,
+                             budget_percent=pct, degraded=degraded)
 
         if action in ("deny", "rewrite"):
             label = ", ".join(sorted({f.data_type for f in findings})) or "sensitive data"
@@ -676,4 +772,5 @@ class Engine:
                              budget_percent=pct, updated_input=updated_input,
                              degraded=degraded)
 
-        return Decision("allow", budget_percent=pct, degraded=degraded)
+        return Decision("allow", system_message=notice, budget_percent=pct,
+                         degraded=degraded)

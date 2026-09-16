@@ -121,9 +121,10 @@ from .hud_snapshot import HudPublisher
 from .ledger import Ledger
 from .mask import new_salt
 from .matrix.loader import Matrix, load_matrix
-from .origin import extract_origin
+from .origin import OriginKind, extract_origin
 from .render import receipt as render_receipt
 from .runtime import latch_path
+from .settings import Settings
 
 # Every HUD failure below is logged through this at DEBUG and nowhere else.
 # I1: the message carries the exception's *class name* and nothing else --
@@ -155,6 +156,12 @@ class State:
     ledger: Ledger
     detectors: list
     hud: HudPublisher
+    # #36: `Settings(data_dir)` -- re-read on change so `$privacy read on/off`
+    # (run from a different process) lands inside this running daemon
+    # without a restart. `new_state` builds the real one on `PLUGIN_DATA`;
+    # `Engine.__init__`'s own default covers any caller (tests included)
+    # that never sets this at all.
+    settings: Settings | None = None
 
     # Guards every touch of `ledger` (a single shared sqlite3 connection is
     # not safe for unserialized concurrent use — see daemon.py for the full
@@ -212,6 +219,7 @@ def new_state(data_dir) -> State:
     _record_unobserved_hooks(ledger, data_dir)
     detectors = [PathDetector(), SecretDetector(), ModelDetector()]
     hud = HudPublisher(data_dir)
+    settings = Settings(data_dir)
     try:
         hud.sweep()
         hud.mark_daemon(unattributed_gaps=bool(ledger.unattributed_gaps()))
@@ -219,7 +227,7 @@ def new_state(data_dir) -> State:
         # I6: housekeeping for a display surface never blocks the daemon.
         _log.debug("hud startup housekeeping failed: %s", type(exc).__name__)
     return State(data_dir=data_dir, matrix=matrix, ledger=ledger,
-                 detectors=detectors, hud=hud)
+                 detectors=detectors, hud=hud, settings=settings)
 
 
 def _record_unobserved_hooks(ledger: Ledger, data_dir: Path) -> None:
@@ -358,8 +366,17 @@ def _decision_to_output(decision) -> dict:
         # instead, same as a `deny`, using the message engine.py already
         # crafted for exactly this case.
         return _deny(decision.system_message or decision.reason)
-    # "allow" (and ingress observations, which Ruling 3 never denies):
-    # no hook-specific output needed, Codex proceeds normally.
+    # "allow" (and ingress observations, which Ruling 3 never denies): no
+    # permission decision needed, Codex proceeds normally either way. But
+    # #36's once-per-session read-guard notice rides on exactly this branch
+    # (a local read is never denied unless the guard is on), and an allow
+    # with a message must still surface it -- same bare `{"systemMessage":
+    # ...}` shape `_handle_session_end` already uses, not the
+    # `hookSpecificOutput` wrapper `_allow_with_rewrite` needs for its
+    # `updatedInput`. An allow with no message keeps returning `{}` exactly
+    # as before.
+    if decision.system_message:
+        return {"systemMessage": decision.system_message}
     return _allow()
 
 
@@ -398,7 +415,7 @@ def _get_or_start_engine(state: State, session_id: str, *, cwd: str = "",
                                 observed_start=False)
     state.started_at.setdefault(session_id, time.time())
     engine = Engine(ledger=state.ledger, matrix=state.matrix, salt=salt,
-                     detectors=state.detectors)
+                     detectors=state.detectors, settings=state.settings)
     state.engines[session_id] = engine
     # A session the daemon first meets here -- typically the one whose
     # SessionStart hook spawned this daemon and got no answer -- has no
@@ -441,22 +458,28 @@ def _build_observation(event: str, session_id: str, payload: dict) -> Observatio
         tool_input = payload.get("tool_input")
         if not isinstance(tool_input, dict):
             tool_input = {}
-        if tool_name == "Bash":
+        if tool_name == codex.SHELL_TOOL:
             command = tool_input.get("command", "") or ""
             dests = extract_destinations(command)
             destination = dests[0] if dests else "external_net"
             if destination == "local":
-                # No boundary is crossed. tables.toml's taxonomy has no
-                # "PreToolUse/local" entry and policy_defaults has no
-                # "local" entry either — by design, not omission: Ruling 1
-                # (local always classifies as local_access) was written
-                # against PostToolUse local reads (tables.toml only ever
-                # defines "PostToolUse/local"), and Engine.observe would
-                # raise UnknownKey (I2: never silently caught) if we built
-                # an Observation here anyway. A local Bash command has
-                # nothing for the engine to score — allow without an
-                # Engine.observe call, same as SessionStart/SessionEnd.
-                return None
+                # #36: a local read is no longer nothing to score. When the
+                # origin names a file, the engine decides whether reading it
+                # is allowed -- the one interception point that acts BEFORE
+                # the bytes exist, rather than recording them after.
+                #
+                # Everything else local still returns early: a COMMAND
+                # origin or none at all leaves nothing to decide, and
+                # `Engine.observe` would raise UnknownKey for a row the
+                # taxonomy does not define (I2: never silently caught).
+                origin = extract_origin(tool_name, tool_input)
+                if origin is None or origin.kind is not OriginKind.PATH:
+                    return None
+                return Observation(
+                    session_id=session_id, turn_id=turn_id, hook_event=event,
+                    direction="local", source=origin.value,
+                    destination="local", text=command, tool_name=tool_name,
+                    tool_input=tool_input, origin=origin)
             text = command
         # `codex.is_mcp_tool` is the same predicate `hooks/handler.py`
         # applies client-side (`.startswith("mcp")`, not `"mcp__"`), so the
@@ -466,10 +489,22 @@ def _build_observation(event: str, session_id: str, payload: dict) -> Observatio
             destination = "mcp_tool"
             text = json.dumps(tool_input)
         else:
-            # Not pinned by the mapping table (a non-Bash, non-MCP tool,
-            # e.g. a local file Write/Edit): same "no PreToolUse/local
-            # taxonomy entry" situation as above — nothing crosses a
-            # boundary here, so there is no Engine.observe call to make.
+            # A non-shell, non-MCP tool (`apply_patch`, or one a plugin
+            # added). Not scored, and NOT read-guarded — deliberately.
+            #
+            # `extract_origin` would in fact name a path here if the call
+            # carried one of `origin.PATH_KEYS`: that loop runs for any
+            # tool, ahead of the command parsing. What stops us using it is
+            # that nothing says such a path was *read*. Codex's only native
+            # writer is `codex.PATCH_TOOL`, and a tool that takes a
+            # `file_path` is as likely to write it as to read it — so
+            # denying one under "blocked a read" would be a false block
+            # with false copy, which the spec weighs as the worse error.
+            #
+            # This costs no coverage on Codex today: `codex.SHELL_TOOL` is
+            # how a file gets read, and the guard has that branch. Known
+            # limit 14 states the confinement rather than leaving it to be
+            # discovered from here.
             return None
         return Observation(
             session_id=session_id, turn_id=turn_id, hook_event=event,
@@ -666,7 +701,7 @@ def _handle_session_start(state: State, session_id: str, payload: dict) -> dict:
                                     model=payload.get("model", "") or "")
         state.engines[session_id] = Engine(
             ledger=state.ledger, matrix=state.matrix, salt=salt,
-            detectors=state.detectors)
+            detectors=state.detectors, settings=state.settings)
         state.started_at[session_id] = time.time()
         _publish_hud(state, session_id)
     # Outside the lock: `live_lock` and `lock` are never nested (State's

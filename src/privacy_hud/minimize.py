@@ -28,14 +28,15 @@ import hashlib
 import json
 from collections.abc import Sequence
 
+from . import codex
 from .detect.base import Finding
 from .mask import pseudonym
 
 TOKEN_TTL_SECONDS = 120
 
-# Tool names whose `updatedInput` Codex requires to be a plain string
-# `command` — Bash and apply_patch, per architecture.md §8's "Rewrite path".
-_STRING_COMMAND_TOOLS = {"Bash", "apply_patch"}
+# Which tools those are is a fact about Codex, so it lives in `codex.py`
+# with the evidence behind it, not as a second literal here.
+_STRING_COMMAND_TOOLS = codex.STRING_COMMAND_TOOLS
 
 
 def canonical_json(obj) -> str:

@@ -29,6 +29,8 @@ from privacy_hud.mcp_tools import (
     get_session_summary,
     hud_set_hidden,
     hud_status,
+    read_guard_set,
+    read_guard_status,
     list_exposures,
 )
 
@@ -470,3 +472,28 @@ def test_hud_toggle_output_carries_no_content(tmp_path):
     out = hud_set_hidden(tmp_path, "s1", True)
     assert set(out) == {"session_id", "present", "hidden", "state"}
     assert out["state"] in {"absent", "stale", "hidden", "shown"}
+
+
+# --------------------------------------------------------------------- #
+# read_guard_status / read_guard_set
+# --------------------------------------------------------------------- #
+
+def test_read_guard_round_trip(tmp_path):
+    assert read_guard_status(tmp_path) == {"deny_read": False}
+    assert read_guard_set(tmp_path, True) == {"deny_read": True}
+    assert read_guard_set(tmp_path, False) == {"deny_read": False}
+
+
+def test_read_guard_set_says_so_when_the_setting_cannot_be_written(tmp_path):
+    """`$privacy read on` against an unwritable `PLUGIN_DATA` used to let
+    `PermissionError` escape, so the skill printed a traceback. The user
+    has to learn that the setting did not stick -- and what it still says,
+    since the guard goes on reading the old file."""
+    data = tmp_path / "data"
+    data.mkdir(mode=0o500)
+    try:
+        out = read_guard_set(data, True)
+    finally:
+        data.chmod(0o700)
+    assert out["deny_read"] is False
+    assert "unchanged" in out["error"]

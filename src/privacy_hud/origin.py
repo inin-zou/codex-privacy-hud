@@ -35,6 +35,8 @@ import shlex
 from dataclasses import dataclass
 from enum import Enum
 
+from . import codex
+
 #: Programs whose first non-flag argument is a file they read. A command
 #: that writes (`cp`, `tee`, `install`) is deliberately absent: its output
 #: is not that file's contents, so the file is not where the data came from.
@@ -214,6 +216,14 @@ PATTERN_OPTIONS = frozenset({"-e", "--regexp", "-f", "--file", "--from-file"})
 _SUBCOMMAND = re.compile(r"[a-z][a-z0-9_-]*\Z")
 
 #: Tool-input keys that name a file a tool read, in the order they are tried.
+#:
+#: **Inferred, not evidenced.** No Codex build is known to send any of these:
+#: `codex.SHELL_TOOL` records why — Codex has no native file-read tool, and
+#: its hook schema declares `tool_input` as `any`, so it pins no per-tool key
+#: names at all. These three are the conventional spellings, kept because a
+#: tool that does send one is read for free and the alternative is guessing
+#: from an arbitrary dict. On Codex today this loop is expected to be inert;
+#: `source` falling back to the bare tool name is the evidenced path.
 PATH_KEYS = ("file_path", "path", "notebook_path")
 
 
@@ -418,7 +428,9 @@ def extract_origin(tool_name: str, tool_input: dict) -> Origin | None:
         if isinstance(value, str) and value:
             return Origin(value=_collapse_home(value), kind=OriginKind.PATH)
 
-    if tool_name != "Bash":
+    # Only the shell tool carries a command to parse. `codex.SHELL_TOOL`
+    # holds why that is also the only tool a *read* can arrive through.
+    if tool_name != codex.SHELL_TOOL:
         return None
 
     command = tool_input.get("command")
