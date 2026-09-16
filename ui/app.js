@@ -271,15 +271,29 @@
       </div>
     `).join("");
 
-    // No source-level action: the ledger does not record which file or
-    // input data came from, so a rule cannot target a source (#38).
     const actions = [
       { text: "Protect future occurrences", rule_type: "mask", selector: row.data_type },
     ];
+    // A source-level rule is offered only when the row names a real origin
+    // (#40): source_kind is null when `source` is a bare tool label.
+    if (row.source_kind === "path") {
+      actions.push({ text: `Block values read from ${row.source}`,
+                     rule_type: "block_path", selector: row.source });
+    } else if (row.source_kind === "command") {
+      actions.push({ text: `Block values from \`${row.source}\` output`,
+                     rule_type: "block_command", selector: row.source });
+    }
     const pct = summary.percent || 0;
     const actionsEl = $("detailActions");
+    // `escapeHTML` because an action's text now carries `row.source`, which
+    // since #40 is a real file path or command rather than one of a few
+    // fixed labels -- so a file named `<img src=x onerror=...>.env` would
+    // otherwise run script in this page. Every other row-derived string here
+    // is escaped the same way; this one was safe only while `source` was a
+    // label. It matters more here than in a normal page: script in this tab
+    // can reach the network, which the daemon itself never does (I2).
     actionsEl.innerHTML = actions.map((a, i) =>
-      `<button class="action" data-i="${i}">[ ${a.text} ]</button>`
+      `<button class="action" data-i="${i}">[ ${escapeHTML(a.text)} ]</button>`
     ).join("") + (band(pct) === "danger"
       // Not an action: a clean context is a new Codex conversation, which
       // nothing on this page can start (#23).

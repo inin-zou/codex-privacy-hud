@@ -70,7 +70,7 @@ _ROWS = (
          value_hash=b"\x02" * 16, masked_example="/Users/•••/app.log",
          tool_name="Task", protection="masked"),
     dict(turn_id="t3", kind="prevented", data_type="credential",
-         source=".env", destination="external_net",
+         source=".env", source_kind="path", destination="external_net",
          value_hash=b"\x03" * 16, masked_example=None,
          tool_name="Bash", protection="blocked"),
     dict(turn_id="t4", kind="local_access", data_type="hostname",
@@ -308,6 +308,11 @@ DETAIL_MASKED_PATH = (
 
 #: A credential carries no exemplar at all, so the Example line is absent --
 #: the view must never print "Example None". This is the golden that pins it.
+#:
+#: This row's `source_kind` is "path" (Task 2/3: ingress dispatch now records
+#: where a value actually came from), so it also pins the L3 origin action
+#: (#40): a row naming a real origin gets a second action line, after
+#: "Protect future occurrences", offering to block that exact origin.
 DETAIL_CREDENTIAL = (
     "Credential ×1\n"
     ".env → external_net\n"
@@ -317,6 +322,7 @@ DETAIL_CREDENTIAL = (
     "Budget       +0 pts of 120\n"
     "\n"
     "[ Protect future occurrences ]\n"
+    "[ Block values read from .env ]\n"
     "\n"
     "Already disclosed data cannot be recalled from this session."
 )
@@ -490,21 +496,25 @@ JSON_UI_SUMMARY = dict(JSON_SUMMARY, coverage={
 JSON_ROWS = [
     {"id": 1, "turn_id": "t1", "ts": TS, "kind": "exposed",
      "data_type": "email", "source": "support/logs/production/app.log",
+     "source_kind": None,
      "destination": "model_context", "boundary": "B1", "count": 1,
      "masked_example": "jo•••@acme.com", "budget_delta": 6.0,
      "protection": None, "tool_name": "Read"},
     {"id": 2, "turn_id": "t2", "ts": TS + 60, "kind": "exposed",
      "data_type": "path", "source": "terminal output",
+     "source_kind": None,
      "destination": "subagent", "boundary": "B2", "count": 1,
      "masked_example": "/Users/•••/app.log", "budget_delta": 0.6,
      "protection": "masked", "tool_name": "Task"},
     {"id": 3, "turn_id": "t3", "ts": TS + 120, "kind": "prevented",
      "data_type": "credential", "source": ".env",
+     "source_kind": "path",
      "destination": "external_net", "boundary": "B4", "count": 1,
      "masked_example": None, "budget_delta": 0.0,
      "protection": "blocked", "tool_name": "Bash"},
     {"id": 4, "turn_id": "t4", "ts": TS + 180, "kind": "local_access",
-     "data_type": "hostname", "source": "shell", "destination": "local",
+     "data_type": "hostname", "source": "shell",
+     "source_kind": None, "destination": "local",
      "boundary": "B0", "count": 1, "masked_example": "db•••.internal",
      "budget_delta": 0.0, "protection": None, "tool_name": "Read"},
 ]

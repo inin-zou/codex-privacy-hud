@@ -245,10 +245,13 @@ support.log → main agent → GitHub MCP
    B0            B1            B3
 ```
 
-**Actions.** One, forward-looking:
+**Actions.** One always, a second where the row allows it:
 - `Protect future occurrences` — writes a policy rule to mask this data type from this source going forward.
+- On a row whose source names a real origin — a file path or a command, not a bare tool label — `Block values read from {source}` (path) or `` Block values from `{source}` output `` (command). It writes a `block_path` or `block_command` rule keyed to the `Origin` that finding's value was first seen with (#40).
 
-`Block this source` was meant to write a deny rule for the source path, and is withdrawn (#38). The ledger's `source` holds a fixed label (`tool input` on an outbound call, the tool name or `user prompt` on the way in), never the path the data came from, so no rule could name a source: one written from a tool-output row matched nothing, one written from an outbound row denied every outbound call in the session. It returns when the ledger records where data came from.
+A source rule matches only byte-identical values: it compares a later outbound value against the origin-tagged value under a salted hash, so if the model summarizes, rewrites, or quotes part of what it read, the copy no longer matches and the rule does not catch it (`docs/known-limits.md` #10). Origin extraction is best-effort too (`docs/known-limits.md` #11) — a row with no recognised origin offers no rule at all, rather than one that would not work.
+
+This replaces the earlier `Block this source` (`block_source`), withdrawn in #38: the ledger then recorded only a fixed label as `source` on the outbound observation (`tool input`, or the tool name / `user prompt` on the way in), never the file or command a value came from, so no selector could name a source. `block_path`/`block_command` match against the ledger's own origin record instead, which is why they work where `block_source` could not.
 
 In the red band the detail view also shows a note, not an action: `Want a clean context? Start a new conversation in Codex. What this session already sent to the model stays sent.` A clean context is a new Codex conversation, which the plugin cannot start; an earlier `Start a clean session` action opened a ledger row under an id Codex never sends and was removed (#23).
 

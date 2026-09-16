@@ -55,6 +55,7 @@ from typing import TYPE_CHECKING
 
 from .ledger import ExposureRow, SessionCoverage, SessionSummary
 from .matrix.loader import load_matrix
+from .origin import OriginKind, origin_phrase
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     # Type-only, and deliberately so: `audit()` reads three attributes off a
@@ -536,11 +537,16 @@ def detail(row: ExposureRow) -> str:
       why that field is optional and `None` when unknown, rather than
       defaulted), since fabricating 120 as a hardcoded constant here would
       silently go stale the moment tables.toml's budget_cap is retuned.
-    - Only `Protect future occurrences` is rendered. The red-band note
-      pointing at a new Codex conversation (design.md §6) depends on the
-      session's band, which this function cannot see from a single row.
-      design.md's `Block this source` is withdrawn (#38): the ledger does not
-      record which file or input data came from, so no rule can target one.
+    - `Protect future occurrences` is always rendered; a second action line,
+      `Block values read from {source}` or `` Block values from `{source}`
+      output ``, follows it only when `row.source_kind` is `"path"` or
+      `"command"` -- i.e. only when `source` names a real origin rather than
+      a bare tool label (#40). The red-band note pointing at a new Codex
+      conversation (design.md §6) depends on the session's band, which this
+      function cannot see from a single row. design.md's `Block this source`
+      (`block_source`) stays withdrawn (#38): it named a label, not a
+      source, and `block_path`/`block_command` are the replacement, not a
+      revival of it.
     - The per-action confirmation line ("Rule added: ...") describes what
       happens after a button is pressed; there is no click state in a pure
       render of `row`, so it is not rendered here.
@@ -577,9 +583,19 @@ def detail(row: ExposureRow) -> str:
             contrib += f" of {row.budget_cap:g}"
         lines.append(f"{'Budget':<12} {contrib}")
 
+    lines += ["", "[ Protect future occurrences ]"]
+    # An unrecognised `source_kind` offers nothing, rather than a button
+    # whose rule would never match (#40). The wording comes from
+    # `origin.origin_phrase`, which the engine's deny message also uses, so
+    # the button and the refusal it leads to cannot describe the same
+    # origin in two different ways.
+    if row.source_kind == "path":
+        lines.append(f"[ Block values {origin_phrase(row.source, OriginKind.PATH)} ]")
+    elif row.source_kind == "command":
+        lines.append(
+            f"[ Block values {origin_phrase(row.source, OriginKind.COMMAND)} ]")
+
     lines += [
-        "",
-        "[ Protect future occurrences ]",
         "",
         "Already disclosed data cannot be recalled from this session.",
     ]

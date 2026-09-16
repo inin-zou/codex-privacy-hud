@@ -1,12 +1,16 @@
 import dataclasses
 import json
+import re
 import sqlite3
+from pathlib import Path
 
 import pytest
 from privacy_hud.matrix.loader import load_matrix
-from privacy_hud.ledger import (EventRow, ExposureRow, Ledger, SessionCoverage,
-                                SessionSummary)
+from privacy_hud.ledger import (SCHEMA, EventRow, ExposureRow, Ledger,
+                                SessionCoverage, SessionSummary)
+from privacy_hud.mcp_tools import _POLICY_RULE_TYPES
 
+REPO = Path(__file__).resolve().parents[1]
 M = load_matrix()
 
 
@@ -70,6 +74,21 @@ def test_end_session_nulls_value_hashes(led):
 def test_schema_has_no_raw_content_columns(led):
     cols = {r[1] for r in led.conn.execute("PRAGMA table_info(events)")}
     assert not cols & {"content", "prompt", "raw_value", "snippet", "text"}
+
+
+@pytest.mark.parametrize("source", ["schema", "architecture"])
+def test_the_documented_policy_rule_types_are_the_ones_that_exist(source):
+    """`mcp_tools.apply_policy`'s docstring sends a reader to the SCHEMA
+    comment for the list of rule types it accepts, and architecture.md §5
+    repeats the same table, so neither is decoration. Both listed
+    `mask|block_source|allow_dest`: a type `apply_policy` refuses outright
+    (#38) and neither of the two that ship (#40)."""
+    text = SCHEMA if source == "schema" else (
+        REPO / ".claude" / "docs" / "architecture.md").read_text(encoding="utf-8")
+    documented = re.findall(r"rule_type +TEXT NOT NULL, +-- *(\S+)", text)
+    assert documented, "no documented rule_type list found"
+    for listed in documented:
+        assert set(listed.split("|")) == _POLICY_RULE_TYPES
 
 
 # --------------------------------------------------------------------- #
@@ -492,3 +511,79 @@ def test_policy_tokens_hold_no_arguments(led):
                     "expires_at"}
     banned = {"tool_input", "args", "command", "content", "prompt", "text"}
     assert not cols & banned
+
+
+def test_an_older_ledger_gains_the_source_kind_column(tmp_path):
+    """The schema is applied with CREATE TABLE IF NOT EXISTS, which does not
+    add columns to a database that already exists. Without the migration,
+    every insert against a pre-existing ledger raises OperationalError."""
+    import sqlite3
+
+    from privacy_hud.ledger import Ledger
+    from privacy_hud.matrix.loader import load_matrix
+
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.executescript("""
+        CREATE TABLE sessions (
+          session_id TEXT PRIMARY KEY, started_at INTEGER NOT NULL,
+          ended_at INTEGER, cwd TEXT, model TEXT,
+          budget_score REAL NOT NULL DEFAULT 0,
+          budget_cap REAL NOT NULL DEFAULT 120);
+        CREATE TABLE events (
+          id INTEGER PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions,
+          turn_id TEXT, ts INTEGER NOT NULL, kind TEXT NOT NULL,
+          data_type TEXT NOT NULL, source TEXT NOT NULL,
+          destination TEXT NOT NULL, boundary TEXT NOT NULL,
+          count INTEGER NOT NULL DEFAULT 1, value_hash BLOB,
+          masked_example TEXT, budget_delta REAL NOT NULL DEFAULT 0,
+          protection TEXT, tool_name TEXT,
+          UNIQUE(session_id, value_hash, destination));
+        INSERT INTO sessions(session_id, started_at) VALUES ('s1', 1);
+        INSERT INTO events(session_id, ts, kind, data_type, source,
+                           destination, boundary)
+             VALUES ('s1', 1, 'exposed', 'email', 'Bash', 'model_context', 'B1');
+    """)
+    conn.commit()
+    conn.close()
+
+    led = Ledger(path, load_matrix())
+    columns = {r["name"] for r in led.conn.execute("PRAGMA table_info(events)")}
+    assert "source_kind" in columns
+    # The row written before the migration keeps NULL: nothing knows where
+    # it came from, and a guess would be worse than an absence.
+    assert led.conn.execute(
+        "SELECT source_kind FROM events WHERE id=1").fetchone()[0] is None
+    led.conn.close()
+
+
+def test_migrating_twice_is_a_no_op(tmp_path):
+    from privacy_hud.ledger import Ledger
+    from privacy_hud.matrix.loader import load_matrix
+
+    path = tmp_path / "twice.db"
+    Ledger(path, load_matrix()).conn.close()
+    led = Ledger(path, load_matrix())
+    columns = [r["name"] for r in led.conn.execute("PRAGMA table_info(events)")]
+    assert columns.count("source_kind") == 1
+    led.conn.close()
+
+
+def test_record_stores_the_source_kind(led):
+    led.start_session("s1", cwd="/w", model="m")
+    led.record("s1", turn_id="t1", kind="exposed", data_type="credential",
+               source=".env", destination="model_context",
+               value_hash=b"\x01" * 16, masked_example=None,
+               tool_name="Bash", protection=None, source_kind="path")
+    row = led.conn.execute("SELECT source, source_kind FROM events").fetchone()
+    assert (row["source"], row["source_kind"]) == (".env", "path")
+
+
+def test_record_defaults_source_kind_to_null(led):
+    led.start_session("s1", cwd="/w", model="m")
+    led.record("s1", turn_id="t1", kind="exposed", data_type="email",
+               source="Bash", destination="model_context",
+               value_hash=b"\x02" * 16, masked_example="jo•••@acme.com",
+               tool_name="Bash", protection=None)
+    assert led.conn.execute(
+        "SELECT source_kind FROM events").fetchone()["source_kind"] is None

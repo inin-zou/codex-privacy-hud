@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS events (       -- append-only; never UPDATE except co
   kind          TEXT NOT NULL,            -- exposed|prevented|local_access|detected|retention
   data_type     TEXT NOT NULL,            -- email|credential|person|hostname|path|...
   source        TEXT NOT NULL,            -- support.log | user prompt | tool input
+  source_kind   TEXT,                     -- path|command; NULL when source is a bare label
   destination   TEXT NOT NULL,            -- model_context|subagent:<id>|mcp:<server>|net:<host>
   boundary      TEXT NOT NULL,            -- B0..B4
   count         INTEGER NOT NULL DEFAULT 1,
@@ -94,8 +95,8 @@ CREATE TABLE IF NOT EXISTS flows (        -- multi-hop chains for the L3 flow li
 CREATE TABLE IF NOT EXISTS policy (
   id         INTEGER PRIMARY KEY,
   scope      TEXT NOT NULL,               -- session:<id>
-  rule_type  TEXT NOT NULL,               -- mask|block_source|allow_dest
-  selector   TEXT NOT NULL,               -- data_type / path glob / destination
+  rule_type  TEXT NOT NULL,               -- mask|allow_dest|block_path|block_command
+  selector   TEXT NOT NULL,               -- data_type / destination / origin (#40)
   created_at INTEGER NOT NULL
 );
 
@@ -117,6 +118,22 @@ CREATE TABLE IF NOT EXISTS policy_tokens (  -- one-shot consent, §8
   expires_at INTEGER NOT NULL
 );
 """
+
+#: Columns added to `events` after the first release, as (name, decl). The
+#: schema is applied with CREATE TABLE IF NOT EXISTS, which does nothing to a
+#: database that already exists, so a column added to SCHEMA alone would be
+#: missing on every existing install and every later INSERT would raise. This
+#: is the ledger's first migration; keep it additive and idempotent, which is
+#: all `ALTER TABLE ... ADD COLUMN` of a nullable column can be.
+_ADDED_COLUMNS = (("source_kind", "TEXT"),)
+
+
+def _migrate(conn) -> None:
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(events)")}
+    for name, decl in _ADDED_COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE events ADD COLUMN {name} {decl}")
+
 
 #: `coverage.reason` values. Three, and the list is closed on purpose: each one
 #: names a *specific piece of evidence*, not a guess. Nothing may be added here
@@ -294,9 +311,9 @@ class SessionSummary:
 #: Adding a field to `ExposureRow` therefore does NOT silently widen the wire
 #: format -- a new key has to be added here on purpose.
 _EXPOSURE_JSON_FIELDS = (
-    "id", "turn_id", "ts", "kind", "data_type", "source", "destination",
-    "boundary", "count", "masked_example", "budget_delta", "protection",
-    "tool_name",
+    "id", "turn_id", "ts", "kind", "data_type", "source", "source_kind",
+    "destination", "boundary", "count", "masked_example", "budget_delta",
+    "protection", "tool_name",
 )
 
 #: L3-only fields (`render.detail`, design.md §6). Emitted only when set, which
@@ -348,6 +365,7 @@ class ExposureRow:
     kind: str
     data_type: str
     source: str
+    source_kind: str | None
     destination: str
     boundary: str
     count: int
@@ -438,6 +456,11 @@ class Ledger:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(SCHEMA)
+        # A failure here propagates: the daemon must not come up against a
+        # schema it could not migrate, because it would then write rows whose
+        # origin is silently lost. I6 covers what the hooks do when no daemon
+        # answers (open on ingress, closed on egress).
+        _migrate(self.conn)
         Path(path).chmod(0o600)
 
     def start_session(self, session_id: str, *, cwd: str, model: str,
@@ -578,7 +601,7 @@ class Ledger:
 
     def record(self, session_id: str, *, turn_id, kind, data_type, source,
                destination, value_hash, masked_example, tool_name,
-               protection) -> float:
+               protection, source_kind: str | None = None) -> float:
         # I2: unmapped destinations must raise (UnknownKey), never silently
         # score zero — propagate rather than catch.
         boundary = self.matrix.boundary_for(destination)
@@ -597,11 +620,11 @@ class Ledger:
 
         self.conn.execute(
             "INSERT INTO events(session_id,turn_id,ts,kind,data_type,source,"
-            "destination,boundary,value_hash,masked_example,budget_delta,"
-            "protection,tool_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "source_kind,destination,boundary,value_hash,masked_example,"
+            "budget_delta,protection,tool_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (session_id, turn_id, int(time.time()), kind, data_type, source,
-             destination, boundary, value_hash, masked_example, delta,
-             protection, tool_name))
+             source_kind, destination, boundary, value_hash, masked_example,
+             delta, protection, tool_name))
         if delta:
             self.conn.execute(
                 "UPDATE sessions SET budget_score=budget_score+? WHERE session_id=?",

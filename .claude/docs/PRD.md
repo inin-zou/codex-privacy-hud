@@ -369,7 +369,7 @@ Non-negotiable properties, and the first thing a judge will ask:
 - [ ] Metadata-only SQLite ledger + budget math with the §5.3 invariants tested
 - [ ] `$privacy` skill
 - [ ] Local interactive audit UI: `Exposed / Prevented / All events` + exposure detail
-- [ ] Actions: `Protect future occurrences`, `Allow once` (`Block this source` withdrawn, #38)
+- [ ] Actions: `Protect future occurrences`, `Allow once`, and — on a row that names a real origin — `block_path`/`block_command` (#40; the earlier `Block this source`/`block_source` stays withdrawn, #38)
 - [ ] One real MCP outbound minimization demo, end to end
 
 ### Should

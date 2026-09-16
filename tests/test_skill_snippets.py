@@ -25,6 +25,7 @@ import pytest
 
 from privacy_hud.ledger import Ledger
 from privacy_hud.matrix.loader import load_matrix
+from privacy_hud.origin import OriginKind, origin_phrase
 
 REPO = Path(__file__).resolve().parents[1]
 SKILL_MD = REPO / "skills" / "privacy" / "SKILL.md"
@@ -93,6 +94,32 @@ def test_every_python_block_has_a_case():
                  if not any(m in b for m in covered)]
     assert not uncovered, f"SKILL.md blocks with no test here: {uncovered}"
     assert len(_python_blocks()) == len(MARKERS)
+
+
+def test_the_skill_describes_the_source_rules_that_actually_ship():
+    """The skill is read by the model that is looking at the screen, so a
+    claim in it about that screen has to be true of what `render.detail()`
+    prints. It told the model there was no source-level action while the
+    renderer was printing one (#40), i.e. that the button on its own screen
+    did nothing. Pinned against the renderer's own labels, not retyped."""
+    text = SKILL_MD.read_text(encoding="utf-8")
+
+    for kind in (OriginKind.PATH, OriginKind.COMMAND):
+        # "read from {}" / "from `{}` output", with the origin left out:
+        # the skill describes the shape, a real row fills in the name.
+        wording = origin_phrase("{}", kind).split("{}")[0].strip()
+        assert f"Block values {wording}" in text
+
+    for rule_type in ("block_path", "block_command"):
+        assert rule_type in text
+
+    # The withdrawn action, and the false premise it rested on.
+    assert "Block this source" not in text
+    assert "no rule can name a source" not in text
+
+    # Known limit 10 travels with the claim: the promise is "this value
+    # does not leave unchanged", not "nothing about this file leaves".
+    assert "byte-identical" in text
 
 
 def test_resolve_block_names_the_session(env):

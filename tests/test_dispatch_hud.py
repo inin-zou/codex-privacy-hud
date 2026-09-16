@@ -39,6 +39,12 @@ def _prompt(state, text, sid=SID):
                                      "prompt": text})
 
 
+def _hook(state, event, **fields):
+    return dispatch.dispatch(
+        state, {"hook_event_name": event, "session_id": SID, "cwd": "/w",
+                "model": "gpt-5", "turn_id": "t1", **fields})
+
+
 def test_session_start_publishes_a_zero_snapshot(state, tmp_path):
     _start(state)
     snap = hs.read_snapshot(tmp_path, SID)
@@ -143,3 +149,36 @@ def test_a_session_first_met_without_session_start_gets_a_zero_snapshot(state, t
         dispatch._get_or_start_engine(state, SID, cwd="/w", model="m")
     snap = hs.read_snapshot(tmp_path, SID)
     assert snap is not None and snap.percent == 0 and snap.blocked == 0
+
+
+def test_a_file_read_records_the_path_as_the_source(state):
+    _hook(state, "SessionStart")
+    _hook(state, "PostToolUse", tool_name="Bash",
+          tool_input={"command": "cat .env"},
+          tool_response="OPENAI_API_KEY=sk-proj-Ab3xY9zQw1Er5Ty7Ui0OpAs2Df4Gh6Jk8Lm")
+    row = state.ledger.conn.execute(
+        "SELECT source, source_kind FROM events").fetchone()
+    assert (row["source"], row["source_kind"]) == (".env", "path")
+
+
+def test_a_command_with_no_readable_path_records_its_program_name(state):
+    _hook(state, "SessionStart")
+    _hook(state, "PostToolUse", tool_name="Bash",
+          tool_input={"command": "env"},
+          tool_response="OPENAI_API_KEY=sk-proj-Ab3xY9zQw1Er5Ty7Ui0OpAs2Df4Gh6Jk8Lm")
+    row = state.ledger.conn.execute(
+        "SELECT source, source_kind FROM events").fetchone()
+    assert (row["source"], row["source_kind"]) == ("env", "command")
+
+
+def test_a_payload_with_no_origin_keeps_the_tool_name(state):
+    # The finding has to come from a CHEAP tier: this fixture builds the real
+    # detector stack, and CI installs no `transformers`, so tier 3 finds
+    # nothing there. An email (tier 3 only) made this pass locally and fail on
+    # every CI Python -- the row it asserts on was never written.
+    _hook(state, "SessionStart")
+    _hook(state, "PostToolUse", tool_name="WebFetch",
+          tool_response="OPENAI_API_KEY=sk-proj-Ab3xY9zQw1Er5Ty7Ui0OpAs2Df4Gh6Jk8Lm")
+    row = state.ledger.conn.execute(
+        "SELECT source, source_kind FROM events").fetchone()
+    assert (row["source"], row["source_kind"]) == ("WebFetch", None)

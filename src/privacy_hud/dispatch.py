@@ -12,14 +12,18 @@ Payload -> Observation mapping (architecture.md §10's dispatch table + the
 task-10 brief, both consistent with `hooks/handler.py`'s own
 `_looks_like_egress` — `tool_name.startswith("mcp")`, not `"mcp__"`):
 
-  hook_event_name    source          destination              direction   text
-  UserPromptSubmit   user prompt     model_context             ingress     prompt
-  PostToolUse        tool_name       model_context             ingress     tool_response
-  PreToolUse (Bash)  tool input      extract_destinations(cmd) egress      command
-  PreToolUse (mcp*)  tool input      mcp_tool                  egress      json.dumps(tool_input)
-  SubagentStart      main agent      subagent                  propagate   ""
+  hook_event_name    source              destination              direction   text
+  UserPromptSubmit   user prompt         model_context             ingress     prompt
+  PostToolUse        origin or tool_name model_context             ingress     tool_response
+  PreToolUse (Bash)  tool input          extract_destinations(cmd) egress      command
+  PreToolUse (mcp*)  tool input          mcp_tool                  egress      json.dumps(tool_input)
+  SubagentStart      main agent          subagent                  propagate   ""
   SessionStart / SessionEnd -- not Engine observations; they drive the
   ledger session lifecycle directly.
+
+  `PostToolUse`'s source is `origin.extract_origin(tool_name, tool_input)`
+  when it can name a path or a program the output came from (#40); `None`
+  keeps `tool_name`, exactly as before origins existed.
 
   PreToolUse whose resolved destination is "local" (a Bash command
   `extract_destinations` judges local, or any non-Bash/non-MCP tool) is
@@ -117,6 +121,7 @@ from .hud_snapshot import HudPublisher
 from .ledger import Ledger
 from .mask import new_salt
 from .matrix.loader import Matrix, load_matrix
+from .origin import extract_origin
 from .render import receipt as render_receipt
 from .runtime import latch_path
 
@@ -416,12 +421,20 @@ def _build_observation(event: str, session_id: str, payload: dict) -> Observatio
 
     if event == "PostToolUse":
         tool_name = payload.get("tool_name") or "tool"
+        tool_input = payload.get("tool_input")
+        if not isinstance(tool_input, dict):
+            tool_input = {}
+        # Where the data came from, when it can be named (#40). `source`
+        # keeps the tool name when it cannot: "no origin" is not the same
+        # fact as "an origin that happens to be a tool name", and only a
+        # real origin gets a rule offered for it.
+        origin = extract_origin(tool_name, tool_input)
         return Observation(
             session_id=session_id, turn_id=turn_id, hook_event=event,
-            direction="ingress", source=tool_name,
+            direction="ingress", source=origin.value if origin else tool_name,
             destination="model_context",
             text=_as_text(payload.get("tool_response", "")),
-            tool_name=tool_name)
+            tool_name=tool_name, origin=origin)
 
     if event == "PreToolUse":
         tool_name = payload.get("tool_name") or ""

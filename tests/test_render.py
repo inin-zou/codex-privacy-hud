@@ -26,7 +26,7 @@ GOLDEN = json.loads((Path(__file__).parent / "matrix" / "hud_golden.json").read_
 # field values, same assertions — only the carrier changed.
 ROW = ExposureRow(id=1, turn_id="t1", ts=1757000000, kind="exposed",
                   data_type="email", count=12, source="support.log",
-                  destination="model context", boundary="B1",
+                  source_kind=None, destination="model context", boundary="B1",
                   masked_example="jo•••@acme.com", budget_delta=9.0,
                   protection=None, tool_name="Read")
 SUMMARY = SessionSummary(percent=28, exposed_items=4, destinations=2,
@@ -78,6 +78,33 @@ def test_detail_omits_example_line_when_no_exemplar_exists():
     row = replace(ROW, data_type="credential", masked_example=None)
     out = detail(row)
     assert "None" not in out
+
+
+def test_detail_offers_no_source_action_for_a_bare_tool_label():
+    # `source_kind is None` means `source` is a tool name, not an origin:
+    # there is nothing a rule could name, so no button is offered (#40).
+    assert "Block values" not in detail(ROW)
+
+
+def test_detail_golden_for_a_path_origin_row():
+    row = replace(ROW, source=".env", source_kind="path")
+    assert detail(row).endswith(
+        "\n[ Protect future occurrences ]\n"
+        "[ Block values read from .env ]\n"
+        "\nAlready disclosed data cannot be recalled from this session.")
+
+
+def test_detail_golden_for_a_command_origin_row():
+    """The command branch feeds a DIFFERENT rule_type (`block_command`) to
+    `apply_policy`, and until this golden existed nothing rendered it: a
+    slip here would show the user a confirmation for a rule the engine
+    never matches. The wording is the engine's too -- a command origin is
+    named as output, not as a file that was read (`origin.origin_phrase`)."""
+    row = replace(ROW, source="git log", source_kind="command")
+    assert detail(row).endswith(
+        "\n[ Protect future occurrences ]\n"
+        "[ Block values from `git log` output ]\n"
+        "\nAlready disclosed data cannot be recalled from this session.")
 
 
 def test_no_view_contains_forbidden_copy():
