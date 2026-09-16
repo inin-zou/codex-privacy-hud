@@ -473,9 +473,10 @@ def _build_observation(event: str, session_id: str, payload: dict) -> Observatio
             text = json.dumps(tool_input)
         else:
             # Not pinned by the mapping table (a non-Bash, non-MCP tool,
-            # e.g. a local file Write/Edit): same "no PreToolUse/local
-            # taxonomy entry" situation as above — nothing crosses a
-            # boundary here, so there is no Engine.observe call to make.
+            # e.g. a local file Write/Edit): `extract_origin` has no way to
+            # name a path or command for an arbitrary tool_input shape, so
+            # there is no origin to score against — nothing to decide, and
+            # no Engine.observe call to make.
             return None
         return Observation(
             session_id=session_id, turn_id=turn_id, hook_event=event,

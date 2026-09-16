@@ -622,6 +622,9 @@ class Engine:
             # whatever `direction` the caller supplied, and taking priority
             # over any blocking decision above (which never arises for a
             # local read in practice, since B0 is never egress-blocking).
+            # The read guard's next step adds the check that makes that
+            # blocking decision reachable for a local read -- see Ruling 1's
+            # exception in this module's docstring.
             classify_direction = "local"
         elif action == "deny":
             classify_direction = "blocked"
