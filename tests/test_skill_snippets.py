@@ -14,6 +14,7 @@ until it does.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import sqlite3
@@ -153,6 +154,25 @@ def test_hud_block_prints_one_state_word(env):
 
 
 def test_read_block_prints_on_or_off(env):
-    # No settings.json written yet in this env -- I6's default applies.
+    # The block ships with `on` filled in, the way the `hud` block does, so
+    # running it verbatim turns the guard on and says so in one word. No
+    # second line: this env's PLUGIN_DATA is writable.
     out = _run(_block("read"), env)
-    assert out.strip() == "off"
+    assert out.splitlines() == ["on"]
+    settings = Path(env["PLUGIN_DATA"]) / "settings.json"
+    assert json.loads(settings.read_text())["deny_read"] is True
+
+
+def test_read_block_says_so_when_the_setting_cannot_be_written(env, tmp_path):
+    """The failure the user must not meet as a traceback: the word printed
+    is what the setting still says, and the line after it says the write
+    did not land."""
+    data = Path(env["PLUGIN_DATA"])
+    data.chmod(0o500)
+    try:
+        out = _run(_block("read"), {**env})
+    finally:
+        data.chmod(0o700)
+    first, rest = out.splitlines()[0], out.splitlines()[1:]
+    assert first == "off"
+    assert rest and "unchanged" in rest[0]

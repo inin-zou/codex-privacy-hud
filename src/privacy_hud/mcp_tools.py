@@ -554,7 +554,25 @@ def read_guard_set(data_dir, enabled: bool) -> dict:
     """`$privacy read off` / `on`. Writes the toggle in `settings.json`
     (see `settings.py`) and returns the state that resulted, the same
     shape `read_guard_status` returns -- so a caller never has to make a
-    second call just to confirm what it set."""
+    second call just to confirm what it set.
+
+    A `PLUGIN_DATA` the plugin cannot write is that same answer with an
+    `error` beside it, not an exception: this runs inside the skill's
+    heredoc, where an escaping `PermissionError` is a traceback on the
+    user's screen and no statement of what the setting now says. The
+    caller must be able to tell them the write did not stick, and that
+    the guard goes on reading the file as it was -- so `deny_read` here
+    is re-read from disk rather than echoed back from `enabled`.
+
+    Not a hook path: a read is never denied by this failing (I6).
+    """
     from .settings import Settings
-    Settings(data_dir).set_deny_read(enabled)
+    settings = Settings(data_dir)
+    try:
+        settings.set_deny_read(enabled)
+    except OSError as err:
+        out = read_guard_status(data_dir)
+        out["error"] = (f"could not write {settings.path}: "
+                        f"{err.strerror or err}. The setting is unchanged.")
+        return out
     return read_guard_status(data_dir)
