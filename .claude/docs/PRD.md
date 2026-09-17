@@ -283,10 +283,16 @@ Storage: SQLite at `$PLUGIN_DATA/ledger.db`. Tables: `sessions`, `events`, `flow
 privacy.get_session_summary
 privacy.list_exposures
 privacy.get_exposure_detail
+privacy.read_guard_status
 privacy.update_policy
-privacy.allow_once
-privacy.hud_toggle
 ```
+
+`privacy.allow_once`, `privacy.read_guard_set` and `privacy.hud_toggle` are
+deliberately not exposed here: an MCP tool is called by the model, and none
+of the three may loosen what the plugin enforces. See `CLAUDE.md` §5 for the
+rule that every user-facing action claim must trace to the surface that
+performs it, and `architecture.md` §9 for the full tool list and withheld
+set.
 
 ### 7.6 The `ask` workaround
 

@@ -407,18 +407,17 @@ MCP     {"body": "contact jordan@acme.com about 4412"}
 
 ## 9. MCP server and UI delivery
 
-Local stdio MCP server declared in `plugin.json`:
+Local stdio MCP server, declared in `.codex-plugin/plugin.json` as `mcpServers`
+and launched by Codex as host `python3 ./mcp/server.py`; the script re-executes
+itself under the interpreter `runtime.json` pins, because Codex does not expand
+`${PLUGIN_ROOT}` in an MCP `command`.
 
-```text
-privacy.get_session_summary   → tiles + budget
-privacy.list_exposures        → rows for a tab
-privacy.get_exposure_detail   → L3 payload for one flow
-privacy.update_policy         → write mask / block rules
-privacy.allow_once            → mint a one-shot token
-privacy.hud_toggle            → hide or show the status-line item
-privacy.read_guard_status     → is the read guard on (#36)
-privacy.read_guard_set        → turn it on or off
-```
+It exposes only tools that cannot loosen what the plugin enforces, because an
+MCP tool is called by the model: `privacy.get_session_summary`,
+`privacy.list_exposures`, `privacy.get_exposure_detail`,
+`privacy.read_guard_status`, `privacy.update_policy`. `privacy.allow_once`,
+`privacy.read_guard_set` and `privacy.hud_toggle` are deliberately not exposed
+(`mcp/server.py::EXPOSED_TOOLS`).
 
 `read_guard_set` returns the same shape `read_guard_status` does, plus an `error` string when `settings.json` could not be written — the caller is the `$privacy` skill's heredoc, where a raised `PermissionError` would be a traceback and no statement of what the setting now says. Reads still fail open: this is not a hook path (I6).
 

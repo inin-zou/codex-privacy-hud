@@ -106,5 +106,6 @@ The known limits in `README.md` and `docs/known-limits.md` are load-bearing. Do 
 - Do not claim complete enforcement — hosted tools bypass local hooks, and that must stay stated.
 - Do not claim the whole session is monitored — the first seconds, while the daemon loads the model, are not, and a short one-shot run can go entirely unrecorded.
 - Do not describe heuristic detection as guaranteed.
+- **Every action user-facing copy tells a user to take must be traced, before merge, to the surface that performs it.** Traced through the call, not inferred from a function existing. The block message shipped for six weeks telling users to "minimize, or allow once" through `$privacy`, which does neither; `mcp_tools.allow_once` existed, and that was mistaken for the action being available. `tests/test_copy_promises.py` catches a `$privacy` subcommand that does not exist. It cannot catch a verb in a sentence, which is what shipped, so the final whole-branch review checks this by name.
 
 A privacy tool that overclaims is worse than no privacy tool.

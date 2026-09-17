@@ -110,7 +110,16 @@ it puts `install.sh` on your machine, but it does not run it: the daemon's
 Python environment, the detection model, and the patched Codex build are
 still missing, so every hook answers
 `Privacy HUD unavailable — disclosure unverified` and `$privacy` reports no
-daemon. From here:
+daemon.
+
+The MCP tools are read-only or tightening — a session summary, the exposure
+list, one exposure's detail, the read-guard state, and writing a policy rule.
+Turning the read guard off, hiding the HUD, and allowing a blocked call once
+are not among them: an MCP tool is called by the model, and a switch that
+loosens protection is not one to hand to the thing being enforced against.
+Those stay behind `$privacy`, which you type.
+
+From here:
 
 1. Run `codex`. Codex 0.154 opens with **Hooks need review** for the
    plugin's eight hooks; choose **Trust all and continue**. Nothing from
