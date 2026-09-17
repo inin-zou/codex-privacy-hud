@@ -99,7 +99,7 @@ _TAB_KINDS = {
     "All events": _ALL_EVENT_KINDS,
 }
 
-_POLICY_RULE_TYPES = {"mask", "allow_dest", "block_path", "block_command"}
+_POLICY_RULE_TYPES = {"mask", "block_path", "block_command"}
 
 #: Why `block_source` is refused rather than written (#38). The rule compared
 #: its selector with an observation's `source`, and `dispatch` only ever puts
@@ -117,6 +117,23 @@ _BLOCK_SOURCE_WITHDRAWN = (
     "block_source is not available: it names a label, not a source, so no "
     "rule written that way could ever match an origin (#38) — use "
     "block_path or block_command, which name a real origin (#40)")
+
+#: Why `allow_dest` is refused rather than written. It named a destination
+#: to stop treating as sensitive, and nothing ever enforced it: `Engine.observe`
+#: reads `mask` (its own matrix defaults behind it) and the two origin rule
+#: types, and compares `rule_type` against nothing else. So a row went in, the
+#: caller was told `{"applied": True}`, and every later call was decided
+#: exactly as if the rule did not exist. `2026-09-03-decisions.md` recorded it
+#: as a placeholder -- "untouched because nothing mints it yet" -- and wiring
+#: the MCP server is what would have started minting it. Refused for #38's
+#: reason, in #38's words: a policy row the engine can never match is worse
+#: than an error, because it looks like protection was applied when nothing
+#: was. An allow rule failing to apply is the safe direction; saying it
+#: applied is not.
+_ALLOW_DEST_WITHDRAWN = (
+    "allow_dest is not available: no code path has ever enforced it, so a "
+    "rule written that way decides nothing while reporting success (#38's "
+    "reason) — there is no replacement, because nothing minted it")
 
 #: How close two sessions' last hook events have to be, in seconds, before
 #: "which of these is the caller?" stops being answerable.
@@ -459,6 +476,8 @@ def apply_policy(ledger, session_id: str, *, rule_type: str, selector: str) -> N
     """
     if rule_type == "block_source":
         raise ValueError(_BLOCK_SOURCE_WITHDRAWN)
+    if rule_type == "allow_dest":
+        raise ValueError(_ALLOW_DEST_WITHDRAWN)
     if rule_type not in _POLICY_RULE_TYPES:
         raise ValueError(
             f"unknown rule_type {rule_type!r}; expected one of "

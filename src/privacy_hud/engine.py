@@ -248,7 +248,7 @@ BLOCK_TEMPLATE = (
     "PRIVACY HUD blocked a tool call\n\n"
     "  {tool}  would send  {label}\n"
     "  from {source} to {destination}.\n\n"
-    "  Run $privacy to review, minimize, or allow once."
+    "  Run $privacy to review."
 )
 
 REWRITE_TEMPLATE = (
@@ -270,16 +270,24 @@ REWRITE_TEMPLATE = (
 # It does not end in "Run $privacy to review or adjust policy" like the
 # other two. That would promise an adjustment this call cannot get: an
 # origin deny is decided above, before the consent-token branch, which only
-# runs when the action is still "allow", so an allow-once token does not
-# override a standing rule; and no code path removes a policy row. What is
-# left is what is true -- the rule holds for the rest of this session, and
-# `Ledger.add_policy` scopes it to `session:<id>`, so it does not outlive it.
+# runs when the action is still "allow"; and no code path removes a policy
+# row. What is left is what is true -- the rule holds for the rest of this
+# session, and `Ledger.add_policy` scopes it to `session:<id>`, so it does
+# not outlive it.
+#
+# It also does not say "allow once does not override it" -- the clause used
+# to, and the fact is still true (the consent-token branch only runs when
+# the action is still "allow", so it is never reached here), but no surface
+# mints an allow-once token, so naming it told the user they had a button
+# that does not exist. Stating what cannot be overridden is only useful
+# copy when overriding it is a real option; here it is not one at all, so
+# the clause is gone rather than reworded.
 ORIGIN_BLOCK_TEMPLATE = (
     "PRIVACY HUD blocked a tool call\n\n"
     "  {tool}  would send  {label}\n"
     "  {origin_phrase}.\n\n"
-    "  A source rule you wrote for this session denies this call; allow once\n"
-    "  does not override it. The rule ends with the session."
+    "  A source rule you wrote for this session denies this call.\n"
+    "  The rule ends with the session."
 )
 
 # The one thing this plugin can say without qualification: the call is
