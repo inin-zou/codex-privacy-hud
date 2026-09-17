@@ -336,3 +336,14 @@ def test_a_missing_host_is_reported_not_fatal(home):
     assert r.returncode == 0, r.stderr
     assert "no codex-code-mode-host" in r.stdout
     assert not (home / f".local/share/codex-privacy-hud/{VER}/codex-code-mode-host").exists()
+
+
+def test_the_install_brings_the_mcp_extra():
+    """Without it the server dies at `from mcp.server.fastmcp import FastMCP`
+    and Codex reports nothing. The install runs before the model prompt, so a
+    user who declines the model still gets the server."""
+    REPO = Path(__file__).resolve().parent.parent
+    source = (REPO / "install.sh").read_text(encoding="utf-8")
+    assert "privacy-hud[detectors,mcp]" in source
+    assert "privacy-hud[detectors]" not in source.replace(
+        "privacy-hud[detectors,mcp]", "")
