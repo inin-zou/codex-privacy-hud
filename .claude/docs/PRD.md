@@ -294,9 +294,11 @@ rule that every user-facing action claim must trace to the surface that
 performs it, and `architecture.md` §9 for the full tool list and withheld
 set.
 
-### 7.6 The `ask` workaround
+### 7.6 The `ask` workaround (designed, never built — do not read this as current behavior)
 
-Codex `PreToolUse` supports `deny`, `allow`, and `allow + updatedInput` — but **not** `permissionDecision: "ask"`. So an interactive three-button prompt cannot come from a single hook response. The flow becomes:
+This section records the reasoning about Codex's missing `ask` decision, which is still true. The five-step flow below is a design record of what an interactive consent loop *would* look like; no surface implements steps 2–5. `privacy.allow_once` exists in code but is deliberately not exposed as an MCP tool (§7.5), and nothing else calls it: there is no UI button, no `$privacy` subcommand, and no retry path that consumes the token it would write. Treat this as a proposal this branch left withdrawn, not a description of the shipped product — see `CLAUDE.md` §5.
+
+Codex `PreToolUse` supports `deny`, `allow`, and `allow + updatedInput` — but **not** `permissionDecision: "ask"`. So an interactive three-button prompt cannot come from a single hook response. The flow as designed:
 
 1. Risky call is **denied** by the hook, with a `permissionDecisionReason` pointing at the audit UI.
 2. UI shows the exposure detail.

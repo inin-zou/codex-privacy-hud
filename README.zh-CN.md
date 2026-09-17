@@ -99,7 +99,7 @@ codex plugin add codex-privacy-hud@codex-privacy-hud
 因此，所有 hook 都会回复 `Privacy HUD unavailable — disclosure unverified`。
 `$privacy` 则会报告未找到守护进程。
 
-MCP 工具只提供查询或收紧防护的操作：查看会话摘要、暴露列表、单次暴露的详情和读取防护状态，以及写入策略规则。关闭读取防护、隐藏 HUD、临时放行一次被拦截的调用，都不在其中。原因是 MCP 工具由模型调用，而放宽防护的开关不能交给防护所约束的模型。这些操作只能通过你亲自输入的 `$privacy` 执行。
+MCP 工具只提供查询或收紧防护的操作：查看会话摘要、暴露列表、单次暴露的详情和读取防护状态，以及写入策略规则。关闭读取防护和隐藏 HUD 不在其中，因为 MCP 工具由模型调用，而放宽防护的开关不能交给防护所约束的模型。这两项操作只能通过你亲自输入的 `$privacy` 执行。临时放行一次被拦截的调用也不在其中，但原因不同：这项操作根本没有任何入口——`$privacy` 不提供，审计界面不提供，MCP 工具也不提供——见[已知限制第 13 条](docs/known-limits.md#13-no-policy-rule-can-be-removed-within-the-session-that-wrote-it)。
 
 接下来，请按以下步骤操作：
 

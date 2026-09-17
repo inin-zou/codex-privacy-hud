@@ -114,10 +114,13 @@ daemon.
 
 The MCP tools are read-only or tightening — a session summary, the exposure
 list, one exposure's detail, the read-guard state, and writing a policy rule.
-Turning the read guard off, hiding the HUD, and allowing a blocked call once
-are not among them: an MCP tool is called by the model, and a switch that
-loosens protection is not one to hand to the thing being enforced against.
-Those stay behind `$privacy`, which you type.
+Turning the read guard off and hiding the HUD are not among them, because an
+MCP tool is called by the model, and a switch that loosens protection is not
+one to hand to the thing being enforced against; those two stay behind
+`$privacy`, which you type. Allowing a blocked call once is not among them
+either, but for a different reason: it has no surface at all — not
+`$privacy`, not the audit UI, not an MCP tool — see [known limit
+13](docs/known-limits.md#13-no-policy-rule-can-be-removed-within-the-session-that-wrote-it).
 
 From here:
 
