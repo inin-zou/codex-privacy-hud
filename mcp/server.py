@@ -63,11 +63,101 @@ disclosed before the rule was written stays disclosed (design.md P4).
 """
 from __future__ import annotations
 
+import json
+import os
+import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from privacy_hud import mcp_tools
-from privacy_hud.ledger import Ledger
-from privacy_hud.matrix.loader import load_matrix
+if TYPE_CHECKING:  # import-time cost is the whole point of not importing these
+    from privacy_hud.ledger import Ledger
+
+#: `$PLUGIN_DATA/runtime.json` — written by `privacy-hud-setup`, read by
+#: `hooks/handler.py` to launch the daemon and by this file to launch itself.
+#: Restated rather than imported: `handler.py` inlines these checks inside
+#: `_spawn_daemon`, on the path every tool call runs, and extracting them to
+#: share would change the hook client for this file's benefit. The repo's
+#: precedent for a fact two stdlib-only ends must share is to restate it and
+#: pin both copies with one test —
+#: `tests/test_mcp_launcher.py::test_the_receipt_checks_match_the_hook_client`.
+RECEIPT_NAME = "runtime.json"
+RECEIPT_VERSION = 1
+
+#: Set in the child's environment before `execve`, so an entry that finds it
+#: already set does not exec again. Without it, a receipt naming an
+#: interpreter that re-enters this file loops until the process table gives up.
+REEXEC_MARKER = "PRIVACY_HUD_MCP_REEXEC"
+
+
+def _fail(message: str):
+    """One line to stderr, non-zero exit, nothing on stdout.
+
+    stdout is the JSON-RPC channel for stdio MCP: a single stray byte there
+    desynchronises the framing, so an error printed to stdout is worse than
+    the error it reports. I1: `message` names a cause, never a payload.
+    """
+    print(f"privacy-hud mcp: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def _reexec_under_pinned_interpreter() -> None:
+    """Replace this process with the interpreter `runtime.json` records.
+
+    Codex constrains an MCP `command` to a bare executable on the host PATH
+    or a `./` path inside the plugin root, and rejects `${PLUGIN_ROOT}` there
+    — unlike `hooks.json`, where `$PLUGIN_ROOT` expands. The plugin's venv is
+    neither, so the manifest launches host `python3` and this is how the
+    process reaches an interpreter that can import `privacy_hud` and `mcp`.
+
+    Re-exec, not `sys.path`: `mcp` depends on `pydantic`, whose core is a
+    compiled extension built for one interpreter version. Borrowing the
+    venv's `site-packages` from a different host `python3` is a binary
+    mismatch waiting for the two versions to differ.
+
+    Returns only when already running under the pinned interpreter. Otherwise
+    `execve` replaces the process and this never returns.
+    """
+    if os.environ.get(REEXEC_MARKER):
+        return
+    data_dir = os.environ.get("PLUGIN_DATA")
+    if not data_dir:
+        _fail("PLUGIN_DATA is not set; Codex did not launch this, or the "
+              "plugin is not installed")
+    try:
+        with open(os.path.join(data_dir, RECEIPT_NAME)) as handle:
+            # This file names a program about to be executed, so who can
+            # write it matters — `handler.py` carries the same check and the
+            # same reasoning. `fstat` on the open handle, not `stat` on the
+            # path: the check must describe the bytes actually read.
+            info = os.fstat(handle.fileno())
+            if info.st_uid != os.getuid() or info.st_mode & 0o022:
+                _fail(f"{RECEIPT_NAME} is writable by others; refusing to "
+                      "execute the interpreter it names")
+            receipt = json.load(handle)
+        if not isinstance(receipt, dict) or receipt.get("v") != RECEIPT_VERSION:
+            raise ValueError("unusable receipt")
+        python = receipt["python"]
+        if not isinstance(python, str) or not python:
+            raise ValueError("unusable receipt")
+    except (OSError, ValueError, KeyError) as exc:
+        _fail(f"no usable {RECEIPT_NAME} ({type(exc).__name__}); "
+              "run privacy-hud-setup")
+    if not os.access(python, os.X_OK) or os.path.isdir(python):
+        _fail("the recorded interpreter is not executable; run privacy-hud-setup")
+
+    env = dict(os.environ)
+    env[REEXEC_MARKER] = "1"
+    pythonpath = receipt.get("pythonpath")
+    if isinstance(pythonpath, str) and pythonpath:
+        parts = [pythonpath] + [p for p in env.get("PYTHONPATH", "").split(
+            os.pathsep) if p]
+        seen, ordered = set(), []
+        for part in parts:
+            if part not in seen:
+                seen.add(part)
+                ordered.append(part)
+        env["PYTHONPATH"] = os.pathsep.join(ordered)
+    os.execve(python, [python, os.path.abspath(__file__)], env)
 
 
 def _ledger_path() -> Path:
@@ -83,9 +173,10 @@ def _ledger_path() -> Path:
     return data_dir / "ledger.db"
 
 
-def _open_ledger() -> Ledger:
-    matrix = load_matrix()
-    return Ledger(_ledger_path(), matrix)
+def _open_ledger() -> "Ledger":
+    from privacy_hud.ledger import Ledger
+    from privacy_hud.matrix.loader import load_matrix
+    return Ledger(_ledger_path(), load_matrix())
 
 
 def build_app():
@@ -104,6 +195,8 @@ def build_app():
             "    pip install mcp\n"
             f"(original ImportError: {exc})"
         ) from exc
+
+    from privacy_hud import mcp_tools
 
     app = FastMCP("privacy-hud")
     ledger = _open_ledger()
@@ -185,6 +278,7 @@ def build_app():
 
 
 def main() -> int:
+    _reexec_under_pinned_interpreter()
     app = build_app()
     app.run(transport="stdio")
     return 0
