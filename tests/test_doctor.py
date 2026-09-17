@@ -64,6 +64,56 @@ BANNED = ("undo", "revoke", "remove from context", "your data is protected",
           "100% secure")
 
 
+def _fake_mcp_server_body(tools, *, crash=False) -> str:
+    """The stdlib stdio MCP server body `_write_fake_plugin` and the
+    all-green end-to-end test both ship: answers `initialize` and
+    `tools/list`, nothing else. Real enough to prove the handshake, small
+    enough to have no dependencies — the point is the doctor's side of the
+    conversation, not FastMCP's."""
+    if crash:
+        return "import sys; sys.exit(3)\n"
+    return f"""
+import json, sys
+TOOLS = {tools!r}
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    if msg.get("method") == "initialize":
+        sys.stdout.write(json.dumps({{"jsonrpc": "2.0", "id": msg["id"],
+            "result": {{"protocolVersion": "2024-11-05", "capabilities": {{}},
+            "serverInfo": {{"name": "fake", "version": "1"}}}}}}) + "\\n")
+    elif msg.get("method") == "tools/list":
+        sys.stdout.write(json.dumps({{"jsonrpc": "2.0", "id": msg["id"],
+            "result": {{"tools": [{{"name": n, "inputSchema": {{"type": "object"}}}}
+                                 for n in TOOLS]}}}}) + "\\n")
+    sys.stdout.flush()
+"""
+
+
+def _write_fake_plugin(root, *, tools, declare=True, crash=False):
+    """A plugin directory shaped like an installed one, whose `mcp/server.py`
+    is a stdlib stdio MCP server answering `initialize` and `tools/list`.
+
+    Real enough to prove the handshake, small enough to have no dependencies:
+    the point is the doctor's side of the conversation, not FastMCP's.
+    """
+    import json
+    (root / ".codex-plugin").mkdir(parents=True, exist_ok=True)
+    manifest = {"name": "codex-privacy-hud", "version": "0.7.0",
+                "description": "x", "skills": "./skills/",
+                "hooks": "./hooks/hooks.json"}
+    if declare:
+        manifest["mcpServers"] = {"privacy-hud": {
+            "command": "python3", "args": ["./mcp/server.py"], "cwd": "."}}
+    (root / ".codex-plugin" / "plugin.json").write_text(
+        json.dumps(manifest), encoding="utf-8")
+    (root / "mcp").mkdir(parents=True, exist_ok=True)
+    (root / "mcp" / "server.py").write_text(
+        _fake_mcp_server_body(tools, crash=crash), encoding="utf-8")
+
+
 # --------------------------------------------------------------------- #
 # fixtures
 # --------------------------------------------------------------------- #
@@ -1118,7 +1168,7 @@ def test_a_check_that_raises_becomes_a_failure_not_a_traceback(monkeypatch,
     assert "RuntimeError" in ledger.summary
     text = doctor.format_report(checks)
     assert "something private" not in text
-    assert len(checks) == 9
+    assert len(checks) == 10
 
 
 def test_report_is_plain_text_with_no_escape_sequences(isolated_env):
@@ -1212,7 +1262,24 @@ def test_healthy_setup_reports_healthy_and_exits_zero(isolated_env, monkeypatch,
     _seed_weights(tmp_path, doctor.MODEL_FILES)
     monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
     repo = _fake_repo(tmp_path)
-    _install(tmp_path, repo)
+    # Declare and ship a real (fake) MCP server so the new "MCP server" check
+    # also comes back OK in this all-green scenario, exactly as it would for
+    # an installed copy that Codex can actually launch.
+    manifest_path = repo / ".codex-plugin" / "plugin.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["mcpServers"] = {"privacy-hud": {
+        "command": "python3", "args": ["./mcp/server.py"], "cwd": "."}}
+    manifest_path.write_text(json.dumps(manifest))
+    (repo / "mcp").mkdir(parents=True, exist_ok=True)
+    (repo / "mcp" / "server.py").write_text(
+        _fake_mcp_server_body(list(doctor.MCP_TOOLS)), encoding="utf-8")
+    dest = _install(tmp_path, repo)
+    # `mcp/server.py` is not one of the tracked files `_install` copies (it
+    # is compared for staleness no more than any other untracked file), so
+    # it is copied into the installed copy by hand here.
+    (dest / "mcp").mkdir(parents=True, exist_ok=True)
+    (dest / "mcp" / "server.py").write_bytes(
+        (repo / "mcp" / "server.py").read_bytes())
     monkeypatch.setattr(doctor, "_repo_root", lambda: repo)
 
     try:
@@ -1225,3 +1292,54 @@ def test_healthy_setup_reports_healthy_and_exits_zero(isolated_env, monkeypatch,
     assert "[FAIL]" not in out
     assert "[WARN]" not in out
     assert "Setup is healthy." in out
+
+
+# --------------------------------------------------------------------- #
+# MCP server
+# --------------------------------------------------------------------- #
+
+def test_check_mcp_server_passes_on_the_exact_tool_set(monkeypatch, tmp_path):
+    """The check is the runtime half of the exposure decision: it passes only
+    when the running server lists exactly the tools that cannot loosen
+    protection, so a regression that re-exposes `allow_once` fails something
+    a user runs, not only a unit test."""
+    monkeypatch.setattr(doctor, "_installed_plugin_root", lambda: tmp_path)
+    _write_fake_plugin(tmp_path, tools=list(doctor.MCP_TOOLS))
+    check = doctor.check_mcp_server(timeout=30)
+    assert check.status == doctor.OK
+
+
+def test_check_mcp_server_fails_when_the_manifest_declares_nothing(
+        monkeypatch, tmp_path):
+    """Codex warns and ignores a manifest without the key; nothing inside
+    Codex shows the difference."""
+    monkeypatch.setattr(doctor, "_installed_plugin_root", lambda: tmp_path)
+    _write_fake_plugin(tmp_path, tools=list(doctor.MCP_TOOLS), declare=False)
+    check = doctor.check_mcp_server(timeout=30)
+    assert check.status == doctor.FAIL
+    assert check.fixes
+
+
+def test_check_mcp_server_fails_on_an_extra_tool(monkeypatch, tmp_path):
+    monkeypatch.setattr(doctor, "_installed_plugin_root", lambda: tmp_path)
+    _write_fake_plugin(tmp_path,
+                       tools=list(doctor.MCP_TOOLS) + ["privacy.allow_once"])
+    check = doctor.check_mcp_server(timeout=30)
+    assert check.status == doctor.FAIL
+    assert "privacy.allow_once" in check.summary + " ".join(check.details)
+
+
+def test_check_mcp_server_fails_when_the_server_will_not_start(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr(doctor, "_installed_plugin_root", lambda: tmp_path)
+    _write_fake_plugin(tmp_path, tools=[], crash=True)
+    check = doctor.check_mcp_server(timeout=30)
+    assert check.status == doctor.FAIL
+
+
+def test_the_doctors_tool_list_matches_the_servers(monkeypatch):
+    """Two copies, one fact. The doctor cannot import `mcp/server.py` (not a
+    package, and importing it would need the SDK), so it restates the list —
+    and this is what stops the two drifting."""
+    import server
+    assert tuple(doctor.MCP_TOOLS) == tuple(server.EXPOSED_TOOLS)
