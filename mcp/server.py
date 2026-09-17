@@ -2,12 +2,15 @@
 # mcp/server.py
 """Thin stdio MCP wrapper around `privacy_hud.mcp_tools` (Task 13).
 
-Exposes eight tools: five of those architecture.md §9 names --
-`privacy.get_session_summary`, `privacy.list_exposures`,
-`privacy.get_exposure_detail`, `privacy.update_policy`, `privacy.allow_once` --
-plus `privacy.hud_toggle`, added later for the status-line item, and
-`privacy.read_guard_status` / `privacy.read_guard_set`, added later still for
-the read-guard toggle (#36 Task 2). §9's sixth,
+Exposes exactly the five tools named in `EXPOSED_TOOLS`, below: the four
+reads (`privacy.get_session_summary`, `privacy.list_exposures`,
+`privacy.get_exposure_detail`, `privacy.read_guard_status`) plus
+`privacy.update_policy`, the one write, which can only tighten enforcement,
+never loosen it. `privacy.allow_once`, `privacy.hud_toggle` and
+`privacy.read_guard_set` are withheld because each could loosen what the
+plugin enforces if the model called it, and an MCP tool is called by the
+model -- see `EXPOSED_TOOLS`'s docstring and
+`tests/test_mcp_surface.py`. §9's sixth name,
 `privacy.start_clean_session`, was removed (#23): it opened a ledger row under
 an id Codex never sends, so nothing was ever recorded against it. Each is a direct call into the corresponding
 function in `src/privacy_hud/mcp_tools.py`. All the
@@ -179,9 +182,37 @@ def _open_ledger() -> "Ledger":
     return Ledger(_ledger_path(), load_matrix())
 
 
+#: The tools the model may call, sorted. A tool belongs here only if calling
+#: it cannot weaken what the plugin enforces:
+#:
+#:   * the four reads answer questions and change nothing;
+#:   * `update_policy` only tightens -- since #38 and this change its rule
+#:     types are `mask`, `block_path` and `block_command`, no path removes a
+#:     rule (known limit 13), and its selectors are a data type, a path or a
+#:     program name, never a value, so the call carries no secret.
+#:
+#: Withheld, and not by oversight: `privacy.allow_once` (mints a token that
+#: unblocks the call it names), `privacy.read_guard_set` (can turn the read
+#: guard off) and `privacy.hud_toggle` (can hide the indicator). The last two
+#: stay reachable through `$privacy read|hud on|off`, which a user types.
+#: `allow_once` keeps no surface at all: see
+#: `tests/test_mcp_surface.py::test_allow_once_would_block_itself`.
+#:
+#: `privacy-hud-doctor` compares the running server's tools against its own
+#: copy of this list, so a regression fails a check a user runs.
+EXPOSED_TOOLS = (
+    "privacy.get_exposure_detail",
+    "privacy.get_session_summary",
+    "privacy.list_exposures",
+    "privacy.read_guard_status",
+    "privacy.update_policy",
+)
+
+
 def build_app():
-    """Construct the FastMCP app and register the eight `privacy.*` tools.
-    Imports `mcp` here (not at module scope) -- see this file's docstring."""
+    """Construct the FastMCP app and register the five `privacy.*` tools in
+    `EXPOSED_TOOLS`. Imports `mcp` here (not at module scope) -- see this
+    file's docstring."""
     try:
         from mcp.server.fastmcp import FastMCP
     except ImportError as exc:  # pragma: no cover - exercised only when the
@@ -244,21 +275,6 @@ def build_app():
                                 selector=selector)
         return {"applied": True, "rule_type": rule_type, "selector": selector}
 
-    @app.tool(name="privacy.allow_once")
-    def allow_once(session_id: str, tool_name: str, tool_input: dict,
-                   reviewed: bool) -> dict:
-        """Mint a single-use, 120s consent token for exactly this call
-        (design.md §8). Raises if `reviewed` is not true -- the L3 detail
-        must have been shown first."""
-        mcp_tools.allow_once(ledger, session_id, tool_name=tool_name,
-                              tool_input=tool_input, reviewed=reviewed)
-        return {"minted": True}
-
-    @app.tool(name="privacy.hud_toggle")
-    def hud_toggle(session_id: str, hidden: bool) -> dict:
-        """Hide or show this session's line in the Codex status bar."""
-        return mcp_tools.hud_set_hidden(_ledger_path().parent, session_id, hidden)
-
     @app.tool(name="privacy.read_guard_status")
     def read_guard_status() -> dict:
         """Whether reads of known-sensitive paths are currently blocked
@@ -266,13 +282,6 @@ def build_app():
         Codex's own config, so this is how a caller finds out what it
         says."""
         return mcp_tools.read_guard_status(_ledger_path().parent)
-
-    @app.tool(name="privacy.read_guard_set")
-    def read_guard_set(enabled: bool) -> dict:
-        """Turn the read guard on or off. Takes effect for the running
-        daemon immediately -- no restart required (`settings.py`'s
-        mtime cache)."""
-        return mcp_tools.read_guard_set(_ledger_path().parent, enabled)
 
     return app
 

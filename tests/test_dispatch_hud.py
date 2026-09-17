@@ -19,13 +19,7 @@ from privacy_hud import dispatch, hud_snapshot as hs
 
 SID = "0199abcd-1111-2222-3333-444455556666"
 
-
-@pytest.fixture
-def state(tmp_path, monkeypatch):
-    monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))
-    st = dispatch.new_state(tmp_path)
-    yield st
-    st.ledger.conn.close()
+# `state` is defined in tests/conftest.py, shared with the whole suite.
 
 
 def _start(state, sid=SID):
