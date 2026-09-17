@@ -1790,7 +1790,7 @@ def run_checks(*, load_model: bool = False,
         ("Detector deps", check_detector_deps),
         ("Tier 3 model", lambda: check_tier3(load_model)),
         ("Plugin install", check_plugin_install),
-        ("MCP server", lambda: check_mcp_server(timeout)),
+        ("MCP server", check_mcp_server),
     ]
     results = []
     for name, func in checks:

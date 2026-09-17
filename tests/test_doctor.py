@@ -1343,3 +1343,23 @@ def test_the_doctors_tool_list_matches_the_servers(monkeypatch):
     and this is what stops the two drifting."""
     import server
     assert tuple(doctor.MCP_TOOLS) == tuple(server.EXPOSED_TOOLS)
+
+
+def test_run_checks_gives_the_mcp_check_its_own_timeout_budget(
+        monkeypatch, isolated_env):
+    """`--timeout`/`DAEMON_TIMEOUT` is the daemon round-trip budget (2.0s);
+    the MCP check needs `MCP_TIMEOUT` (20.0s) because it starts an
+    interpreter and opens the ledger, which does not fit in the daemon's
+    window. A registration that threads the daemon's `timeout` into
+    `check_mcp_server` makes a correctly wired server look broken — exactly
+    what `MCP_TIMEOUT`'s docstring warns a doctor must not do ("a doctor
+    that times out on a working server teaches users to ignore it")."""
+    seen = []
+
+    def fake_check_mcp_server(timeout=doctor.MCP_TIMEOUT):
+        seen.append(timeout)
+        return doctor.Check("MCP server", doctor.OK, "stub")
+
+    monkeypatch.setattr(doctor, "check_mcp_server", fake_check_mcp_server)
+    doctor.run_checks(timeout=0.2)
+    assert seen == [doctor.MCP_TIMEOUT]
