@@ -1480,21 +1480,30 @@ def _declared_version(repo: Path | None) -> str | None:
         return None
 
 
-def _installed_plugin_root() -> Path | None:
-    """Where Codex put this plugin, or `None` if it has not.
+def _installed_plugin_entry(installed: list[tuple[str, str, Path]] | None = None
+                            ) -> tuple[str, str, Path] | None:
+    """The cached copy this doctor reports on: `(marketplace, version, path)`.
 
-    The one answer to "where did Codex put us": the installed copy matching
-    this checkout's declared version when Codex has one, otherwise the
-    newest installed version. `check_plugin_install` and `check_mcp_server`
-    both resolve the installed plugin through this function rather than
-    each re-deriving it, so there is exactly one place that logic lives.
+    The one answer to "which copy of us did Codex install": the one matching
+    this checkout's declared version when Codex has one, otherwise the newest.
+    `check_plugin_install` and `check_mcp_server` both resolve the installed
+    plugin through here rather than each re-deriving it.
+
+    The whole entry, not just the path: `check_plugin_install` needs the
+    marketplace and version that go with the copy it is reporting on, and
+    used to recover them with `next(e for e in installed if e[2] == root)` —
+    a generator expression with no default, over a *second* reading of the
+    cache. A plugin removed between the two readings raised `StopIteration`
+    out of a diagnostic whose whole job is to survive a broken install.
+    Passing `installed` in keeps both facts from one reading.
 
     `None` covers every reason there is nothing to point at: no Codex home,
     or a Codex home with no cached copy of this plugin.
     """
     if not _codex_home().is_dir():
         return None
-    installed = _installed_plugin_dirs()
+    if installed is None:
+        installed = _installed_plugin_dirs()
     if not installed:
         return None
     declared = _declared_version(_repo_root())
@@ -1502,9 +1511,14 @@ def _installed_plugin_root() -> Path | None:
     if declared is not None:
         chosen = next((entry for entry in installed if entry[1] == declared),
                       None)
-    if chosen is None:
-        chosen = installed[-1]
-    return chosen[2]
+    return chosen if chosen is not None else installed[-1]
+
+
+def _installed_plugin_root() -> Path | None:
+    """Where Codex put this plugin, or `None` if it has not.
+    `_installed_plugin_entry`'s path, for the callers that need only that."""
+    entry = _installed_plugin_entry()
+    return None if entry is None else entry[2]
 
 
 def check_plugin_install() -> Check:
@@ -1565,12 +1579,14 @@ def check_plugin_install() -> Check:
 
     # Compare against the copy matching this checkout's declared version when
     # Codex has one; otherwise the newest installed version, so the report is
-    # about the code most likely to run. `_installed_plugin_root` makes this
-    # same choice; find the (marketplace, version) that goes with it rather
-    # than re-deriving the choice here.
-    root = _installed_plugin_root()
-    marketplace, version, path = next(
-        entry for entry in installed if entry[2] == root)
+    # about the code most likely to run. `_installed_plugin_entry` makes that
+    # choice, over the listing already read above — so the three facts come
+    # from one reading of the cache and cannot disagree about which copy this
+    # report is about. `installed` is non-empty and the Codex home is a
+    # directory (both checked above), so the fallback is unreachable — it is
+    # there because a diagnostic must not raise on a path it cannot reach.
+    entry = _installed_plugin_entry(installed)
+    marketplace, version, path = entry if entry is not None else installed[-1]
 
     details = [f"{marketplace}/{PLUGIN_NAME} version " + ", ".join(
         sorted({v for _m, v, _p in installed}))
@@ -1658,6 +1674,37 @@ MCP_TOOLS = (
     "privacy.update_policy",
 )
 
+#: The name the manifest gives our server, from `.codex-plugin/plugin.json`'s
+#: `mcpServers` object. Read by key rather than taking whatever the object's
+#: first value happens to be: a manifest may legitimately grow a second
+#: server, and probing an arbitrary one would report on something else
+#: entirely — passing or failing for reasons that have nothing to do with
+#: this plugin. `tests/test_codex_facts.py` pins the manifest's key set to
+#: exactly this name, and `tests/test_doctor.py` pins this constant to it.
+MCP_SERVER_NAME = "privacy-hud"
+
+#: How much of the server's own stderr to quote back. Long enough for the
+#: launcher's one-line causes (`no usable runtime.json (FileNotFoundError);
+#: run privacy-hud-setup`), short enough that a server which decides to dump
+#: a traceback cannot take the report over.
+_STDERR_QUOTE_CHARS = 200
+
+
+def _stderr_tail(text: str) -> str:
+    """The server's last non-empty stderr line, capped.
+
+    Safe to show by construction (I1): `mcp/server.py::_fail` writes one line
+    naming a cause — an exception class or a fixed phrase — and never a
+    payload, which is the property that error-handling section was written
+    around. Anything else on that pipe is not ours and is truncated hard.
+    """
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    if not lines:
+        return ""
+    last = lines[-1]
+    return last if len(last) <= _STDERR_QUOTE_CHARS else \
+        last[:_STDERR_QUOTE_CHARS] + "…"
+
 
 def _mcp_tool_names(command, cwd, env, timeout) -> list[str]:
     """Speak enough MCP over stdio to list a server's tools.
@@ -1665,6 +1712,15 @@ def _mcp_tool_names(command, cwd, env, timeout) -> list[str]:
     Raw JSON-RPC rather than the `mcp` client SDK: one thing this check must
     be able to report is that the SDK is missing, which it cannot do if
     importing the SDK is how it runs.
+
+    A failure carries the server's own last stderr line as an exception note,
+    because that line is the diagnosis. The launcher writes `no usable
+    runtime.json (FileNotFoundError); run privacy-hud-setup`, or `runtime.json
+    is writable by others…`, and exits — and without this the user got
+    `the server did not start (ValueError)` and nothing else, while the real
+    answer sat unread in a pipe this function had already opened. A note
+    rather than a wrapper exception: the exception's class is what the
+    summary names, and `ValueError` there is more use than `_ProbeFailed`.
     """
     import subprocess
 
@@ -1679,11 +1735,13 @@ def _mcp_tool_names(command, cwd, env, timeout) -> list[str]:
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}))
     try:
-        out, _err = proc.communicate(request, timeout=timeout)
+        out, err = proc.communicate(request, timeout=timeout)
     except subprocess.TimeoutExpired:
         proc.kill()
-        proc.communicate()
-        raise TimeoutError("the server did not answer in time") from None
+        _out, err = proc.communicate()
+        exc: Exception = TimeoutError("the server did not answer in time")
+        _attach_stderr(exc, err)
+        raise exc from None
     for line in out.splitlines():
         try:
             message = json.loads(line)
@@ -1691,7 +1749,18 @@ def _mcp_tool_names(command, cwd, env, timeout) -> list[str]:
             continue  # a server that logs to stdout, which ours never does
         if message.get("id") == 2 and "result" in message:
             return sorted(t["name"] for t in message["result"].get("tools", []))
-    raise ValueError("the server answered nothing this check could read")
+    exc = ValueError("the server answered nothing this check could read")
+    _attach_stderr(exc, err)
+    raise exc
+
+
+def _attach_stderr(exc: Exception, err: str | None) -> None:
+    """Carry the server's last stderr line on the exception, for the check to
+    quote. `add_note` rather than a custom attribute so nothing downstream has
+    to know this function ran."""
+    said = _stderr_tail(err or "")
+    if said:
+        exc.add_note(said)
 
 
 def check_mcp_server(timeout: float = MCP_TIMEOUT) -> Check:
@@ -1709,12 +1778,22 @@ def check_mcp_server(timeout: float = MCP_TIMEOUT) -> Check:
     compares the tools it lists against `MCP_TOOLS`. The comparison is
     `==`, not "contains": a tool that can loosen protection appearing here
     is exactly what this must catch.
+
+    Setting `PLUGIN_DATA` here used to be load-bearing in a way it should not
+    have been: whether Codex sets it for an MCP server is an assumption the
+    design never sourced, and a probe that supplies the variable itself
+    cannot tell the difference. The launcher now resolves the directory
+    without it (`server._resolved_data_dir`), so this sets it for
+    determinism — to name the same ledger this doctor reports on — rather
+    than to keep the server alive.
     """
     root = _installed_plugin_root()
     if root is None:
         return Check("MCP server", WARN,
                      "Codex has no installed copy of this plugin to check",
-                     fixes=["codex plugin install codex-privacy-hud"])
+                     fixes=["codex plugin marketplace add "
+                            "inin-zou/codex-privacy-hud",
+                            f"codex plugin add {PLUGIN_NAME}@{PLUGIN_NAME}"])
     manifest_path = root / ".codex-plugin" / "plugin.json"
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -1731,8 +1810,18 @@ def check_mcp_server(timeout: float = MCP_TIMEOUT) -> Check:
                      "Codex caches a plugin by version, so a manifest change "
                      "does not reach an existing install until you reinstall."],
             fixes=["Reinstall: ./install.sh"])
-    entry = next(iter(servers.values()))
-    command = [entry.get("command", "python3"), *entry.get("args", [])]
+    declared = servers.get(MCP_SERVER_NAME)
+    if not isinstance(declared, dict):
+        return Check(
+            "MCP server", FAIL,
+            f"the installed manifest declares no server named "
+            f"{MCP_SERVER_NAME!r}",
+            details=[f"read from {manifest_path}",
+                     "it declares: " + ", ".join(sorted(servers)),
+                     "Probing whichever server the manifest happens to list "
+                     "first would report on something else entirely."],
+            fixes=["Reinstall: ./install.sh"])
+    command = [declared.get("command", "python3"), *declared.get("args", [])]
     data_dir = _ledger_path()
     env = dict(os.environ)
     env["PLUGIN_ROOT"] = str(root)
@@ -1741,10 +1830,17 @@ def check_mcp_server(timeout: float = MCP_TIMEOUT) -> Check:
     try:
         names = _mcp_tool_names(command, root, env, timeout)
     except (OSError, ValueError, TimeoutError) as exc:
+        # The launcher's own diagnosis, first, because it is the answer: it
+        # names the cause (`no usable runtime.json (FileNotFoundError); run
+        # privacy-hud-setup`) where everything below only names the shape.
+        details = ["Codex reports nothing when this happens: the plugin "
+                   "loads, and the tools are simply absent."]
+        said = list(getattr(exc, "__notes__", ()))
+        if said:
+            details.insert(0, f"the server said: {said[0]}")
         return Check("MCP server", FAIL,
                      f"the server did not start ({type(exc).__name__})",
-                     details=["Codex reports nothing when this happens: the "
-                              "plugin loads, and the tools are simply absent."],
+                     details=details,
                      fixes=["Reinstall: ./install.sh",
                             "Then: privacy-hud-doctor"])
     if names != sorted(MCP_TOOLS):
