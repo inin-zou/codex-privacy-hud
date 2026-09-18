@@ -97,6 +97,17 @@ RECEIPT_VERSION = 1
 REEXEC_MARKER = "PRIVACY_HUD_MCP_REEXEC"
 
 
+#: Codex's own name for this plugin's data directory is
+#: `<marketplace>-<plugin>`, and `codex.PLUGIN_NAME` is the substring both
+#: halves share. Restated here for the same reason the receipt checks are:
+#: this half of the file runs under host `python3`, before the re-exec, where
+#: `privacy_hud` is not importable at all. `_codex_data_candidates` below
+#: mirrors `codex.codex_data_candidates()` line for line, and
+#: `tests/test_mcp_launcher.py::test_the_data_dir_fallback_matches_codex`
+#: runs both against the same tree and compares the answers.
+PLUGIN_NAME = "codex-privacy-hud"
+
+
 def _fail(message: str):
     """One line to stderr, non-zero exit, nothing on stdout.
 
@@ -106,6 +117,49 @@ def _fail(message: str):
     """
     print(f"privacy-hud mcp: {message}", file=sys.stderr)
     raise SystemExit(1)
+
+
+def _codex_data_candidates() -> list[str]:
+    """Directories under `$CODEX_HOME/plugins/data/` that look like ours.
+
+    A stdlib mirror of `privacy_hud.codex.codex_data_candidates()`, which is
+    where this project's knowledge of Codex's layout lives. It cannot be
+    imported here: everything above the `execve` runs under host `python3`,
+    which has no `privacy_hud` on its path — that is the whole reason the
+    re-exec exists. The repo's precedent for a fact two stdlib-only ends must
+    share is to restate it and pin the copies with one test (`EGRESS_EVENTS`,
+    the socket name, the receipt checks above), and that is what this is.
+    """
+    home = os.environ.get("CODEX_HOME")
+    root = (Path(home).expanduser() if home else Path.home() / ".codex")
+    try:
+        entries = sorted((root / "plugins" / "data").iterdir())
+    except OSError:
+        return []
+    return [str(p) for p in entries if p.is_dir() and PLUGIN_NAME in p.name]
+
+
+def _resolved_data_dir() -> str | None:
+    """`$PLUGIN_DATA`, or the directory Codex assigns this plugin.
+
+    The spec asserts Codex injects `PLUGIN_DATA` into an MCP server's
+    environment, with no source for the claim — and `doctor.check_mcp_server`
+    sets that variable itself before spawning the server, so a green doctor
+    is compatible with a server that dies at every real Codex launch. Rather
+    than leave the assumption load-bearing, resolve the directory the way
+    every other reader in this project does when the variable is absent
+    (`runtime.plugin_data_dir` -> `codex.codex_data_candidates`), so the
+    assumption stops mattering either way.
+
+    One candidate only. Several means "which of these is Codex's?" has no
+    answer here, and `runtime.resolve_data_dir` refuses that case too rather
+    than guessing; `None` sends the caller to `_fail`, which is loud.
+    """
+    env = os.environ.get("PLUGIN_DATA")
+    if env:
+        return env
+    candidates = _codex_data_candidates()
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def _reexec_under_pinned_interpreter() -> None:
@@ -127,10 +181,11 @@ def _reexec_under_pinned_interpreter() -> None:
     """
     if os.environ.get(REEXEC_MARKER):
         return
-    data_dir = os.environ.get("PLUGIN_DATA")
+    data_dir = _resolved_data_dir()
     if not data_dir:
-        _fail("PLUGIN_DATA is not set; Codex did not launch this, or the "
-              "plugin is not installed")
+        _fail("PLUGIN_DATA is not set and no Codex plugin-data directory for "
+              "this plugin could be resolved; the plugin is not installed, or "
+              "several candidates matched — run privacy-hud-setup")
     try:
         with open(os.path.join(data_dir, RECEIPT_NAME)) as handle:
             # This file names a program about to be executed, so who can
@@ -155,6 +210,11 @@ def _reexec_under_pinned_interpreter() -> None:
 
     env = dict(os.environ)
     env[REEXEC_MARKER] = "1"
+    # Hand the child the directory this half resolved, so the two halves
+    # cannot disagree about which ledger this server is for. When
+    # `PLUGIN_DATA` was set this is a no-op; when it was not, it is the
+    # resolution above, made explicit rather than re-derived after the exec.
+    env["PLUGIN_DATA"] = data_dir
     pythonpath = receipt.get("pythonpath")
     if isinstance(pythonpath, str) and pythonpath:
         parts = [pythonpath] + [p for p in env.get("PYTHONPATH", "").split(

@@ -41,6 +41,7 @@ def _fake_interpreter(tmp_path: Path) -> Path:
         "import json, os, sys\n"
         "print(json.dumps({'argv': sys.argv[1:],\n"
         "                  'pythonpath': os.environ.get('PYTHONPATH', ''),\n"
+        "                  'plugin_data': os.environ.get('PLUGIN_DATA', ''),\n"
         "                  'marker': os.environ.get('PRIVACY_HUD_MCP_REEXEC', '')}))\n",
         encoding="utf-8")
     path.chmod(0o755)
@@ -59,11 +60,30 @@ def _receipt(tmp_path: Path, python: Path, *, pythonpath="/pinned/site-packages"
     return data
 
 
-def _run(data_dir, *, env_extra=None):
+def _codex_home_with_receipt(tmp_path: Path, python: Path) -> tuple[Path, Path]:
+    """A `$CODEX_HOME` shaped like a real one: the plugin-data directory Codex
+    assigns this plugin, with a receipt in it. Returns `(codex_home, data)`."""
+    data = (tmp_path / "codex-home" / "plugins" / "data"
+            / "codex-privacy-hud-codex-privacy-hud")
+    data.mkdir(parents=True)
+    receipt = data / "runtime.json"
+    receipt.write_text(json.dumps({
+        "v": 1, "python": str(python), "pythonpath": "/pinned/site-packages",
+        "plugin_data": str(data), "env": {}}), encoding="utf-8")
+    receipt.chmod(0o600)
+    return tmp_path / "codex-home", data
+
+
+def _run(data_dir, *, env_extra=None, codex_home="/nonexistent/codex-home"):
     env = {k: v for k, v in os.environ.items() if k != MARKER}
     env["PLUGIN_DATA"] = str(data_dir) if data_dir is not None else ""
     if data_dir is None:
         del env["PLUGIN_DATA"]
+    # Never the developer's real `~/.codex`: since the launcher falls back to
+    # the directory Codex assigns when `PLUGIN_DATA` is unset, a machine with
+    # the plugin installed would otherwise resolve a real receipt and start a
+    # real server in the middle of the suite.
+    env["CODEX_HOME"] = str(codex_home)
     env.pop("PYTHONPATH", None)
     env.update(env_extra or {})
     return subprocess.run([sys.executable, str(SERVER)], env=env,
@@ -84,6 +104,66 @@ def test_the_recorded_pythonpath_is_prepended(tmp_path):
     payload = json.loads(result.stdout)
     assert payload["pythonpath"].split(os.pathsep) == [
         "/pinned/site-packages", "/already/here"]
+
+
+def test_it_falls_back_to_the_directory_codex_assigns(tmp_path):
+    """With no `PLUGIN_DATA`, resolve the directory instead of refusing.
+
+    The spec asserts Codex injects `PLUGIN_DATA` into an MCP server's
+    environment and cites nothing for it, and `doctor.check_mcp_server` sets
+    the variable itself before spawning — so a green doctor was compatible
+    with a server that died at every real Codex launch. `_ledger_path`, in
+    this same file, has always resolved the directory without the variable.
+    The strict half just ran first.
+    """
+    fake = _fake_interpreter(tmp_path)
+    codex_home, data = _codex_home_with_receipt(tmp_path, fake)
+    result = _run(None, codex_home=codex_home)
+    payload = json.loads(result.stdout)
+    assert payload["argv"] == [str(SERVER)]
+    assert payload["plugin_data"] == str(data), \
+        "the child must be told which directory this resolved to"
+
+
+def test_the_data_dir_fallback_matches_codex(tmp_path, monkeypatch):
+    """The second pin of a restated fact, alongside the receipt checks.
+
+    `codex.codex_data_candidates()` is where this project's knowledge of
+    Codex's layout lives, and the launcher cannot import it — everything
+    before the `execve` runs under host `python3`. So it mirrors it, and this
+    runs both against the same tree and compares the answers, rather than
+    comparing source text and hoping the two mean the same thing.
+    """
+    import server
+
+    from privacy_hud import codex
+
+    root = tmp_path / "plugins" / "data"
+    root.mkdir(parents=True)
+    for name in ("codex-privacy-hud-codex-privacy-hud",
+                 "someone-else-codex-privacy-hud",
+                 # Close enough to match a *shortened* plugin name and not
+                 # the real one, so a drift in the restated literal shows up
+                 # here rather than as a server reading someone else's data.
+                 "privacy-hud-lookalike",
+                 "unrelated-plugin"):
+        (root / name).mkdir()
+    (root / "codex-privacy-hud-notadir").write_text("", encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+
+    assert server._codex_data_candidates() == [
+        str(p) for p in codex.codex_data_candidates()]
+    assert len(server._codex_data_candidates()) == 2
+
+    # And the choice the launcher makes on top of them: one candidate is an
+    # answer, two are not — the same rule `runtime.resolve_data_dir` applies.
+    monkeypatch.delenv("PLUGIN_DATA", raising=False)
+    assert server._resolved_data_dir() is None
+    (root / "someone-else-codex-privacy-hud").rmdir()
+    (root / "privacy-hud-lookalike").rmdir()
+    (root / "unrelated-plugin").rmdir()
+    assert server._resolved_data_dir() == str(
+        root / "codex-privacy-hud-codex-privacy-hud")
 
 
 def test_it_does_not_re_exec_twice(tmp_path):
