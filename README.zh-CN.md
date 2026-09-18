@@ -99,8 +99,6 @@ codex plugin add codex-privacy-hud@codex-privacy-hud
 因此，所有 hook 都会回复 `Privacy HUD unavailable — disclosure unverified`。
 `$privacy` 则会报告未找到守护进程。
 
-MCP 工具只提供查询或收紧防护的操作：查看会话摘要、暴露列表、单次暴露的详情和读取防护状态，以及写入策略规则。关闭读取防护和隐藏 HUD 不在其中，因为 MCP 工具由模型调用，而放宽防护的开关不能交给防护所约束的模型。这两项操作只能通过你亲自输入的 `$privacy` 执行。临时放行一次被拦截的调用也不在其中，但原因不同：这项操作根本没有任何入口——`$privacy` 不提供，审计界面不提供，MCP 工具也不提供——见[已知限制第 13 条](docs/known-limits.md#13-no-policy-rule-can-be-removed-within-the-session-that-wrote-it)。
-
 接下来，请按以下步骤操作：
 
 1. 运行 `codex`。Codex 0.154 启动时会显示 **Hooks need review**（需要审核 hook），提示你审核插件的八个 hook。选择 **Trust all and continue**（信任全部并继续）。在此之前，插件中的任何内容都不会运行。
@@ -170,6 +168,8 @@ API credential ×1     .env             none             [PREVENTED]
 标签页：`Exposed`（已暴露）· `Prevented`（已阻止）· `All events`（全部事件）。
 
 **Level 3：暴露详情。** 查看单条数据流、脱敏后的证据，以及面向后续披露的补救措施（`Protect future occurrences`；对于标明真实来源的行，还可使用 `Block values read from <file>`）。这些措施无法撤销披露——已经披露的数据无法收回，且来源规则仅匹配未经改动就向外发送的值。
+
+**MCP 工具。** Codex 还可通过模型调用五个 `privacy.*` 工具：查看会话摘要、暴露列表、单次暴露的详情和读取防护状态，以及写入策略规则。前四个只提供查询，第五个只能收紧防护，因为它所能写入的规则中，唯一会放宽防护的一种会被拒绝：对当前被直接拦截的数据类型改用掩码处理，这会让调用在数据经过掩码处理后获准通过，而不是被拦截。关闭读取防护和隐藏 HUD 不在这五个工具之中，因为 MCP 工具由模型调用，而放宽防护的开关不能交给防护所约束的模型。这两项操作只能通过你亲自输入的 `$privacy` 执行。临时放行一次被拦截的调用也不在其中，但原因不同：这项操作根本没有任何入口——`$privacy` 不提供，审计界面不提供，MCP 工具也不提供——见[已知限制第 13 条](docs/known-limits.md#13-no-policy-rule-can-be-removed-within-the-session-that-wrote-it)。
 
 ## 工作原理
 

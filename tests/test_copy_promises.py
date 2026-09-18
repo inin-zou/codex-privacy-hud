@@ -24,8 +24,8 @@ SKILL = REPO / "skills" / "privacy" / "SKILL.md"
 
 #: `$privacy` followed by a word, in or out of backticks. The bare form
 #: (`Run $privacy to review.`) names no subcommand and is not a claim about
-#: one, so `to` and friends are filtered by the documented-set check below
-#: only when they look like subcommands -- see `_SUBCOMMANDS`.
+#: one, so `to` and friends are filtered out before the documented-set check
+#: below -- see `_PROSE`.
 _MENTION = re.compile(r"\$privacy\s+([a-z][a-z-]*)")
 
 #: Prose connectives that follow a bare `$privacy`, not subcommands.

@@ -61,7 +61,7 @@ It does what `hooks/handler.py` already does to spawn the daemon: read `$PLUGIN_
 
 - **Why re-exec, not `sys.path`.** `mcp` depends on `pydantic`, whose core is a compiled extension built for the venv interpreter's version. Host `python3` importing it from the venv's `site-packages` is a binary mismatch waiting for the two versions to differ.
 - **Why restate the receipt checks rather than import them.** In `handler.py` they are inlined in `_spawn_daemon`, on the path every tool call runs; extracting them would change the hook client for this feature's sake. The repo's precedent for a fact two stdlib-only ends must share is to restate it and pin both copies with one test (`EGRESS_EVENTS`, the socket name). This follows it.
-- **A re-exec guard.** An environment marker is set before `execve`. An entry that finds it already set does not re-exec again; it exits.
+- **A re-exec guard.** An environment marker is set before `execve`. An entry that finds it already set does not re-exec again; it returns, and the process goes on to start the server. It must not exit: the marker is set in the *child*, so the child is exactly the process that finds it set, and a guard that exited there would mean the re-exec'd interpreter exits immediately and the server never runs. The guard's job is to stop a second `execve`, not to stop the program.
 - **stdout is the protocol.** Stdio MCP speaks JSON-RPC on stdout. The launcher writes nothing there on any path. Every failure goes to stderr with a non-zero exit.
 
 ### 4. The manifest
@@ -111,7 +111,7 @@ Two layers, because only half of it is mechanical.
 
 - No `PLUGIN_DATA`, no receipt, a receipt failing the checks, or an interpreter that is not executable: one line to stderr naming the problem — an exception class or a fixed phrase, never a payload (I1) — and a non-zero exit. Codex marks the server failed; the doctor says why.
 - `mcp` not importable under the pinned interpreter: the existing lazy import's message, to stderr.
-- Re-exec guard already set: exit non-zero rather than loop.
+- Re-exec guard already set: fall through and serve, rather than `execve` again. This is the normal path in the child, not an error — a receipt naming an interpreter that re-enters this file is what the marker prevents looping on, and the loop is broken by not re-execing, not by exiting. `test_it_does_not_re_exec_twice` asserts the recorded interpreter's payload is absent, not that stdout is empty, for that reason: with the marker set stdout is the server's own JSON-RPC channel.
 
 ## Testing
 

@@ -112,16 +112,6 @@ still missing, so every hook answers
 `Privacy HUD unavailable — disclosure unverified` and `$privacy` reports no
 daemon.
 
-The MCP tools are read-only or tightening — a session summary, the exposure
-list, one exposure's detail, the read-guard state, and writing a policy rule.
-Turning the read guard off and hiding the HUD are not among them, because an
-MCP tool is called by the model, and a switch that loosens protection is not
-one to hand to the thing being enforced against; those two stay behind
-`$privacy`, which you type. Allowing a blocked call once is not among them
-either, but for a different reason: it has no surface at all — not
-`$privacy`, not the audit UI, not an MCP tool — see [known limit
-13](docs/known-limits.md#13-no-policy-rule-can-be-removed-within-the-session-that-wrote-it).
-
 From here:
 
 1. Run `codex`. Codex 0.154 opens with **Hooks need review** for the
@@ -216,6 +206,8 @@ API credential ×1     .env             none             [PREVENTED]
 Tabs: `Exposed` · `Prevented` · `All events`.
 
 **Level 3 — Exposure detail.** One flow, its masked evidence, and forward-looking remedies (`Protect future occurrences`; on a row that names a real origin, `Block values read from <file>`). Never an undo — already disclosed data cannot be recalled, and a source rule only matches values that leave unchanged.
+
+**The MCP tools.** Codex also gets five `privacy.*` tools the model can call: a session summary, the exposure list, one exposure's detail, the read-guard state, and writing a policy rule. The first four read; the fifth can only tighten, because the one rule it could write that would weaken enforcement — masking a data type that is currently blocked outright, which would let the call through masked instead of stopping it — is refused. Turning the read guard off and hiding the HUD are not among the five at all, because an MCP tool is called by the model, and a switch that loosens protection is not one to hand to the thing being enforced against; those two stay behind `$privacy`, which you type. Allowing a blocked call once is not among them either, but for a different reason: it has no surface at all — not `$privacy`, not the audit UI, not an MCP tool — see [known limit 13](docs/known-limits.md#13-no-policy-rule-can-be-removed-within-the-session-that-wrote-it).
 
 ## How it works
 

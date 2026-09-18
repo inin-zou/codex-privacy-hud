@@ -345,5 +345,8 @@ def test_the_install_brings_the_mcp_extra():
     REPO = Path(__file__).resolve().parent.parent
     source = (REPO / "install.sh").read_text(encoding="utf-8")
     assert "privacy-hud[detectors,mcp]" in source
-    assert "privacy-hud[detectors]" not in source.replace(
-        "privacy-hud[detectors,mcp]", "")
+    # No `.replace(...)` first: `privacy-hud[detectors]` was never a
+    # substring of `privacy-hud[detectors,mcp]` (the character after
+    # `detectors` is `,`, not `]`), so guarding against that collision
+    # claimed a reach this assertion does not have.
+    assert "privacy-hud[detectors]" not in source
