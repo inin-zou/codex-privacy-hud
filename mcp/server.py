@@ -5,14 +5,19 @@
 Exposes exactly the five tools named in `EXPOSED_TOOLS`, below: the four
 reads (`privacy.get_session_summary`, `privacy.list_exposures`,
 `privacy.get_exposure_detail`, `privacy.read_guard_status`) plus
-`privacy.update_policy`, the one write, which can only tighten enforcement,
-never loosen it. `privacy.allow_once`, `privacy.hud_toggle` and
+`privacy.update_policy`, the one write, which can only tighten enforcement
+because `mcp_tools.apply_policy` refuses the one rule that would loosen it
+-- a `mask` rule on a data type the engine hard-blocks, which would replace
+that block with an executed, masked call. See `_MASK_WOULD_DOWNGRADE` there,
+and the behaviour test in `tests/test_mcp_surface.py`:
+`test_no_exposed_tool_can_turn_a_deny_into_an_allow`.
+`privacy.allow_once`, `privacy.hud_toggle` and
 `privacy.read_guard_set` are withheld because each could loosen what the
 plugin enforces if the model called it, and an MCP tool is called by the
 model -- see `EXPOSED_TOOLS`'s docstring and
-`tests/test_mcp_surface.py`. §9's sixth name,
-`privacy.start_clean_session`, was removed (#23): it opened a ledger row under
-an id Codex never sends, so nothing was ever recorded against it. Each is a direct call into the corresponding
+`tests/test_mcp_surface.py`. `privacy.start_clean_session` was removed
+(#23): it opened a ledger row under an id Codex never sends, so nothing was
+ever recorded against it. Each is a direct call into the corresponding
 function in `src/privacy_hud/mcp_tools.py`. All the
 real logic (I1's no-raw-value guarantee, the consent rule, the policy-table
 write) lives there and is unit-tested in `tests/test_mcp.py` without going
@@ -186,10 +191,22 @@ def _open_ledger() -> "Ledger":
 #: it cannot weaken what the plugin enforces:
 #:
 #:   * the four reads answer questions and change nothing;
-#:   * `update_policy` only tightens -- since #38 and this change its rule
-#:     types are `mask`, `block_path` and `block_command`, no path removes a
-#:     rule (known limit 13), and its selectors are a data type, a path or a
-#:     program name, never a value, so the call carries no secret.
+#:   * `update_policy` only tightens, and here is why rather than the bare
+#:     claim. Its rule types are `mask`, `block_path` and `block_command`
+#:     (since #38). `block_path`/`block_command` set a deny outright.
+#:     `mask` forces a rewrite of a call that would otherwise have been
+#:     allowed -- except on a data type the engine hard-blocks, where it
+#:     would instead replace that block with an executed, masked call,
+#:     because `Engine.observe` applies a mask rule ahead of its own matrix
+#:     defaults and the default deny only runs while the action is still
+#:     "allow". That one combination is refused by
+#:     `mcp_tools.apply_policy` (`_MASK_WOULD_DOWNGRADE`), keyed off the
+#:     same `HARD_BLOCKED_DATA_TYPES` the engine gates the block on, so the
+#:     two cannot drift. With it refused, nothing this tool can write
+#:     loosens anything. Its selectors are a data type, a path or a program
+#:     name, never a value, so the call carries no secret, and no path
+#:     removes a rule once written (known limit 13) -- which is also why
+#:     the refusal matters: a downgrade written here would last the session.
 #:
 #: Withheld, and not by oversight: `privacy.allow_once` (mints a token that
 #: unblocks the call it names), `privacy.read_guard_set` (can turn the read
@@ -270,7 +287,11 @@ def build_app():
         matching call, not retroactively, and matches only byte-identical
         values. `rule_type="block_source"` is refused (#38): it named a
         label, not a source, and `block_path`/`block_command` are the
-        replacement rather than a revival of it."""
+        replacement rather than a revival of it. A `mask` rule on a data
+        type the engine hard-blocks (`credential`) is refused as well: that
+        rule would take effect ahead of the block and replace it with an
+        executed, masked call, which is the only way this tool could ever
+        loosen enforcement."""
         mcp_tools.apply_policy(ledger, session_id, rule_type=rule_type,
                                 selector=selector)
         return {"applied": True, "rule_type": rule_type, "selector": selector}

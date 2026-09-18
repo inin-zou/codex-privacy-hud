@@ -43,6 +43,12 @@ This does not apply retroactively (design.md P4): data already disclosed
 before the rule was written stays disclosed, and no caller of this module
 should claim otherwise.
 
+That same ordering — policy first, matrix defaults second — is why a `mask`
+rule on a hard-blocked data type is refused (`_MASK_WOULD_DOWNGRADE`): it
+would take effect *ahead of* the deny it is standing in front of and
+replace it. It is the only rule this function could write that loosens
+anything, which is what lets every caller say "tighten-only" and mean it.
+
 "Block this source" (`block_source`) is withdrawn (#38): `apply_policy`
 refuses it and `Engine.observe` ignores any such row an older ledger still
 holds. It matched a rule's selector against the *outbound* observation's
@@ -71,6 +77,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .ledger import ExposureRow, SessionCoverage, SessionSummary
+from .matrix.loader import HARD_BLOCKED_DATA_TYPES
 from .minimize import mint_token
 
 # The curated event-row projection that used to live here as `_EVENT_FIELDS` +
@@ -134,6 +141,39 @@ _ALLOW_DEST_WITHDRAWN = (
     "allow_dest is not available: no code path has ever enforced it, so a "
     "rule written that way decides nothing while reporting success (#38's "
     "reason) — there is no replacement, because nothing minted it")
+
+#: Why a `mask` rule on a hard-blocked data type is refused: it is the one
+#: combination of rule type and selector that LOOSENS enforcement.
+#:
+#: `Engine.observe` applies a user-written `mask` rule before its own matrix
+#: defaults, and the default block is guarded by "the action is still allow".
+#: So a `mask` rule whose selector is one of `HARD_BLOCKED_DATA_TYPES` sets
+#: the action to `"rewrite"` first, and the deny below it never runs: every
+#: later call that would have been blocked is executed instead, with the
+#: value pseudonymised — for the rest of the session, with no removal path
+#: (known limit 13), while the ledger still records `prevented` and the
+#: audit still reports that protection held.
+#:
+#: And it is always a downgrade, never a trade: `policy_defaults` maps both
+#: egress destinations (`mcp_tool`, `external_net`) to `block`, so there is
+#: no destination where masking a hard-blocked type adds protection it did
+#: not already have. Every other combination only tightens — `mask` on any
+#: other type covers calls that would otherwise have been allowed outright,
+#: and `block_path`/`block_command` deny.
+#:
+#: Refused here rather than in one caller because every caller needs it. The
+#: local audit UI's "Protect future occurrences" button calls this function,
+#: and on a credential exposure it was *downgrading* the user's protection
+#: when clicked — a pre-existing defect this refusal closes. `update_policy`
+#: is model-callable since the MCP server was wired, and the call carries no
+#: secret, so nothing else stood between the model and this downgrade.
+_MASK_WOULD_DOWNGRADE = (
+    "mask is not available for {selector!r}: a value of that type on an "
+    "outbound call is already denied, and a mask rule replaces that deny "
+    "with an executed, masked call. It can only weaken enforcement here, "
+    "never strengthen it, and no path removes a rule once written "
+    "(known limit 13). Nothing to do: the block is already the stronger "
+    "outcome.")
 
 #: How close two sessions' last hook events have to be, in seconds, before
 #: "which of these is the caller?" stops being answerable.
@@ -468,6 +508,13 @@ def apply_policy(ledger, session_id: str, *, rule_type: str, selector: str) -> N
     like protection was applied when nothing was. `block_source` is refused
     for exactly that reason (`_BLOCK_SOURCE_WITHDRAWN`, #38).
 
+    A `mask` rule whose selector is a hard-blocked data type is refused too,
+    for the opposite reason: the engine *would* match it, and matching it
+    turns a deny into an executed, masked call. See `_MASK_WOULD_DOWNGRADE`.
+    That refusal is what makes "this call can only tighten enforcement" true
+    of every caller — the MCP tool the model can call, and the local audit
+    UI's button alike.
+
     See this module's top-level docstring: `Engine.observe` consults `mask`
     rules (ahead of its own matrix defaults) on every later egress
     observation that has a finding of that data type. It does not apply
@@ -478,6 +525,8 @@ def apply_policy(ledger, session_id: str, *, rule_type: str, selector: str) -> N
         raise ValueError(_BLOCK_SOURCE_WITHDRAWN)
     if rule_type == "allow_dest":
         raise ValueError(_ALLOW_DEST_WITHDRAWN)
+    if rule_type == "mask" and selector in HARD_BLOCKED_DATA_TYPES:
+        raise ValueError(_MASK_WOULD_DOWNGRADE.format(selector=selector))
     if rule_type not in _POLICY_RULE_TYPES:
         raise ValueError(
             f"unknown rule_type {rule_type!r}; expected one of "

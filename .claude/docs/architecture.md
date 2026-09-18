@@ -419,6 +419,19 @@ MCP tool is called by the model: `privacy.get_session_summary`,
 `privacy.read_guard_set` and `privacy.hud_toggle` are deliberately not exposed
 (`mcp/server.py::EXPOSED_TOOLS`).
 
+Withholding three tools is only half of that. `privacy.update_policy` is a
+write, and one rule it could write loosens: a `mask` rule whose selector is a
+data type the engine hard-blocks. `Engine.observe` reads policy *ahead of* its
+own matrix defaults and the default deny only runs while the action is still
+`allow`, so such a rule replaces the block with an executed, masked call for
+the rest of the session — and no path removes a rule (known limit 13).
+`mcp_tools.apply_policy` refuses that combination, keyed off the same
+`matrix.loader.HARD_BLOCKED_DATA_TYPES` the engine gates the block on so the
+two cannot drift, which is what makes "cannot loosen" a property of the code
+rather than of the tool list. It covers the local audit UI's "Protect future
+occurrences" button too, which called the same function and was downgrading
+protection when clicked on a credential exposure.
+
 `read_guard_set` returns the same shape `read_guard_status` does, plus an `error` string when `settings.json` could not be written — the caller is the `$privacy` skill's heredoc, where a raised `PermissionError` would be a traceback and no statement of what the setting now says. Reads still fail open: this is not a hook path (I6).
 
 **UI delivery.** Codex Desktop does not currently render MCP Apps inline iframe resources ([openai/codex#21019](https://github.com/openai/codex/issues/21019)), and `tui.status_line` accepts only built-in item identifiers. So:

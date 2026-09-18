@@ -250,14 +250,44 @@ def test_resending_the_secret_is_still_denied_by_the_credential_default(state):
 
 def test_protect_future_occurrences_is_still_offered(state, ui):
     """The other L3 action is unaffected: a mask rule on a data type is
-    matched against findings, which dispatch does produce."""
+    matched against findings, which dispatch does produce.
+
+    On a data type the engine does not already hard-block. `credential` is
+    the exception, and has its own test below — this one used to use it, and
+    in doing so pinned a downgrade as if it were the feature working.
+    """
+    _hook(state, "SessionStart")
+    _read_secret_through_bash(state)
+    status, body = _post(ui, "/api/policy", {"session_id": SID,
+                                             "rule_type": "mask",
+                                             "selector": "email"})
+    assert status == 200, body
+    assert state.ledger.policy_selectors(SID, "mask") == {"email"}
+
+
+def test_protect_future_occurrences_is_refused_on_a_hard_blocked_type(state, ui):
+    """The button was WEAKENING protection on exactly the exposures it
+    matters most on.
+
+    A credential on an outbound call is already denied by the matrix
+    default. `Engine.observe` reads mask rules *ahead of* that default and
+    the default only runs while the action is still "allow", so a mask rule
+    on `credential` replaced every later deny with an executed, masked call
+    — for the rest of the session, with no removal path (known limit 13),
+    while the ledger still recorded `prevented`. Clicking "Protect future
+    occurrences" on a credential exposure did that.
+
+    The refusal lives in `mcp_tools.apply_policy`, so it covers this button
+    and the model-callable `privacy.update_policy` tool with one rule.
+    """
     _hook(state, "SessionStart")
     _read_secret_through_bash(state)
     status, body = _post(ui, "/api/policy", {"session_id": SID,
                                              "rule_type": "mask",
                                              "selector": "credential"})
-    assert status == 200, body
-    assert state.ledger.policy_selectors(SID, "mask") == {"credential"}
+    assert status == 400, body
+    assert "already denied" in body["error"], body
+    assert state.ledger.policy_selectors(SID, "mask") == set()
 
 
 def test_the_page_escapes_the_origin_it_prints_on_a_button(ui):

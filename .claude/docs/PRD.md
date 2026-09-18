@@ -289,7 +289,11 @@ privacy.update_policy
 
 `privacy.allow_once`, `privacy.read_guard_set` and `privacy.hud_toggle` are
 deliberately not exposed here: an MCP tool is called by the model, and none
-of the three may loosen what the plugin enforces. See `CLAUDE.md` §5 for the
+of the three may loosen what the plugin enforces. `privacy.update_policy` is
+exposed although it writes, because the one rule it could write that would
+loosen anything — masking a data type that is currently blocked outright — is
+refused by `mcp_tools.apply_policy`; see `architecture.md` §9. See
+`CLAUDE.md` §5 for the
 rule that every user-facing action claim must trace to the surface that
 performs it, and `architecture.md` §9 for the full tool list and withheld
 set.

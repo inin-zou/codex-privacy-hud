@@ -104,7 +104,7 @@ from dataclasses import dataclass
 from .detect.base import Cost, Finding, is_available, profile_of
 from .detect.paths import is_sensitive_path
 from .mask import mask, value_hash
-from .matrix.loader import UnknownKey
+from .matrix.loader import HARD_BLOCKED_DATA_TYPES, UnknownKey
 from .minimize import consume_token, minimize_tool_input
 from .origin import Origin, OriginKind, origin_phrase
 
@@ -620,7 +620,14 @@ class Engine:
         degraded = scan.degraded
 
         is_egress = obs.direction == "egress"
-        has_credential = any(f.data_type == "credential" for f in findings)
+        # The gate on the whole `policy_defaults` consultation below, and so
+        # the only thing that decides whether a call can be hard-blocked at
+        # all. `HARD_BLOCKED_DATA_TYPES` rather than a literal `"credential"`:
+        # `mcp_tools.apply_policy` has to refuse exactly the `mask` rules that
+        # would downgrade this deny, and a second literal there would be free
+        # to drift away from this one. See that constant's comment.
+        hard_blocked = any(f.data_type in HARD_BLOCKED_DATA_TYPES
+                           for f in findings)
 
         action = "allow"
         blocked_origin = None
@@ -665,6 +672,16 @@ class Engine:
         # mask; otherwise this falls through, unchanged, to the
         # Matrix.default_action() logic below.
         #
+        # This branch sets `action = "rewrite"`, and the hard block below
+        # only runs while `action` is still `"allow"` — so a `mask` rule on
+        # a `HARD_BLOCKED_DATA_TYPES` type would REPLACE a deny with an
+        # executed, masked call. That is why `mcp_tools.apply_policy`
+        # refuses to write one: the ordering here is safe because no such
+        # rule can be minted, not because this branch checks for it. Every
+        # other rule a caller can write only tightens — `block_path` and
+        # `block_command` are decided in the `if` above this `elif`, so a
+        # mask rule can never undo a source rule either.
+        #
         # `block_source` rows are deliberately not read (#38). That rule
         # compared its selector with `obs.source`, which dispatch only ever
         # fills with fixed labels ("tool input" on every egress call), so it
@@ -679,7 +696,7 @@ class Engine:
                 if mask_selectors & {f.data_type for f in findings}:
                     action = "rewrite"
 
-        if action == "allow" and is_egress and has_credential:
+        if action == "allow" and is_egress and hard_blocked:
             # Ruling 3: default_action is an egress-only policy. An ingress
             # observation never reaches this branch, no matter what it
             # contains — the bytes are already in context.
@@ -766,7 +783,7 @@ class Engine:
                 # "minimize" token-consumption branch further below; all
                 # three leave `findings` non-empty (either a policy mask
                 # rule matched an existing finding's data_type, or
-                # has_credential was required to reach the other two), so
+                # `hard_blocked` was required to reach the other two), so
                 # there is always something to rewrite.
                 ti = obs.tool_input if obs.tool_input is not None else obs.text
                 # fix-round-1: pass obs.text straight through as the exact
