@@ -275,6 +275,17 @@ REWRITE_TEMPLATE = (
 # session, and `Ledger.add_policy` scopes it to `session:<id>`, so it does
 # not outlive it.
 #
+# It says "a source rule in force", not "a source rule you wrote". Until
+# this branch the only writer was a human clicking a button in the local
+# audit UI, so "you wrote" was accurate. `privacy.update_policy` is now an
+# exposed MCP tool, which means the model can write one of these rules --
+# and known limit 13 says nothing can remove it. Attributing to the user a
+# rule they may not have written is §5's own defect (copy naming an actor
+# that is no longer traceable to a user surface), and the sentence loses
+# nothing it was carrying: what the reader needs is that a rule denies this
+# call and that it dies with the session, neither of which depends on who
+# wrote it.
+#
 # It also does not say "allow once does not override it" -- the clause used
 # to, and the fact is still true (the consent-token branch only runs when
 # the action is still "allow", so it is never reached here), but no surface
@@ -286,7 +297,7 @@ ORIGIN_BLOCK_TEMPLATE = (
     "PRIVACY HUD blocked a tool call\n\n"
     "  {tool}  would send  {label}\n"
     "  {origin_phrase}.\n\n"
-    "  A source rule you wrote for this session denies this call.\n"
+    "  A source rule in force for this session denies this call.\n"
     "  The rule ends with the session."
 )
 
