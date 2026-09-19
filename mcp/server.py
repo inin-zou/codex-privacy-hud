@@ -6,11 +6,16 @@ Exposes exactly the five tools named in `EXPOSED_TOOLS`, below: the four
 reads (`privacy.get_session_summary`, `privacy.list_exposures`,
 `privacy.get_exposure_detail`, `privacy.read_guard_status`) plus
 `privacy.update_policy`, the one write, which can only tighten enforcement
-because `mcp_tools.apply_policy` refuses the one rule that would loosen it
--- a `mask` rule on a data type the engine hard-blocks, which would replace
-that block with an executed, masked call. See `_MASK_WOULD_DOWNGRADE` there,
-and the behaviour test in `tests/test_mcp_surface.py`:
-`test_no_exposed_tool_can_turn_a_deny_into_an_allow`.
+because `Engine.observe` never lets a user `mask` rule decide an observation
+that carries a hard-blocked data type: the mask branch is skipped and the
+matrix default -- the deny -- stands. That is a property of the engine, not
+of the rules this tool is allowed to write; a rule whose selector is
+innocuous can still land on a call that carries a credential, which is the
+case a mint-site refusal cannot see. `mcp_tools.apply_policy` additionally
+refuses a `mask` rule on a hard-blocked selector, now because such a rule is
+inert (see `_MASK_WOULD_DOWNGRADE` there). The behaviour test is
+`tests/test_mcp_surface.py::test_no_exposed_tool_can_turn_a_deny_into_an_allow`,
+whose payload carries a second, co-occurring finding for exactly that reason.
 `privacy.allow_once`, `privacy.hud_toggle` and
 `privacy.read_guard_set` are withheld because each could loosen what the
 plugin enforces if the model called it, and an MCP tool is called by the
@@ -255,18 +260,22 @@ def _open_ledger() -> "Ledger":
 #:     claim. Its rule types are `mask`, `block_path` and `block_command`
 #:     (since #38). `block_path`/`block_command` set a deny outright.
 #:     `mask` forces a rewrite of a call that would otherwise have been
-#:     allowed -- except on a data type the engine hard-blocks, where it
-#:     would instead replace that block with an executed, masked call,
-#:     because `Engine.observe` applies a mask rule ahead of its own matrix
-#:     defaults and the default deny only runs while the action is still
-#:     "allow". That one combination is refused by
-#:     `mcp_tools.apply_policy` (`_MASK_WOULD_DOWNGRADE`), keyed off the
-#:     same `HARD_BLOCKED_DATA_TYPES` the engine gates the block on, so the
-#:     two cannot drift. With it refused, nothing this tool can write
-#:     loosens anything. Its selectors are a data type, a path or a program
+#:     allowed -- and only of such a call: `Engine.observe` skips its mask
+#:     branch entirely on any observation carrying a finding of a
+#:     `HARD_BLOCKED_DATA_TYPES` type, so the matrix default decides that
+#:     one and the deny stands. No rule this tool can write, with any
+#:     selector, changes that. The guard is in the engine rather than in
+#:     what this tool accepts because it has to be: the branch matched on
+#:     every finding of the observation, so a mask rule on an innocuous type
+#:     that co-occurred with a credential skipped the block, and a refusal
+#:     keyed on the selector cannot see that call. `mcp_tools.apply_policy`
+#:     does still refuse `mask` on a hard-blocked selector
+#:     (`_MASK_WOULD_DOWNGRADE`), keyed off the same
+#:     `HARD_BLOCKED_DATA_TYPES` the engine gates the block on so the two
+#:     cannot drift -- now because such a rule would be inert, and as
+#:     defence in depth. Its selectors are a data type, a path or a program
 #:     name, never a value, so the call carries no secret, and no path
-#:     removes a rule once written (known limit 13) -- which is also why
-#:     the refusal matters: a downgrade written here would last the session.
+#:     removes a rule once written (known limit 13).
 #:
 #: Withheld, and not by oversight: `privacy.allow_once` (mints a token that
 #: unblocks the call it names), `privacy.read_guard_set` (can turn the read

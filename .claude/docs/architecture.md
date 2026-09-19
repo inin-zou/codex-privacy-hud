@@ -420,17 +420,32 @@ MCP tool is called by the model: `privacy.get_session_summary`,
 (`mcp/server.py::EXPOSED_TOOLS`).
 
 Withholding three tools is only half of that. `privacy.update_policy` is a
-write, and one rule it could write loosens: a `mask` rule whose selector is a
-data type the engine hard-blocks. `Engine.observe` reads policy *ahead of* its
-own matrix defaults and the default deny only runs while the action is still
-`allow`, so such a rule replaces the block with an executed, masked call for
-the rest of the session — and no path removes a rule (known limit 13).
-`mcp_tools.apply_policy` refuses that combination, keyed off the same
-`matrix.loader.HARD_BLOCKED_DATA_TYPES` the engine gates the block on so the
-two cannot drift, which is what makes "cannot loosen" a property of the code
-rather than of the tool list. It covers the local audit UI's "Protect future
-occurrences" button too, which called the same function and was downgrading
-protection when clicked on a credential exposure.
+write, and a user `mask` rule used to outrank the plugin's one unconditional
+deny: `Engine.observe` reads policy *ahead of* its own matrix defaults, and
+the default deny only runs while the action is still `allow`. What makes
+"cannot loosen" a property of the code is that the mask branch is now skipped
+whenever the observation carries a finding of a
+`matrix.loader.HARD_BLOCKED_DATA_TYPES` type, whatever the rule's selector
+says — the observation falls through to `Matrix.default_action(destination)`,
+which is `block` for `mcp_tool`/`external_net` and `mask` for
+`model_context`/`subagent`, so the rule never yields to anything weaker than
+it asked for. Observations carrying no hard-blocked finding are decided by
+the rule exactly as before.
+
+The guard is in that branch and not at the rule's mint site because the
+branch intersects its selectors with *every* finding on the observation, not
+with the finding that triggers the block: a `mask` rule on any type that
+merely co-occurs with a credential — a path on the same command line, which
+is what one click of the audit UI's "Protect future occurrences" on a path
+exposure writes — skipped the block for the whole call. Those selectors are
+innocuous, so no refusal keyed on a selector reaches that case.
+`mcp_tools.apply_policy` still refuses a `mask` rule whose selector *is* a
+hard-blocked type, keyed off the same `HARD_BLOCKED_DATA_TYPES` so the two
+cannot drift — now because such a rule would decide nothing while reporting
+success, with no path to remove it (known limit 13), and as defence in depth
+if the branch's guard is ever lost.
+`tests/test_mcp_surface.py::test_no_exposed_tool_can_turn_a_deny_into_an_allow`
+checks the property as behaviour, with a co-occurring finding in its payload.
 
 `read_guard_set` returns the same shape `read_guard_status` does, plus an `error` string when `settings.json` could not be written — the caller is the `$privacy` skill's heredoc, where a raised `PermissionError` would be a traceback and no statement of what the setting now says. Reads still fail open: this is not a hook path (I6).
 

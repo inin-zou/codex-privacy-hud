@@ -683,14 +683,47 @@ class Engine:
         # mask; otherwise this falls through, unchanged, to the
         # Matrix.default_action() logic below.
         #
-        # This branch sets `action = "rewrite"`, and the hard block below
-        # only runs while `action` is still `"allow"` — so a `mask` rule on
-        # a `HARD_BLOCKED_DATA_TYPES` type would REPLACE a deny with an
-        # executed, masked call. That is why `mcp_tools.apply_policy`
-        # refuses to write one: the ordering here is safe because no such
-        # rule can be minted, not because this branch checks for it. Every
-        # other rule a caller can write only tightens — `block_path` and
-        # `block_command` are decided in the `if` above this `elif`, so a
+        # `and not hard_blocked` is the whole of C1's fix, and it is load
+        # bearing. This branch sets `action = "rewrite"`, and the hard block
+        # below only runs while `action` is still `"allow"` — so without the
+        # guard a mask rule REPLACES the plugin's one unconditional deny with
+        # an executed, masked call, for the rest of the session, with no
+        # removal path (known limit 13), while the ledger still records
+        # `prevented` and the audit still reports that protection held.
+        #
+        # The guard is *here*, in the branch, and not only at the rule's mint
+        # site, because the intersection below is over every finding on the
+        # observation rather than over the finding that triggers the block.
+        # A mask rule on any data type that merely CO-OCCURS with a
+        # hard-blocked one — a path on the same command line — fired and
+        # skipped the block for the whole call. Those selectors are
+        # innocuous and `apply_policy` accepts them (one click of the audit
+        # UI's "Protect future occurrences" on a path exposure writes one),
+        # so no refusal keyed on the selector can reach that case. An earlier
+        # fix wave asserted it could, on the false premise that `mask` +
+        # `credential` was the only loosening combination; the comment that
+        # said so is what let the defect survive the wave that looked for it.
+        #
+        # What the guard costs: with a hard-blocked finding present the
+        # observation falls through to `Matrix.default_action(dest_kind)`
+        # instead of rewriting here — `block` for `mcp_tool`/`external_net`
+        # (the deny, which is the point) and `mask` for
+        # `model_context`/`subagent`, which yields the same `"rewrite"` the
+        # mask branch would have produced. So the user's rule is never
+        # weaker than the default it yields to, and an observation carrying
+        # no hard-blocked finding is decided exactly as before
+        # (`test_a_mask_rule_still_rewrites_when_no_hard_blocked_type_is
+        # _present`).
+        #
+        # `mcp_tools.apply_policy` still refuses a `mask` rule whose selector
+        # is a hard-blocked type. That refusal is no longer what makes this
+        # ordering safe — this branch is — and its remaining job is stated
+        # there: such a rule is now silently inert, and writing an
+        # unremovable rule that decides nothing while reporting success is
+        # #38's defect.
+        #
+        # Every other rule a caller can write only tightens — `block_path`
+        # and `block_command` are decided in the `if` above this `elif`, so a
         # mask rule can never undo a source rule either.
         #
         # `block_source` rows are deliberately not read (#38). That rule
@@ -702,7 +735,7 @@ class Engine:
             blocked_origin = self._blocked_origin(obs.session_id, findings)
             if blocked_origin is not None:
                 action = "deny"
-            elif findings:
+            elif findings and not hard_blocked:
                 mask_selectors = self._policy_selectors(obs.session_id, "mask")
                 if mask_selectors & {f.data_type for f in findings}:
                     action = "rewrite"

@@ -13,28 +13,31 @@ from pathlib import Path
 
 DEFAULT_TABLES = Path(__file__).with_name("tables.toml")
 
-#: The data types `[policy_defaults]` decides — and therefore the only data
-#: types this plugin can hard-block. `Engine.observe` consults
-#: `Matrix.default_action()` only when a finding of one of these is present,
-#: and every egress destination in that table (`mcp_tool`, `external_net`)
-#: is `"block"`, so "in this set" and "denied on the way out" are the same
-#: statement.
+#: The data types that make `[policy_defaults]` apply at all. `Engine.observe`
+#: consults `Matrix.default_action(destination)` only when a finding of one of
+#: these is present; what that consultation then decides is the table's
+#: business, and the table is not uniformly a block — `mcp_tool` and
+#: `external_net` are `"block"`, `model_context` and `subagent` are `"mask"`.
+#: So "in this set" means "this type can be hard-blocked on the way out",
+#: not "always denied wherever it goes".
 #:
 #: It lives here, beside the table whose comment used to be the only record
 #: of it ("when a credential is present"), because two ends need the same
 #: fact and neither may guess it:
 #:
-#:   * `engine.py` gates the hard block on it;
+#:   * `engine.py` gates the hard block on it — and, since C1, also skips the
+#:     user `mask` rule branch whenever a finding of one of these is present,
+#:     so a mask rule can never take effect ahead of that block;
 #:   * `mcp_tools.apply_policy` refuses a `mask` rule whose selector is one
-#:     of these, because such a rule *replaces* that deny with an executed,
-#:     masked call — the one combination of rule type and selector that
-#:     loosens enforcement rather than tightening it.
+#:     of these, which since C1 is a rule that would decide nothing while
+#:     reporting success rather than one that would loosen enforcement.
 #:
 #: Two literals would drift, and a drift here is silent in the direction
-#: that matters: the refusal would stop covering a type the engine still
-#: blocks. That is #38's defect exactly, and this branch withdrew a rule
-#: type over it. `tests/test_mcp_surface.py::test_the_hard_block_set_has_one
-#: _definition` pins the two readers to this object.
+#: that matters: the engine would stop skipping the mask branch for a type it
+#: still blocks, or the refusal would stop covering one. That is #38's defect
+#: exactly, and this branch withdrew a rule type over it.
+#: `tests/test_mcp_surface.py::test_the_hard_block_set_has_one_definition`
+#: pins the two readers to this object.
 HARD_BLOCKED_DATA_TYPES = frozenset({"credential"})
 
 

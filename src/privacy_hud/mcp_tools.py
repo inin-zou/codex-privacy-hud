@@ -43,11 +43,19 @@ This does not apply retroactively (design.md P4): data already disclosed
 before the rule was written stays disclosed, and no caller of this module
 should claim otherwise.
 
-That same ordering — policy first, matrix defaults second — is why a `mask`
-rule on a hard-blocked data type is refused (`_MASK_WOULD_DOWNGRADE`): it
-would take effect *ahead of* the deny it is standing in front of and
-replace it. It is the only rule this function could write that loosens
-anything, which is what lets every caller say "tighten-only" and mean it.
+That ordering — policy first, matrix defaults second — has one exception,
+and it is what lets every caller say "tighten-only" and mean it: the mask
+branch is skipped entirely when the observation carries a finding of a
+`HARD_BLOCKED_DATA_TYPES` type, so no rule this function writes can stand in
+front of the plugin's one unconditional deny. The guard is in the engine
+rather than in the rules this function accepts because the branch's
+selector test looked at *every* finding on the observation: a mask rule on
+any innocuous type that co-occurred with a credential used to skip the block
+for the whole call, and no refusal keyed on a selector can reach that.
+`_MASK_WOULD_DOWNGRADE` still refuses `mask` on a hard-blocked selector —
+now because such a rule is inert, and as defence in depth. Read that
+constant and `Engine.observe`'s mask branch together; neither is the whole
+argument on its own.
 
 "Block this source" (`block_source`) is withdrawn (#38): `apply_policy`
 refuses it and `Engine.observe` ignores any such row an older ledger still
@@ -142,36 +150,48 @@ _ALLOW_DEST_WITHDRAWN = (
     "rule written that way decides nothing while reporting success (#38's "
     "reason) — there is no replacement, because nothing minted it")
 
-#: Why a `mask` rule on a hard-blocked data type is refused: it is the one
-#: combination of rule type and selector that LOOSENS enforcement.
+#: Why a `mask` rule on a hard-blocked data type is refused: the rule cannot
+#: do anything, and an unremovable rule that decides nothing is #38's defect.
 #:
-#: `Engine.observe` applies a user-written `mask` rule before its own matrix
-#: defaults, and the default block is guarded by "the action is still allow".
-#: So a `mask` rule whose selector is one of `HARD_BLOCKED_DATA_TYPES` sets
-#: the action to `"rewrite"` first, and the deny below it never runs: every
-#: later call that would have been blocked is executed instead, with the
-#: value pseudonymised — for the rest of the session, with no removal path
-#: (known limit 13), while the ledger still records `prevented` and the
-#: audit still reports that protection held.
+#: **This refusal is no longer what keeps the hard block safe.** It was, or
+#: was believed to be: `Engine.observe` applied a user `mask` rule ahead of
+#: its matrix defaults and the default deny only ran while the action was
+#: still "allow", so a mask rule on a hard-blocked type replaced the deny
+#: with an executed, masked call. The argument for closing that here was
+#: that `mask` + a hard-blocked selector was the only combination that could
+#: loosen anything, so refusing it at the mint site was provably complete.
+#: **That argument was wrong.** The engine intersected its mask selectors
+#: with *every* finding on the observation, not with the finding that
+#: triggered the block, so a mask rule on any type that merely co-occurred
+#: with a hard-blocked one — a path on the same command line, the selector
+#: one click of the audit UI's "Protect future occurrences" writes — skipped
+#: the block for the whole call. Those selectors are innocuous and this
+#: function accepts them, so no refusal keyed on a selector could ever have
+#: covered that case.
 #:
-#: And it is always a downgrade, never a trade: `policy_defaults` maps both
-#: egress destinations (`mcp_tool`, `external_net`) to `block`, so there is
-#: no destination where masking a hard-blocked type adds protection it did
-#: not already have. Every other combination only tightens — `mask` on any
-#: other type covers calls that would otherwise have been allowed outright,
-#: and `block_path`/`block_command` deny.
+#: The precedence now lives where the decision is made: the mask branch in
+#: `Engine.observe` does not run at all when the observation carries a
+#: hard-blocked finding, whatever the rule's selector says. Read that branch's
+#: comment for what it costs (the observation falls through to
+#: `Matrix.default_action`, which is never weaker than the mask the rule
+#: asked for).
 #:
-#: Refused here rather than in one caller because every caller needs it. The
-#: local audit UI's "Protect future occurrences" button calls this function,
-#: and on a credential exposure it was *downgrading* the user's protection
-#: when clicked — a pre-existing defect this refusal closes. `update_policy`
-#: is model-callable since the MCP server was wired, and the call carries no
-#: secret, so nothing else stood between the model and this downgrade.
+#: What this refusal still does, and why it stays: with the engine holding
+#: the line, a `mask` rule on a hard-blocked type is *inert*. Writing it
+#: would tell the caller protection was applied, record a rule no path
+#: removes (known limit 13), and change no decision — which is exactly the
+#: reason `block_source` and `allow_dest` are refused above. It is defence
+#: in depth for the same reason: if the branch's guard is ever lost, this
+#: keeps the rule that would exploit it from being written in the first
+#: place. Refused here rather than in one caller because both callers need
+#: it — the model-callable `privacy.update_policy` tool and the local audit
+#: UI's button, which called this function and, on a credential exposure,
+#: was *downgrading* the user's protection when clicked.
 _MASK_WOULD_DOWNGRADE = (
     "mask is not available for {selector!r}: a value of that type on an "
-    "outbound call is already denied, and a mask rule replaces that deny "
-    "with an executed, masked call. It can only weaken enforcement here, "
-    "never strengthen it, and no path removes a rule once written "
+    "outbound call is already denied, and that deny takes precedence over "
+    "every mask rule, so this rule would decide nothing while reporting "
+    "that protection was applied — and no path removes a rule once written "
     "(known limit 13). Nothing to do: the block is already the stronger "
     "outcome.")
 
@@ -509,11 +529,14 @@ def apply_policy(ledger, session_id: str, *, rule_type: str, selector: str) -> N
     for exactly that reason (`_BLOCK_SOURCE_WITHDRAWN`, #38).
 
     A `mask` rule whose selector is a hard-blocked data type is refused too,
-    for the opposite reason: the engine *would* match it, and matching it
-    turns a deny into an executed, masked call. See `_MASK_WOULD_DOWNGRADE`.
-    That refusal is what makes "this call can only tighten enforcement" true
-    of every caller — the MCP tool the model can call, and the local audit
-    UI's button alike.
+    for the same reason rather than the opposite one: since C1, the engine
+    keeps its hard block ahead of every mask rule, so such a rule matches
+    nothing it could change. What makes "this call can only tighten
+    enforcement" true of every caller — the MCP tool the model can call and
+    the local audit UI's button alike — is that precedence in
+    `Engine.observe`, not this refusal; the refusal additionally stops a rule
+    that would be silently inert, and stands as defence in depth if the
+    precedence is ever lost. See `_MASK_WOULD_DOWNGRADE`.
 
     See this module's top-level docstring: `Engine.observe` consults `mask`
     rules (ahead of its own matrix defaults) on every later egress

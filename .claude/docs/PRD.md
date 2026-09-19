@@ -290,9 +290,16 @@ privacy.update_policy
 `privacy.allow_once`, `privacy.read_guard_set` and `privacy.hud_toggle` are
 deliberately not exposed here: an MCP tool is called by the model, and none
 of the three may loosen what the plugin enforces. `privacy.update_policy` is
-exposed although it writes, because the one rule it could write that would
-loosen anything — masking a data type that is currently blocked outright — is
-refused by `mcp_tools.apply_policy`; see `architecture.md` §9. See
+exposed although it writes, because no rule it can write reaches the plugin's
+one unconditional deny: `Engine.observe` skips user `mask` rules altogether on
+an observation carrying a hard-blocked data type, whatever the rule's selector
+says, and decides it by the matrix default instead. That is a property of the
+engine, not a restriction on the tool's arguments — a mask rule with a
+perfectly ordinary selector can still land on a call that also carries a
+credential, which is why refusing selectors at the mint site was never enough.
+`mcp_tools.apply_policy` does still refuse a `mask` rule whose selector is
+itself a hard-blocked type, which is now an honesty matter (the rule would be
+inert) rather than an enforcement one; see `architecture.md` §9. See
 `CLAUDE.md` §5 for the
 rule that every user-facing action claim must trace to the surface that
 performs it, and `architecture.md` §9 for the full tool list and withheld

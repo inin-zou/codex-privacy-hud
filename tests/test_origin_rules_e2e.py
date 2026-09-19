@@ -249,12 +249,24 @@ def test_resending_the_secret_is_still_denied_by_the_credential_default(state):
 
 
 def test_protect_future_occurrences_is_still_offered(state, ui):
-    """The other L3 action is unaffected: a mask rule on a data type is
-    matched against findings, which dispatch does produce.
+    """The other L3 action is still accepted: the endpoint takes a `mask`
+    rule on a data type the engine does not hard-block, and the rule reaches
+    the `policy` table.
 
-    On a data type the engine does not already hard-block. `credential` is
-    the exception, and has its own test below — this one used to use it, and
-    in doing so pinned a downgrade as if it were the feature working.
+    That is the whole of what this reaches, and the docstring used to say
+    more — that the rule "is matched against findings, which dispatch does
+    produce". It is not matched here: this fixture's session produces
+    `credential` and `path` findings and no `email` one, so nothing in this
+    test exercises enforcement. What the enforcement side of a mask rule
+    does is pinned in `tests/test_engine.py`
+    (`test_a_mask_rule_still_rewrites_when_no_hard_blocked_type_is_present`
+    for the rewrite, and
+    `test_a_mask_rule_on_a_co_occurring_type_does_not_unblock_a_credential`
+    for the block it must not preempt).
+
+    `credential` is refused, and has its own test below — this one used to
+    use it, and in doing so pinned a downgrade as if it were the feature
+    working.
     """
     _hook(state, "SessionStart")
     _read_secret_through_bash(state)
