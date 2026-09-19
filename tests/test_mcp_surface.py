@@ -14,6 +14,7 @@ helpful agent that gets blocked reaches for the documented remedy.
 from __future__ import annotations
 
 import pytest
+from pathlib import Path
 
 import server  # `mcp/` is on sys.path via conftest; module scope needs no SDK
 
@@ -45,13 +46,15 @@ def _registered(app) -> set[str]:
 
 
 def test_the_server_exposes_exactly_the_five(monkeypatch, tmp_path):
-    pytest.importorskip("mcp", reason="the MCP SDK is an optional extra")
+    pytest.importorskip(
+        "mcp.server.fastmcp", reason="the MCP SDK is an optional extra")
     monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))
     assert _registered(server.build_app()) == set(server.EXPOSED_TOOLS)
 
 
 def test_no_withheld_tool_is_registered(monkeypatch, tmp_path):
-    pytest.importorskip("mcp", reason="the MCP SDK is an optional extra")
+    pytest.importorskip(
+        "mcp.server.fastmcp", reason="the MCP SDK is an optional extra")
     monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))
     assert not _registered(server.build_app()) & set(WITHHELD)
 
@@ -289,3 +292,48 @@ def test_allow_once_would_block_itself(state):
         "tool_input": {"session_id": sid, "tool_name": "Bash",
                        "tool_input": blocked, "reviewed": True}})
     assert "deny" in _json.dumps(reply)
+
+
+def test_the_repo_shadows_the_mcp_distribution_so_no_test_may_skip_on_it():
+    """`import mcp` is not a safe thing to condition a skip on, here.
+
+    `mcp/` sits at the repo root with no `__init__.py`, and pytest puts the
+    repo root on `sys.path`. Where the real SDK is absent — which is every CI
+    run, since the `mcp` extra is not installed — `mcp` therefore resolves to
+    a namespace package over THIS directory, and `import mcp` SUCCEEDS. A
+    `pytest.importorskip("mcp")` does not skip; it sails through and the test
+    dies later inside `build_app` with
+    `No module named 'mcp.server.fastmcp'; 'mcp.server' is not a package`.
+
+    That is exactly how this suite went green locally and red on all four CI
+    Pythons. `mcp/server.py`'s own docstring predicted the collision; the
+    tests conditioned on the shadowed name anyway.
+
+    So: skip on `mcp.server.fastmcp`, the thing `build_app` actually imports,
+    which the shadow cannot satisfy. This test pins that choice at the source
+    level, because the failure it prevents is invisible in any environment
+    where the SDK happens to be installed — including every developer's.
+    """
+    import ast
+
+    repo = Path(__file__).resolve().parent.parent
+    assert not (repo / "mcp" / "__init__.py").exists(), (
+        "mcp/ gained an __init__.py — it is now a real package shadowing the "
+        "real `mcp` distribution outright, which is worse than the namespace "
+        "collision this test guards")
+
+    offenders = []
+    for path in sorted((repo / "tests").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "importorskip"
+                    and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and node.args[0].value == "mcp"):
+                offenders.append(f"{path.relative_to(repo)}:{node.lineno}")
+    assert not offenders, (
+        "importorskip('mcp') always succeeds where the SDK is absent, because "
+        "the repo's own mcp/ directory answers to that name. Skip on "
+        "'mcp.server.fastmcp' instead:\n  " + "\n  ".join(offenders))
