@@ -295,7 +295,7 @@ CREATE TABLE flows (                      -- multi-hop chains for the L3 flow li
 CREATE TABLE policy (
   id         INTEGER PRIMARY KEY,
   scope      TEXT NOT NULL,               -- session:<id>
-  rule_type  TEXT NOT NULL,               -- mask|allow_dest|block_path|block_command
+  rule_type  TEXT NOT NULL,               -- mask|block_path|block_command
   selector   TEXT NOT NULL,               -- data_type / destination / origin (#40)
   created_at INTEGER NOT NULL
 );
@@ -407,18 +407,45 @@ MCP     {"body": "contact jordan@acme.com about 4412"}
 
 ## 9. MCP server and UI delivery
 
-Local stdio MCP server declared in `plugin.json`:
+Local stdio MCP server, declared in `.codex-plugin/plugin.json` as `mcpServers`
+and launched by Codex as host `python3 ./mcp/server.py`; the script re-executes
+itself under the interpreter `runtime.json` pins, because Codex does not expand
+`${PLUGIN_ROOT}` in an MCP `command`.
 
-```text
-privacy.get_session_summary   → tiles + budget
-privacy.list_exposures        → rows for a tab
-privacy.get_exposure_detail   → L3 payload for one flow
-privacy.update_policy         → write mask / block rules
-privacy.allow_once            → mint a one-shot token
-privacy.hud_toggle            → hide or show the status-line item
-privacy.read_guard_status     → is the read guard on (#36)
-privacy.read_guard_set        → turn it on or off
-```
+It exposes only tools that cannot loosen what the plugin enforces, because an
+MCP tool is called by the model: `privacy.get_session_summary`,
+`privacy.list_exposures`, `privacy.get_exposure_detail`,
+`privacy.read_guard_status`, `privacy.update_policy`. `privacy.allow_once`,
+`privacy.read_guard_set` and `privacy.hud_toggle` are deliberately not exposed
+(`mcp/server.py::EXPOSED_TOOLS`).
+
+Withholding three tools is only half of that. `privacy.update_policy` is a
+write, and a user `mask` rule used to outrank the plugin's one unconditional
+deny: `Engine.observe` reads policy *ahead of* its own matrix defaults, and
+the default deny only runs while the action is still `allow`. What makes
+"cannot loosen" a property of the code is that the mask branch is now skipped
+whenever the observation carries a finding of a
+`matrix.loader.HARD_BLOCKED_DATA_TYPES` type, whatever the rule's selector
+says — the observation falls through to `Matrix.default_action(destination)`,
+which is `block` for `mcp_tool`/`external_net` and `mask` for
+`model_context`/`subagent`, so the rule never yields to anything weaker than
+it asked for. Observations carrying no hard-blocked finding are decided by
+the rule exactly as before.
+
+The guard is in that branch and not at the rule's mint site because the
+branch intersects its selectors with *every* finding on the observation, not
+with the finding that triggers the block: a `mask` rule on any type that
+merely co-occurs with a credential — a path on the same command line, which
+is what one click of the audit UI's "Protect future occurrences" on a path
+exposure writes — skipped the block for the whole call. Those selectors are
+innocuous, so no refusal keyed on a selector reaches that case.
+`mcp_tools.apply_policy` still refuses a `mask` rule whose selector *is* a
+hard-blocked type, keyed off the same `HARD_BLOCKED_DATA_TYPES` so the two
+cannot drift — now because such a rule would decide nothing while reporting
+success, with no path to remove it (known limit 13), and as defence in depth
+if the branch's guard is ever lost.
+`tests/test_mcp_surface.py::test_no_exposed_tool_can_turn_a_deny_into_an_allow`
+checks the property as behaviour, with a co-occurring finding in its payload.
 
 `read_guard_set` returns the same shape `read_guard_status` does, plus an `error` string when `settings.json` could not be written — the caller is the `$privacy` skill's heredoc, where a raised `PermissionError` would be a traceback and no statement of what the setting now says. Reads still fail open: this is not a hook path (I6).
 

@@ -283,14 +283,33 @@ Storage: SQLite at `$PLUGIN_DATA/ledger.db`. Tables: `sessions`, `events`, `flow
 privacy.get_session_summary
 privacy.list_exposures
 privacy.get_exposure_detail
+privacy.read_guard_status
 privacy.update_policy
-privacy.allow_once
-privacy.hud_toggle
 ```
 
-### 7.6 The `ask` workaround
+`privacy.allow_once`, `privacy.read_guard_set` and `privacy.hud_toggle` are
+deliberately not exposed here: an MCP tool is called by the model, and none
+of the three may loosen what the plugin enforces. `privacy.update_policy` is
+exposed although it writes, because no rule it can write reaches the plugin's
+one unconditional deny: `Engine.observe` skips user `mask` rules altogether on
+an observation carrying a hard-blocked data type, whatever the rule's selector
+says, and decides it by the matrix default instead. That is a property of the
+engine, not a restriction on the tool's arguments — a mask rule with a
+perfectly ordinary selector can still land on a call that also carries a
+credential, which is why refusing selectors at the mint site was never enough.
+`mcp_tools.apply_policy` does still refuse a `mask` rule whose selector is
+itself a hard-blocked type, which is now an honesty matter (the rule would be
+inert) rather than an enforcement one; see `architecture.md` §9. See
+`CLAUDE.md` §5 for the
+rule that every user-facing action claim must trace to the surface that
+performs it, and `architecture.md` §9 for the full tool list and withheld
+set.
 
-Codex `PreToolUse` supports `deny`, `allow`, and `allow + updatedInput` — but **not** `permissionDecision: "ask"`. So an interactive three-button prompt cannot come from a single hook response. The flow becomes:
+### 7.6 The `ask` workaround (designed, never built — do not read this as current behavior)
+
+This section records the reasoning about Codex's missing `ask` decision, which is still true. The five-step flow below is a design record of what an interactive consent loop *would* look like; no surface implements steps 2–5. `privacy.allow_once` exists in code but is deliberately not exposed as an MCP tool (§7.5), and nothing else calls it: there is no UI button, no `$privacy` subcommand, and no retry path that consumes the token it would write. Treat this as a proposal this branch left withdrawn, not a description of the shipped product — see `CLAUDE.md` §5.
+
+Codex `PreToolUse` supports `deny`, `allow`, and `allow + updatedInput` — but **not** `permissionDecision: "ask"`. So an interactive three-button prompt cannot come from a single hook response. The flow as designed:
 
 1. Risky call is **denied** by the hook, with a `permissionDecisionReason` pointing at the audit UI.
 2. UI shows the exposure detail.

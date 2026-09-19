@@ -95,7 +95,7 @@ CREATE TABLE IF NOT EXISTS flows (        -- multi-hop chains for the L3 flow li
 CREATE TABLE IF NOT EXISTS policy (
   id         INTEGER PRIMARY KEY,
   scope      TEXT NOT NULL,               -- session:<id>
-  rule_type  TEXT NOT NULL,               -- mask|allow_dest|block_path|block_command
+  rule_type  TEXT NOT NULL,               -- mask|block_path|block_command
   selector   TEXT NOT NULL,               -- data_type / destination / origin (#40)
   created_at INTEGER NOT NULL
 );

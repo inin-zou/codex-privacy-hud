@@ -110,7 +110,9 @@ it puts `install.sh` on your machine, but it does not run it: the daemon's
 Python environment, the detection model, and the patched Codex build are
 still missing, so every hook answers
 `Privacy HUD unavailable — disclosure unverified` and `$privacy` reports no
-daemon. From here:
+daemon.
+
+From here:
 
 1. Run `codex`. Codex 0.154 opens with **Hooks need review** for the
    plugin's eight hooks; choose **Trust all and continue**. Nothing from
@@ -204,6 +206,8 @@ API credential ×1     .env             none             [PREVENTED]
 Tabs: `Exposed` · `Prevented` · `All events`.
 
 **Level 3 — Exposure detail.** One flow, its masked evidence, and forward-looking remedies (`Protect future occurrences`; on a row that names a real origin, `Block values read from <file>`). Never an undo — already disclosed data cannot be recalled, and a source rule only matches values that leave unchanged.
+
+**The MCP tools.** Codex also gets five `privacy.*` tools the model can call: a session summary, the exposure list, one exposure's detail, the read-guard state, and writing a policy rule. The first four read; the fifth can only tighten, because the engine keeps its one unconditional block — a credential on an outbound call — ahead of every rule you or the model can write: a call carrying a credential is decided by the built-in default, and a mask rule on it is not consulted at all. That holds whatever the rule names, which is the point — a rule written about something innocuous, like a file path, can still land on a call that happens to carry a credential too. A mask rule naming a blocked type outright is refused when written, because it would now decide nothing while looking like protection you applied. Turning the read guard off and hiding the HUD are not among the five at all, because an MCP tool is called by the model, and a switch that loosens protection is not one to hand to the thing being enforced against; those two stay behind `$privacy`, which you type. Allowing a blocked call once is not among them either, but for a different reason: it has no surface at all — not `$privacy`, not the audit UI, not an MCP tool — see [known limit 13](docs/known-limits.md#13-no-policy-rule-can-be-removed-within-the-session-that-wrote-it).
 
 ## How it works
 

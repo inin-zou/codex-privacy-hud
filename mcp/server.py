@@ -2,14 +2,27 @@
 # mcp/server.py
 """Thin stdio MCP wrapper around `privacy_hud.mcp_tools` (Task 13).
 
-Exposes eight tools: five of those architecture.md §9 names --
-`privacy.get_session_summary`, `privacy.list_exposures`,
-`privacy.get_exposure_detail`, `privacy.update_policy`, `privacy.allow_once` --
-plus `privacy.hud_toggle`, added later for the status-line item, and
-`privacy.read_guard_status` / `privacy.read_guard_set`, added later still for
-the read-guard toggle (#36 Task 2). §9's sixth,
-`privacy.start_clean_session`, was removed (#23): it opened a ledger row under
-an id Codex never sends, so nothing was ever recorded against it. Each is a direct call into the corresponding
+Exposes exactly the five tools named in `EXPOSED_TOOLS`, below: the four
+reads (`privacy.get_session_summary`, `privacy.list_exposures`,
+`privacy.get_exposure_detail`, `privacy.read_guard_status`) plus
+`privacy.update_policy`, the one write, which can only tighten enforcement
+because `Engine.observe` never lets a user `mask` rule decide an observation
+that carries a hard-blocked data type: the mask branch is skipped and the
+matrix default -- the deny -- stands. That is a property of the engine, not
+of the rules this tool is allowed to write; a rule whose selector is
+innocuous can still land on a call that carries a credential, which is the
+case a mint-site refusal cannot see. `mcp_tools.apply_policy` additionally
+refuses a `mask` rule on a hard-blocked selector, now because such a rule is
+inert (see `_MASK_WOULD_DOWNGRADE` there). The behaviour test is
+`tests/test_mcp_surface.py::test_no_exposed_tool_can_turn_a_deny_into_an_allow`,
+whose payload carries a second, co-occurring finding for exactly that reason.
+`privacy.allow_once`, `privacy.hud_toggle` and
+`privacy.read_guard_set` are withheld because each could loosen what the
+plugin enforces if the model called it, and an MCP tool is called by the
+model -- see `EXPOSED_TOOLS`'s docstring and
+`tests/test_mcp_surface.py`. `privacy.start_clean_session` was removed
+(#23): it opened a ledger row under an id Codex never sends, so nothing was
+ever recorded against it. Each is a direct call into the corresponding
 function in `src/privacy_hud/mcp_tools.py`. All the
 real logic (I1's no-raw-value guarantee, the consent rule, the policy-table
 write) lives there and is unit-tested in `tests/test_mcp.py` without going
@@ -63,11 +76,161 @@ disclosed before the rule was written stays disclosed (design.md P4).
 """
 from __future__ import annotations
 
+import json
+import os
+import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from privacy_hud import mcp_tools
-from privacy_hud.ledger import Ledger
-from privacy_hud.matrix.loader import load_matrix
+if TYPE_CHECKING:  # import-time cost is the whole point of not importing these
+    from privacy_hud.ledger import Ledger
+
+#: `$PLUGIN_DATA/runtime.json` — written by `privacy-hud-setup`, read by
+#: `hooks/handler.py` to launch the daemon and by this file to launch itself.
+#: Restated rather than imported: `handler.py` inlines these checks inside
+#: `_spawn_daemon`, on the path every tool call runs, and extracting them to
+#: share would change the hook client for this file's benefit. The repo's
+#: precedent for a fact two stdlib-only ends must share is to restate it and
+#: pin both copies with one test —
+#: `tests/test_mcp_launcher.py::test_the_receipt_checks_match_the_hook_client`.
+RECEIPT_NAME = "runtime.json"
+RECEIPT_VERSION = 1
+
+#: Set in the child's environment before `execve`, so an entry that finds it
+#: already set does not exec again. Without it, a receipt naming an
+#: interpreter that re-enters this file loops until the process table gives up.
+REEXEC_MARKER = "PRIVACY_HUD_MCP_REEXEC"
+
+
+#: Codex's own name for this plugin's data directory is
+#: `<marketplace>-<plugin>`, and `codex.PLUGIN_NAME` is the substring both
+#: halves share. Restated here for the same reason the receipt checks are:
+#: this half of the file runs under host `python3`, before the re-exec, where
+#: `privacy_hud` is not importable at all. `_codex_data_candidates` below
+#: mirrors `codex.codex_data_candidates()` line for line, and
+#: `tests/test_mcp_launcher.py::test_the_data_dir_fallback_matches_codex`
+#: runs both against the same tree and compares the answers.
+PLUGIN_NAME = "codex-privacy-hud"
+
+
+def _fail(message: str):
+    """One line to stderr, non-zero exit, nothing on stdout.
+
+    stdout is the JSON-RPC channel for stdio MCP: a single stray byte there
+    desynchronises the framing, so an error printed to stdout is worse than
+    the error it reports. I1: `message` names a cause, never a payload.
+    """
+    print(f"privacy-hud mcp: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def _codex_data_candidates() -> list[str]:
+    """Directories under `$CODEX_HOME/plugins/data/` that look like ours.
+
+    A stdlib mirror of `privacy_hud.codex.codex_data_candidates()`, which is
+    where this project's knowledge of Codex's layout lives. It cannot be
+    imported here: everything above the `execve` runs under host `python3`,
+    which has no `privacy_hud` on its path — that is the whole reason the
+    re-exec exists. The repo's precedent for a fact two stdlib-only ends must
+    share is to restate it and pin the copies with one test (`EGRESS_EVENTS`,
+    the socket name, the receipt checks above), and that is what this is.
+    """
+    home = os.environ.get("CODEX_HOME")
+    root = (Path(home).expanduser() if home else Path.home() / ".codex")
+    try:
+        entries = sorted((root / "plugins" / "data").iterdir())
+    except OSError:
+        return []
+    return [str(p) for p in entries if p.is_dir() and PLUGIN_NAME in p.name]
+
+
+def _resolved_data_dir() -> str | None:
+    """`$PLUGIN_DATA`, or the directory Codex assigns this plugin.
+
+    The spec asserts Codex injects `PLUGIN_DATA` into an MCP server's
+    environment, with no source for the claim — and `doctor.check_mcp_server`
+    sets that variable itself before spawning the server, so a green doctor
+    is compatible with a server that dies at every real Codex launch. Rather
+    than leave the assumption load-bearing, resolve the directory the way
+    every other reader in this project does when the variable is absent
+    (`runtime.plugin_data_dir` -> `codex.codex_data_candidates`), so the
+    assumption stops mattering either way.
+
+    One candidate only. Several means "which of these is Codex's?" has no
+    answer here, and `runtime.resolve_data_dir` refuses that case too rather
+    than guessing; `None` sends the caller to `_fail`, which is loud.
+    """
+    env = os.environ.get("PLUGIN_DATA")
+    if env:
+        return env
+    candidates = _codex_data_candidates()
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _reexec_under_pinned_interpreter() -> None:
+    """Replace this process with the interpreter `runtime.json` records.
+
+    Codex constrains an MCP `command` to a bare executable on the host PATH
+    or a `./` path inside the plugin root, and rejects `${PLUGIN_ROOT}` there
+    — unlike `hooks.json`, where `$PLUGIN_ROOT` expands. The plugin's venv is
+    neither, so the manifest launches host `python3` and this is how the
+    process reaches an interpreter that can import `privacy_hud` and `mcp`.
+
+    Re-exec, not `sys.path`: `mcp` depends on `pydantic`, whose core is a
+    compiled extension built for one interpreter version. Borrowing the
+    venv's `site-packages` from a different host `python3` is a binary
+    mismatch waiting for the two versions to differ.
+
+    Returns only when already running under the pinned interpreter. Otherwise
+    `execve` replaces the process and this never returns.
+    """
+    if os.environ.get(REEXEC_MARKER):
+        return
+    data_dir = _resolved_data_dir()
+    if not data_dir:
+        _fail("PLUGIN_DATA is not set and no Codex plugin-data directory for "
+              "this plugin could be resolved; the plugin is not installed, or "
+              "several candidates matched — run privacy-hud-setup")
+    try:
+        with open(os.path.join(data_dir, RECEIPT_NAME)) as handle:
+            # This file names a program about to be executed, so who can
+            # write it matters — `handler.py` carries the same check and the
+            # same reasoning. `fstat` on the open handle, not `stat` on the
+            # path: the check must describe the bytes actually read.
+            info = os.fstat(handle.fileno())
+            if info.st_uid != os.getuid() or info.st_mode & 0o022:
+                _fail(f"{RECEIPT_NAME} is writable by others; refusing to "
+                      "execute the interpreter it names")
+            receipt = json.load(handle)
+        if not isinstance(receipt, dict) or receipt.get("v") != RECEIPT_VERSION:
+            raise ValueError("unusable receipt")
+        python = receipt["python"]
+        if not isinstance(python, str) or not python:
+            raise ValueError("unusable receipt")
+    except (OSError, ValueError, KeyError) as exc:
+        _fail(f"no usable {RECEIPT_NAME} ({type(exc).__name__}); "
+              "run privacy-hud-setup")
+    if not os.access(python, os.X_OK) or os.path.isdir(python):
+        _fail("the recorded interpreter is not executable; run privacy-hud-setup")
+
+    env = dict(os.environ)
+    env[REEXEC_MARKER] = "1"
+    # Hand the child the directory this half resolved, so the two halves
+    # cannot disagree about which ledger this server is for. When
+    # `PLUGIN_DATA` was set this is a no-op; when it was not, it is the
+    # resolution above, made explicit rather than re-derived after the exec.
+    env["PLUGIN_DATA"] = data_dir
+    pythonpath = receipt.get("pythonpath")
+    if isinstance(pythonpath, str) and pythonpath:
+        parts = [pythonpath] + [p for p in env.get("PYTHONPATH", "").split(
+            os.pathsep) if p]
+        seen, ordered = set(), []
+        for part in parts:
+            if part not in seen:
+                seen.add(part)
+                ordered.append(part)
+        env["PYTHONPATH"] = os.pathsep.join(ordered)
+    os.execve(python, [python, os.path.abspath(__file__)], env)
 
 
 def _ledger_path() -> Path:
@@ -83,14 +246,59 @@ def _ledger_path() -> Path:
     return data_dir / "ledger.db"
 
 
-def _open_ledger() -> Ledger:
-    matrix = load_matrix()
-    return Ledger(_ledger_path(), matrix)
+def _open_ledger() -> "Ledger":
+    from privacy_hud.ledger import Ledger
+    from privacy_hud.matrix.loader import load_matrix
+    return Ledger(_ledger_path(), load_matrix())
+
+
+#: The tools the model may call, sorted. A tool belongs here only if calling
+#: it cannot weaken what the plugin enforces:
+#:
+#:   * the four reads answer questions and change nothing;
+#:   * `update_policy` only tightens, and here is why rather than the bare
+#:     claim. Its rule types are `mask`, `block_path` and `block_command`
+#:     (since #38). `block_path`/`block_command` set a deny outright.
+#:     `mask` forces a rewrite of a call that would otherwise have been
+#:     allowed -- and only of such a call: `Engine.observe` skips its mask
+#:     branch entirely on any observation carrying a finding of a
+#:     `HARD_BLOCKED_DATA_TYPES` type, so the matrix default decides that
+#:     one and the deny stands. No rule this tool can write, with any
+#:     selector, changes that. The guard is in the engine rather than in
+#:     what this tool accepts because it has to be: the branch matched on
+#:     every finding of the observation, so a mask rule on an innocuous type
+#:     that co-occurred with a credential skipped the block, and a refusal
+#:     keyed on the selector cannot see that call. `mcp_tools.apply_policy`
+#:     does still refuse `mask` on a hard-blocked selector
+#:     (`_MASK_WOULD_DOWNGRADE`), keyed off the same
+#:     `HARD_BLOCKED_DATA_TYPES` the engine gates the block on so the two
+#:     cannot drift -- now because such a rule would be inert, and as
+#:     defence in depth. Its selectors are a data type, a path or a program
+#:     name, never a value, so the call carries no secret, and no path
+#:     removes a rule once written (known limit 13).
+#:
+#: Withheld, and not by oversight: `privacy.allow_once` (mints a token that
+#: unblocks the call it names), `privacy.read_guard_set` (can turn the read
+#: guard off) and `privacy.hud_toggle` (can hide the indicator). The last two
+#: stay reachable through `$privacy read|hud on|off`, which a user types.
+#: `allow_once` keeps no surface at all: see
+#: `tests/test_mcp_surface.py::test_allow_once_would_block_itself`.
+#:
+#: `privacy-hud-doctor` compares the running server's tools against its own
+#: copy of this list, so a regression fails a check a user runs.
+EXPOSED_TOOLS = (
+    "privacy.get_exposure_detail",
+    "privacy.get_session_summary",
+    "privacy.list_exposures",
+    "privacy.read_guard_status",
+    "privacy.update_policy",
+)
 
 
 def build_app():
-    """Construct the FastMCP app and register the eight `privacy.*` tools.
-    Imports `mcp` here (not at module scope) -- see this file's docstring."""
+    """Construct the FastMCP app and register the five `privacy.*` tools in
+    `EXPOSED_TOOLS`. Imports `mcp` here (not at module scope) -- see this
+    file's docstring."""
     try:
         from mcp.server.fastmcp import FastMCP
     except ImportError as exc:  # pragma: no cover - exercised only when the
@@ -104,6 +312,8 @@ def build_app():
             "    pip install mcp\n"
             f"(original ImportError: {exc})"
         ) from exc
+
+    from privacy_hud import mcp_tools
 
     app = FastMCP("privacy-hud")
     ledger = _open_ledger()
@@ -146,25 +356,14 @@ def build_app():
         matching call, not retroactively, and matches only byte-identical
         values. `rule_type="block_source"` is refused (#38): it named a
         label, not a source, and `block_path`/`block_command` are the
-        replacement rather than a revival of it."""
+        replacement rather than a revival of it. A `mask` rule on a data
+        type the engine hard-blocks (`credential`) is refused as well: that
+        rule would take effect ahead of the block and replace it with an
+        executed, masked call, which is the only way this tool could ever
+        loosen enforcement."""
         mcp_tools.apply_policy(ledger, session_id, rule_type=rule_type,
                                 selector=selector)
         return {"applied": True, "rule_type": rule_type, "selector": selector}
-
-    @app.tool(name="privacy.allow_once")
-    def allow_once(session_id: str, tool_name: str, tool_input: dict,
-                   reviewed: bool) -> dict:
-        """Mint a single-use, 120s consent token for exactly this call
-        (design.md §8). Raises if `reviewed` is not true -- the L3 detail
-        must have been shown first."""
-        mcp_tools.allow_once(ledger, session_id, tool_name=tool_name,
-                              tool_input=tool_input, reviewed=reviewed)
-        return {"minted": True}
-
-    @app.tool(name="privacy.hud_toggle")
-    def hud_toggle(session_id: str, hidden: bool) -> dict:
-        """Hide or show this session's line in the Codex status bar."""
-        return mcp_tools.hud_set_hidden(_ledger_path().parent, session_id, hidden)
 
     @app.tool(name="privacy.read_guard_status")
     def read_guard_status() -> dict:
@@ -174,17 +373,11 @@ def build_app():
         says."""
         return mcp_tools.read_guard_status(_ledger_path().parent)
 
-    @app.tool(name="privacy.read_guard_set")
-    def read_guard_set(enabled: bool) -> dict:
-        """Turn the read guard on or off. Takes effect for the running
-        daemon immediately -- no restart required (`settings.py`'s
-        mtime cache)."""
-        return mcp_tools.read_guard_set(_ledger_path().parent, enabled)
-
     return app
 
 
 def main() -> int:
+    _reexec_under_pinned_interpreter()
     app = build_app()
     app.run(transport="stdio")
     return 0

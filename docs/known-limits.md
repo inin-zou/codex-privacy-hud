@@ -75,7 +75,7 @@ A daemon replaced mid-session loses it, and source rules stop matching with no e
 
 There is no removal path for any of them: nothing deletes a policy row — no `remove_policy`, no `DELETE FROM policy` anywhere in the code. This is **not new with source rules**; it has always been true of `Protect future occurrences` (a `mask` rule) as well, and was simply never written down. A rule written by mistake is lived with.
 
-For a source rule there is also no way around it in the moment: an "allow once" token does not override one, because an origin deny is decided before the token is consulted and the token path only runs on a call that is otherwise allowed.
+For a source rule there is also no way around it in the moment: an "allow once" token does not override one, because an origin deny is decided before the token is consulted and the token path only runs on a call that is otherwise allowed. This is not a workaround you are missing — no surface mints such a token today: not `$privacy`, not the audit UI, not an MCP tool.
 
 What limits every rule is the session. `Ledger.add_policy` scopes it to `session:<id>`, so it applies until that session ends and not after — a new Codex conversation starts with none of them. That is the only escape, and it is the same one the red band already points at for context: what the old session sent stays sent.
 

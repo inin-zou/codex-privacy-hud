@@ -149,7 +149,7 @@ Read this as *"the ledger holds 0%, and the ledger is not a complete record of t
 
 **5. Run `$privacy` at any point** to see the session audit — the ASCII table always works; it also starts a local browser UI at a `127.0.0.1` URL it prints (never a link to anything else).
 
-**6. When a call is blocked**, Codex surfaces the reason via `systemMessage`. Run `$privacy` to review the exposure, then choose to minimize and retry, allow once, or leave it blocked — see [`design.md` §8](../.claude/docs/design.md) for the full consent flow.
+**6. When a call is blocked**, Codex surfaces the reason via `systemMessage`. Run `$privacy` to review the exposure. Neither "minimize and retry" nor "allow once" is an action any surface offers *you* — [`design.md` §8](../.claude/docs/design.md) is an internal design document describing a consent flow that was never built, not a feature this plugin ships. Masking itself is not missing: the engine does it on its own, without asking, wherever the policy for that destination is "mask" rather than "block", and says so (`PRIVACY HUD masked a tool call`). What does not exist is the choice — a prompt asking you which of the two you want for this call.
 
 **7. Uninstall the plugin itself.** (If you used the one-command installer, run [`install.sh --uninstall`](../README.md#uninstall) instead — it also removes the patched Codex build and the forwarder. This step only removes the plugin; also stop any daemon still running — an auto-started one exits by itself five minutes after your last Codex session ends — and the ambient HUD from step 3 if you started it):
 

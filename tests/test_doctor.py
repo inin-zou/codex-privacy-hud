@@ -64,6 +64,63 @@ BANNED = ("undo", "revoke", "remove from context", "your data is protected",
           "100% secure")
 
 
+def _fake_mcp_server_body(tools, *, crash=False, says="") -> str:
+    """The stdlib stdio MCP server body `_write_fake_plugin` and the
+    all-green end-to-end test both ship: answers `initialize` and
+    `tools/list`, nothing else. Real enough to prove the handshake, small
+    enough to have no dependencies — the point is the doctor's side of the
+    conversation, not FastMCP's.
+
+    `says` makes it die the way the real launcher dies: one line of cause on
+    stderr, nothing on stdout, non-zero exit."""
+    if crash:
+        if says:
+            return (f"import sys; print({says!r}, file=sys.stderr); "
+                    "sys.exit(1)\n")
+        return "import sys; sys.exit(3)\n"
+    return f"""
+import json, sys
+TOOLS = {tools!r}
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    if msg.get("method") == "initialize":
+        sys.stdout.write(json.dumps({{"jsonrpc": "2.0", "id": msg["id"],
+            "result": {{"protocolVersion": "2024-11-05", "capabilities": {{}},
+            "serverInfo": {{"name": "fake", "version": "1"}}}}}}) + "\\n")
+    elif msg.get("method") == "tools/list":
+        sys.stdout.write(json.dumps({{"jsonrpc": "2.0", "id": msg["id"],
+            "result": {{"tools": [{{"name": n, "inputSchema": {{"type": "object"}}}}
+                                 for n in TOOLS]}}}}) + "\\n")
+    sys.stdout.flush()
+"""
+
+
+def _write_fake_plugin(root, *, tools, declare=True, crash=False, says="",
+                       server_name="privacy-hud"):
+    """A plugin directory shaped like an installed one, whose `mcp/server.py`
+    is a stdlib stdio MCP server answering `initialize` and `tools/list`.
+
+    Real enough to prove the handshake, small enough to have no dependencies:
+    the point is the doctor's side of the conversation, not FastMCP's.
+    """
+    import json
+    (root / ".codex-plugin").mkdir(parents=True, exist_ok=True)
+    manifest = {"name": "codex-privacy-hud", "version": "0.7.0",
+                "description": "x", "skills": "./skills/",
+                "hooks": "./hooks/hooks.json"}
+    if declare:
+        manifest["mcpServers"] = {server_name: {
+            "command": "python3", "args": ["./mcp/server.py"], "cwd": "."}}
+    (root / ".codex-plugin" / "plugin.json").write_text(
+        json.dumps(manifest), encoding="utf-8")
+    (root / "mcp").mkdir(parents=True, exist_ok=True)
+    (root / "mcp" / "server.py").write_text(
+        _fake_mcp_server_body(tools, crash=crash, says=says), encoding="utf-8")
+
+
 # --------------------------------------------------------------------- #
 # fixtures
 # --------------------------------------------------------------------- #
@@ -1118,7 +1175,7 @@ def test_a_check_that_raises_becomes_a_failure_not_a_traceback(monkeypatch,
     assert "RuntimeError" in ledger.summary
     text = doctor.format_report(checks)
     assert "something private" not in text
-    assert len(checks) == 9
+    assert len(checks) == 10
 
 
 def test_report_is_plain_text_with_no_escape_sequences(isolated_env):
@@ -1212,7 +1269,24 @@ def test_healthy_setup_reports_healthy_and_exits_zero(isolated_env, monkeypatch,
     _seed_weights(tmp_path, doctor.MODEL_FILES)
     monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
     repo = _fake_repo(tmp_path)
-    _install(tmp_path, repo)
+    # Declare and ship a real (fake) MCP server so the new "MCP server" check
+    # also comes back OK in this all-green scenario, exactly as it would for
+    # an installed copy that Codex can actually launch.
+    manifest_path = repo / ".codex-plugin" / "plugin.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["mcpServers"] = {"privacy-hud": {
+        "command": "python3", "args": ["./mcp/server.py"], "cwd": "."}}
+    manifest_path.write_text(json.dumps(manifest))
+    (repo / "mcp").mkdir(parents=True, exist_ok=True)
+    (repo / "mcp" / "server.py").write_text(
+        _fake_mcp_server_body(list(doctor.MCP_TOOLS)), encoding="utf-8")
+    dest = _install(tmp_path, repo)
+    # `mcp/server.py` is not one of the tracked files `_install` copies (it
+    # is compared for staleness no more than any other untracked file), so
+    # it is copied into the installed copy by hand here.
+    (dest / "mcp").mkdir(parents=True, exist_ok=True)
+    (dest / "mcp" / "server.py").write_bytes(
+        (repo / "mcp" / "server.py").read_bytes())
     monkeypatch.setattr(doctor, "_repo_root", lambda: repo)
 
     try:
@@ -1225,3 +1299,164 @@ def test_healthy_setup_reports_healthy_and_exits_zero(isolated_env, monkeypatch,
     assert "[FAIL]" not in out
     assert "[WARN]" not in out
     assert "Setup is healthy." in out
+
+
+# --------------------------------------------------------------------- #
+# MCP server
+# --------------------------------------------------------------------- #
+
+def test_check_plugin_install_survives_a_plugin_removed_mid_check(
+        monkeypatch, tmp_path, isolated_env):
+    """It read the cache twice and matched the second reading against the
+    first: `next(entry for entry in installed if entry[2] == root)`, with no
+    default. A plugin removed between the two readings raised
+    `StopIteration` out of the diagnostic whose whole job is to survive a
+    broken install — and `run_checks` would report it as a doctor crash
+    rather than as anything about the user's setup.
+
+    Simulated by making the second reading empty, which is what `codex
+    plugin remove` in another terminal looks like from in here.
+    """
+    doctor._codex_home().mkdir(parents=True, exist_ok=True)
+    version = doctor._declared_version(doctor._repo_root()) or "0.7.0"
+    readings = [[("m", version, tmp_path)], []]
+    monkeypatch.setattr(doctor, "_installed_plugin_dirs",
+                        lambda: readings.pop(0) if readings else [])
+    check = doctor.check_plugin_install()
+    assert check.name == "Plugin install"
+
+
+def test_check_mcp_server_passes_on_the_exact_tool_set(monkeypatch, tmp_path):
+    """The check is the runtime half of the exposure decision: it passes only
+    when the running server lists exactly the tools that cannot loosen
+    protection, so a regression that re-exposes `allow_once` fails something
+    a user runs, not only a unit test."""
+    monkeypatch.setattr(doctor, "_installed_plugin_root", lambda: tmp_path)
+    _write_fake_plugin(tmp_path, tools=list(doctor.MCP_TOOLS))
+    check = doctor.check_mcp_server(timeout=30)
+    assert check.status == doctor.OK
+
+
+def test_check_mcp_server_fails_when_the_manifest_declares_nothing(
+        monkeypatch, tmp_path):
+    """Codex warns and ignores a manifest without the key; nothing inside
+    Codex shows the difference."""
+    monkeypatch.setattr(doctor, "_installed_plugin_root", lambda: tmp_path)
+    _write_fake_plugin(tmp_path, tools=list(doctor.MCP_TOOLS), declare=False)
+    check = doctor.check_mcp_server(timeout=30)
+    assert check.status == doctor.FAIL
+    assert check.fixes
+
+
+def test_check_mcp_server_fails_on_an_extra_tool(monkeypatch, tmp_path):
+    monkeypatch.setattr(doctor, "_installed_plugin_root", lambda: tmp_path)
+    _write_fake_plugin(tmp_path,
+                       tools=list(doctor.MCP_TOOLS) + ["privacy.allow_once"])
+    check = doctor.check_mcp_server(timeout=30)
+    assert check.status == doctor.FAIL
+    assert "privacy.allow_once" in check.summary + " ".join(check.details)
+
+
+def test_check_mcp_server_fails_on_a_missing_tool(monkeypatch, tmp_path):
+    """The other half of "a differing tool set" (spec, Testing item 6). An
+    extra tool is the dangerous direction and has always been covered; a
+    missing one means a read the `$privacy` surfaces rely on is simply not
+    there, and the report has to name which."""
+    monkeypatch.setattr(doctor, "_installed_plugin_root", lambda: tmp_path)
+    _write_fake_plugin(tmp_path, tools=list(doctor.MCP_TOOLS)[1:])
+    check = doctor.check_mcp_server(timeout=30)
+    assert check.status == doctor.FAIL
+    assert "missing:" in " ".join(check.details)
+    assert doctor.MCP_TOOLS[0] in " ".join(check.details)
+
+
+def test_check_mcp_server_fails_when_the_server_will_not_start(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr(doctor, "_installed_plugin_root", lambda: tmp_path)
+    _write_fake_plugin(tmp_path, tools=[], crash=True)
+    check = doctor.check_mcp_server(timeout=30)
+    assert check.status == doctor.FAIL
+
+
+def test_check_mcp_server_quotes_the_reason_the_server_gave(
+        monkeypatch, tmp_path):
+    """The launcher writes a cause to stderr and exits. Without this the
+    report said `the server did not start (ValueError)` and stopped there —
+    while the answer (`no usable runtime.json (FileNotFoundError); run
+    privacy-hud-setup`) sat unread in a pipe this check had already opened.
+
+    Safe to quote by construction: `mcp/server.py::_fail` emits a cause and
+    never a payload (I1), which is what that error-handling rule was for.
+    """
+    monkeypatch.setattr(doctor, "_installed_plugin_root", lambda: tmp_path)
+    _write_fake_plugin(
+        tmp_path, tools=[], crash=True,
+        says="privacy-hud mcp: no usable runtime.json (FileNotFoundError); "
+             "run privacy-hud-setup")
+    check = doctor.check_mcp_server(timeout=30)
+    assert check.status == doctor.FAIL
+    assert "run privacy-hud-setup" in " ".join(check.details)
+
+
+def test_check_mcp_server_caps_what_it_quotes(monkeypatch, tmp_path):
+    """A server that dumps instead of diagnosing must not take the report
+    over."""
+    monkeypatch.setattr(doctor, "_installed_plugin_root", lambda: tmp_path)
+    _write_fake_plugin(tmp_path, tools=[], crash=True, says="x" * 5000)
+    check = doctor.check_mcp_server(timeout=30)
+    assert check.status == doctor.FAIL
+    assert max(len(d) for d in check.details) < 400
+
+
+def test_check_mcp_server_reads_the_server_the_manifest_names(
+        monkeypatch, tmp_path):
+    """`next(iter(servers.values()))` probed whichever server came first. A
+    manifest may legitimately grow a second one, and a check that reports on
+    an arbitrary server passes and fails for reasons that have nothing to do
+    with this plugin."""
+    monkeypatch.setattr(doctor, "_installed_plugin_root", lambda: tmp_path)
+    _write_fake_plugin(tmp_path, tools=list(doctor.MCP_TOOLS),
+                       server_name="somebody-elses-server")
+    check = doctor.check_mcp_server(timeout=30)
+    assert check.status == doctor.FAIL
+    assert "somebody-elses-server" in " ".join(check.details)
+    assert doctor.MCP_SERVER_NAME in check.summary
+
+
+def test_the_doctor_probes_the_server_the_real_manifest_declares():
+    """The doctor's copy of the manifest key, pinned to the manifest."""
+    import json as _json
+    from pathlib import Path as _Path
+
+    manifest = _json.loads(
+        (_Path(__file__).resolve().parent.parent / ".codex-plugin"
+         / "plugin.json").read_text(encoding="utf-8"))
+    assert set(manifest["mcpServers"]) == {doctor.MCP_SERVER_NAME}
+
+
+def test_the_doctors_tool_list_matches_the_servers(monkeypatch):
+    """Two copies, one fact. The doctor cannot import `mcp/server.py` (not a
+    package, and importing it would need the SDK), so it restates the list —
+    and this is what stops the two drifting."""
+    import server
+    assert tuple(doctor.MCP_TOOLS) == tuple(server.EXPOSED_TOOLS)
+
+
+def test_run_checks_gives_the_mcp_check_its_own_timeout_budget(
+        monkeypatch, isolated_env):
+    """`--timeout`/`DAEMON_TIMEOUT` is the daemon round-trip budget (2.0s);
+    the MCP check needs `MCP_TIMEOUT` (20.0s) because it starts an
+    interpreter and opens the ledger, which does not fit in the daemon's
+    window. A registration that threads the daemon's `timeout` into
+    `check_mcp_server` makes a correctly wired server look broken — exactly
+    what `MCP_TIMEOUT`'s docstring warns a doctor must not do ("a doctor
+    that times out on a working server teaches users to ignore it")."""
+    seen = []
+
+    def fake_check_mcp_server(timeout=doctor.MCP_TIMEOUT):
+        seen.append(timeout)
+        return doctor.Check("MCP server", doctor.OK, "stub")
+
+    monkeypatch.setattr(doctor, "check_mcp_server", fake_check_mcp_server)
+    doctor.run_checks(timeout=0.2)
+    assert seen == [doctor.MCP_TIMEOUT]

@@ -149,3 +149,29 @@ def test_the_patch_tool_yields_no_path_origin():
     assert origin.extract_origin(
         codex.PATCH_TOOL,
         {"input": "*** Begin Patch\n*** Update File: .env\n"}) is None
+
+
+def test_the_manifest_declares_the_mcp_server_in_the_shape_codex_parses():
+    """Codex warns and IGNORES an `mcpServers` value it cannot use, leaving
+    the plugin loaded with hooks and skills intact — the same silent shape as
+    the hooks trust gate. A typo here is invisible from inside Codex, so the
+    shape is pinned here and proved live by `privacy-hud-doctor`.
+
+    The field set comes from the 0.154.0 binary's `AgentPluginMcpServer`
+    parser: a stdio server takes `command`, `args`, `env` and `cwd`, and
+    nothing else. `command` must be a bare executable name or a contained
+    `./` path — `${PLUGIN_ROOT}` is rejected there, which is why this runs
+    host `python3` and `mcp/server.py` re-execs itself (see that file).
+    """
+    import json
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parent.parent
+    manifest = json.loads(
+        (repo / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    servers = manifest["mcpServers"]
+    assert set(servers) == {"privacy-hud"}
+    entry = servers["privacy-hud"]
+    assert entry == {"command": "python3", "args": ["./mcp/server.py"],
+                     "cwd": "."}
+    assert (repo / "mcp" / "server.py").is_file()
