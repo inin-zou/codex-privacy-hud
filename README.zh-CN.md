@@ -98,6 +98,7 @@ codex plugin add codex-privacy-hud@codex-privacy-hud
 此时仍缺少守护进程的 Python 环境、检测模型和补丁版 Codex。
 因此，所有 hook 都会回复 `Privacy HUD unavailable — disclosure unverified`。
 `$privacy` 则会报告未找到守护进程。
+
 接下来，请按以下步骤操作：
 
 1. 运行 `codex`。Codex 0.154 启动时会显示 **Hooks need review**（需要审核 hook），提示你审核插件的八个 hook。选择 **Trust all and continue**（信任全部并继续）。在此之前，插件中的任何内容都不会运行。
@@ -168,6 +169,8 @@ API credential ×1     .env             none             [PREVENTED]
 
 **Level 3：暴露详情。** 查看单条数据流、脱敏后的证据，以及面向后续披露的补救措施（`Protect future occurrences`；对于标明真实来源的行，还可使用 `Block values read from <file>`）。这些措施无法撤销披露——已经披露的数据无法收回，且来源规则仅匹配未经改动就向外发送的值。
 
+**MCP 工具。** Codex 还可通过模型调用五个 `privacy.*` 工具：查看会话摘要、暴露列表、单次暴露的详情和读取防护状态，以及写入策略规则。前四个只提供查询，第五个只能收紧防护，因为引擎会优先执行唯一的无条件硬拦截——拦截携带凭据的出站调用——再考虑你或模型能写入的任何规则：携带凭据的调用直接由内置默认策略决定，即予以拦截，完全跳过用户掩码规则。无论规则的选择器指定什么，这一点都成立，而这正是关键所在：即使规则针对的是文件路径这类无害类型，它也可能匹配到同时携带凭据的调用。选择器直接指定被硬拦截类型的掩码规则仍会在写入时被拒绝，因为这样的规则如今无法决定任何处理结果，却会让人误以为已经施加了防护。关闭读取防护和隐藏 HUD 不在这五个工具之中，因为 MCP 工具由模型调用，而放宽防护的开关不能交给防护所约束的模型。这两项操作只能通过你亲自输入的 `$privacy` 执行。临时放行一次被拦截的调用也不在其中，但原因不同：这项操作根本没有任何入口——`$privacy` 不提供，审计界面不提供，MCP 工具也不提供——见[已知限制第 13 条](docs/known-limits.md#13-no-policy-rule-can-be-removed-within-the-session-that-wrote-it)。
+
 ## 工作原理
 
 ### 要解决的问题
@@ -202,11 +205,11 @@ support.log → main agent → GitHub MCP
 
 ### 读取防护
 
-上述规则都适用于数据向外发送时。数据**进入**时，有一种操作可以被阻止：读取已知敏感路径（如 `.env`、`id_rsa`、`deploy/key.pem`）的 shell 命令会在执行前触发 `PreToolUse`，因此可以被拒绝。命令不会执行，该文件中的任何内容都不会到达模型。
+上面的规则都在数据向外发送时生效。在数据**进入**模型之前，有一类操作可以拦截：读取已知敏感路径（如 `.env`、`id_rsa`、`deploy/key.pem`）的 shell 命令会在运行前触发 `PreToolUse`，此时可以拒绝这次调用。命令不执行，文件中的任何内容就都不会到达模型。
 
-防护范围仅限 shell，因为 Codex 就是这样读文件的：它没有原生的读文件工具，模型通过执行 `cat` 来读取。其他工具一律放行，不作检查，见已知限制第 14 条。
+读取防护只检查 shell，因为 Codex 通过 shell 读取文件：它没有原生的文件读取工具，模型会运行 `cat` 来读取。其他工具一律不经检查直接放行，见已知限制第 14 条。
 
-读取防护**默认关闭**。安装后，对这类路径的可识别读取会被记录，防护功能每个会话会提示一次自身的存在；不会拦截任何操作。命令如下：
+读取防护**默认关闭**。刚安装时，能识别出的这类路径读取只会被记录，防护功能会在每个会话中提示一次自身的存在，不会拦截任何操作。可用命令如下：
 
 ```text
 $privacy read on        # 拒绝对已知敏感路径的可识别读取
@@ -214,9 +217,9 @@ $privacy read off       # 恢复为只记录这些读取
 $privacy read status    # 输出 `on` 或 `off`
 ```
 
-设置写入 `~/.codex/plugins/data/codex-privacy-hud-…/settings.json`，而非 `config.toml`。更改会应用于正在运行的会话，无需重启。在 Codex 内无法查看该文件，因此需要通过 `$privacy read status` 和 `privacy-hud-doctor` 查看设置状态。
+设置保存在 `~/.codex/plugins/data/codex-privacy-hud-…/settings.json` 中，不在 `config.toml` 中。修改后会直接对当前运行的会话生效，无需重启。在 Codex 内看不到这个文件，要确认设置状态，需要使用 `$privacy read status` 或 `privacy-hud-doctor`。
 
-读取防护未覆盖的情况见下文已知限制第 14–18 条：它只作用于 shell 命令，且只能阻止其中可识别的读取（如 `cat .env`，但不包括 `wc -l .env`）；不会拦截 `.env.example` 这样的模板文件；写入的审计行记录的是匹配到的模式，而非文件名。
+下文已知限制第 14–18 条列出了读取防护的覆盖边界：它只检查 shell 命令，而且只能拦截其中能识别出的读取操作（能识别 `cat .env`，但不能识别 `wc -l .env`）；它从不拦截 `.env.example` 这样的模板文件；它写入的审计记录只注明命中的模式，不注明具体文件。
 
 ### 账本
 
@@ -266,7 +269,7 @@ flowchart TD
 11. **来源提取会尽力识别，但不保证成功。** 能识别 `cat .env`，但不能识别 `python -c "open('.env')"`。没有来源的行不提供规则，以免提供无法生效的规则。（[详情](docs/known-limits.md#11-origin-extraction-is-best-effort)）
 12. **污点映射随守护进程终止而丢失。** 如果在会话中途替换守护进程，映射就会丢失，来源规则会停止匹配，且不会报错。（[详情](docs/known-limits.md#12-the-taint-map-dies-with-the-daemon)）
 13. **任何策略规则都无法在写入它的会话中移除。** 早在来源规则出现之前，`Protect future occurrences` 就已如此。只有新建 Codex 对话才能从没有这些规则的状态开始。（[详情](docs/known-limits.md#13-no-policy-rule-can-be-removed-within-the-session-that-wrote-it)）
-14. **只有提取器能识别其读取操作的 shell 命令才会被拦截。** 防护只看一种工具——shell，因为 Codex 就是这样读文件的；其他工具一律放行，不作检查。在 shell 之内，`cat .env` 会被拦截；`wc -l .env`、`source .env`、`cp .env /tmp/x`、`strings id_rsa`、`head -5 .env` 和 `python -c "open('.env')"` 则不会：不拒绝、不提示，也不写入记录。具体机制见第 11 条。（[详情](docs/known-limits.md#14-only-a-shell-command-whose-read-the-extractor-recognises-is-stopped)）
+14. **只有提取器能识别出读取操作的 shell 命令才会被拦截。** 防护只检查 shell 这一种工具，因为 Codex 通过它读取文件；其他工具一律不经检查直接放行。即使是 shell 命令，也只有 `cat .env` 这样的读取会被拦截；`wc -l .env`、`source .env`、`cp .env /tmp/x`、`strings id_rsa`、`head -5 .env` 和 `python -c "open('.env')"` 都不会被拦截：不拒绝、不提示、不写入记录。具体机制见第 11 条。（[详情](docs/known-limits.md#14-only-a-shell-command-whose-read-the-extractor-recognises-is-stopped)）
 15. **模板文件永远不会被拦截。** 即使其中确实包含密钥也一样，但检测仍会将其标记出来。（[详情](docs/known-limits.md#15-a-template-file-is-never-blocked)）
 16. **只有手动开启防护后，读取才会被拦截。** 默认只记录读取，并在每个会话中提示一次防护功能，不会拦截任何读取。（[详情](docs/known-limits.md#16-nothing-is-blocked-until-you-turn-it-on)）
 17. **在特定操作顺序下，被拦截的读取可能留下与实际情况相反的记录。** 先在防护关闭时读取，再开启防护并再次读取：账本按 `(session_id, value_hash, destination)` 去重，因此这次拒绝只会增加原有行的 `count`。最终保留的是一行 `local_access` 记录，表示第一次读取的文件被读取了两次，且没有任何操作被拦截。由于没有写入 `prevented` 行，即使确实发生了拒绝，状态行项的拦截计数仍为 `0`。（[详情](docs/known-limits.md#17-a-blocked-read-can-leave-a-record-that-says-the-opposite-in-one-sequence)）

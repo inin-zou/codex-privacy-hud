@@ -251,7 +251,7 @@ if [ "${PRIVACY_HUD_FAKE:-0}" != "1" ]; then
   log "step 2/9: creating venv and installing the plugin package (a few minutes)"
   python3 -m venv "$SHARE/venv"
   "$SHARE/venv/bin/pip" -q install --upgrade pip
-  "$SHARE/venv/bin/pip" -q install "privacy-hud[detectors] @ git+https://github.com/$REPO"
+  "$SHARE/venv/bin/pip" -q install "privacy-hud[detectors,mcp] @ git+https://github.com/$REPO"
   add_created "$SHARE/venv/"
   if [ "$NO_MODEL" -eq 0 ]; then
     if [ "$YES" -eq 0 ]; then

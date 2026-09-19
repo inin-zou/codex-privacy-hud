@@ -345,7 +345,9 @@ the rc file by hand.
   leaves". Two more facts, if the user asks: a source rule is scoped to the
   session (`Ledger.add_policy` writes `session:<id>`) and ends with it, and
   nothing removes one before then — there is no removal path, and an
-  "allow once" token does not override one (known limit 13).
+  "allow once" token does not override one (known limit 13). No surface
+  mints that token today — not `$privacy`, not the audit UI, not an MCP
+  tool — so this is not a workaround the user has and is missing.
 - None of these rules applies retroactively: data already disclosed before
   the rule was written stays disclosed (design.md P4) — a rule only changes
   what happens on the *next* call, not what already happened.

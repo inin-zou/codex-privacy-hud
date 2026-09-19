@@ -104,7 +104,7 @@ from dataclasses import dataclass
 from .detect.base import Cost, Finding, is_available, profile_of
 from .detect.paths import is_sensitive_path
 from .mask import mask, value_hash
-from .matrix.loader import UnknownKey
+from .matrix.loader import HARD_BLOCKED_DATA_TYPES, UnknownKey
 from .minimize import consume_token, minimize_tool_input
 from .origin import Origin, OriginKind, origin_phrase
 
@@ -248,7 +248,7 @@ BLOCK_TEMPLATE = (
     "PRIVACY HUD blocked a tool call\n\n"
     "  {tool}  would send  {label}\n"
     "  from {source} to {destination}.\n\n"
-    "  Run $privacy to review, minimize, or allow once."
+    "  Run $privacy to review."
 )
 
 REWRITE_TEMPLATE = (
@@ -270,16 +270,35 @@ REWRITE_TEMPLATE = (
 # It does not end in "Run $privacy to review or adjust policy" like the
 # other two. That would promise an adjustment this call cannot get: an
 # origin deny is decided above, before the consent-token branch, which only
-# runs when the action is still "allow", so an allow-once token does not
-# override a standing rule; and no code path removes a policy row. What is
-# left is what is true -- the rule holds for the rest of this session, and
-# `Ledger.add_policy` scopes it to `session:<id>`, so it does not outlive it.
+# runs when the action is still "allow"; and no code path removes a policy
+# row. What is left is what is true -- the rule holds for the rest of this
+# session, and `Ledger.add_policy` scopes it to `session:<id>`, so it does
+# not outlive it.
+#
+# It says "a source rule in force", not "a source rule you wrote". Until
+# this branch the only writer was a human clicking a button in the local
+# audit UI, so "you wrote" was accurate. `privacy.update_policy` is now an
+# exposed MCP tool, which means the model can write one of these rules --
+# and known limit 13 says nothing can remove it. Attributing to the user a
+# rule they may not have written is §5's own defect (copy naming an actor
+# that is no longer traceable to a user surface), and the sentence loses
+# nothing it was carrying: what the reader needs is that a rule denies this
+# call and that it dies with the session, neither of which depends on who
+# wrote it.
+#
+# It also does not say "allow once does not override it" -- the clause used
+# to, and the fact is still true (the consent-token branch only runs when
+# the action is still "allow", so it is never reached here), but no surface
+# mints an allow-once token, so naming it told the user they had a button
+# that does not exist. Stating what cannot be overridden is only useful
+# copy when overriding it is a real option; here it is not one at all, so
+# the clause is gone rather than reworded.
 ORIGIN_BLOCK_TEMPLATE = (
     "PRIVACY HUD blocked a tool call\n\n"
     "  {tool}  would send  {label}\n"
     "  {origin_phrase}.\n\n"
-    "  A source rule you wrote for this session denies this call; allow once\n"
-    "  does not override it. The rule ends with the session."
+    "  A source rule in force for this session denies this call.\n"
+    "  The rule ends with the session."
 )
 
 # The one thing this plugin can say without qualification: the call is
@@ -612,7 +631,14 @@ class Engine:
         degraded = scan.degraded
 
         is_egress = obs.direction == "egress"
-        has_credential = any(f.data_type == "credential" for f in findings)
+        # The gate on the whole `policy_defaults` consultation below, and so
+        # the only thing that decides whether a call can be hard-blocked at
+        # all. `HARD_BLOCKED_DATA_TYPES` rather than a literal `"credential"`:
+        # `mcp_tools.apply_policy` has to refuse exactly the `mask` rules that
+        # would downgrade this deny, and a second literal there would be free
+        # to drift away from this one. See that constant's comment.
+        hard_blocked = any(f.data_type in HARD_BLOCKED_DATA_TYPES
+                           for f in findings)
 
         action = "allow"
         blocked_origin = None
@@ -657,6 +683,49 @@ class Engine:
         # mask; otherwise this falls through, unchanged, to the
         # Matrix.default_action() logic below.
         #
+        # `and not hard_blocked` is the whole of C1's fix, and it is load
+        # bearing. This branch sets `action = "rewrite"`, and the hard block
+        # below only runs while `action` is still `"allow"` — so without the
+        # guard a mask rule REPLACES the plugin's one unconditional deny with
+        # an executed, masked call, for the rest of the session, with no
+        # removal path (known limit 13), while the ledger still records
+        # `prevented` and the audit still reports that protection held.
+        #
+        # The guard is *here*, in the branch, and not only at the rule's mint
+        # site, because the intersection below is over every finding on the
+        # observation rather than over the finding that triggers the block.
+        # A mask rule on any data type that merely CO-OCCURS with a
+        # hard-blocked one — a path on the same command line — fired and
+        # skipped the block for the whole call. Those selectors are
+        # innocuous and `apply_policy` accepts them (one click of the audit
+        # UI's "Protect future occurrences" on a path exposure writes one),
+        # so no refusal keyed on the selector can reach that case. An earlier
+        # fix wave asserted it could, on the false premise that `mask` +
+        # `credential` was the only loosening combination; the comment that
+        # said so is what let the defect survive the wave that looked for it.
+        #
+        # What the guard costs: with a hard-blocked finding present the
+        # observation falls through to `Matrix.default_action(dest_kind)`
+        # instead of rewriting here — `block` for `mcp_tool`/`external_net`
+        # (the deny, which is the point) and `mask` for
+        # `model_context`/`subagent`, which yields the same `"rewrite"` the
+        # mask branch would have produced. So the user's rule is never
+        # weaker than the default it yields to, and an observation carrying
+        # no hard-blocked finding is decided exactly as before
+        # (`test_a_mask_rule_still_rewrites_when_no_hard_blocked_type_is
+        # _present`).
+        #
+        # `mcp_tools.apply_policy` still refuses a `mask` rule whose selector
+        # is a hard-blocked type. That refusal is no longer what makes this
+        # ordering safe — this branch is — and its remaining job is stated
+        # there: such a rule is now silently inert, and writing an
+        # unremovable rule that decides nothing while reporting success is
+        # #38's defect.
+        #
+        # Every other rule a caller can write only tightens — `block_path`
+        # and `block_command` are decided in the `if` above this `elif`, so a
+        # mask rule can never undo a source rule either.
+        #
         # `block_source` rows are deliberately not read (#38). That rule
         # compared its selector with `obs.source`, which dispatch only ever
         # fills with fixed labels ("tool input" on every egress call), so it
@@ -666,12 +735,12 @@ class Engine:
             blocked_origin = self._blocked_origin(obs.session_id, findings)
             if blocked_origin is not None:
                 action = "deny"
-            elif findings:
+            elif findings and not hard_blocked:
                 mask_selectors = self._policy_selectors(obs.session_id, "mask")
                 if mask_selectors & {f.data_type for f in findings}:
                     action = "rewrite"
 
-        if action == "allow" and is_egress and has_credential:
+        if action == "allow" and is_egress and hard_blocked:
             # Ruling 3: default_action is an egress-only policy. An ingress
             # observation never reaches this branch, no matter what it
             # contains — the bytes are already in context.
@@ -758,7 +827,7 @@ class Engine:
                 # "minimize" token-consumption branch further below; all
                 # three leave `findings` non-empty (either a policy mask
                 # rule matched an existing finding's data_type, or
-                # has_credential was required to reach the other two), so
+                # `hard_blocked` was required to reach the other two), so
                 # there is always something to rewrite.
                 ti = obs.tool_input if obs.tool_input is not None else obs.text
                 # fix-round-1: pass obs.text straight through as the exact

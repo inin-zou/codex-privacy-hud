@@ -229,6 +229,19 @@ def test_block_source_is_still_refused(led):
         apply_policy(led, "s1", rule_type="block_source", selector=".env")
 
 
+def test_allow_dest_is_refused_like_block_source(led):
+    """`allow_dest` was accepted, written, and reported applied — and the
+    engine never read it. `Engine.observe` compares `rule_type` against
+    exactly `mask`, `block_path` and `block_command`, so an `allow_dest`
+    row decided nothing while `{"applied": True}` said otherwise. That is
+    #38's defect wearing a different name, and `apply_policy`'s own
+    docstring calls it worse than an error."""
+    with pytest.raises(ValueError, match="allow_dest"):
+        apply_policy(led, "s1", rule_type="allow_dest",
+                     selector="external_net")
+    assert led.policy_selectors("s1", "allow_dest") == set()
+
+
 # --------------------------------------------------------------------- #
 # Cross-cutting: no raw sensitive value leaves ANY function, ever.
 # --------------------------------------------------------------------- #
