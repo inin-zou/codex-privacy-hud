@@ -339,8 +339,21 @@ def build_app():
 
     @app.tool(name="privacy.get_session_summary")
     def get_session_summary(session_id: str) -> dict:
-        """The four L2 tiles: disclosure percent, exposed items,
-        destinations, prevented (design.md §5)."""
+        """The four L2 tile numbers (design.md §5), under the field names
+        `percent`, `exposed_items`, `destinations` and `prevented`.
+
+        What each one IS, since the model reads this to decide what they
+        mean (#49 item 9, and the field names are the wire contract, so they
+        do not move even though the labels shown to a human did):
+        `percent` is score over cap -- an assigned budget occupancy, not a
+        probability of leakage and not a fraction of data disclosed.
+        `exposed_items` counts crossings the plugin permitted, written
+        before the host returns its own decision, so permitted and not
+        delivered. `destinations` is a DISTINCT over normalised boundary
+        kinds, so it counts categories -- a handful at most -- and never
+        services or recipients (known limit 20). `prevented` contributes
+        exactly zero to the budget (I4).
+        """
         return mcp_tools.get_session_summary(ledger, session_id).as_dict()
 
     @app.tool(name="privacy.list_exposures")
