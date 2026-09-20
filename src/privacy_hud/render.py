@@ -75,11 +75,41 @@ _DOT = "⬤"
 
 _ACRONYMS = {"ssn": "SSN", "ip": "IP", "url": "URL"}
 
+#: Each line states what the LEDGER holds for that tab, and stops there.
+#:
+#: They used to state what the world holds — "No sensitive data has crossed a
+#: trust boundary this session", "No privacy events recorded. The engine is
+#: running." Neither survives `SessionCoverage`'s own account of itself:
+#: `verified` means "nothing on record contradicts a complete account …
+#: deliberately weaker than complete", and the same docstring lists what stays
+#: invisible regardless — a hook Codex never fired, a hook whose 2 s client
+#: timeout expired, a hosted tool that bypasses local hooks. So the type that
+#: gates the reassuring line documents that it cannot carry it, and no
+#: coverage reading makes those two sentences true.
+#:
+#: "The engine is running" is dropped rather than reworded. It answered a real
+#: question — design.md §5's "an empty audit is otherwise indistinguishable
+#: from a broken plugin" — with the wrong evidence: a ledger is history and
+#: cannot vouch for a live process. `_EMPTY_VERIFIED` answers what the record
+#: can answer; liveness belongs to something that checks liveness, which is
+#: `privacy-hud-doctor`.
 _EMPTY_MESSAGES = {
-    "Exposed": "No sensitive data has crossed a trust boundary this session.",
-    "Prevented": "Nothing has been blocked or minimized yet.",
-    "All events": "No privacy events recorded. The engine is running.",
+    "Exposed": "No exposure recorded this session.",
+    "Prevented": "Nothing recorded as blocked or minimized yet.",
+    "All events": "No privacy events recorded for this session.",
 }
+
+#: Appended when coverage was asked for and came back verified. This is the
+#: honest half of what "The engine is running" was reaching for: it says the
+#: record has no hole in it, in `SessionCoverage`'s own words, and then says
+#: what that still does not amount to. A caller that passes no coverage gets
+#: the bare line above — "not asked" and "asked, and verified" are different
+#: answers, and only the second earns this sentence.
+_EMPTY_VERIFIED = (
+    " Nothing on record contradicts a complete account of it, which is weaker "
+    "than a complete account: a hook that never fired, or whose client timed "
+    "out, leaves no trace anywhere."
+)
 
 #: The one empty-state line for a session whose record is not verified — it
 #: replaces all three of the above, on every tab.
@@ -97,6 +127,50 @@ _EMPTY_UNVERIFIED = (
     "No events recorded for this tab. With this session's record incomplete, "
     "that is not evidence that none occurred."
 )
+
+
+def empty_message(tab: str, coverage: SessionCoverage | None) -> str:
+    """The one empty-state line for `tab` under `coverage`.
+
+    Public, and the only way any surface may choose this string. `audit()`
+    calls it; `local_ui_server` serves its result to the browser rather than
+    shipping the raw dict for `ui/app.js` to index. That is the whole point:
+    the browser used to pick from `_EMPTY_MESSAGES` itself, with the coverage
+    reading sitting unread in the same payload, so the reassuring line was
+    shown on exactly the sessions it could not be shown on. Two surfaces each
+    deciding is how they came to disagree; one function decides now.
+
+    Three answers, not two — "not asked" and "asked, and verified" are
+    different states and only the second earns `_EMPTY_VERIFIED`:
+
+    - coverage says not verified → `_EMPTY_UNVERIFIED`, the same line on every
+      tab, because an incomplete record is a caveat about the session and not
+      about one tab's contents.
+    - coverage verified → the tab's line plus what the record supports.
+    - `None` → the tab's line alone, which is what a caller with no coverage
+      reading is entitled to and no more.
+    """
+    if coverage is not None and not coverage.verified:
+        return _EMPTY_UNVERIFIED
+    line = _EMPTY_MESSAGES.get(tab, "No events to show.")
+    return line + _EMPTY_VERIFIED if coverage is not None else line
+
+
+def coverage_banner(coverage: SessionCoverage | None) -> str | None:
+    """The session-scope caveat, or `None` when there is nothing to caveat.
+
+    `audit()` puts this inside the text block it returns. The browser needs it
+    as a field of its own, because the block goes into a region
+    `ui/index.html` hides by default — so on the surface people actually look
+    at, a caveat that travels inside the ASCII is a caveat nobody reads.
+
+    `None` on a verified reading, and on no reading at all. A caveat shown
+    unconditionally is noise, and `Ledger.coverage`'s own comment says where
+    that ends: "noise is how a warning gets trained away."
+    """
+    if coverage is None or coverage.verified:
+        return None
+    return _coverage_banner(coverage)
 
 
 def _check_band(pct) -> None:
@@ -486,10 +560,13 @@ def audit(summary: SessionSummary, rows: Sequence[ExposureRow], tab: str, *,
     # Session-scope first, event-scope second: "we were not watching" is a
     # bigger caveat than "one event got the fast path only", and reading them
     # in the other order invites treating the first as a footnote to it.
-    incomplete = False
-    if coverage is not None and not coverage.verified:
-        incomplete = True
-        lines.append(_coverage_banner(coverage))
+    # Through `coverage_banner()` rather than testing `coverage.verified`
+    # here: the browser asks the same question, and one of the two asking it
+    # separately is how the reassuring empty state came to be shown on
+    # sessions that could not support it.
+    banner = coverage_banner(coverage)
+    if banner is not None:
+        lines.append(banner)
         lines.append("")
 
     # Deep-scan degradation covers two situations (task-11 brief): the model
@@ -506,8 +583,7 @@ def audit(summary: SessionSummary, rows: Sequence[ExposureRow], tab: str, *,
         lines.append("")
 
     if not ordered:
-        lines.append(_EMPTY_UNVERIFIED if incomplete
-                     else _EMPTY_MESSAGES.get(tab, "No events to show."))
+        lines.append(empty_message(tab, coverage))
     else:
         lines.append(_table(ordered))
 

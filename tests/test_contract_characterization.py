@@ -196,11 +196,11 @@ _EMPTY_TILES = (
 
 AUDIT_EMPTY = {
     "Exposed": _EMPTY_TILES + " ─────────                                   \n"
-               "\nNo sensitive data has crossed a trust boundary this session.",
+               "\nNo exposure recorded this session.",
     "Prevented": _EMPTY_TILES + "                ───────────                  \n"
-                 "\nNothing has been blocked or minimized yet.",
+                 "\nNothing recorded as blocked or minimized yet.",
     "All events": _EMPTY_TILES + "                                 ────────────\n"
-                  "\nNo privacy events recorded. The engine is running.",
+                  "\nNo privacy events recorded for this session.",
 }
 
 
@@ -223,12 +223,19 @@ def test_audit_empty_session_is_byte_identical(led, tab):
 
 #: The same empty audit, for a session the ledger did NOT watch from the start.
 #:
-#: Read the two goldens side by side: `AUDIT_EMPTY["All events"]` ends with "No
-#: privacy events recorded. The engine is running." — the sentence design.md §5
-#: added so an empty audit could not be mistaken for a broken plugin. This one
-#: cannot say it, because for this session the engine was not running, and
-#: printing it anyway spends the reader's trust vouching for the exact case it
-#: cannot vouch for. That substitution, plus the banner, IS the fix.
+#: Read the two goldens side by side. `AUDIT_EMPTY["All events"]` ends with a
+#: statement about the ledger — "No privacy events recorded for this session."
+#: This one replaces it wholesale, because for this session observation began
+#: late and even that statement would invite being read as an account.
+#:
+#: Until #49 the difference was sharper and in the wrong direction: the
+#: verified golden said "No privacy events recorded. The engine is running.",
+#: design.md §5's answer to "an empty audit is otherwise indistinguishable
+#: from a broken plugin". Right question, wrong evidence — a ledger is history
+#: and cannot vouch for a live process, and `SessionCoverage` says in its own
+#: docstring that `verified` is "deliberately weaker than complete". The
+#: distinction these two goldens draw is still the fix; it is now drawn
+#: between two things the record can actually support.
 AUDIT_UNVERIFIED = (
     "Privacy Audit\n"
     "Current session\n"
@@ -628,9 +635,23 @@ def test_ui_summary_endpoint_json_is_byte_identical(ui):
 
 def test_ui_exposures_endpoint_json_is_byte_identical(ui):
     payload = _get(ui, f"/api/exposures?session_id={SESSION}&tab=All%20events")
-    assert list(payload) == ["rows", "text"]
+    assert list(payload) == ["rows", "text", "empty_message", "coverage_banner"]
     assert payload["rows"] == JSON_ROWS
     assert payload["text"] == AUDIT_ALL
+    # Two fields the browser needs and the ASCII block cannot give it: that
+    # block is rendered into a region `ui/index.html` hides by default, so a
+    # caveat delivered only inside `text` reaches the terminal and not the
+    # page. Spelled out as a literal, not recomputed from `render` — a golden
+    # that calls the code it is pinning pins nothing. `SESSION` was watched
+    # from the start, so it is verified: no banner, and the empty line says
+    # what a verified record does and does not amount to.
+    assert payload["empty_message"] == (
+        "No privacy events recorded for this session. Nothing on record "
+        "contradicts a complete account of it, which is weaker than a "
+        "complete account: a hook that never fired, or whose client timed "
+        "out, leaves no trace anywhere."
+    )
+    assert payload["coverage_banner"] is None
 
 
 def test_ui_detail_endpoint_json_is_byte_identical(ui):
@@ -640,13 +661,17 @@ def test_ui_detail_endpoint_json_is_byte_identical(ui):
     assert payload["text"] == DETAIL_EMAIL.format(t=_hhmmss(TS))
 
 
-def test_ui_copy_endpoint_json_is_byte_identical(ui):
+def test_ui_copy_endpoint_carries_no_empty_messages(ui):
+    """`empty_messages` was here, and its removal is the fix, not a loss.
+
+    This endpoint is session-independent and fetched once per page load, so a
+    browser indexing it by tab could only ever pick a line for a session whose
+    coverage it had not consulted — which is exactly what happened: the
+    reassuring line was shown on sessions the ledger knew it could not vouch
+    for. The line is now chosen per session by `render.empty_message` and
+    delivered by `/api/exposures`, and there is deliberately no second source
+    left for a client to fall back to."""
     assert _get(ui, "/api/copy") == {
-        "empty_messages": {
-            "Exposed": "No sensitive data has crossed a trust boundary this session.",
-            "Prevented": "Nothing has been blocked or minimized yet.",
-            "All events": "No privacy events recorded. The engine is running.",
-        },
         "acronyms": {"ssn": "SSN", "ip": "IP", "url": "URL"},
     }
 

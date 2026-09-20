@@ -164,10 +164,28 @@
     const tbody = $("rows");
     const emptyEl = $("empty");
 
+    // The session-scope caveat. It also travels inside `data.text`, but that
+    // block lives in the "View as text" region, which is hidden until asked
+    // for — so on the surface people actually look at, a caveat delivered
+    // only there is a caveat nobody reads. Null on a verified session: shown
+    // unconditionally it is noise, and noise is how a warning gets trained
+    // away.
+    const coverageEl = $("coverage");
+    coverageEl.textContent = data.coverage_banner || "";
+    coverageEl.hidden = !data.coverage_banner;
+
+    // The server decides which empty line applies, because it is the side
+    // that holds this session's coverage reading. This used to index
+    // `copy.empty_messages[activeTab]` — a session-independent dict fetched
+    // once — so the reassuring line ("No sensitive data has crossed a trust
+    // boundary this session") was shown on sessions whose record was known to
+    // be incomplete, with the coverage reading sitting unread in `summary`.
+    // See render.empty_message. No fallback to a second source: "No events to
+    // show." is the neutral last resort, not another claim.
     if (rows.length === 0) {
       tbody.innerHTML = "";
       emptyEl.hidden = false;
-      emptyEl.textContent = (copy.empty_messages && copy.empty_messages[activeTab]) || "No events to show.";
+      emptyEl.textContent = data.empty_message || "No events to show.";
     } else {
       emptyEl.hidden = true;
       tbody.innerHTML = rows.map((r, i) => {
