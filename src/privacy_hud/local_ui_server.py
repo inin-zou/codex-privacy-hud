@@ -70,8 +70,9 @@ from . import mcp_tools, runtime
 from .ledger import Ledger
 from .matrix.loader import load_matrix
 from .render import _ACRONYMS as _RENDER_ACRONYMS
-from .render import _EMPTY_MESSAGES as _RENDER_EMPTY_MESSAGES
 from .render import audit as render_audit
+from .render import coverage_banner as render_coverage_banner
+from .render import empty_message as render_empty_message
 from .render import detail as render_detail
 
 _UI_DIR = Path(__file__).resolve().parent.parent.parent / "ui"
@@ -241,13 +242,18 @@ class _Handler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/copy":
             # Copy pulled directly from render.py's own module-level
-            # constants (not re-typed here) so the UI's empty-state and
-            # type-label wording can never silently drift from the
-            # approved strings design.md §9 governs.
-            self._send_json(200, {
-                "empty_messages": _RENDER_EMPTY_MESSAGES,
-                "acronyms": _RENDER_ACRONYMS,
-            })
+            # constants (not re-typed here) so the UI's type-label wording can
+            # never silently drift from the approved strings design.md §9
+            # governs.
+            #
+            # `empty_messages` used to be here too, and that was the bug: this
+            # endpoint is session-independent and fetched once per page load,
+            # so a client indexing it by tab could only ever choose the line
+            # for a session whose coverage it had not consulted. The
+            # empty-state line is now decided per session by
+            # `render.empty_message` and delivered by `/api/exposures`. There
+            # is deliberately no second source for it to fall back to.
+            self._send_json(200, {"acronyms": _RENDER_ACRONYMS})
             return
 
         if parsed.path == "/api/summary":
@@ -281,20 +287,29 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": str(exc)})
                 return
             summary = mcp_tools.get_session_summary(ledger, sid)
+            coverage = mcp_tools.get_session_coverage(ledger, sid)
             # `rows` goes to the browser as JSON and to `render_audit` as
             # typed rows -- the same values, serialized once, on purpose.
             #
-            # `coverage` is passed to `render_audit` but not added to this
-            # payload: the banner and the corrected empty-state line travel
-            # inside `text`, which is the block `ui/app.js` puts on the page
-            # verbatim, so the browser shows the caveat without this endpoint's
-            # own key set moving. A client that wants the machine-readable form
-            # asks `/api/summary`, which carries it.
+            # `empty_message` and `coverage_banner` are fields of their own
+            # because the reasoning that used to be here was wrong. It said the
+            # caveat "travels inside `text`, which is the block `ui/app.js`
+            # puts on the page verbatim, so the browser shows the caveat" --
+            # true of the block, false of the page: `ui/index.html` hides that
+            # region by default, and the HTML view picked its own empty line
+            # out of `/api/copy` with the coverage reading sitting unread in
+            # the `/api/summary` payload beside it. So the reassuring sentence
+            # was shown on exactly the sessions that could not support it.
+            #
+            # `/api/copy` cannot carry the decision instead: it is
+            # session-independent and fetched once per page load, while
+            # coverage is per session. The decision belongs to `render`, which
+            # owns the approved strings -- see `render.empty_message`.
             self._send_json(200, {
                 "rows": [r.as_dict() for r in rows],
-                "text": render_audit(
-                    summary, rows, tab,
-                    coverage=mcp_tools.get_session_coverage(ledger, sid)),
+                "text": render_audit(summary, rows, tab, coverage=coverage),
+                "empty_message": render_empty_message(tab, coverage),
+                "coverage_banner": render_coverage_banner(coverage),
             })
             return
 

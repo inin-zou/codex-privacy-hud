@@ -130,6 +130,7 @@
 
   .empty-state { color: var(--muted); padding: 20px 4px; }
   .degraded-banner { color: var(--warn); margin-bottom: 10px; }
+  .coverage-banner { color: var(--warn); margin-bottom: 10px; white-space: pre-wrap; }
 
   /* L3 detail panel — design.md §6. */
   #detail {
@@ -222,6 +223,12 @@
   <div class="tiles" id="tiles"></div>
 
   <div class="tabs" id="tabs" role="tablist"></div>
+
+  <!-- Session scope first, event scope second — render.py's own ordering:
+       "we were not watching" is a bigger caveat than "one event got the fast
+       path only", and reading them the other way round invites treating the
+       first as a footnote to the second. -->
+  <div id="coverage" class="coverage-banner" hidden></div>
 
   <div id="degraded" class="degraded-banner" hidden></div>
 

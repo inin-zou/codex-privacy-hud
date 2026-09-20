@@ -120,19 +120,32 @@ def test_receipt_states_that_nothing_raw_was_stored():
         receipt("s1", SUMMARY, [ROW], 41)
 
 
-def test_empty_exposed_tab_explains_the_engine_is_running():
+# These three used to pin the opposite of what they now pin, and that is the
+# point worth keeping. They asserted "The engine is running." and "No
+# sensitive data has crossed a trust boundary this session." — so the copy
+# that #49 item 3 is about was not merely present, it was enforced, and any
+# attempt to soften it failed CI. A test can hold a claim in place as firmly
+# as it can hold a behaviour; what decides which it is doing is whether the
+# claim was ever traced to something that could support it. Neither of those
+# two could be: `SessionCoverage` documents that `verified` means "nothing on
+# record contradicts a complete account … deliberately weaker than complete",
+# and a ledger cannot vouch for a live process at all.
+
+def test_an_empty_tab_states_what_the_ledger_holds_and_stops():
     out = audit(EMPTY_SUMMARY, [], "All events")
-    assert "The engine is running." in out
+    assert "No privacy events recorded for this session." in out
+    assert "The engine is running." not in out
 
 
-def test_empty_exposed_tab_says_nothing_crossed_a_boundary():
+def test_an_empty_exposed_tab_does_not_claim_nothing_crossed():
     out = audit(EMPTY_SUMMARY, [], "Exposed")
-    assert "No sensitive data has crossed a trust boundary this session." in out
+    assert "No exposure recorded this session." in out
+    assert "has crossed a trust boundary" not in out
 
 
-def test_empty_prevented_tab_says_nothing_blocked_yet():
+def test_empty_prevented_tab_says_nothing_recorded_as_blocked_yet():
     out = audit(EMPTY_SUMMARY, [], "Prevented")
-    assert "Nothing has been blocked or minimized yet." in out
+    assert "Nothing recorded as blocked or minimized yet." in out
 
 
 def test_audit_degraded_banner_covers_deep_scan_gaps():
