@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "privacy-hud"
-version = "0.7.0"
+version = "0.7.1"
 description = "Local-first privacy plugin for the Codex CLI: a session-level disclosure ledger with upstream enforcement."
 requires-python = ">=3.11"
 license = "MIT"
@@ -41,7 +41,15 @@ privacy-hud-setup = "privacy_hud.runtime:main"
 # run -- checks that could not fail, guarding the workflows whose own check
 # could not fail. Declare the dependency and import it plainly: a missing
 # PyYAML must be a collection error, never a quiet skip.
-test = ["pytest>=8", "pyyaml>=6"]
+# `mcp` is here for the same reason PyYAML is, and it cost more. The MCP
+# surface tests guarded `build_app()` behind `pytest.importorskip`, the SDK
+# was in no dependency group CI installs, so they skipped on every CI run --
+# and when SDK 2.0 renamed the class the server imports, the two tests that
+# would have caught it skipped with the reason "the MCP SDK is an optional
+# extra", which by then was false: the SDK was installed, and our code did
+# not work with it. Declared here, imported plainly, so an SDK our code
+# cannot drive is a failure rather than a skip.
+test = ["pytest>=8", "pyyaml>=6", "mcp>=2"]
 # Floors, not decoration. A bare `transformers` let an incompatible pair get
 # installed during development and cost hours: < 5.16 does not recognize the
 # `openai_privacy_filter` architecture at all, and transformers itself declares
@@ -52,7 +60,15 @@ detectors = ["transformers>=5.16", "torch>=2.5"]
 # Only needed to run mcp/server.py (the stdio MCP wrapper, Task 13). Not a
 # hard dependency of the daemon, the hook client, or any pure privacy_hud
 # module -- see mcp/server.py's own docstring for the tradeoff.
-mcp = ["mcp"]
+#
+# The bound is the whole point, and its absence was a real outage. SDK 2.0
+# renamed `FastMCP` to `MCPServer` and left `mcp.server.fastmcp` as a module
+# that raises on import. With a bare `mcp`, which side of that rename an
+# install landed on depended on the date: a venv built 2026-09-15 got 1.x and
+# worked, the same install.sh on 2026-09-20 got 2.2.0 and the server never
+# started -- silently, since Codex reports nothing when an MCP server fails
+# to launch. Same lesson as `detectors` above, ten lines down.
+mcp = ["mcp>=2"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

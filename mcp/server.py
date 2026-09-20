@@ -296,26 +296,37 @@ EXPOSED_TOOLS = (
 
 
 def build_app():
-    """Construct the FastMCP app and register the five `privacy.*` tools in
+    """Construct the MCP app and register the five `privacy.*` tools in
     `EXPOSED_TOOLS`. Imports `mcp` here (not at module scope) -- see this
-    file's docstring."""
+    file's docstring.
+
+    `MCPServer` is the SDK 2.x name for what 1.x called `FastMCP`. The rename
+    is why `pyproject.toml` bounds the extra at `mcp>=2` rather than leaving
+    it bare: with no bound, which side of the rename an install lands on
+    depends on the day it ran. A venv built 2026-09-15 got 1.x and worked; the
+    same `install.sh` on 2026-09-20 got 2.2.0, `mcp.server.fastmcp` raised, the
+    server never started, and -- in the doctor's words -- "Codex reports
+    nothing when this happens: the plugin loads, and the tools are simply
+    absent."
+    """
     try:
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server.mcpserver import MCPServer
     except ImportError as exc:  # pragma: no cover - exercised only when the
         # optional extra genuinely isn't installed; covering this branch in
         # a test would require uninstalling `mcp` mid-suite.
         raise SystemExit(
-            "mcp/server.py requires the 'mcp' package, which is an optional "
-            "extra (not a hard dependency of privacy-hud). Install it with:\n"
+            "mcp/server.py requires the 'mcp' package (>= 2), which is an "
+            "optional extra (not a hard dependency of privacy-hud). Install "
+            "it with:\n"
             "    pip install 'privacy-hud[mcp]'\n"
             "or, from a source checkout:\n"
-            "    pip install mcp\n"
+            "    pip install 'mcp>=2'\n"
             f"(original ImportError: {exc})"
         ) from exc
 
     from privacy_hud import mcp_tools
 
-    app = FastMCP("privacy-hud")
+    app = MCPServer("privacy-hud")
     ledger = _open_ledger()
 
     # The three read tools below end in `.as_dict()`. `mcp_tools` returns

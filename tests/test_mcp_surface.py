@@ -25,8 +25,8 @@ WITHHELD = ("privacy.allow_once", "privacy.hud_toggle",
 
 
 def _registered(app) -> set[str]:
-    """The names FastMCP holds, through whichever accessor this SDK version
-    offers.
+    """The names the MCP app holds, through whichever accessor this SDK
+    version offers.
 
     Pinned in one helper on purpose: the accessor is the SDK's business and
     has moved between versions, and a test file that reaches into it in four
@@ -42,27 +42,27 @@ def _registered(app) -> set[str]:
             import asyncio
             tools = asyncio.run(tools)
         return {t.name for t in tools}
-    raise AssertionError("no FastMCP accessor for the registered tools")
+    raise AssertionError("no accessor for the registered tools on this SDK")
 
 
 def test_the_server_exposes_exactly_the_five(monkeypatch, tmp_path):
-    pytest.importorskip(
-        "mcp.server.fastmcp", reason="the MCP SDK is an optional extra")
     monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))
     assert _registered(server.build_app()) == set(server.EXPOSED_TOOLS)
 
 
 def test_no_withheld_tool_is_registered(monkeypatch, tmp_path):
-    pytest.importorskip(
-        "mcp.server.fastmcp", reason="the MCP SDK is an optional extra")
     monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))
     assert not _registered(server.build_app()) & set(WITHHELD)
 
 
 def test_no_withheld_tool_is_listed_as_exposed():
-    """The half of the rule that needs no SDK, so CI -- which installs no
-    optional extras -- still enforces it. The two tests above skip there;
-    this one is what actually guards the decision on every Python."""
+    """The half of the rule that needs no SDK at all.
+
+    It used to carry the whole weight: CI installed no optional extras, so
+    the two tests above skipped there and this was the only one that ran.
+    That is no longer true -- `mcp>=2` is in `[test]` and all three run --
+    but this one stays, because it checks the decision rather than the
+    wiring, and it would survive the SDK being unavailable for any reason."""
     assert not set(server.EXPOSED_TOOLS) & set(WITHHELD)
     assert len(server.EXPOSED_TOOLS) == 5
 
@@ -294,25 +294,33 @@ def test_allow_once_would_block_itself(state):
     assert "deny" in _json.dumps(reply)
 
 
-def test_the_repo_shadows_the_mcp_distribution_so_no_test_may_skip_on_it():
-    """`import mcp` is not a safe thing to condition a skip on, here.
+def test_no_test_skips_itself_on_the_mcp_sdk():
+    """The SDK is a declared test dependency, so its absence is a failure.
 
-    `mcp/` sits at the repo root with no `__init__.py`, and pytest puts the
-    repo root on `sys.path`. Where the real SDK is absent — which is every CI
-    run, since the `mcp` extra is not installed — `mcp` therefore resolves to
-    a namespace package over THIS directory, and `import mcp` SUCCEEDS. A
-    `pytest.importorskip("mcp")` does not skip; it sails through and the test
-    dies later inside `build_app` with
-    `No module named 'mcp.server.fastmcp'; 'mcp.server' is not a package`.
+    This test used to say the opposite. It banned `importorskip("mcp")` —
+    correctly, because `mcp/` sits at the repo root with no `__init__.py` and
+    pytest puts the repo root on `sys.path`, so where the real SDK was absent
+    `mcp` resolved to a namespace package over THIS directory and the skip
+    never fired — and it prescribed `importorskip("mcp.server.fastmcp")`
+    instead, the thing `build_app` actually imported.
 
-    That is exactly how this suite went green locally and red on all four CI
-    Pythons. `mcp/server.py`'s own docstring predicted the collision; the
-    tests conditioned on the shadowed name anyway.
+    That prescription then caused the outage it was written to prevent. SDK
+    2.0 renamed `FastMCP` to `MCPServer` and left `mcp.server.fastmcp` as a
+    module that raises on import. The two tests that would have caught the
+    server failing to start skipped instead, giving the reason "the MCP SDK
+    is an optional extra" — false by then: the SDK was installed, and our
+    code could not drive it. A fresh `install.sh` shipped a plugin whose five
+    `privacy.*` tools silently did not exist.
 
-    So: skip on `mcp.server.fastmcp`, the thing `build_app` actually imports,
-    which the shadow cannot satisfy. This test pins that choice at the source
-    level, because the failure it prevents is invisible in any environment
-    where the SDK happens to be installed — including every developer's.
+    The root cause was never which name to skip on. It was that the SDK was
+    in no dependency group CI installs, so the choice of skip target decided
+    whether a real defect was reported or swallowed. `pyproject.toml` now
+    puts `mcp>=2` in `[test]`, and with it declared there is nothing left to
+    condition a skip on: an SDK that is missing, or one our code cannot
+    drive, must fail.
+
+    The `__init__.py` guard below still matters — the shadowing it describes
+    is real and would come back the moment the extra stopped being installed.
     """
     import ast
 
@@ -331,9 +339,12 @@ def test_the_repo_shadows_the_mcp_distribution_so_no_test_may_skip_on_it():
                     and node.func.attr == "importorskip"
                     and node.args
                     and isinstance(node.args[0], ast.Constant)
-                    and node.args[0].value == "mcp"):
-                offenders.append(f"{path.relative_to(repo)}:{node.lineno}")
+                    and str(node.args[0].value).split(".")[0] == "mcp"):
+                offenders.append(
+                    f"{path.relative_to(repo)}:{node.lineno}"
+                    f" -> importorskip({node.args[0].value!r})")
     assert not offenders, (
-        "importorskip('mcp') always succeeds where the SDK is absent, because "
-        "the repo's own mcp/ directory answers to that name. Skip on "
-        "'mcp.server.fastmcp' instead:\n  " + "\n  ".join(offenders))
+        "`mcp>=2` is a declared test dependency, so a skip conditioned on it "
+        "can only convert a real failure into silence — which is how SDK "
+        "2.0's rename shipped unnoticed. Import it and let it fail:\n  "
+        + "\n  ".join(offenders))
