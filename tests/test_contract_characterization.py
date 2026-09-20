@@ -646,10 +646,9 @@ def test_ui_exposures_endpoint_json_is_byte_identical(ui):
     # from the start, so it is verified: no banner, and the empty line says
     # what a verified record does and does not amount to.
     assert payload["empty_message"] == (
-        "No privacy events recorded for this session. Nothing on record "
-        "contradicts a complete account of it, which is weaker than a "
-        "complete account: a hook that never fired, or whose client timed "
-        "out, leaves no trace anywhere."
+        "No privacy events recorded for this session. Coverage found no gaps "
+        "in this session's record, which is not proof that every event was "
+        "seen."
     )
     assert payload["coverage_banner"] is None
 

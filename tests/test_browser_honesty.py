@@ -16,17 +16,25 @@ supports, and `SessionCoverage`'s own docstring is what proves it:
     which is the strongest claim the evidence supports and deliberately
     weaker than "complete".
 
-It then lists what stays invisible even so: a hook Codex never fired, a hook
-whose client timeout expired, a hosted tool that bypasses local hooks. So
-"No sensitive data has crossed a trust boundary this session" is not
+So "No sensitive data has crossed a trust boundary this session" is not
 supportable on the verified path either -- the type that gates the claim
 documents that it cannot carry it.
+
+That docstring also lists examples, and one of them is wrong: it names "a
+hook whose 2 s client timeout expired against a busy daemon" as an event
+that leaves no trace, which `daemon.py`'s own probe disproves -- 10
+concurrent ingress calls at the real timeout, 7 clients gave up, all 10 rows
+in the ledger once the daemon drained. The first draft of the replacement
+copy repeated that example and had to be corrected. The lesson is in the
+copy now: it reports what the coverage check found and names no examples at
+all, because enumerating is how a caveat acquires a claim of its own.
 
 The fix both halves share: **one function decides which empty line applies,
 and every surface calls it.** Two surfaces each deciding is how they came to
 disagree.
 """
 import json
+import re
 import urllib.parse
 import urllib.request
 
@@ -151,13 +159,23 @@ def test_a_verified_session_carries_no_banner(state):
     assert payload["empty_message"] == render.empty_message("Exposed", VERIFIED)
 
 
-def test_the_browser_renders_the_servers_empty_message_and_banner():
-    """`ui/app.js` is a 342-line IIFE with no exports and this suite has no
-    JS runtime, so this pins the two call sites rather than the behaviour.
-    It is a tripwire, not a proof: the acceptance run after the reinstall is
-    where the rendered page is actually looked at."""
+def test_the_browser_reads_the_servers_empty_message_and_banner():
+    """`ui/app.js` is an IIFE with no exports and this suite has no JS
+    runtime, so this pins the two reads rather than the rendering. It is a
+    tripwire, not a proof, and the page itself is looked at during the
+    reinstall acceptance run.
+
+    Comments are stripped first. The version of this test that did not strip
+    them passed on a file whose assignments had been deleted, because both
+    field names also appear in the comments explaining them — a check that
+    survives the defect it names, which is the failure this whole issue is
+    about.
+    """
     src = (local_ui_server.__file__.rsplit("/src/", 1)[0] + "/ui/app.js")
     with open(src) as fh:
         js = fh.read()
-    assert "empty_message" in js, "app.js ignores the server's empty message"
-    assert "coverage_banner" in js, "app.js ignores the server's banner"
+    code = re.sub(r"^\s*//.*$", "", js, flags=re.M)
+    assert "data.empty_message" in code, \
+        "app.js does not read the server's empty message"
+    assert "data.coverage_banner" in code, \
+        "app.js does not read the server's coverage banner"
