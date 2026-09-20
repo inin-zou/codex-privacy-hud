@@ -130,9 +130,16 @@
   function renderTiles() {
     const pct = summary.percent || 0;
     const tiles = [
-      [`${pct}%`, "disclosure", band(pct)],
-      [String(summary.exposed_items || 0), "exposed items", null],
-      [String(summary.destinations || 0), "destinations", null],
+      // Labels name what the number is, not what it evokes (#49 item 9).
+      // `percent` is score/cap — an assigned budget occupancy, not a
+      // probability of leakage and not a fraction of data disclosed.
+      // `destinations` is a DISTINCT over normalised boundary kinds, so it
+      // counts categories and never services (known limit 20). "exposed" is
+      // written before the host returns its decision, so it means permitted,
+      // not delivered.
+      [`${pct}%`, "of budget", band(pct)],
+      [String(summary.exposed_items || 0), "permitted crossings", null],
+      [String(summary.destinations || 0), "boundary kinds", null],
       [String(summary.prevented || 0), "prevented", null],
     ];
     $("tiles").innerHTML = tiles.map(([value, label, cls]) => `

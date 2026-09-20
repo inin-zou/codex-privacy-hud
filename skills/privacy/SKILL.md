@@ -1,6 +1,6 @@
 ---
 name: privacy
-description: Open the Privacy HUD session audit — what sensitive data reached the model, subagents, or external tools this session, what was prevented, and what you can do about it.
+description: Open the Privacy HUD session audit — what sensitive data was observed crossing a trust boundary this session, what was prevented, and what you can do about it.
 ---
 
 ## What this does

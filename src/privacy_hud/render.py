@@ -365,10 +365,18 @@ def _tile(value: str, label: str) -> list[str]:
 def _tiles_block(summary: SessionSummary) -> str:
     pct = int(summary.percent)
     _check_band(pct)  # same fail-loud validation as hud_line
+    # Each label names what the number IS, and `ui/app.js` carries the same
+    # four (#49 item 9). They read "disclosure", "exposed items" and
+    # "destinations" until then, which evoked three things none of them is:
+    # `percent` is score/cap, an assigned budget occupancy rather than a
+    # probability or a proportion of data; `exposed` is written before the
+    # host returns its decision, so it means permitted and not delivered; and
+    # `destinations` is a DISTINCT over normalised boundary kinds, so it
+    # counts categories and never services (known limit 20).
     tiles = [
-        (f"{pct}%", "disclosure"),
-        (str(summary.exposed_items), "exposed items"),
-        (str(summary.destinations), "destinations"),
+        (f"{pct}%", "of budget"),
+        (str(summary.exposed_items), "permitted crossings"),
+        (str(summary.destinations), "boundary kinds"),
         (str(summary.prevented), "prevented"),
     ]
     blocks = [_tile(value, label) for value, label in tiles]
@@ -718,8 +726,13 @@ def receipt(session_id: str, summary: SessionSummary,
         f"PRIVACY RECEIPT · {session_id} · {minutes} min",
         "",
         f"{'Disclosure':<16} {pct}% of budget",
-        f"{'Exposed':<16} {summary.exposed_items} flows across "
-        f"{summary.destinations} destinations",
+        # "crossings across N boundary kinds", not "flows across N
+        # destinations": `destination` holds the KIND of boundary and not who
+        # was on the other side, so a second MCP server is not a second
+        # destination (known limit 20), and `flows` names a table nothing
+        # writes. #49 item 8.
+        f"{'Exposed':<16} {summary.exposed_items} crossings across "
+        f"{summary.destinations} boundary kinds",
         f"{'Prevented':<16} {summary.prevented} events",
         f"{'Retained':<16} session transcript, persisted by Codex outside "
         "this ledger.",
