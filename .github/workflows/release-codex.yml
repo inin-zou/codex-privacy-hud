@@ -133,6 +133,22 @@ jobs:
       # publish stopped half-way.
       - name: Publish the tarballs
         run: |
+          # Every write to GitHub here is retried, not just the upload.
+          # Hardening one write and leaving the others bare only moves where
+          # a flaky minute stops a release: a drill run lost `gh release
+          # create` to a transient HTTP 403 "Resource not accessible by
+          # integration" -- the same call, same repository, same token,
+          # having succeeded minutes earlier and again minutes later.
+          retry() {
+            n=0
+            until "$@"; do
+              n=$((n + 1))
+              [ "$n" -lt 4 ] || { echo "$2 $3 failed 4 times" >&2; return 1; }
+              echo "$2 $3 failed; retry $n in $((n * 20))s" >&2
+              sleep $((n * 20))
+            done
+          }
+
           # First attempt without --clobber, retries with it. `gh release
           # upload --clobber` deletes the existing asset before sending the
           # new one and says so in its own help: "If the upload fails, the
@@ -157,8 +173,12 @@ jobs:
             done
           }
 
+          # A `view` that fails for a transient reason reads as "absent"
+          # here, so the create that follows fails with "already exists" and
+          # the job goes red with the release untouched. Loud and harmless,
+          # which is the right way round.
           gh release view latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
-            || gh release create latest --repo "$GITHUB_REPOSITORY" --title latest \
+            || retry gh release create latest --repo "$GITHUB_REPOSITORY" --title latest \
                  --notes "The newest patched Codex build for each version. install.sh falls back here when a version-pinned release is absent."
           upload latest
 
@@ -166,7 +186,7 @@ jobs:
           # dispatch --target creates the tag at the commit that ran.
           rel="codex-$VER-hud"
           if ! gh release view "$rel" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$rel" --repo "$GITHUB_REPOSITORY" --draft \
+            retry gh release create "$rel" --repo "$GITHUB_REPOSITORY" --draft \
               --target "$GITHUB_SHA" --title "$rel" \
               --notes "Patched Codex $VER with the privacy status-line item. install.sh installs it; docs/installing-by-hand.md does it by hand."
           fi
@@ -175,7 +195,7 @@ jobs:
           # release that is already published resets published_at, which
           # moves the repository's "Latest release" pointer to this version.
           if [ "$(gh release view "$rel" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = "true" ]; then
-            gh release edit "$rel" --repo "$GITHUB_REPOSITORY" --draft=false
+            retry gh release edit "$rel" --repo "$GITHUB_REPOSITORY" --draft=false
           fi
 
       # The producer's own positive control. Every step above runs

@@ -17,7 +17,7 @@ were just changed to close (#45).
 import re
 from pathlib import Path
 
-import pytest
+import yaml
 
 ROOT = Path(__file__).parents[1]
 INSTALL = ROOT / "install.sh"
@@ -42,7 +42,6 @@ NAME_LOOP = re.compile(r'for name in "(codex-privacy-[^"]+\.tar\.gz)" "\1\.sha25
 
 
 def matrix_triples():
-    yaml = pytest.importorskip("yaml")
     matrix = yaml.safe_load(RELEASE.read_text())["jobs"]["build"]["strategy"]["matrix"]
     return sorted(entry["target"] for entry in matrix["include"])
 

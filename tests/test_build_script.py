@@ -6,7 +6,7 @@ import os
 import subprocess
 from pathlib import Path
 
-import pytest
+import yaml
 
 ROOT = Path(__file__).parents[1]
 SCRIPT = ROOT / "scripts" / "build-patched-codex.sh"
@@ -89,7 +89,6 @@ def test_the_release_workflow_clones_before_it_warms_the_cache():
     is given. Pointed at a directory the build step creates later, it found
     no lockfile, fell back to a weaker key, and every release build was a
     cold one -- an invisible failure, since the build still succeeded."""
-    yaml = pytest.importorskip("yaml")
     steps = yaml.safe_load(WORKFLOW.read_text())["jobs"]["build"]["steps"]
     names = [s.get("name") or s.get("uses") for s in steps]
     clone = next(i for i, s in enumerate(steps)

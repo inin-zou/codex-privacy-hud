@@ -35,7 +35,13 @@ privacy-hud-doctor = "privacy_hud.doctor:main"
 privacy-hud-setup = "privacy_hud.runtime:main"
 
 [project.optional-dependencies]
-test = ["pytest>=8"]
+# PyYAML is here because two tests parse the release workflows to pin them
+# against install.sh. They used `pytest.importorskip("yaml")`, PyYAML was not
+# installed by `pip install -e ".[test]"`, and so they skipped on every CI
+# run -- checks that could not fail, guarding the workflows whose own check
+# could not fail. Declare the dependency and import it plainly: a missing
+# PyYAML must be a collection error, never a quiet skip.
+test = ["pytest>=8", "pyyaml>=6"]
 # Floors, not decoration. A bare `transformers` let an incompatible pair get
 # installed during development and cost hours: < 5.16 does not recognize the
 # `openai_privacy_filter` architecture at all, and transformers itself declares
