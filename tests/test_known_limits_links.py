@@ -81,10 +81,21 @@ def test_the_readme_lists_exactly_the_limits_that_exist(readme):
 
 @pytest.mark.parametrize("readme", READMES, ids=lambda p: p.name)
 def test_the_documentation_table_states_the_right_count(readme):
-    """The one place the number is written out in words rather than derived."""
+    """The one place the number is written out in words rather than derived.
+
+    Longest match wins, and that is not a detail. Every count word here is a
+    prefix of a larger one — "twenty" of "twenty-one", 二十 of 二十一 — so
+    collecting every word that appears as a substring finds two counts in a
+    correctly worded row and fails on input that is right. The first version
+    of this test did exactly that: it would have gone red the day a
+    twenty-first limit was written and the README was updated properly. A
+    test that fails on correct input is the mirror of one that passes on
+    wrong input, and it teaches the same thing — that the check is noise.
+    """
     row = next(line for line in readme.read_text(encoding="utf-8").splitlines()
                if "docs/known-limits.md`](docs/known-limits.md)" in line)
-    stated = [n for word, n in WORD_COUNTS.items() if word in row]
-    assert stated, f"{readme.name}: no count found in {row!r}"
-    assert set(stated) == {len(_limit_headings())}, (
+    matches = [word for word in WORD_COUNTS if word in row]
+    assert matches, f"{readme.name}: no count found in {row!r}"
+    stated = WORD_COUNTS[max(matches, key=len)]
+    assert stated == len(_limit_headings()), (
         f"{readme.name} says {stated} limits; there are {len(_limit_headings())}")

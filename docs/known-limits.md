@@ -63,7 +63,7 @@ Ever.
 
 A model that summarizes, rewrites, or quotes part of what it read defeats it, and that is a likely path rather than an exotic one. The rule's promise is "this value does not leave unchanged", not "nothing about this file leaves".
 
-This said "byte-identical" until #49 item 7, and that was wrong in the other direction. Matching keys on `mask.value_hash`, which is an HMAC of `value.strip().lower()` (`mask.py:21`) — the same hash the taint map is keyed by (`engine.py:443`). So the set that matches is **wider** than byte-identical: two values differing only in case or surrounding whitespace are one value here. Whether that is the right identity is open (#43, #44); what is not open is describing it as a byte comparison.
+This said "byte-identical" until #49 item 7, and that was wrong in the other direction. Matching keys on `mask.value_hash`, which is an HMAC of `value.strip().lower()` (`mask.py:21`) — the same hash the taint map is keyed by (`engine.py:448`). So the set that matches is **wider** than byte-identical: two values differing only in case or surrounding whitespace are one value here. Whether that is the right identity is open (#43, #44); what is not open is describing it as a byte comparison.
 
 Collapsing two sightings into one ledger row needs more than a hash collision — the row's key is `(session_id, value_hash, destination)` — so a `×N` count is N hits on that key, not N distinct values and not N hops.
 
