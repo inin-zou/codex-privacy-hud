@@ -5,8 +5,8 @@ name: Track upstream Codex
 # release-codex.yml for that version. If the patch no longer applies, open
 # one issue (never a duplicate) so a person rebases it; users on the new
 # Codex keep working meanwhile, since the forwarder falls through to the
-# official binary. Nothing here rebuilds a version that already has its
-# tarballs.
+# official binary. Nothing here rebuilds a version whose release is already
+# published with every file install.sh downloads.
 #
 # GitHub pauses scheduled workflows on repositories with no commits for 60
 # days; the Actions tab shows a button to re-enable this one when that
@@ -47,17 +47,68 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "ver=$ver" >> "$GITHUB_OUTPUT"
 
+      # The question is not "are there at least two tarballs" but "can
+      # install.sh install this version", and counting tarballs answered the
+      # second only by luck (#45). A publish failed half-way and left
+      # codex-0.155.0-hud a DRAFT holding the two .sha256 files and neither
+      # tarball; the count was zero, so this step said "needed" and the
+      # history check below opened an issue. Correct, and accidental. Move
+      # the same failure one step later -- both tarballs up, the flip to
+      # public failing -- and the count is two on a release nobody can
+      # download. `gh release view` runs authenticated and returns a draft's
+      # assets; install.sh runs anonymous and gets 404. Two tarballs with
+      # their .sha256 missing is worse still: install.sh finds the archive,
+      # cannot find the checksum, and dies with "checksum file not found"
+      # rather than falling through to "no patched build published".
+      #
+      # So the condition is install.sh's own, from install.sh:290 and the
+      # line after it: codex-privacy-<ver>-<triple>.tar.gz and its .sha256,
+      # for both triples, on a release that is not a draft.
+      # tests/test_release_assets.py pins these names to install.sh and to
+      # release-codex.yml's build matrix.
       - name: Do we already have it?
         id: have
+        env:
+          VER: ${{ steps.up.outputs.ver }}
         run: |
-          n="$(gh release view "codex-${{ steps.up.outputs.ver }}-hud" --repo "$GITHUB_REPOSITORY" \
-                --json assets --jq '[.assets[].name | select(endswith(".tar.gz"))] | length' 2>/dev/null || echo 0)"
-          if [ "$n" -ge 2 ]; then
-            echo "codex-${{ steps.up.outputs.ver }}-hud already has $n tarballs; nothing to do"
-            echo "needed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "codex-${{ steps.up.outputs.ver }}-hud has $n tarballs; a build is needed"
+          rel="codex-$VER-hud"
+          if out="$(gh release view "$rel" --repo "$GITHUB_REPOSITORY" --json isDraft,assets 2>"$RUNNER_TEMP/err")"; then
+            :
+          elif grep -qi 'release not found' "$RUNNER_TEMP/err"; then
+            echo "no release $rel yet; a build is needed"
             echo "needed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          else
+            # Neither "we have it" nor "we do not": unknown. Fail the step
+            # rather than pick one. A scheduled run that turns red is seen;
+            # both guesses are silent. Guessing "needed" starts a
+            # two-and-a-half-hour build on a network blip, and guessing "have
+            # it" is the class of bug this step exists in order not to have --
+            # including the case where some later `gh` or `jq` change breaks
+            # the call outright and quietly retires the watchdog.
+            echo "gh release view $rel failed:" >&2
+            cat "$RUNNER_TEMP/err" >&2
+            exit 1
+          fi
+
+          missing=""
+          for triple in aarch64-apple-darwin x86_64-apple-darwin; do
+            for name in "codex-privacy-$VER-$triple.tar.gz" "codex-privacy-$VER-$triple.tar.gz.sha256"; do
+              printf '%s' "$out" | jq -e --arg n "$name" 'any(.assets[]; .name == $n)' >/dev/null \
+                || missing="$missing $name"
+            done
+          done
+
+          if [ "$(printf '%s' "$out" | jq -r .isDraft)" = "true" ]; then
+            echo "$rel exists but is a draft, so install.sh cannot see it; a build is needed"
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          elif [ -n "$missing" ]; then
+            echo "$rel is missing:$missing"
+            echo "a build is needed"
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "$rel is published and carries all four assets; nothing to do"
+            echo "needed=false" >> "$GITHUB_OUTPUT"
           fi
 
       # Two things the release history decides. Any run still in flight
