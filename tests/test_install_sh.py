@@ -339,9 +339,13 @@ def test_a_missing_host_is_reported_not_fatal(home):
 
 
 def test_the_install_brings_the_mcp_extra():
-    """Without it the server dies at `from mcp.server.fastmcp import FastMCP`
-    and Codex reports nothing. The install runs before the model prompt, so a
-    user who declines the model still gets the server."""
+    """Without it the server dies at `from mcp.server.mcpserver import
+    MCPServer` and Codex reports nothing. Having the extra is necessary and
+    not sufficient: `pyproject.toml` bounds it at `mcp>=2` because an
+    unbounded `mcp` let a 2026-09-20 install pull SDK 2.2.0 against code
+    written for 1.x, and the server never started. The install runs before
+    the model prompt, so a user who declines the model still gets the
+    server."""
     REPO = Path(__file__).resolve().parent.parent
     source = (REPO / "install.sh").read_text(encoding="utf-8")
     assert "privacy-hud[detectors,mcp]" in source
