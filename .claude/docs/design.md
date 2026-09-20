@@ -14,7 +14,7 @@ A privacy tool that interrupts constantly gets disabled within a day. Level 1 is
 **P2 — Honest accounting beats alarming.**
 Never show a number that conflates "we detected something" with "something left the machine." A scanner that screams about every email in every file is noise. The product's credibility rests on the `detected` / `exposed` / `prevented` distinction being visible everywhere.
 
-**P3 — Show flows, not findings.**
+**P3 — Show flows, not findings.** *(Intent. The `flows` table is created and nothing writes it, so what ships renders one row per crossing — `docs/known-limits.md` #20 and issue #47 item 11.)*
 `support.log → main agent → GitHub MCP` answers the user's actual question. "Found 12 emails" does not.
 
 **P4 — Never imply recall.**
@@ -146,10 +146,10 @@ the user's attention.
 Privacy Audit
 Current session · 41 min
 
-┌──────────┐ ┌───────────────┐ ┌──────────────┐ ┌─────────────┐
-│   28%    │ │      4        │ │      2       │ │     17      │
-│disclosure│ │ exposed items │ │ destinations │ │  prevented  │
-└──────────┘ └───────────────┘ └──────────────┘ └─────────────┘
+┌───────────┐ ┌─────────────────────┐ ┌────────────────┐ ┌───────────┐
+│    28%    │ │          4          │ │       2        │ │     17    │
+│ of budget │ │ permitted crossings │ │ boundary kinds │ │ prevented │
+└───────────┘ └─────────────────────┘ └────────────────┘ └───────────┘
 
  Exposed 4      Prevented 17      All events 24
  ─────────
@@ -173,7 +173,9 @@ Internal hostname ×3  terminal output  model context    [MASKED]
 
 Only the first line supports the word "current", and it supports it for a specific reason: running `$privacy` fires a hook in the asking session, so "most recently active" *is* "current" by construction. A header asserting certainty above a note retracting it is the same overclaim §9 forbids anywhere else.
 
-**Summary tiles.** Four, fixed: disclosure %, exposed items, destinations, prevented. `destinations` is the tile people underestimate — it is the "how far did this spread" number, and it is what distinguishes this from a scanner.
+**Summary tiles.** Four, fixed. The field names are `percent`, `exposed_items`, `destinations`, `prevented`; the labels shown are "of budget", "permitted crossings", "boundary kinds", "prevented" (#49 item 9).
+
+`destinations` is the tile people underestimate — it is meant to be the "how far did this spread" number, and that is what would distinguish this from a scanner. **As built it does not reach that** (`docs/known-limits.md` #20): `dispatch.py` normalises every MCP call to `mcp_tool` before the engine sees it, so the count is over boundary categories — a handful at most — and a second MCP server adds nothing to it. Restoring the recipient detail `architecture.md` specifies (`mcp:<server>`, `net:<host>`, `subagent:<id>`) is what would make this paragraph true.
 
 **Tabs.**
 - `Exposed` — crossed a boundary. Default tab. Sorted by budget contribution descending, not chronologically: the worst thing should be the first row.
@@ -187,7 +189,7 @@ Only the first line supports the word "current", and it supports it for a specif
 **Empty states** (each says what it means, not just "no data"):
 - Exposed, empty: `No sensitive data has crossed a trust boundary this session.`
 - Prevented, empty: `Nothing has been blocked or minimized yet.`
-- All events, empty: `No privacy events recorded. The engine is running.` — the second sentence matters; an empty audit is otherwise indistinguishable from a broken plugin.
+- All events, empty: `No privacy events recorded for this session.` — and, on a verified coverage reading, what the check found. The second sentence used to read `The engine is running.`, which answered the right question — an empty audit is otherwise indistinguishable from a broken plugin — with evidence that cannot answer it, since a ledger is history and cannot vouch for a live process (#49 item 3). Liveness belongs to `privacy-hud-doctor`.
 
 **Degraded state banner.** If the deep scanner timed out at any point: `⚠ Deep scan unavailable for 2 events — fast-path results only.` Never silently present partial results as complete.
 
@@ -208,7 +210,7 @@ imply the unrecorded events can be listed, retrieved or replayed (§9 / I5):
 
 **The empty states above are replaced, not supplemented, when the record is
 incomplete.** All three make positive claims — "No sensitive data has crossed a
-trust boundary this session", "…The engine is running." — and an unverified
+trust boundary this session", "…The engine is running." — both removed in #49 item 3 — and an unverified
 session supports none of them. The third is the worst of the three to get wrong:
 it exists so an empty audit cannot be mistaken for a broken plugin, which is
 precisely why printing it *when the plugin was broken for this session* spends
@@ -238,7 +240,7 @@ Already disclosed data cannot be recalled from this session.
 
 **Fields.** Title (`type ×count`) · flow line · `First seen` · `Last seen` (when > first) · `Protection` (`none` / `masked` / `minimized`) · `Example` (masked exemplar) · `Budget contribution` (`+9 pts of 120`).
 
-**The flow line is the hero.** For multi-hop flows it renders the full chain with each hop's boundary:
+**The flow line is the hero.** For multi-hop flows it renders the full chain with each hop's boundary — *designed, never built; no multi-hop chain is assembled today, and a `×N` count is N hits on one dedupe key*:
 
 ```text
 support.log → main agent → GitHub MCP
@@ -249,7 +251,7 @@ support.log → main agent → GitHub MCP
 - `Protect future occurrences` — writes a policy rule to mask this data type from this source going forward.
 - On a row whose source names a real origin — a file path or a command, not a bare tool label — `Block values read from {source}` (path) or `` Block values from `{source}` output `` (command). It writes a `block_path` or `block_command` rule keyed to the `Origin` that finding's value was first seen with (#40).
 
-A source rule matches only byte-identical values: it compares a later outbound value against the origin-tagged value under a salted hash, so if the model summarizes, rewrites, or quotes part of what it read, the copy no longer matches and the rule does not catch it (`docs/known-limits.md` #10). Origin extraction is best-effort too (`docs/known-limits.md` #11) — a row with no recognised origin offers no rule at all, rather than one that would not work.
+A source rule matches the whole value, normalised: it compares a later outbound value against the origin-tagged value under a salted HMAC of `value.strip().lower()` (`mask.py`), so if the model summarizes, rewrites, or quotes part of what it read, the copy no longer matches and the rule does not catch it (`docs/known-limits.md` #10). This said "only byte-identical values" until #49 item 7, which contradicted the salted hash described in the same sentence: case and surrounding whitespace do not defeat the rule, so the set that matches is wider than a byte comparison, not narrower. Origin extraction is best-effort too (`docs/known-limits.md` #11) — a row with no recognised origin offers no rule at all, rather than one that would not work.
 
 This replaces the earlier `Block this source` (`block_source`), withdrawn in #38: the ledger then recorded only a fixed label as `source` on the outbound observation (`tool input`, or the tool name / `user prompt` on the way in), never the file or command a value came from, so no selector could name a source. `block_path`/`block_command` match against the ledger's own origin record instead, which is why they work where `block_source` could not.
 
@@ -337,7 +339,7 @@ Emitted at `SessionEnd`, rendered in-terminal and saved as Markdown:
 PRIVACY RECEIPT · session_123 · 41 min
 
 Disclosure       28% of budget
-Exposed          4 flows across 2 destinations
+Exposed          4 crossings across 2 boundary kinds
 Prevented        17 events
 Retained         transcript written to ~/.codex/sessions/...
 
