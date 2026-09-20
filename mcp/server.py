@@ -364,8 +364,9 @@ def build_app():
         that blocks later outbound calls carrying a value from that exact
         origin (design.md §6, #40). See this file's module docstring:
         `Engine.observe` enforces any of these starting with the next
-        matching call, not retroactively, and matches only byte-identical
-        values. `rule_type="block_source"` is refused (#38): it named a
+        matching call, not retroactively, and matches the whole value
+        normalised -- an HMAC of `value.strip().lower()`, so not a byte
+        comparison and not a summary of what was read (known limit 10). `rule_type="block_source"` is refused (#38): it named a
         label, not a source, and `block_path`/`block_command` are the
         replacement rather than a revival of it. A `mask` rule on a data
         type the engine hard-blocks (`credential`) is refused as well: that

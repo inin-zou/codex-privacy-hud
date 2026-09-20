@@ -338,11 +338,14 @@ the rc file by hand.
   carrying one of them. A row with no origin — `source` is a bare tool
   label like `Bash` — offers neither, because no rule could name it, and
   `apply_policy` refuses the withdrawn `block_source` type outright (#38).
-- State the limit whenever you describe a source rule: **only
-  byte-identical values match** (known limit 10). A model that summarizes,
+- State the limit whenever you describe a source rule: **it matches the
+  whole value, normalised** (known limit 10). A model that summarizes,
   rewrites, or quotes part of what it read defeats it. The promise is
   "this value does not leave unchanged", not "nothing about this file
-  leaves". Two more facts, if the user asks: a source rule is scoped to the
+  leaves". Matching keys on an HMAC of `value.strip().lower()`, so values
+  differing only in case or surrounding whitespace match too — wider than a
+  byte comparison, not narrower, and never describe it as one. Two more
+  facts, if the user asks: a source rule is scoped to the
   session (`Ledger.add_policy` writes `session:<id>`) and ends with it, and
   nothing removes one before then — there is no removal path, and an
   "allow once" token does not override one (known limit 13). No surface
