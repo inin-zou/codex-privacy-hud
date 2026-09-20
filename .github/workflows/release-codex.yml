@@ -194,7 +194,16 @@ jobs:
           # Only on the draft -> published transition. --draft=false on a
           # release that is already published resets published_at, which
           # moves the repository's "Latest release" pointer to this version.
-          if [ "$(gh release view "$rel" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = "true" ]; then
+          #
+          # Read into a variable rather than testing the substitution inline:
+          # a command substitution that fails inside `[ ]` yields an empty
+          # string and `set -e` says nothing about it, so a transient lookup
+          # would read as "not a draft", skip the flip, and leave the release
+          # invisible -- with the job going red two steps later and blaming
+          # the anonymous download. As an assignment, the failure is the
+          # failure.
+          draft="$(retry gh release view "$rel" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
+          if [ "$draft" = "true" ]; then
             retry gh release edit "$rel" --repo "$GITHUB_REPOSITORY" --draft=false
           fi
 
