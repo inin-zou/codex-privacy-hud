@@ -670,7 +670,16 @@ def test_no_non_loopback_url_literal_in_runtime_code():
 # Names permitted in pyproject.toml. `dependencies` must stay empty (the
 # daemon, hook client and every pure privacy_hud module are stdlib-only);
 # optional extras are reviewed individually.
-ALLOWED_DISTRIBUTIONS = {"pytest", "transformers", "torch", "mcp"}
+#
+# pyyaml: test-only, and it never reaches the shipped plugin -- the import
+# allowlist below governs `src/` and `hooks/`, and no module there imports
+# it. Two tests parse the release workflows with `yaml.safe_load` to pin
+# them against install.sh. Reviewed for I2 at 6.0.2: an AST scan of all 17
+# .py files in the distribution finds no import of socket, ssl, urllib,
+# http, subprocess or os. It also ships a `_yaml` C extension, which that
+# scan does not cover; it is libyaml's parser bindings, and nothing here
+# hands it anything but a file this repository wrote.
+ALLOWED_DISTRIBUTIONS = {"pytest", "transformers", "torch", "mcp", "pyyaml"}
 
 
 def _requirement_name(spec: str) -> str:

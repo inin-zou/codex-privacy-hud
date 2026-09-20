@@ -21,8 +21,10 @@ on:
 permissions:
   contents: write
 
-# One build per version at a time; a second request for the same version
-# waits rather than racing the first to the release assets.
+# Best effort against building one version twice over. It keys on the tag as
+# pushed, so it does not catch every spelling of a version, and it is not
+# what keeps two runs from racing to the same release assets -- the publish
+# job's own group does that, for every version at once.
 concurrency:
   # The same key whichever way a version arrives: a dispatch for 0.155.0
   # and a push of the tag codex-0.155.0-hud both group as that tag name.
@@ -85,23 +87,154 @@ jobs:
     name: publish
     needs: [version, build]
     runs-on: ubuntu-latest
+    # Both releases this job writes are shared beyond one version. `latest`
+    # obviously is. The versioned one is too, whenever two tag spellings
+    # resolve to the same version -- pushing codex-0.155.0-hud2 rebuilds
+    # 0.155.0 and writes the same release a dispatch for 0.155.0 writes. The
+    # workflow-level group covers neither, because it keys on the tag as
+    # pushed. This group does, and this job is the only place assets are
+    # written.
+    concurrency:
+      group: release-codex-publish
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VER: ${{ needs.version.outputs.ver }}
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
-      # On a tag push the tag exists and this attaches to it; on a dispatch
-      # the action creates the tag at the commit that ran, then the release.
-      - name: Attach to the version's release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: codex-${{ needs.version.outputs.ver }}-hud
-          target_commitish: ${{ github.sha }}
-          files: dist/*
-          prerelease: false
-      - name: Also publish under the rolling 'latest' release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: latest
-          name: latest
-          files: dist/*
+
+      # The four names install.sh builds (install.sh:290 and the line after
+      # it), for the two targets the build matrix covers.
+      # tests/test_release_assets.py pins this list to both.
+      - name: Did we build everything install.sh asks for?
+        run: |
+          for triple in aarch64-apple-darwin x86_64-apple-darwin; do
+            for name in "codex-privacy-$VER-$triple.tar.gz" "codex-privacy-$VER-$triple.tar.gz.sha256"; do
+              [ -s "dist/$name" ] || { echo "dist/$name missing or empty" >&2; exit 1; }
+            done
+          done
+          ls -l dist
+
+      # softprops/action-gh-release does not retry a failed asset save. The
+      # 0.155.0 publish created the release, uploaded both .sha256 files in a
+      # second, then spent 43 seconds failing both ~100 MB tarballs with
+      # "Error saving asset" and stopped. `gh release upload --clobber` in a
+      # loop is that upload with the retry the action does not do, and one
+      # fewer third-party action on the path that ships a binary.
+      #
+      # `latest` first, then the versioned release, and the versioned release
+      # stays a draft until all four of its assets are on it. install.sh
+      # tries the versioned URL and falls back to `latest`, so "the versioned
+      # release is visible" implies both URLs work. That is the condition
+      # track-upstream.yml reads back, and the draft is what tells it a
+      # publish stopped half-way.
+      - name: Publish the tarballs
+        run: |
+          # Every write to GitHub here is retried, not just the upload.
+          # Hardening one write and leaving the others bare only moves where
+          # a flaky minute stops a release: a drill run lost `gh release
+          # create` to a transient HTTP 403 "Resource not accessible by
+          # integration" -- the same call, same repository, same token,
+          # having succeeded minutes earlier and again minutes later.
+          retry() {
+            n=0
+            until "$@"; do
+              n=$((n + 1))
+              [ "$n" -lt 4 ] || { echo "$2 $3 failed 4 times" >&2; return 1; }
+              echo "$2 $3 failed; retry $n in $((n * 20))s" >&2
+              sleep $((n * 20))
+            done
+          }
+
+          # First attempt without --clobber, retries with it. `gh release
+          # upload --clobber` deletes the existing asset before sending the
+          # new one and says so in its own help: "If the upload fails, the
+          # original assets will be lost." On `latest`, which holds every
+          # version's archives, that would mean a flaky upload of THIS
+          # version destroying a previous one's. Retries still need it --
+          # attempt 1 may have landed some of the four -- but the first
+          # attempt, the one that runs when nothing is wrong, deletes
+          # nothing.
+          upload() {
+            n=0
+            clobber=""
+            # $clobber is deliberately unquoted: empty must expand to no
+            # argument at all, and the only values it ever holds are "" and
+            # --clobber.
+            until gh release upload "$1" dist/* --repo "$GITHUB_REPOSITORY" $clobber; do
+              n=$((n + 1))
+              [ "$n" -lt 4 ] || { echo "upload to $1 failed 4 times" >&2; return 1; }
+              clobber="--clobber"
+              echo "upload to $1 failed; retry $n with --clobber in $((n * 20))s" >&2
+              sleep $((n * 20))
+            done
+          }
+
+          # A `view` that fails for a transient reason reads as "absent"
+          # here, so the create that follows fails with "already exists" and
+          # the job goes red with the release untouched. Loud and harmless,
+          # which is the right way round.
+          gh release view latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || retry gh release create latest --repo "$GITHUB_REPOSITORY" --title latest \
+                 --notes "The newest patched Codex build for each version. install.sh falls back here when a version-pinned release is absent."
+          upload latest
+
+          # On a tag push the tag exists and this attaches to it; on a
+          # dispatch --target creates the tag at the commit that ran.
+          rel="codex-$VER-hud"
+          if ! gh release view "$rel" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            retry gh release create "$rel" --repo "$GITHUB_REPOSITORY" --draft \
+              --target "$GITHUB_SHA" --title "$rel" \
+              --notes "Patched Codex $VER with the privacy status-line item. install.sh installs it; docs/installing-by-hand.md does it by hand."
+          fi
+          upload "$rel"
+          # Only on the draft -> published transition. --draft=false on a
+          # release that is already published resets published_at, which
+          # moves the repository's "Latest release" pointer to this version.
+          #
+          # Read into a variable rather than testing the substitution inline:
+          # a command substitution that fails inside `[ ]` yields an empty
+          # string and `set -e` says nothing about it, so a transient lookup
+          # would read as "not a draft", skip the flip, and leave the release
+          # invisible -- with the job going red two steps later and blaming
+          # the anonymous download. As an assignment, the failure is the
+          # failure.
+          draft="$(retry gh release view "$rel" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
+          if [ "$draft" = "true" ]; then
+            retry gh release edit "$rel" --repo "$GITHUB_REPOSITORY" --draft=false
+          fi
+
+      # The producer's own positive control. Every step above runs
+      # authenticated; install.sh does not. A draft, a missing asset and a
+      # half-saved one all read as success to `gh` and as 404 to a user --
+      # the gap that shipped as #45. So fetch the first byte of all eight
+      # URLs install.sh could try, with the same unauthenticated curl it
+      # uses. (Blanking GH_TOKEN changes nothing for curl, which never sent
+      # it; it is here so a `gh` call added to this step later cannot make
+      # the check authenticated without anyone noticing.)
+      - name: Can an anonymous user download what we just published?
+        env:
+          GH_TOKEN: ""
+        run: |
+          base="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download"
+          fail=0
+          for triple in aarch64-apple-darwin x86_64-apple-darwin; do
+            for name in "codex-privacy-$VER-$triple.tar.gz" "codex-privacy-$VER-$triple.tar.gz.sha256"; do
+              for tag in "codex-$VER-hud" latest; do
+                n=0
+                # A just-published release takes a moment to become readable
+                # anonymously, so one 404 is not yet a verdict.
+                until curl -fsSL -o /dev/null -r 0-0 "$base/$tag/$name"; do
+                  n=$((n + 1))
+                  [ "$n" -lt 3 ] || break
+                  sleep 10
+                done
+                if [ "$n" -lt 3 ]; then echo "ok   $tag/$name"
+                else echo "FAIL $tag/$name"; fail=1; fi
+              done
+            done
+          done
+          [ "$fail" -eq 0 ] || { echo "published assets are not anonymously downloadable" >&2; exit 1; }
