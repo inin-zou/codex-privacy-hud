@@ -40,7 +40,7 @@ REPO = Path(__file__).resolve().parents[1]
 SELF = Path(__file__).resolve()
 
 # Declarations below are data, not claims; the scan skips their AST spans in
-# this file only (`_self_exempt_lines`).
+# this file only (`_without_self_declarations`).
 RETRACTED = [
     "Protect future occurrences",
     "Protection applied",
@@ -215,27 +215,30 @@ _SELF_EXEMPT_NAMES = {"RETRACTED", "LEGACY_NOTICE", "ALLOWED"}
 _LINE_PREFIX = re.compile(r"[ \t]*(?:#:?|//|\*|>)?[ \t]*")
 
 
-def _normalize_with_lines(text: str) -> tuple[str, list[int]]:
+def _normalize_with_lines(text: str, *, offsets: bool = False
+                          ) -> tuple[str, list[int]]:
     """Normalised text and, for each output character, its 1-based source
     line. Lowercases; drops `*` and backticks; reads `_` as a space; strips
     a comment or quote prefix at the start of every line so a wrapped
     comment reads as one sentence; collapses whitespace."""
     out: list[str] = []
     lines: list[int] = []
+    position = 0
     for number, raw in enumerate(text.split("\n"), start=1):
         prefix = _LINE_PREFIX.match(raw)
-        body = raw[prefix.end():] if prefix else raw
-        for ch in body:
+        begin = prefix.end() if prefix else 0
+        for column, ch in enumerate(raw[begin:], start=begin):
             if ch in "*`":
                 continue
             ch = " " if ch == "_" or ch.isspace() else ch.lower()
             if ch == " " and (not out or out[-1] == " "):
                 continue
             out.append(ch)
-            lines.append(number)
+            lines.append(position + column if offsets else number)
         if out and out[-1] != " ":
             out.append(" ")
-            lines.append(number)
+            lines.append(position + len(raw) if offsets else number)
+        position += len(raw) + 1
     return "".join(out), lines
 
 
@@ -277,9 +280,13 @@ def _string_constants(text: str) -> list[tuple[int, int, str]]:
     return out
 
 
-def _self_exempt_lines(text: str) -> set[int]:
+def _without_self_declarations(text: str) -> str:
     tree = ast.parse(text)
-    lines: set[int] = set()
+    rows = text.encode("utf-8").splitlines(keepends=True)
+    starts = [0]
+    for row in rows:
+        starts.append(starts[-1] + len(row))
+    source = bytearray(text.encode("utf-8"))
     for node in tree.body:
         targets = []
         if isinstance(node, ast.Assign):
@@ -288,13 +295,34 @@ def _self_exempt_lines(text: str) -> set[int]:
             targets = [node.target]
         if any(isinstance(t, ast.Name) and t.id in _SELF_EXEMPT_NAMES
                for t in targets):
-            lines.update(range(node.lineno, (node.end_lineno or
-                                             node.lineno) + 1))
-    return lines
+            first = starts[node.lineno - 1] + node.col_offset
+            last = starts[node.end_lineno - 1] + node.end_col_offset
+            source[first:last] = bytes(
+                ch if ch in (10, 13) else 32 for ch in source[first:last])
+            source[first:first + 4] = b"pass"
+    return source.decode("utf-8")
+
+
+def _without_allowed_claims(path: str, text: str) -> str:
+    # Break only identified claims inside validated exact passages.
+    # Keep Python syntax intact so decoded strings remain inspectable.
+    source = list(text)
+    for _first, _last, entry in _allowed_spans(path, text):
+        start = text.index(entry.passage)
+        normalized, positions = _normalize_with_lines(
+            entry.passage, offsets=True)
+        pattern = re.escape(_normalize(entry.claim))
+        for match in re.finditer(pattern, normalized):
+            index = next(i for i in range(match.start(), match.end())
+                         if normalized[i].isalpha())
+            source[start + positions[index]] = "X"
+    return "".join(source)
 
 
 def scan_text(path: str, text: str) -> list[Hit]:
     """Every retracted-claim occurrence in one file, before allowances."""
+    if Path(REPO / path).resolve() == SELF:
+        text = _without_self_declarations(text)
     hits: set[Hit] = set()
     normalized, line_of = _normalize_with_lines(text)
     for claim_norm, claim in NORMALIZED_CLAIMS.items():
@@ -309,9 +337,6 @@ def scan_text(path: str, text: str) -> list[Hit]:
                                   and first <= h.line <= _last for h in hits)
                     if not already:
                         hits.add(Hit(path, first, claim))
-    if Path(REPO / path).resolve() == SELF:
-        exempt = _self_exempt_lines(text)
-        hits = {h for h in hits if h.line not in exempt}
     return sorted(hits, key=lambda h: (h.path, h.line, h.claim))
 
 
@@ -332,14 +357,7 @@ def _allowed_spans(path: str, text: str) -> list[tuple[int, int, Allowed]]:
 
 
 def violations_in(path: str, text: str) -> list[Hit]:
-    spans = _allowed_spans(path, text)
-    out = []
-    for hit in scan_text(path, text):
-        covered = any(first <= hit.line <= last and entry.claim == hit.claim
-                      for first, last, entry in spans)
-        if not covered:
-            out.append(hit)
-    return out
+    return scan_text(path, _without_allowed_claims(path, text))
 
 
 def tracked_files() -> list[str]:
@@ -434,15 +452,39 @@ def test_retracted_claim_scanner_detects_active_reintroduction(claim):
     assert any(h.claim == claim for h in found), "adjacent literals"
 
 
-def test_historical_exception_does_not_allow_a_second_occurrence():
-    if not ALLOWED:
-        pytest.skip("no historical allowance to duplicate")
-    entry = ALLOWED[0]
-    text = _read(entry.path)
-    assert text is not None
-    doubled = text + "\n" + entry.passage + "\n"
-    found = violations_in(entry.path, doubled)
-    assert any(h.claim == entry.claim for h in found)
+def test_historical_exception_does_not_allow_a_second_occurrence(monkeypatch):
+    for entry in ALLOWED:
+        text = _read(entry.path)
+        assert text is not None
+        mutations = [
+            text + "\n" + entry.passage + "\n",
+            text.replace(entry.passage, entry.passage + " " + entry.claim),
+        ]
+        for mutated in mutations:
+            found = violations_in(entry.path, mutated)
+            assert any(h.claim == entry.claim for h in found), entry.path
+
+    entry = next(e for e in ALLOWED
+                 if e.path == "src/privacy_hud/local_ui_server.py")
+    escaped = entry.claim.replace(" ", r"\x20", 1)
+    source = ('def example():\n    """\n' + entry.passage
+              + "\n    " + escaped + '\n    """\n')
+    assert source.count(entry.passage) == 1
+    assert any(h.claim == entry.claim
+               for h in violations_in(entry.path, source))
+
+    own = str(SELF.relative_to(REPO))
+    same_line = "ALLOWED = []; message = " + repr(RETRACTED[0]) + "\n"
+    assert any(h.claim == RETRACTED[0]
+               for h in violations_in(own, same_line))
+
+    monkeypatch.setattr(sys.modules[__name__], "tracked_files",
+                        lambda: [entry.path, own])
+    monkeypatch.setattr(sys.modules[__name__], "_read",
+                        lambda path: source if path == entry.path else same_line)
+    active = active_text()
+    assert _normalize(entry.claim) in active
+    assert _normalize(RETRACTED[0]) in active
 
 
 def _registered_tools(app):
@@ -530,14 +572,16 @@ def active_text() -> str:
         text = _read(path)
         if text is None:
             continue
+        decoded_source = _without_allowed_claims(path, text)
         for _first, _last, entry in _allowed_spans(path, text):
             text = text.replace(entry.passage, "")
         if (REPO / path).resolve() == SELF:
-            exempt = _self_exempt_lines(text)
-            text = "\n".join(line for number, line in
-                             enumerate(text.split("\n"), start=1)
-                             if number not in exempt)
+            text = _without_self_declarations(text)
+            decoded_source = _without_self_declarations(decoded_source)
         chunks.append(f"== {path}\n{_normalize(text)}")
+        if path.endswith(".py"):
+            for first, _last, value in _string_constants(decoded_source):
+                chunks.append(f"== {path}:{first} decoded\n{_normalize(value)}")
     return "\n".join(chunks)
 
 
