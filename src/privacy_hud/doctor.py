@@ -1685,25 +1685,53 @@ MCP_TOOLS = (
 #: exactly this name, and `tests/test_doctor.py` pins this constant to it.
 MCP_SERVER_NAME = "privacy-hud"
 
-#: How much of the server's own stderr to quote back. Long enough for the
-#: launcher's one-line causes (`no usable runtime.json (FileNotFoundError);
-#: run privacy-hud-setup`), short enough that a server which decides to dump
-#: a traceback cannot take the report over.
+#: Presentation cap, applied only after a complete allowlist match.
+#: Truncation is not a privacy filter.
 _STDERR_QUOTE_CHARS = 200
 
+_STDERR_WITHHELD = (
+    "The server wrote to stderr; its contents are withheld. "
+    "Check the runtime with privacy-hud-setup."
+)
 
-def _stderr_tail(text: str) -> str:
-    """The server's last non-empty stderr line, capped.
+#: Copies of the launcher's fixed _fail messages, including its prefix.
+#: test_doctor_stderr_allowlist_matches_all_launcher_fail_calls pins these
+#: to every _fail call site in mcp/server.py.
+_LAUNCHER_STDERR_LINES = frozenset({
+    "privacy-hud mcp: PLUGIN_DATA is not set and no Codex plugin-data "
+    "directory for this plugin could be resolved; the plugin is not "
+    "installed, or several candidates matched — run privacy-hud-setup",
+    "privacy-hud mcp: runtime.json is writable by others; refusing to "
+    "execute the interpreter it names",
+    "privacy-hud mcp: the recorded interpreter is not executable; "
+    "run privacy-hud-setup",
+})
+_LAUNCHER_RECEIPT_ERROR = (
+    r"privacy-hud mcp: no usable runtime\.json "
+    r"\([A-Za-z_][A-Za-z0-9_]*\); run privacy-hud-setup"
+)
 
-    Safe to show by construction (I1): `mcp/server.py::_fail` writes one line
-    naming a cause — an exception class or a fixed phrase — and never a
-    payload, which is the property that error-handling section was written
-    around. Anything else on that pipe is not ours and is truncated hard.
+
+def _stderr_tail(text: str, *, allow_launcher: bool = False) -> str:
+    """Return an allowlisted startup diagnostic or fixed withholding text.
+
+    Match the last nonblank LF-delimited line without stripping its content.
+    Before any initialize response, permit only the launcher's fixed message
+    shapes; the sole variable field is an ASCII exception-class identifier.
+    A match constrains the text, not its provenance. After an initialize
+    response, quote nothing. Apply the presentation cap only after matching.
     """
-    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    import re
+
+    lines = [line for line in (text or "").split("\n") if line.strip()]
     if not lines:
         return ""
     last = lines[-1]
+    if not allow_launcher or not (
+        last in _LAUNCHER_STDERR_LINES
+        or re.fullmatch(_LAUNCHER_RECEIPT_ERROR, last) is not None
+    ):
+        return _STDERR_WITHHELD
     return last if len(last) <= _STDERR_QUOTE_CHARS else \
         last[:_STDERR_QUOTE_CHARS] + "…"
 
@@ -1735,11 +1763,11 @@ def _mcp_probe(command, cwd, env, timeout) -> tuple[list[str], bool]:
     each answer read before the next, so the server never sees end-of-input
     while a call is in flight.
 
-    A failure to start carries the server's own last stderr line as an
-    exception note, because that line is the diagnosis (the launcher writes
-    `no usable runtime.json (FileNotFoundError); run privacy-hud-setup` and
-    exits). A failed call quotes nothing: a tool error or a traceback can
-    carry anything, and the check's summary is the whole answer.
+    Before any initialize response, a failure may carry an allowlisted
+    launcher diagnostic as an exception note. Other nonblank stderr produces
+    fixed withholding text. Once initialize has answered, all stderr is
+    withheld, including text matching a launcher message. A failed tool call
+    quotes nothing: tool errors and tracebacks can contain sensitive text.
     """
     import queue
     import subprocess
@@ -1796,6 +1824,7 @@ def _mcp_probe(command, cwd, env, timeout) -> tuple[list[str], bool]:
         return proc.stderr.read() if proc.stderr is not None else ""
 
     listed = None
+    initialize_answered = False
     try:
         try:
             send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
@@ -1804,6 +1833,7 @@ def _mcp_probe(command, cwd, env, timeout) -> tuple[list[str], bool]:
                              "clientInfo": {"name": "privacy-hud-doctor",
                                             "version": "1"}}})
             if answer(1) is not None:
+                initialize_answered = True
                 send({"jsonrpc": "2.0", "method": "notifications/initialized"},
                      {"jsonrpc": "2.0", "id": 2, "method": "tools/list",
                       "params": {}})
@@ -1812,12 +1842,16 @@ def _mcp_probe(command, cwd, env, timeout) -> tuple[list[str], bool]:
             listed = None
         except TimeoutError as exc:
             proc.kill()
-            _attach_stderr(exc, stderr_after_exit())
+            _attach_stderr(
+                exc, stderr_after_exit(),
+                allow_launcher=not initialize_answered)
             raise
         if listed is None or "result" not in listed:
             failure = ValueError(
                 "the server answered nothing this check could read")
-            _attach_stderr(failure, stderr_after_exit())
+            _attach_stderr(
+                failure, stderr_after_exit(),
+                allow_launcher=not initialize_answered)
             raise failure
         names = sorted(t["name"] for t in listed["result"].get("tools", []))
         try:
@@ -1859,11 +1893,12 @@ def _is_summary_reply(message: dict | None) -> bool:
     )
 
 
-def _attach_stderr(exc: Exception, err: str | None) -> None:
-    """Carry the server's last stderr line on the exception, for the check to
-    quote. `add_note` rather than a custom attribute so nothing downstream has
-    to know this function ran."""
-    said = _stderr_tail(err or "")
+def _attach_stderr(
+        exc: Exception, err: str | None, *,
+        allow_launcher: bool = False) -> None:
+    """Attach only an allowlisted startup diagnostic or fixed withholding
+    text. Never attach an unfiltered stderr line."""
+    said = _stderr_tail(err or "", allow_launcher=allow_launcher)
     if said:
         exc.add_note(said)
 
@@ -1935,14 +1970,13 @@ def check_mcp_server(timeout: float = MCP_TIMEOUT) -> Check:
     try:
         names, read_ok = _mcp_probe(command, root, env, timeout)
     except (OSError, ValueError, TimeoutError) as exc:
-        # The launcher's own diagnosis, first, because it is the answer: it
-        # names the cause (`no usable runtime.json (FileNotFoundError); run
-        # privacy-hud-setup`) where everything below only names the shape.
+        # Put the probe diagnostic first: an allowlisted startup cause or
+        # fixed withholding text. A match does not authenticate its source.
         details = ["Codex reports nothing when this happens: the plugin "
                    "loads, and the tools are simply absent."]
         said = list(getattr(exc, "__notes__", ()))
         if said:
-            details.insert(0, f"the server said: {said[0]}")
+            details.insert(0, f"probe diagnostic: {said[0]}")
         return Check("MCP server", FAIL,
                      f"the server did not start ({type(exc).__name__})",
                      details=details,
