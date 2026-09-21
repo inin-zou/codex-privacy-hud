@@ -212,24 +212,46 @@ CHEAP_DATA_TYPES = frozenset({"path", "credential"})
 #:
 #: Saving a rule is not enforcing it, and the gap between the two is not a
 #: detail: a user who reads "enforced" and goes on to send the data has made
-#: a decision this plugin then cannot honour and cannot reverse (I5). The
-#: three clauses are the three ways a written rule leaves a value unchanged,
-#: and none of them is visible to the person clicking the button.
+#: a decision this plugin then cannot honour and cannot reverse (I5). Each
+#: clause below is a way a written rule leaves a value unchanged, and none
+#: of them is visible to the person clicking the button.
+#:
+#: Three strings rather than one, because the caveat is not uniform and a
+#: uniform one would be its own false statement. The first draft of this
+#: had exactly that bug: it keyed only on `selector`, so a `block_path` rule
+#: on `/home/u/.env` — whose selector is a file path, not a data type —
+#: fell through to the deep-scan text and was told its matching "needs the
+#: deep scan", while an origin that happened to be named `path` got the
+#: cheap text. An origin rule matches on where a value came from, which is
+#: a different question from which tier found it.
 _RULE_CONDITIONS_DEEP = (
     " Matching {selector} needs the deep scan, which is skipped when it is "
     "busy, out of time, over the size limit, or unavailable (known limit "
-    "21) — on those calls the rule changes nothing and the call still goes. "
-    "Detection can also miss values, and hosted tools never reach this "
-    "plugin at all.")
+    "21) — on those calls the rule matches nothing. Detection can also miss "
+    "values, and hosted tools never reach this plugin at all.")
 
 _RULE_CONDITIONS_CHEAP = (
     " Detection is heuristic and can miss values, and hosted tools never "
     "reach this plugin at all — on a call where nothing is detected the "
-    "rule changes nothing and the call still goes.")
+    "rule matches nothing.")
+
+_RULE_CONDITIONS_ORIGIN = (
+    " It matches a value only while this session still knows that value "
+    "came from there, which it knows from the scan that first saw it — so "
+    "a value the deep scan missed or never got to (known limit 21) is not "
+    "connected to its origin and this rule does not see it. Detection can "
+    "also miss values, and hosted tools never reach this plugin at all.")
 
 
-def rule_enforcement_note(selector: str) -> str:
-    """The conditions clause for a rule on `selector`."""
+def rule_enforcement_note(rule_type: str, selector: str) -> str:
+    """The conditions clause for one saved rule.
+
+    `rule_type` decides the shape of the question and `selector` only
+    refines it: an origin rule's selector is a path or a command, and
+    asking whether *that* is a cheap data type is a category error.
+    """
+    if rule_type in ("block_path", "block_command"):
+        return _RULE_CONDITIONS_ORIGIN
     if selector in CHEAP_DATA_TYPES:
         return _RULE_CONDITIONS_CHEAP
     return _RULE_CONDITIONS_DEEP.format(selector=selector)

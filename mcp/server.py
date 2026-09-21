@@ -396,7 +396,8 @@ def build_app():
         # user hopes will happen.
         return {"saved": True, "enforcement": "conditional",
                 "rule_type": rule_type, "selector": selector,
-                "conditions": mcp_tools.rule_enforcement_note(selector).strip()}
+                "conditions": mcp_tools.rule_enforcement_note(
+                    rule_type, selector).strip()}
 
     @app.tool(name="privacy.read_guard_status")
     def read_guard_status() -> dict:

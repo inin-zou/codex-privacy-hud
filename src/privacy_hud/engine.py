@@ -668,7 +668,8 @@ class Engine:
                 return origin
         return None
 
-    def _scan(self, obs: Observation, dest_kind: str, boundary: str) -> tuple[list, bool]:
+    def _scan(self, obs: Observation, dest_kind: str,
+              boundary: str) -> tuple[list, str | None]:
         """Run every cheap detector unconditionally, then the expensive ones
         only when they are gated on and the payload is small enough
         (Ruling 4). Returns (findings, gap) — `gap` is a `GAP_*` reason

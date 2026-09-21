@@ -232,6 +232,8 @@ scan(text) →
 
 Tier 3 runs only when Tier 1 hits, when the payload crosses B3/B4, or when the text contains PII-shaped tokens that Tier 1 could not classify. Roughly 10–15% of events in practice.
 
+**What ships, on the B3/B4 half of that sentence.** For a year the engine did the opposite — it excluded B3/B4 outright — and the only types tier 3 owns (`person`, `address`, `email`, `phone`, `url`, `date`, `account`) could not appear on any outbound row (#47 item 1). The exclusion is gone, and the reason it could not simply be deleted is the shape the rest of this section has to account for: an outbound call is a `PreToolUse`, `hooks/handler.py` gives the daemon 2.0 s, and I6 turns a missed deadline into a **deny** of a call that should have been allowed. So on B3/B4 the deep scan is admitted one at a time across the daemon and bounded end to end by `engine.TIER3_EGRESS_BUDGET` (1.0 s, covering admission, the wait for the model, and inference); a call that does not get it proceeds on tiers 0-2. Ingress keeps waiting as long as the model takes, because Ruling 3 makes its reply `{}` either way. Each skipped scan is recorded — see §4's note on degraded coverage below and `docs/known-limits.md` #21.
+
 **Shell destination extraction (Tier 2)** is what makes egress detection real. Parse the command, walk the AST, and classify each sink:
 
 ```text
@@ -504,22 +506,26 @@ on PostToolUse(tool_response):
   tiers 0-2 (path rules, regex+entropy, structural parse)  → always run on the FULL payload
                                                                (cheap: ~8 ms combined per §4,
                                                                roughly linear in size)
-  tier 3 (Presidio NER)                                     → runs only on the first 8 KB
-                                                               of the payload
+  tier 3 (the NER model)                                    → skipped entirely above
+                                                               8192 characters
 
-  if len(tool_response) > 8 KB:
-      record the event as usual, but mark it degraded (tier 3 did not see the full payload)
+  if len(tool_response) > 8192 chars:
+      record the event as usual, and record a scan gap for the observation
       → same "fast-path results only" degraded state design.md §5 already defines for
         deep-scanner timeout; a payload over the bound is treated identically to a scan
         that timed out, because from the ledger's point of view the effect is the same:
         tier 3 coverage is incomplete for that event.
 ```
 
+**What ships, on truncation.** This section specified scanning the first 8 KB and marking the remainder. The engine skips the deep scan **entirely** above `MAX_TIER3_CHARS` (8192 characters) rather than scanning a prefix, and `Engine._scan` says why: a prefix scan reports a clean result for a payload it mostly did not read, and the resulting row looks the same as a fully scanned one. Skip-and-record was chosen over truncate-and-scan for that reason, and the paragraphs below are kept because the sizing argument is still the sizing argument.
+
 **Why 8 KB.** It is sized to keep tier 3's synchronous cost close to the ~40 ms figure this budget already assumes (§4's Tier 3 estimate), which was measured against a typical small-to-medium chunk, not a large file read — capping the input size is what keeps that estimate honest at any payload size, rather than letting cost scale with whatever the tool happened to return. It also comfortably clears the 150 ms target with room for tiers 0-2, the socket round trip, and the ledger write, while leaving wide margin below the 5 s hook timeout even under a slow/cold-cache tier 3 run. This is a starting point, not a tuned constant — Task 10 should treat it as adjustable pending a real measurement of tier 3 latency vs. input size on this machine, but it must ship with *some* concrete bound rather than an unbounded scan, because unbounded is the failure mode this section exists to rule out.
 
 Tiers 0-2 are deliberately left unbounded (full payload, every time): they are cheap enough not to need a cap, and skipping them on the tail of a large payload would silently reintroduce the exact "large disclosure goes unrecorded" gap tier 3's bound is meant to close for the cheap, deterministic checks (credential patterns, path rules) that do not need a model to run.
 
-This connects directly to a piece of UI that already exists for a different reason: design.md §5's degraded-state banner (`⚠ Deep scan unavailable for N events — fast-path results only`) was designed for deep-scanner *timeout*. It now also covers deep-scanner *truncation* — same banner, same copy, same meaning to the user ("tier 3 did not fully cover this"), one fewer state for the UI layer to invent. Recording this connection here so it is not rediscovered as a "new" requirement later.
+This connects directly to a piece of UI that already exists for a different reason: design.md §5's degraded-state banner (`⚠ Deep scan unavailable for N events — fast-path results only`) was designed for deep-scanner *timeout*. It now also covers every other way the deep scan can fail to cover an observation — same banner, same meaning to the user ("tier 3 did not fully cover this"), one fewer state for the UI layer to invent.
+
+**What ships, on where that is recorded.** This section says "mark the affected event degraded". The implementation records the *scan* instead, in an append-only `scan_gaps` table counted per session by `Ledger.coverage`, and the reason is the case a per-event mark cannot reach: an observation whose cheap tiers found nothing and whose deep scan was skipped writes **no event row at all**, and is otherwise indistinguishable from a call that was fully scanned and was clean. The cost of that choice is real and is stated in `docs/known-limits.md` #21: the audit can say a session has three shallow scans and cannot say which calls they were.
 
 ---
 

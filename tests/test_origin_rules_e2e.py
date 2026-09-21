@@ -423,3 +423,36 @@ def test_a_cheap_type_does_not_inherit_the_deep_scan_caveat(ui, state):
     # It still says what it cannot do.
     assert "heuristic" in body["message"]
     assert "hosted tools" in body["message"]
+
+
+def test_an_origin_rule_is_not_described_as_if_its_selector_were_a_data_type(ui,
+                                                                             state):
+    """The category error the first draft of this note shipped.
+
+    A `block_path` rule's selector is a file path. Keying the conditions on
+    the selector alone sent it down the deep-scan branch — "matching
+    /home/u/.env needs the deep scan" — and would have sent an origin
+    literally named `path` down the cheap one. An origin rule matches on
+    where a value came from, which is a different question from which tier
+    found it."""
+    status, body = _post(ui, "/api/policy", {"session_id": SID,
+                                             "rule_type": "block_path",
+                                             "selector": "/home/u/.env"})
+    assert status == 200, body
+    message = body["message"]
+    assert "Matching /home/u/.env needs the deep scan" not in message
+    assert "came from there" in message
+
+
+def test_the_confirmation_does_not_certify_what_the_call_is_allowed_to_do(ui,
+                                                                          state):
+    """A mask rule decides masking, not the verdict.
+
+    The note used to end "the rule changes nothing and the call still
+    goes" — which is false on the call that matters most: a credential on
+    that same outbound call is denied whatever this rule does."""
+    status, body = _post(ui, "/api/policy", {"session_id": SID,
+                                             "rule_type": "mask",
+                                             "selector": "email"})
+    assert "the call still goes" not in body["message"]
+    assert "decided by the rest of the policy" in body["message"]

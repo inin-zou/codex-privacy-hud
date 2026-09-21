@@ -427,6 +427,27 @@ def test_an_ingress_detector_crash_still_reaches_the_caller(tmp_path):
         eng.scan(_obs())
 
 
+class _GilHog(StubModelDetector):
+    """Busy-loops instead of sleeping, so the CALLER cannot run either.
+
+    `_SlowStub` sleeps, which releases the GIL — the caller wakes on time,
+    `wait()` returns False, and the timeout path is what gets tested. To
+    reach `_in_time` the worker has to finish *after* the deadline while the
+    caller was not scheduled to notice, which is what holding the GIL
+    produces.
+    """
+
+    def __init__(self, hold, findings):
+        super().__init__(findings)
+        self.hold = hold
+
+    def scan(self, text, ctx):
+        end = time.monotonic() + self.hold
+        while time.monotonic() < end:
+            pass
+        return super().scan(text, ctx)
+
+
 def test_a_result_that_finished_after_the_deadline_is_not_accepted(tmp_path,
                                                                    monkeypatch):
     """`done` being set proves the work completed, not that it was in time.
@@ -434,22 +455,33 @@ def test_a_result_that_finished_after_the_deadline_is_not_accepted(tmp_path,
     A caller descheduled past its own budget wakes to a set event, and
     without a completion timestamp it accepts findings its deadline had
     already excluded — which makes the bound advisory rather than a bound.
-    Forced here by moving the deadline into the past after the scan
-    finished, which is the same state a stalled caller observes."""
-    monkeypatch.setattr(engine, "TIER3_EGRESS_BUDGET", 0.4)
-    slow = _SlowStub(0.2, [EMAIL_FINDING])
-    eng = _engine(tmp_path, [PathDetector(), SecretDetector(), slow])
 
-    real_in_time = engine._in_time
-    monkeypatch.setattr(engine, "_in_time",
-                        lambda finished_at, deadline: False)
+    This test reaches that state for real rather than by patching
+    `_in_time`: the detector holds the GIL well past the budget, so the
+    caller does not get to run until after the worker has finished and set
+    `done`. An earlier version of this test patched `_in_time` to return
+    False and described itself as "moving the deadline into the past",
+    which tested the branch without ever producing the state that reaches
+    it."""
+    monkeypatch.setattr(engine, "TIER3_EGRESS_BUDGET", 0.02)
+    eng = _engine(tmp_path, [PathDetector(), SecretDetector(),
+                             _GilHog(0.25, [EMAIL_FINDING])])
     scan = eng.scan(_obs(destination="mcp_tool"))
-    assert TIER3_TYPE not in _types(scan)
-    assert scan.degraded_reason == engine.GAP_TIMEOUT
 
-    monkeypatch.setattr(engine, "_in_time", real_in_time)
+    assert TIER3_TYPE not in _types(scan), (
+        "a scan that finished after its deadline was accepted")
+    assert scan.degraded_reason in (engine.GAP_TIMEOUT,)
+    assert CHEAP_TYPES <= _types(scan)
+
+
+def test_the_same_scan_inside_its_budget_is_accepted(tmp_path, monkeypatch):
+    """The control: `_in_time` must not reject everything."""
+    monkeypatch.setattr(engine, "TIER3_EGRESS_BUDGET", 5.0)
+    eng = _engine(tmp_path, [PathDetector(), SecretDetector(),
+                             _GilHog(0.05, [EMAIL_FINDING])])
     scan = eng.scan(_obs(destination="mcp_tool"))
-    assert TIER3_TYPE in _types(scan), "the same scan in time must be accepted"
+    assert TIER3_TYPE in _types(scan)
+    assert scan.degraded_reason is None
 
 
 class _FailingModel(StubModelDetector):

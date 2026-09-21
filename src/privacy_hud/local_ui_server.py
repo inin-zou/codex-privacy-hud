@@ -160,7 +160,7 @@ def _rule_confirmation(rule_type: str, selector: str) -> str:
     Matching is also on the whole value, normalised (known limit 10), so a
     model that summarizes what it read still sends it.
     """
-    conditions = mcp_tools.rule_enforcement_note(selector)
+    conditions = mcp_tools.rule_enforcement_note(rule_type, selector)
     if rule_type in ("block_path", "block_command"):
         return (f"Rule saved: block values from {selector}. It applies to "
                 "later outbound calls, not to anything already sent. Only "
@@ -169,7 +169,8 @@ def _rule_confirmation(rule_type: str, selector: str) -> str:
     return (f"Rule saved: {rule_type} {selector}, for this session. On later "
             "outbound calls this plugin checks, a detected "
             f"{selector} is masked unless the call is blocked outright."
-            + conditions)
+            " What the call is then allowed to do is decided by the rest of"
+            " the policy, not by this rule." + conditions)
 
 
 class _Handler(BaseHTTPRequestHandler):
