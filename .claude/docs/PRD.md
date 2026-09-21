@@ -375,7 +375,7 @@ Non-negotiable properties, and the first thing a judge will ask:
 - No telemetry, no analytics, no network calls from the plugin itself except to `127.0.0.1`.
 - A session's salt is discarded at `SessionEnd`, and its stored value hashes are nulled then.
 - Ledger DB is `0600`, under `PLUGIN_DATA`.
-- The tool must survive its own audit: running Privacy HUD on Privacy HUD produces zero exposures.
+- The tool must survive its own audit, on stated inputs: the committed self-audit corpus's clean half produces zero findings and its planted half is found (`docs/self-audit.md`). **This is an acceptance requirement, not a description of current behaviour** — four entries fail it today and are recorded as such. *(The unconditional "running Privacy HUD on Privacy HUD produces zero exposures" was measured false — 88%, 100% and 100% of budget on three read-only source reviews.)*
 
 ---
 

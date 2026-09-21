@@ -545,7 +545,7 @@ This connects directly to a piece of UI that already exists for a different reas
 4. **Side channels** — a determined agent could encode data to evade regex/NER. Detection is heuristic.
 5. **Model memorization** — nothing recalls data once disclosed.
 
-**Self-audit requirement.** The plugin makes no network calls except to `127.0.0.1`. Running Privacy HUD on its own development session must yield zero exposures; this is a test, not an aspiration.
+**Self-audit requirement.** The plugin makes no outbound network calls. On the committed self-audit corpus, the clean half must yield zero exposures and the planted half must be found (`tests/test_self_audit.py`). *(This said "running Privacy HUD on its own development session must yield zero exposures; this is a test, not an aspiration". It was neither: three read-only source reviews measured 88%, 100% and 100% of budget, and no test existed. `docs/self-audit.md` has the replacement, and why the old form was an invalid requirement rather than an untestable one.)*
 
 ---
 
@@ -560,9 +560,10 @@ This connects directly to a piece of UI that already exists for a different reas
 | Hook client | Fixture hook payloads on stdin → assert stdout JSON | No |
 | Consent loop | Token mint → consume → replay must fail | No |
 | End-to-end | Scripted Codex session; assert receipt matches expectation | Yes |
-| Self-audit | Run the plugin on its own session; assert zero exposures | Yes |
+| Self-audit (corpus) | `tests/fixtures/self_audit/`; clean half silent, planted half found | No |
+| Self-audit (session) | Run the plugin on a real session and record what it scored | Yes |
 
-Everything except the last two rows runs without Codex, which is what makes the build order in `PRD.md` §11 viable — the hard platform integration is isolated to one thin, fixture-testable client.
+Everything except the two `Yes` rows runs without Codex, which is what makes the build order in `PRD.md` §11 viable — the hard platform integration is isolated to one thin, fixture-testable client. The self-audit is split across both because the corpus half needs no session and the session half cannot be faked by one.
 
 ---
 

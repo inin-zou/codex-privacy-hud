@@ -45,7 +45,8 @@ Privacy HUD:  How much sensitive context has been disclosed?
 
 - 2026-09-15: patched Codex 0.154.0 builds for `aarch64-apple-darwin` and `x86_64-apple-darwin` are published on the GitHub release `codex-0.154.0-hud` and on the rolling `latest`. `install.sh` finds them.
 - 2026-09-15: the `privacy` status-line item now renders inside a patched Codex, and the macOS install is one command.
-- 2026-09-05: verified by hand against Codex CLI 0.153.0 that running the plugin on its own development session yields zero exposures (zero events, budget 0.0/120.0). It is **not** an automated test: it needs a live Codex session, which CI has neither the binary nor the network for.
+- 2026-09-21: the self-audit claim was withdrawn and replaced. Three read-only source-review sessions measured 88%, 100% and 100% of budget, against an invariant that said zero. What replaces it is a committed corpus with both controls — see [`docs/self-audit.md`](docs/self-audit.md), which also records the four entries it does not satisfy — two clean strings the model reports personal data in, and two addresses it misses or fragments.
+- 2026-09-05: verified by hand against Codex CLI 0.153.0 that one session reading `src/privacy_hud/budget.py` recorded zero events, budget 0.0/120.0. That run was real; the general claim drawn from it was not.
 
 ## Install
 
@@ -283,7 +284,7 @@ There is **no second LLM call to audit the first one.** That would re-transmit t
 - The ledger stores **metadata only** — types, counts, sources, destinations, timestamps, masked exemplars. There is no `content` column, no `prompt` column, no `raw_value` column. The schema *is* the guarantee.
 - Value identity uses a session-scoped salted HMAC held in memory and destroyed at session end, so cross-session correlation is impossible by construction.
 - No telemetry. No analytics. No network calls except `127.0.0.1`.
-- Running Privacy HUD on its own development session must yield zero exposures.
+- The self-audit is a committed corpus with both controls, and it is a **requirement the tool does not yet meet**: four of its entries fail — two ordinary development strings the model reports personal data in, and two addresses it misses or fragments. Each is recorded rather than tolerated. [`docs/self-audit.md`](docs/self-audit.md) has them, and says what a passing run does not prove. The older, wider promise — that a development session yields zero exposures — was withdrawn when measurement contradicted it.
 
 ### What the forwarder is, and what it is not
 
