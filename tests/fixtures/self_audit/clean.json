@@ -85,7 +85,7 @@
       "known_false_positive": {
         "data_type": "person",
         "value": "Bash",
-        "why": "The model reads the string value of a JSON `tool_name` field as a person's name, confidently. Known limit 7 records this class -- `\"Bash\"` appearing as a JSON string value scores 0.998-1.000 as `person` -- and the confidence floor cannot reach it without dropping real disclosures first."
+        "why": "The model reads the string value of a JSON `tool_name` field as a person's name. Measured on THIS input: mean token confidence 0.996. (Known limit 7's 0.998-1.000 figures are historical, from different strings of the same class -- a capitalised structured value.) The confidence floor cannot reach this without dropping real disclosures first."
       }
     },
     {
@@ -100,7 +100,7 @@
       "known_false_positive": {
         "data_type": "date",
         "value": "2026-09-21T11:04:18",
-        "why": "A log timestamp scores 1.000 as `date`, indistinguishable from a real date of birth in the same shape. Known limit 7 names this as one of the four classes no threshold separates."
+        "why": "A log timestamp is read as a `date`, indistinguishable from a date of birth in the same shape. Measured on THIS input: 0.951. (Known limit 7's 1.000 is historical, from a different timestamp.) One of the four classes no threshold separates."
       }
     },
     {

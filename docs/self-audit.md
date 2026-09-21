@@ -62,17 +62,23 @@ values only the model can find — email, person, phone and three addresses
 (tier 3). Every value is invented or a public landmark. The tier-3 half
 skips when the weights are not on the machine, which is CI.
 
-**Both halves run through both tiers.** That sounds obvious and was not: the
-first version of this suite ran only the cheap detectors over the clean
-corpus and reported green, while two of its own entries fired on the model.
-A false-positive corpus that never runs the detector producing the false
-positives is not a weaker check — it is a check of nothing, wearing the
-green tick of a real one. Review found it by running the model itself.
+**The clean half runs through both tiers; each planted entry runs through
+the tier it names.** The asymmetry is deliberate — a planted credential
+tests tier 1, and running the model at it would test nothing extra — but
+the clean half has to face every detector, because a false positive can
+come from any of them. The first version of this suite ran only the cheap
+detectors over the clean corpus and reported green while two of its own
+entries fired on the model. A false-positive corpus that never runs the
+detector producing the false positives is not a weaker check; it is a check
+of nothing wearing the green tick of a real one. Review found it by running
+the model itself. *(An earlier version of this paragraph said "both halves
+run through both tiers", which was the overclaim it was written to
+correct.)*
 
 ## What the corpus found on its first run
 
-Three of the twelve planted values are not detected. They are marked
-`known_gap` in the fixture and asserted as **strict** expected failures, so
+**Four entries fail the requirement: two clean, two planted.** Each is
+marked in its fixture and asserted as a **strict** expected failure, so
 closing one turns the suite red and forces the entry to be promoted — a
 non-strict marker would let a fixed detector sit behind a stale "we do not
 catch this" note, which is the drift this repository keeps finding in other
@@ -100,11 +106,11 @@ just the data type. A first version compared type sets, and three `address`
 findings satisfied "an address was found" while none of them was the
 address.
 
-One entry carries a `note` rather than a gap: `path-03` expects the finding
+Two entries carry a `note` rather than a gap. `path-03` expects the finding
 value `.pem`, not `server.pem`, because the detector reports the pattern it
-matched rather than the file it matched in. That is issue #44 and known
-limit 18, recorded here so the corpus states what the tool does rather than
-what it should do.
+matched rather than the file it matched in — issue #44 and known limit 18,
+recorded so the corpus states what the tool does rather than what it should
+do. `cred-03` carries the record of the false gap described above.
 
 Both directions matter. A detector that stops seeing planted credentials has
 failed at the only job that matters. A detector that fires on
@@ -129,9 +135,14 @@ detector run and a clean session sit at least:
 - **the boundary taxonomy**, where an allowed call is recorded as `exposed`
   before permission returns (#47 item 8).
 
-So the honest reading of a green run is *"the detectors behave on these
-inputs"*, and nothing wider. Closing the gap between that and the session
-number is the work those issues describe.
+So the honest reading of a green run is narrower still than *"the detectors
+behave on these inputs"*. It is: **no unrecorded regression appeared in the
+cases this corpus covers.** Four known violations pass as expected failures,
+every model check skips where the weights are absent — which is CI, so CI's
+green covers the cheap tiers only — and the corpus exercises detectors
+directly, never `is_sensitive_path`, so a mutation disabling the path guard
+entirely still passes. Closing the gap between that and the session number
+is the work those issues describe.
 
 ## What is deliberately not in the corpus
 

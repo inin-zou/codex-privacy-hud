@@ -284,7 +284,7 @@ There is **no second LLM call to audit the first one.** That would re-transmit t
 - The ledger stores **metadata only** — types, counts, sources, destinations, timestamps, masked exemplars. There is no `content` column, no `prompt` column, no `raw_value` column. The schema *is* the guarantee.
 - Value identity uses a session-scoped salted HMAC held in memory and destroyed at session end, so cross-session correlation is impossible by construction.
 - No telemetry. No analytics. No network calls except `127.0.0.1`.
-- The self-audit is a committed corpus with both controls, and it is a **requirement the tool does not yet meet**: four of its entries fail, each recorded rather than tolerated — two ordinary development strings the model reports personal data in, and two addresses it misses or fragments. [`docs/self-audit.md`](docs/self-audit.md) has them. The older, wider promise — that a development session yields zero exposures — was withdrawn when measurement contradicted it.
+- The self-audit is a committed corpus with both controls, and it is a **requirement the tool does not yet meet**: four of its entries fail — two ordinary development strings the model reports personal data in, and two addresses it misses or fragments. Each is recorded rather than tolerated. [`docs/self-audit.md`](docs/self-audit.md) has them, and says what a passing run does not prove. The older, wider promise — that a development session yields zero exposures — was withdrawn when measurement contradicted it.
 
 ### What the forwarder is, and what it is not
 

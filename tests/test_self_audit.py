@@ -2,15 +2,21 @@
 """I7's corpus: the clean half must be silent, the planted half must be found.
 
 I7 used to say "running Privacy HUD on this repo's own development session
-must produce zero exposures". That was false — three read-only source
-reviews measured 88%, 100% and 100% of budget — and it was false for
-sixteen days after the measurement, because the measurement lived in a
-commit message and nothing here could reach it.
+must produce zero exposures". Three read-only source reviews measured 88%,
+100% and 100% of budget, so the invariant was contradicted by the tool's own
+output. What it was not is unfalsifiable — one counterexample disproves it,
+and one arrived. It was an **invalid requirement**: sessions differ, and a
+session that reads a file holding a real address *should* record an
+exposure, so the rule asked a correct tool to fail.
 
-The replacement is narrower on purpose. "Zero on a development session" is
-not falsifiable: sessions differ, and a session that reads a file holding a
-real address *should* record an exposure. So the claim is about **stated
-inputs**, and the inputs are committed next to this file:
+(Both retracted phrasings — "not falsifiable", and a claim that the
+measurement went unexamined for sixteen days — were corrected in
+`CLAUDE.md` and `docs/self-audit.md` one commit before they were corrected
+here, which is why this paragraph exists as a separate act of maintenance
+rather than as part of that one.)
+
+So the claim is about **stated inputs**, and the inputs are committed next
+to this file:
 
   `clean.json`    ordinary development text with no personal data, no
                   credential and no sensitive path. Correct answer: nothing.
@@ -39,6 +45,7 @@ from pathlib import Path
 
 import pytest
 
+from privacy_hud.detect.base import is_available
 from privacy_hud.detect.paths import PathDetector
 from privacy_hud.detect.secrets import SecretDetector
 
@@ -95,6 +102,30 @@ def _scan(detectors, text: str) -> list:
     found = []
     for d in detectors:
         found.extend(d.scan(text, {"source": "self-audit"}))
+    return found
+
+
+def _scan_deeply(model, text: str) -> list:
+    """Scan with the model, and refuse to report a result it did not produce.
+
+    `ModelDetector.scan` catches an inference exception, marks itself
+    unavailable and returns `[]` — which is the honest thing for a detector
+    to do and a trap for a caller that reads "no findings" as "nothing
+    here". Checking availability only *before* the scan leaves exactly that
+    hole: one failed inference and every later clean entry is certified
+    clean by a model that never examined it. Review demonstrated it —
+    inference failed on `log-02` and the aggregate test passed anyway,
+    having silently stopped testing five entries.
+
+    So availability is read again afterwards, and a detector that went
+    unavailable during its own scan fails the test rather than passing it.
+    This is the same defect `engine._run_expensive` was fixed for in #47
+    item 6, one layer up, written by the same person on the same day.
+    """
+    found = model.scan(text, {"source": "self-audit"})
+    assert is_available(model), (
+        "the model marked itself unavailable during this scan, so its empty "
+        "result is a failure to examine the input, not a clean reading")
     return found
 
 
@@ -157,7 +188,7 @@ def test_a_clean_development_string_produces_no_deep_finding(entry):
     model = _model_detector()
     if model is None:
         pytest.skip("tier 3 weights are not on this machine")
-    found = _scan([model], entry["text"])
+    found = _scan_deeply(model, entry["text"])
     assert found == [], (
         f"{entry['id']} ({entry['kind']}) is ordinary {entry['kind']} with "
         f"nothing sensitive in it, and the model reported "
@@ -174,10 +205,17 @@ def test_the_clean_corpus_records_every_model_false_positive_it_has():
     if model is None:
         pytest.skip("tier 3 weights are not on this machine")
     for entry in _load("clean.json"):
-        fires = bool(_scan([model], entry["text"]))
-        recorded = bool(entry.get("known_false_positive"))
-        assert fires == recorded, (
-            f"{entry['id']}: model fires={fires}, fixture records={recorded}")
+        found = _scan_deeply(model, entry["text"])
+        # Compare what was found, not merely whether anything was. A
+        # boolean lets the recorded type and value drift away from the
+        # model's actual output while the test stays green — a marker that
+        # no longer describes the behaviour it excuses.
+        actual = sorted((f.data_type, f.value) for f in found)
+        fp = entry.get("known_false_positive")
+        expected = sorted([(fp["data_type"], fp["value"])] if fp else [])
+        assert actual == expected, (
+            f"{entry['id']}: model reports {actual}, fixture records "
+            f"{expected}")
 
 
 # ---------------------------------------------------------------------------
@@ -201,16 +239,18 @@ def test_a_planted_deep_tier_value_is_found(entry):
     model = _model_detector()
     if model is None:
         pytest.skip("tier 3 weights are not on this machine")
-    found = _scan([model], entry["text"])
+    found = _scan_deeply(model, entry["text"])
     for expected in entry["expect"]:
         # The VALUE, not just the type. A first version of this compared
         # data-type sets, and `address-03` — where the model splits one
         # street line into `42`, `Rue de Rivoli` and `75001` — passed it:
         # three `address` findings satisfy "an address was found" while no
-        # single finding carries the address. Task 12 masks on these
-        # offsets, so a fragmented span is a masking hole, and a check that
-        # cannot see it is a check that would have let the fragmentation
-        # bug in `detect/model.py`'s own docstring through again.
+        # single finding carries the address. What is lost is the reported
+        # value; masking is NOT broken by it, because `minimize_text`
+        # replaces all three fragments (an earlier version of this comment
+        # claimed otherwise without checking). A check that cannot see
+        # fragmentation would still have let the bug in `detect/model.py`'s
+        # own docstring through a second time.
         assert any(f.data_type == expected["data_type"]
                    and expected["value"] in f.value
                    for f in found), (
