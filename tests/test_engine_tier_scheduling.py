@@ -55,10 +55,12 @@ TIER3_TYPE = "email"
 class _SlowStub(StubModelDetector):
     """`StubModelDetector` that takes measurable time inside `scan()`.
 
-    The egress budget bounds admission, the wait for the model, and
-    inference. Only a detector that is slow *while holding the model* can
-    tell a real deadline from one that merely bounds the wait — which is the
-    distinction the first version of this change got wrong."""
+    The egress budget covers admission and the wait for the model, and
+    decides whether a late result is used — it does not bound inference
+    (see `engine.TIER3_EGRESS_BUDGET`). Only a detector that is slow
+    *while holding the model* can tell a deadline that governs the result
+    from one that only governs the lock wait, which is the distinction the
+    first version of this change got wrong."""
 
     def __init__(self, delay, findings):
         super().__init__(findings)
@@ -232,7 +234,7 @@ def test_an_oversized_egress_degrades_now_that_the_deep_scan_applies_there(tmp_p
 
 def test_an_egress_whose_budget_expires_reports_a_timeout_gap(tmp_path,
                                                               monkeypatch):
-    """The deadline covers inference, not just the wait for the lock.
+    """The deadline governs a scan that ran, not just the wait for the lock.
 
     The first version of this change took the lock with a timeout and then
     ran the scan unbounded, which bounds nothing — a slow forward pass could

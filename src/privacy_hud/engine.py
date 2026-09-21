@@ -31,12 +31,13 @@ task-8-report.md for the full account):
              it runs on the observation text only when under
              `MAX_TIER3_CHARS`; above that it is skipped entirely (not
              truncated-and-run). And, on egress only, by time and by
-             admission: one outbound deep scan runs at a time, and the
-             caller waits at most `TIER3_EGRESS_BUDGET` for it, because I6
-             turns a missed client deadline into a deny of a call that
-             should have been allowed. The budget bounds the WAIT and the
-             acceptance of a result, not inference itself — nothing here
-             can cancel a running model call. Whichever bound bites, the scan
+             admission: one outbound deep scan runs at a time, under
+             `TIER3_EGRESS_BUDGET`, because I6 turns a missed client
+             deadline into a deny of a call that should have been allowed.
+             Read that constant's comment for what the budget is and is
+             not — it is a requested timeout and a completion cutoff, and
+             restating it in shorter words is how five reviews found five
+             contradictory versions of it. Whichever bound bites, the scan
              carries a `GAP_*` reason, the `Decision` is `degraded`, and
              `Ledger.record_scan_gap` writes it down — so the session's
              coverage stops reading as complete and design.md §5's
@@ -195,27 +196,44 @@ _TIER3_LOCK = threading.Lock()
 # before the scan/observe split: a benign `curl .../health`, real answer
 # allow, took 2002ms behind six ingress scans and was denied.
 #
-# 1.0s is the egress deep scan's budget: how long the calling thread will
-# wait for a result, and the cutoff past which a result that arrives is
-# discarded rather than used (`_in_time`). It does NOT stop inference — a
-# model call already under way runs to completion on its worker, and Python
-# cannot cancel a C extension call mid-flight. Measured with this budget and
-# a detector that holds the interpreter: the call returned at 1.25s, having
-# correctly timed out and dropped the findings. "We stop waiting, and we do
-# not use what comes late" is the promise; "the scan is over at 1.0s" is not
-# one this design can make. The number is deliberately half the client's
-# 2.0s rather than as much of it as one warm scan (~430-540ms) seems to
-# leave spare, and the reason is the thing this bound does NOT cover.
+# --- THE CONTRACT. Every other surface points here; none restates it. -----
 #
-# It bounds the time `Engine.scan` spends on the deep scan. It is not a
-# proof that the hook round trip fits in 2.0s: `State.lock` contention,
-# sqlite, the socket and the client's own read are outside it, and nobody
-# has measured that distribution. Half is the split you can defend without
-# that measurement — the other half is margin for the parts nobody bounded,
-# not headroom to spend. `tests/test_daemon.py`'s lock-scope tests are
-# where a change to this number shows up as a number.
+# `TIER3_EGRESS_BUDGET` is two things, and neither of them is a clock:
 #
-# Ingress has no such budget and blocks for as long as the model takes:
+#   1. the timeout the caller REQUESTS of `task.done.wait()`, and
+#   2. the cutoff a worker's completion must beat for its findings to be
+#      used at all (`_in_time`).
+#
+# It does not stop inference. Python cannot cancel a running C extension
+# call, so a model call already under way runs to completion on its worker;
+# what the budget decides is whether anyone is still listening and whether
+# the result is allowed to count.
+#
+# It does not bound elapsed time either, and this is the part that reads
+# wrong every time someone paraphrases it. When a thread that asked for a
+# 1.0s timeout actually resumes is the operating system's business.
+# MEASURED: under this 1.0s budget, with a detector holding the
+# interpreter, the call returned at **1.25s** — it timed out correctly and
+# discarded the findings, 250ms after the number.
+#
+# And it does not bound the hook round trip: `State.lock` contention,
+# sqlite, the socket and the client's own read are all outside it, and
+# nobody has measured that distribution.
+#
+# Half of the client's 2.0s is the split you can defend without that
+# measurement — the other half is margin for the parts nobody bounded, not
+# headroom to spend. `tests/test_daemon.py`'s lock-scope tests are where a
+# change to this number shows up as a number.
+#
+# Why this paragraph is the only one: six review rounds found the same
+# contradiction five separate times, because the fact was restated at
+# seventeen surfaces in five different paraphrases — "waits at most",
+# "bounds the wait", "bounds the time Engine.scan spends", "gives up
+# after", "is now bounded" — each of which drifts back toward a wall-clock
+# promise. A claim restated in seventeen places drifts in seventeen
+# directions. Everywhere else now says "see `TIER3_EGRESS_BUDGET`".
+#
+# Ingress has no budget at all and blocks for as long as the model takes:
 # Ruling 3 makes its reply `{}` either way, so a slow ingress scan costs
 # latency and never a wrong answer.
 TIER3_EGRESS_BUDGET = 1.0
@@ -750,9 +768,9 @@ class Engine:
             # would only ever admit the categories that needed it least
             # (email/phone/SSN, which tiers 0-2 already have some coverage
             # for) and permanently exclude the rest. The guard already in
-            # this `if` (dest_kind), MAX_TIER3_CHARS below, and the egress
-            # budget are the intended cost bound, not a shape heuristic on
-            # top.
+            # this `if` (dest_kind) and MAX_TIER3_CHARS below are the cost
+            # bound, with `TIER3_EGRESS_BUDGET` limiting what egress waits
+            # for rather than what it costs — not a shape heuristic on top.
             ctx = {"source": obs.source}
             if len(obs.text) > MAX_TIER3_CHARS:
                 gap = GAP_OVERSIZE
@@ -764,7 +782,7 @@ class Engine:
         return findings, gap
 
     def _deep_scan_on_a_deadline(self, text, ctx, expensive, findings):
-        """The egress path: a bounded wait, and admitted one at a time.
+        """The egress path: a requested timeout, admitted one at a time.
 
         Returns a `GAP_*` reason, or None when the deep findings are in
         `findings`.
@@ -772,7 +790,9 @@ class Engine:
         Three properties, and each of them is the fix for a specific way the
         first version of this was wrong (#47 item 1, rejected in review):
 
-        **The deadline covers the wait and the result, not just the lock.** The
+        **The deadline covers the wait and the result, not just the lock**
+        — and covers neither inference nor elapsed time; see
+        `TIER3_EGRESS_BUDGET`. The
         first version took `_TIER3_LOCK` with a timeout and then ran the
         scan with no bound at all, which bounds nothing: inference is the
         slow part. A cold or oversized forward pass could still run past
