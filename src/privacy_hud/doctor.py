@@ -1534,8 +1534,8 @@ def check_plugin_install() -> Check:
     * **Installed but stale.** `WARN`. Codex installs a *copy*, so an edited
       `hooks/handler.py` in the checkout is not what runs until the plugin is
       re-added — the failure mode that has cost this project the most
-      debugging time. It is a warning rather than a failure because the
-      installed copy genuinely works; it just is not the code you are
+      debugging time. It is a warning rather than a failure because file
+      divergence alone does not establish a runtime failure; it just is not the code you are
       reading. The report names the diverging files so the difference between
       "my edit is not live" and "a README typo" is visible at a glance.
 
@@ -1650,8 +1650,8 @@ def check_plugin_install() -> Check:
         details=details + [
             f"Differs from this checkout: {shown}.",
             "Codex runs its own copy, so edits here are not live until you "
-            "re-add the plugin. The installed copy still works — it is just "
-            "not the code you are reading."],
+            "re-add the plugin. The installed copy differs from this "
+            "checkout; this comparison does not establish whether it works."],
         fixes=[f"codex plugin marketplace add {_shell_path(repo)} --json",
                f"codex plugin add {PLUGIN_NAME}@{marketplace} --json"],
     )
@@ -1707,52 +1707,150 @@ def _stderr_tail(text: str) -> str:
         last[:_STDERR_QUOTE_CHARS] + "…"
 
 
-def _mcp_tool_names(command, cwd, env, timeout) -> list[str]:
-    """Speak enough MCP over stdio to list a server's tools.
+#: The session id the doctor's ledger-read probe asks about. Fixed and
+#: synthetic: the probe reads, and must never name a real session.
+MCP_PROBE_SESSION = "__privacy_hud_doctor_probe__"
+
+#: The fields a `privacy.get_session_summary` reply carries.
+_SUMMARY_FIELDS = frozenset({"percent", "exposed_items", "destinations",
+                             "prevented"})
+
+
+def _mcp_probe(command, cwd, env, timeout) -> tuple[list[str], bool]:
+    """Speak enough MCP over stdio to list a server's tools and make one
+    ledger-backed call. Returns `(tool names, whether the call succeeded)`.
+
+    Listing alone is not enough: with MCP SDK 2.x every ledger-backed tool
+    failed on a worker thread (0.7.4 and earlier) while `tools/list` and the
+    settings-only tool kept answering, and this check passed. The call is
+    `privacy.get_session_summary` on `MCP_PROBE_SESSION`, a read: it adds no
+    session, policy, event or coverage row. A reply counts only if it is a
+    summary; zero totals are not evidence of monitoring and are not read as
+    any.
 
     Raw JSON-RPC rather than the `mcp` client SDK: one thing this check must
     be able to report is that the SDK is missing, which it cannot do if
-    importing the SDK is how it runs.
+    importing the SDK is how it runs. Requests are sent one at a time and
+    each answer read before the next, so the server never sees end-of-input
+    while a call is in flight.
 
-    A failure carries the server's own last stderr line as an exception note,
-    because that line is the diagnosis. The launcher writes `no usable
-    runtime.json (FileNotFoundError); run privacy-hud-setup`, or `runtime.json
-    is writable by others…`, and exits — and without this the user got
-    `the server did not start (ValueError)` and nothing else, while the real
-    answer sat unread in a pipe this function had already opened. A note
-    rather than a wrapper exception: the exception's class is what the
-    summary names, and `ValueError` there is more use than `_ProbeFailed`.
+    A failure to start carries the server's own last stderr line as an
+    exception note, because that line is the diagnosis (the launcher writes
+    `no usable runtime.json (FileNotFoundError); run privacy-hud-setup` and
+    exits). A failed call quotes nothing: a tool error or a traceback can
+    carry anything, and the check's summary is the whole answer.
     """
+    import queue
     import subprocess
+    import threading
 
     proc = subprocess.Popen(
         command, cwd=str(cwd), env=env, text=True,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    request = "".join(json.dumps(m) + "\n" for m in (
-        {"jsonrpc": "2.0", "id": 1, "method": "initialize",
-         "params": {"protocolVersion": "2024-11-05", "capabilities": {},
-                    "clientInfo": {"name": "privacy-hud-doctor",
-                                   "version": "1"}}},
-        {"jsonrpc": "2.0", "method": "notifications/initialized"},
-        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}))
-    try:
-        out, err = proc.communicate(request, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        _out, err = proc.communicate()
-        exc: Exception = TimeoutError("the server did not answer in time")
-        _attach_stderr(exc, err)
-        raise exc from None
-    for line in out.splitlines():
+    lines: queue.Queue = queue.Queue()
+
+    def pump() -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            lines.put(line)
+        lines.put(None)
+
+    threading.Thread(target=pump, daemon=True).start()
+    deadline = time.monotonic() + timeout
+
+    def send(*messages) -> None:
+        assert proc.stdin is not None
+        proc.stdin.write("".join(json.dumps(m) + "\n" for m in messages))
+        proc.stdin.flush()
+
+    def answer(request_id: int) -> dict | None:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("the server did not answer in time")
+            try:
+                line = lines.get(timeout=remaining)
+            except queue.Empty:
+                raise TimeoutError("the server did not answer in time") from None
+            if line is None:
+                return None
+            try:
+                message = json.loads(line)
+            except ValueError:
+                continue  # a server that logs to stdout, which ours never does
+            if isinstance(message, dict) and message.get("id") == request_id:
+                return message
+
+    def stderr_after_exit() -> str:
         try:
-            message = json.loads(line)
-        except ValueError:
-            continue  # a server that logs to stdout, which ours never does
-        if message.get("id") == 2 and "result" in message:
-            return sorted(t["name"] for t in message["result"].get("tools", []))
-    exc = ValueError("the server answered nothing this check could read")
-    _attach_stderr(exc, err)
-    raise exc
+            if proc.stdin is not None:
+                proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        return proc.stderr.read() if proc.stderr is not None else ""
+
+    listed = None
+    try:
+        try:
+            send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                  "params": {"protocolVersion": "2024-11-05",
+                             "capabilities": {},
+                             "clientInfo": {"name": "privacy-hud-doctor",
+                                            "version": "1"}}})
+            if answer(1) is not None:
+                send({"jsonrpc": "2.0", "method": "notifications/initialized"},
+                     {"jsonrpc": "2.0", "id": 2, "method": "tools/list",
+                      "params": {}})
+                listed = answer(2)
+        except BrokenPipeError:
+            listed = None
+        except TimeoutError as exc:
+            proc.kill()
+            _attach_stderr(exc, stderr_after_exit())
+            raise
+        if listed is None or "result" not in listed:
+            failure = ValueError(
+                "the server answered nothing this check could read")
+            _attach_stderr(failure, stderr_after_exit())
+            raise failure
+        names = sorted(t["name"] for t in listed["result"].get("tools", []))
+        try:
+            send({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                  "params": {"name": "privacy.get_session_summary",
+                             "arguments": {"session_id": MCP_PROBE_SESSION}}})
+            called = answer(3)
+        except (OSError, TimeoutError):
+            called = None
+        return names, _is_summary_reply(called)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
+def _is_summary_reply(message: dict | None) -> bool:
+    """Whether a `tools/call` answer is a successful summary."""
+    if not isinstance(message, dict) or "error" in message:
+        return False
+    result = message.get("result")
+    if not isinstance(result, dict) or result.get("isError") is True:
+        return False
+    content = result.get("content")
+    if not isinstance(content, list) or not content:
+        return False
+    first = content[0]
+    if not isinstance(first, dict) or not isinstance(first.get("text"), str):
+        return False
+    try:
+        summary = json.loads(first["text"])
+    except ValueError:
+        return False
+    return isinstance(summary, dict) and set(summary) == _SUMMARY_FIELDS
 
 
 def _attach_stderr(exc: Exception, err: str | None) -> None:
@@ -1829,7 +1927,7 @@ def check_mcp_server(timeout: float = MCP_TIMEOUT) -> Check:
     if data_dir is not None:
         env["PLUGIN_DATA"] = str(data_dir.parent)
     try:
-        names = _mcp_tool_names(command, root, env, timeout)
+        names, read_ok = _mcp_probe(command, root, env, timeout)
     except (OSError, ValueError, TimeoutError) as exc:
         # The launcher's own diagnosis, first, because it is the answer: it
         # names the cause (`no usable runtime.json (FileNotFoundError); run
@@ -1854,8 +1952,18 @@ def check_mcp_server(timeout: float = MCP_TIMEOUT) -> Check:
                     + ([f"missing: {', '.join(missing)}"] if missing else []),
             fixes=["A tool that can loosen protection must not be exposed — "
                    "see mcp/server.py::EXPOSED_TOOLS"])
+    if not read_ok:
+        return Check(
+            "MCP server", FAIL,
+            "server started, but the MCP ledger-read probe failed",
+            details=["The tools are listed, but a ledger-backed call "
+                     "(privacy.get_session_summary) did not return a "
+                     "summary. Codex reports nothing when a tool call fails."],
+            fixes=["Reinstall: ./install.sh",
+                   "Then: privacy-hud-doctor"])
     return Check("MCP server", OK,
-                 f"declared and answering — {len(names)} read/tighten-only tools")
+                 f"declared and answering — {len(names)} read/tighten-only "
+                 "tools; ledger read succeeded")
 
 
 # --------------------------------------------------------------------- #

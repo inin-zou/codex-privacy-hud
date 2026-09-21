@@ -101,6 +101,12 @@ RECEIPT_VERSION = 1
 #: interpreter that re-enters this file loops until the process table gives up.
 REEXEC_MARKER = "PRIVACY_HUD_MCP_REEXEC"
 
+#: What a ledger-backed tool reports when sqlite fails. Fixed text: the
+#: exception's own message could carry anything, and the tool must never
+#: return an empty summary or `saved: true` in its place.
+LEDGER_ERROR = ("Privacy HUD ledger operation failed; no successful result "
+                "is available.")
+
 #: I2: assigned into the child's environment last, after every merge, so an
 #: inherited value cannot turn the network back on in the pinned
 #: interpreter. A copy of `privacy_hud.offline.FORCED_ENV`, which this file
@@ -262,9 +268,17 @@ def _ledger_path() -> Path:
 
 
 def _open_ledger() -> "Ledger":
+    """The server's one ledger connection, with thread affinity off.
+
+    MCP SDK 2.x runs a synchronous tool on a worker thread, so the thread
+    that opens this connection is not the one that uses it. `build_app`
+    serializes every use and the close under one lock, which is the
+    condition `Ledger` states for turning affinity off. With affinity on,
+    every ledger-backed tool failed with `sqlite3.ProgrammingError` (0.7.4
+    and earlier)."""
     from privacy_hud.ledger import Ledger
     from privacy_hud.matrix.loader import load_matrix
-    return Ledger(_ledger_path(), load_matrix())
+    return Ledger(_ledger_path(), load_matrix(), check_same_thread=False)
 
 
 #: The tools the model may call, sorted. A tool belongs here only if calling
@@ -318,7 +332,7 @@ def build_app():
     `MCPServer` is the SDK 2.x name for what 1.x called `FastMCP`. The rename
     is why `pyproject.toml` bounds the extra at `mcp>=2` rather than leaving
     it bare: with no bound, which side of the rename an install lands on
-    depends on the day it ran. A venv built 2026-09-15 got 1.x and worked; the
+    depends on the day it ran. A venv built 2026-09-15 got 1.x and started; the
     same `install.sh` on 2026-09-20 got 2.2.0, `mcp.server.fastmcp` raised, the
     server never started, and -- in the doctor's words -- "Codex reports
     nothing when this happens: the plugin loads, and the tools are simply
@@ -339,10 +353,48 @@ def build_app():
             f"(original ImportError: {exc})"
         ) from exc
 
+    import asyncio
+    import contextlib
+    import sqlite3
+    import threading
+
+    from mcp.server.mcpserver.exceptions import ToolError
+
     from privacy_hud import mcp_tools
 
-    app = MCPServer("privacy-hud")
     ledger = _open_ledger()
+    # One lock for the connection: every tool body, including the
+    # `.as_dict()` that materializes its result, and the close at shutdown.
+    # It serializes this process's use of the connection whatever thread the
+    # SDK runs a tool on. It does not coordinate with the daemon, which is
+    # another process: sqlite arbitrates between processes.
+    lock = threading.Lock()
+
+    @contextlib.contextmanager
+    def tool_access():
+        with lock:
+            try:
+                yield
+            except sqlite3.Error:
+                # A fixed message, never the sqlite text (I1: an exception
+                # message is a string this plugin did not choose). No retry:
+                # a write that may have failed is reported as failed, never
+                # as `saved: true`.
+                raise ToolError(LEDGER_ERROR) from None
+
+    def close_ledger() -> None:
+        with lock:
+            ledger.conn.close()
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app):
+        try:
+            yield {}
+        finally:
+            # Waits for a tool that holds the connection, off the event loop.
+            await asyncio.to_thread(close_ledger)
+
+    app = MCPServer("privacy-hud", lifespan=lifespan)
 
     # The three read tools below end in `.as_dict()`. `mcp_tools` returns
     # `ledger.py`'s `SessionSummary`/`ExposureRow` dataclasses, and this is the
@@ -369,21 +421,24 @@ def build_app():
         services or recipients (known limit 20). `prevented` contributes
         exactly zero to the budget (I4).
         """
-        return mcp_tools.get_session_summary(ledger, session_id).as_dict()
+        with tool_access():
+            return mcp_tools.get_session_summary(ledger, session_id).as_dict()
 
     @app.tool(name="privacy.list_exposures")
     def list_exposures(session_id: str, tab: str) -> list[dict]:
         """Rows for one of the L2 tabs: "Exposed", "Prevented", or
         "All events" (design.md §5)."""
-        return [r.as_dict()
-                for r in mcp_tools.list_exposures(ledger, session_id, tab)]
+        with tool_access():
+            return [r.as_dict()
+                    for r in mcp_tools.list_exposures(ledger, session_id, tab)]
 
     @app.tool(name="privacy.get_exposure_detail")
     def get_exposure_detail(session_id: str, event_id: int) -> dict:
         """The L3 detail payload for one flow, keyed by its `events` row
         id (design.md §6)."""
-        return mcp_tools.get_exposure_detail(
-            ledger, session_id, event_id).as_dict()
+        with tool_access():
+            return mcp_tools.get_exposure_detail(
+                ledger, session_id, event_id).as_dict()
 
     @app.tool(name="privacy.update_policy")
     def update_policy(session_id: str, rule_type: str, selector: str) -> dict:
@@ -397,13 +452,12 @@ def build_app():
         comparison and not a summary of what was read (known limit 10).
         `rule_type="block_source"` is refused (#38): it named a label, not a
         source, and `block_path`/`block_command` are the replacement rather
-        than a revival of it. A `mask` rule on a data
-        type the engine hard-blocks (`credential`) is refused as well: that
-        rule would take effect ahead of the block and replace it with an
-        executed, masked call, which is the only way this tool could ever
-        loosen enforcement."""
-        mcp_tools.apply_policy(ledger, session_id, rule_type=rule_type,
-                                selector=selector)
+        than a revival of it. A `mask` rule naming a hard-blocked data type
+        (`credential`) is refused because it is inert: the engine preserves
+        the hard block regardless of matching mask rules."""
+        with tool_access():
+            mcp_tools.apply_policy(ledger, session_id, rule_type=rule_type,
+                                   selector=selector)
         # `saved`, not `applied`. The rule is in the policy table; whether it
         # ever fires depends on a later call producing a finding it matches.
         # For every type outside `mcp_tools.CHEAP_DATA_TYPES`, matching

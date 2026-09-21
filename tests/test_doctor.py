@@ -48,6 +48,7 @@ import sys
 import tempfile
 import textwrap
 import threading
+import time
 import tomllib
 from pathlib import Path
 
@@ -65,7 +66,7 @@ BANNED = ("undo", "revoke", "remove from context", "your data is protected",
           "100% secure")
 
 
-def _fake_mcp_server_body(tools, *, crash=False, says="") -> str:
+def _fake_mcp_server_body(tools, *, crash=False, says="", call="ok") -> str:
     """The stdlib stdio MCP server body `_write_fake_plugin` and the
     all-green end-to-end test both ship: answers `initialize` and
     `tools/list`, nothing else. Real enough to prove the handshake, small
@@ -73,15 +74,20 @@ def _fake_mcp_server_body(tools, *, crash=False, says="") -> str:
     conversation, not FastMCP's.
 
     `says` makes it die the way the real launcher dies: one line of cause on
-    stderr, nothing on stdout, non-zero exit."""
+    stderr, nothing on stdout, non-zero exit.
+
+    `call` is how it answers the doctor's ledger-read probe (`tools/call`):
+    "ok" a summary, "error" a tool error carrying a sentinel payload,
+    "malformed" a result that is not a summary, "hang" no answer at all."""
     if crash:
         if says:
             return (f"import sys; print({says!r}, file=sys.stderr); "
                     "sys.exit(1)\n")
         return "import sys; sys.exit(3)\n"
     return f"""
-import json, sys
+import json, sys, time
 TOOLS = {tools!r}
+CALL = {call!r}
 for line in sys.stdin:
     line = line.strip()
     if not line:
@@ -95,12 +101,27 @@ for line in sys.stdin:
         sys.stdout.write(json.dumps({{"jsonrpc": "2.0", "id": msg["id"],
             "result": {{"tools": [{{"name": n, "inputSchema": {{"type": "object"}}}}
                                  for n in TOOLS]}}}}) + "\\n")
+    elif msg.get("method") == "tools/call":
+        if CALL == "hang":
+            time.sleep(60)
+        elif CALL == "error":
+            result = {{"isError": True, "content": [{{"type": "text",
+                "text": "SENTINEL-tool-error-payload-7d2e"}}]}}
+        elif CALL == "malformed":
+            result = {{"content": [{{"type": "text", "text": "[]"}}]}}
+        else:
+            result = {{"content": [{{"type": "text", "text": json.dumps(
+                {{"percent": 0, "exposed_items": 0, "destinations": 0,
+                  "prevented": 0}})}}]}}
+        if CALL != "hang":
+            sys.stdout.write(json.dumps({{"jsonrpc": "2.0", "id": msg["id"],
+                "result": result}}) + "\\n")
     sys.stdout.flush()
 """
 
 
 def _write_fake_plugin(root, *, tools, declare=True, crash=False, says="",
-                       server_name="privacy-hud"):
+                       server_name="privacy-hud", call="ok"):
     """A plugin directory shaped like an installed one, whose `mcp/server.py`
     is a stdlib stdio MCP server answering `initialize` and `tools/list`.
 
@@ -119,7 +140,8 @@ def _write_fake_plugin(root, *, tools, declare=True, crash=False, says="",
         json.dumps(manifest), encoding="utf-8")
     (root / "mcp").mkdir(parents=True, exist_ok=True)
     (root / "mcp" / "server.py").write_text(
-        _fake_mcp_server_body(tools, crash=crash, says=says), encoding="utf-8")
+        _fake_mcp_server_body(tools, crash=crash, says=says, call=call),
+        encoding="utf-8")
 
 
 # --------------------------------------------------------------------- #
@@ -1461,6 +1483,97 @@ def test_check_mcp_server_reads_the_server_the_manifest_names(
     assert check.status == doctor.FAIL
     assert "somebody-elses-server" in " ".join(check.details)
     assert doctor.MCP_SERVER_NAME in check.summary
+
+
+def test_check_mcp_server_fails_when_list_succeeds_but_call_errors(
+        monkeypatch, tmp_path):
+    """The failure 0.7.4 and earlier shipped with MCP SDK 2.x: the tools
+    listed, every ledger-backed call errored, and listing was all this
+    check looked at."""
+    monkeypatch.setattr(doctor, "_installed_plugin_root", lambda: tmp_path)
+    _write_fake_plugin(tmp_path, tools=list(doctor.MCP_TOOLS), call="error")
+    check = doctor.check_mcp_server(timeout=30)
+    assert check.status == doctor.FAIL
+    assert check.summary == ("server started, but the MCP ledger-read probe "
+                             "failed")
+
+
+def test_check_mcp_server_fails_on_malformed_tool_result(monkeypatch,
+                                                         tmp_path):
+    monkeypatch.setattr(doctor, "_installed_plugin_root", lambda: tmp_path)
+    _write_fake_plugin(tmp_path, tools=list(doctor.MCP_TOOLS),
+                       call="malformed")
+    check = doctor.check_mcp_server(timeout=30)
+    assert check.status == doctor.FAIL
+    assert "ledger-read probe failed" in check.summary
+
+
+def test_check_mcp_server_fails_when_tool_call_times_out(monkeypatch,
+                                                         tmp_path):
+    monkeypatch.setattr(doctor, "_installed_plugin_root", lambda: tmp_path)
+    _write_fake_plugin(tmp_path, tools=list(doctor.MCP_TOOLS), call="hang")
+    started = time.monotonic()
+    check = doctor.check_mcp_server(timeout=3)
+    assert time.monotonic() - started < 20, "the child was not cleaned up"
+    assert check.status == doctor.FAIL
+    assert "ledger-read probe failed" in check.summary
+
+
+def test_check_mcp_server_does_not_echo_tool_error_payload(monkeypatch,
+                                                           tmp_path):
+    """A tool error can carry anything; the report quotes none of it."""
+    monkeypatch.setattr(doctor, "_installed_plugin_root", lambda: tmp_path)
+    _write_fake_plugin(tmp_path, tools=list(doctor.MCP_TOOLS), call="error")
+    check = doctor.check_mcp_server(timeout=30)
+    text = " ".join([check.summary, *check.details, *check.fixes])
+    assert "SENTINEL-tool-error-payload-7d2e" not in text
+
+
+def test_check_mcp_server_probe_does_not_write_ledger_rows(monkeypatch,
+                                                           tmp_path):
+    """Against the real `mcp/server.py`: the probe passes, and every table
+    holds exactly what it held before -- no session, policy, event or
+    coverage row for the probe's synthetic session."""
+    import shutil
+
+    from privacy_hud.ledger import Ledger
+    from privacy_hud.matrix.loader import load_matrix
+
+    repo = Path(__file__).resolve().parents[1]
+    root = tmp_path / "plugin"
+    _write_fake_plugin(root, tools=list(doctor.MCP_TOOLS))
+    shutil.copy(repo / "mcp" / "server.py", root / "mcp" / "server.py")
+    data = tmp_path / "data"
+    data.mkdir()
+    led = Ledger(data / "ledger.db", load_matrix())
+    led.start_session("real", cwd="/r", model="gpt-5")
+    led.conn.close()
+    receipt = data / "runtime.json"
+    receipt.write_text(json.dumps({
+        "v": 1, "python": sys.executable, "pythonpath": str(repo / "src"),
+        "plugin_data": str(data), "env": {}}), encoding="utf-8")
+    receipt.chmod(0o600)
+
+    def counts() -> dict[str, int]:
+        conn = sqlite3.connect(data / "ledger.db")
+        try:
+            tables = [r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")]
+            return {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                    for t in tables}
+        finally:
+            conn.close()
+
+    before = counts()
+    monkeypatch.setattr(doctor, "_installed_plugin_root", lambda: root)
+    monkeypatch.setattr(doctor, "_ledger_path", lambda: data / "ledger.db")
+    monkeypatch.delenv("PRIVACY_HUD_MCP_REEXEC", raising=False)
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "no-codex-home"))
+    check = doctor.check_mcp_server(timeout=60)
+    assert check.status == doctor.OK, (check.summary, check.details)
+    assert check.summary.endswith("ledger read succeeded")
+    assert counts() == before
 
 
 def test_the_doctor_probes_the_server_the_real_manifest_declares():

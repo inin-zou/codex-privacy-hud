@@ -656,3 +656,26 @@ def test_a_gap_row_holds_nothing_about_what_the_payload_contained(led):
     led.record_scan_gap("s1", boundary="B3", reason="timeout")
     row = dict(led.conn.execute("SELECT * FROM scan_gaps").fetchone())
     assert set(row) == {"id", "session_id", "ts", "boundary", "reason"}
+
+
+def test_default_connection_retains_thread_affinity(tmp_path):
+    """Thread affinity stays on by default: only a caller that serializes
+    every use (the daemon's `State.lock`, the MCP server's tool lock) may
+    turn it off, and it has to say so."""
+    import sqlite3
+    import threading
+
+    led = Ledger(tmp_path / "affinity.db", M)
+    errors: list[BaseException] = []
+
+    def elsewhere():
+        try:
+            led.conn.execute("SELECT 1").fetchone()
+        except BaseException as exc:            # noqa: BLE001
+            errors.append(exc)
+
+    t = threading.Thread(target=elsewhere)
+    t.start()
+    t.join()
+    led.conn.close()
+    assert len(errors) == 1 and isinstance(errors[0], sqlite3.ProgrammingError)
