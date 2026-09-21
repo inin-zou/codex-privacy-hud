@@ -587,3 +587,67 @@ def test_record_defaults_source_kind_to_null(led):
                tool_name="Bash", protection=None)
     assert led.conn.execute(
         "SELECT source_kind FROM events").fetchone()["source_kind"] is None
+
+
+# ---------------------------------------------------------------------------
+# scan_gaps: the deep scans that did not run (#47 items 1 and 6).
+# ---------------------------------------------------------------------------
+
+def test_the_gap_reasons_the_engine_writes_are_the_ones_this_schema_documents():
+    """`record_scan_gap` cannot validate `reason` — `ledger` is imported BY
+    `engine`, so it cannot import the taxonomy back. This is the check that
+    stands in for that validation, and it is the reason the docstring can
+    promise the two lists agree.
+
+    A reason the schema comment does not list is not a cosmetic mismatch: the
+    comment is what a reader consults to find out what a row means, and a
+    value it does not mention reads as data nobody wrote down on purpose."""
+    from privacy_hud import engine
+
+    written = {engine.GAP_OVERSIZE, engine.GAP_UNAVAILABLE,
+               engine.GAP_BUSY, engine.GAP_TIMEOUT}
+    line = next(ln for ln in SCHEMA.splitlines() if "oversize|" in ln)
+    documented = set(line.split("--")[1].strip().split("|"))
+    assert written == documented
+
+
+def test_a_gap_makes_the_session_unverified_and_names_the_count(led):
+    assert led.coverage("s1").verified is True
+    led.record_scan_gap("s1", boundary="B3", reason="timeout")
+    led.record_scan_gap("s1", boundary="B3", reason="busy")
+
+    cov = led.coverage("s1")
+    assert cov.shallow_scans == 2
+    assert cov.verified is False
+    assert cov.reason == "2 observations got the fast detectors only"
+
+
+def test_one_gap_reads_as_singular(led):
+    led.record_scan_gap("s1", boundary="B4", reason="oversize")
+    assert led.coverage("s1").reason == "1 observation got the fast detectors only"
+
+
+def test_gaps_are_not_deduped(led):
+    """Append-only, and deliberately not `INSERT OR IGNORE` like `coverage`:
+    two outbound calls that each lost their deep scan are two lost scans, and
+    collapsing them would under-report exactly the burst case the admission
+    control in `engine` exists to handle."""
+    for _ in range(3):
+        led.record_scan_gap("s1", boundary="B3", reason="busy")
+    assert led.scan_gaps("s1") == 3
+
+
+def test_a_gap_in_another_session_does_not_count_against_this_one(led):
+    led.start_session("s2", cwd="/repo", model="gpt-5")
+    led.record_scan_gap("s2", boundary="B3", reason="timeout")
+    assert led.scan_gaps("s1") == 0
+    assert led.coverage("s1").verified is True
+
+
+def test_a_gap_row_holds_nothing_about_what_the_payload_contained(led):
+    """I1, checked at the schema rather than trusted: this table records a
+    scan that did not happen, and a scan that did not happen has even less
+    business holding content than one that did."""
+    led.record_scan_gap("s1", boundary="B3", reason="timeout")
+    row = dict(led.conn.execute("SELECT * FROM scan_gaps").fetchone())
+    assert set(row) == {"id", "session_id", "ts", "boundary", "reason"}

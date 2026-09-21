@@ -133,6 +133,28 @@ This says nothing about what happens *inside* a subagent's own session, which ha
 
 The `destinations` tile therefore counts boundary categories — a handful at most — not services. `architecture.md` specifies `subagent:<id>`, `mcp:<server>` and `net:<host>`; that detail is stripped today.
 
+## 21. On an outbound call, the deep scan is best-effort.
+
+Until #47 item 1 the deep scan never ran on an outbound call at all, so `email`, `person`, `address`, `phone` and `account` — the five types only it can find — could not appear on any egress row, whatever the tool was sending. It runs there now, under a bound the ingress path does not have.
+
+The model is a serial resource: one inference pipeline, one lock, around half a second per scan on the machine it was measured on. The hook client gives the daemon 2.0 s per socket operation, and I6 turns a missed deadline on an outbound call into a **deny**. Before this, an egress decision was regex-only and never waited for the model (it still waited for the ledger lock, as every request does); a version that simply queued behind other sessions' scans would have reproduced a failure already measured here — a benign `curl https://example.com/health` denied, at 2002 ms, because six unrelated ingress scans were in flight.
+
+So an outbound call waits at most `engine.TIER3_EGRESS_BUDGET` (1.0 s — half the client's budget, the other half left as margin for the parts this does not bound), and one outbound scan runs at a time. A second outbound call while one is in flight does not queue: it takes the fast tiers immediately.
+
+**The budget bounds the wait, not the scan.** Nothing here stops a model call that is already running — Python cannot cancel one — so what the budget guarantees is that the call stops *waiting* at 1.0 s, and that a result arriving after that is discarded rather than used. The inference finishes on its own thread, releases the slot for the next call, and its findings go nowhere. Measured with this budget and a detector that holds the interpreter: the call returned at 1.25 s, reported a timeout, and dropped the findings.
+
+**This bounds the deep scan, not the round trip.** What is bounded is the time the detection phase spends waiting for, and accepting the result of, the deep scan — not the time the whole request takes. Lock contention on the ledger, sqlite and the socket are outside it, and nobody has measured the end-to-end distribution against the client's 2.0 s, so this is a guard against the failure that was measured, not a proof that the hook always answers in time.
+
+**The fallback is not decision-neutral.** It is tempting to say only the record suffers, and that is wrong: `detect/model.py`'s label map includes `SECRET`, so the deep scan can produce the `credential` finding that blocks a call, and a `mask` rule can only fire on a finding some tier actually produced. An outbound call that falls back to the fast tiers can therefore be allowed where a completed scan would have denied it, and can go unmasked where a completed scan would have masked it. That is exactly what every outbound call did before #47 item 1, which is why it is an acceptable fallback — and why it is recorded rather than silent.
+
+**What you see.** Each skipped scan writes a row to `scan_gaps`, so `coverage` for that session stops reading as verified instead of showing a clean account. The banner names one reason at a time and the shallow-scan count is the last of them, so a session that *also* started unobserved or survived a daemon restart shows that instead — the account is still marked incomplete, but the line you read will not mention the scans. That covers the case a per-event flag could not: an outbound call whose fast tiers found nothing and whose deep scan was skipped writes no event row at all, and would otherwise be indistinguishable from a call that was fully scanned and was clean. The same recording now applies to the other ways a qualifying deep scan can fail to cover an observation: a payload over `engine.MAX_TIER3_CHARS` (8192 characters), a machine whose weights never loaded, and — since it used to be the one that looked cleanest — an inference that raised. That last one returned an empty result and was counted as a scan that ran and found nothing; the detector now marks itself unavailable instead, so the gap is recorded like the rest.
+
+One consequence of that worth knowing: a detector that fails mid-inference marks itself unavailable and stays that way for the life of the daemon, so a single transient failure takes the deep scan out until the daemon restarts (five minutes after your last session ends, or sooner if you restart it). Every later observation *that the deep scan would have applied to* is recorded as a gap — a local read is not one, since the deep scan never runs there — so those sessions are marked rather than silently shallow. They are all shallow.
+
+What is still missing is *which* calls: the gap count is per session, and no individual row is marked.
+
+How often this happens has not been measured on real sessions. The contention half needs a second scan in flight, which one idle session will not produce — but the size cap and a model that fails to load or fails mid-inference do not need contention at all, and the last of those is a scan that ran, crashed, and is counted here because it cannot be told apart from one that found nothing.
+
 ## Note on tests
 
 `cargo test -p codex-tui` and the upstream `insta` picker snapshots have not been run anywhere.

@@ -89,7 +89,7 @@ def test_detail_offers_no_source_action_for_a_bare_tool_label():
 def test_detail_golden_for_a_path_origin_row():
     row = replace(ROW, source=".env", source_kind="path")
     assert detail(row).endswith(
-        "\n[ Protect future occurrences ]\n"
+        "\n[ Mask detected email in future calls ]\n"
         "[ Block values read from .env ]\n"
         "\nAlready disclosed data cannot be recalled from this session.")
 
@@ -102,7 +102,7 @@ def test_detail_golden_for_a_command_origin_row():
     named as output, not as a file that was read (`origin.origin_phrase`)."""
     row = replace(ROW, source="git log", source_kind="command")
     assert detail(row).endswith(
-        "\n[ Protect future occurrences ]\n"
+        "\n[ Mask detected email in future calls ]\n"
         "[ Block values from `git log` output ]\n"
         "\nAlready disclosed data cannot be recalled from this session.")
 

@@ -294,7 +294,7 @@ DETAIL_EMAIL = (
     "Example      jo•••@acme.com\n"
     "Budget       +6 pts of 120\n"
     "\n"
-    "[ Protect future occurrences ]\n"
+    "[ Mask detected email in future calls ]\n"
     "\n"
     "Already disclosed data cannot be recalled from this session."
 )
@@ -308,7 +308,7 @@ DETAIL_MASKED_PATH = (
     "Example      /Users/•••/app.log\n"
     "Budget       +0.6 pts of 120\n"
     "\n"
-    "[ Protect future occurrences ]\n"
+    "[ Mask detected path in future calls ]\n"
     "\n"
     "Already disclosed data cannot be recalled from this session."
 )
@@ -318,8 +318,8 @@ DETAIL_MASKED_PATH = (
 #:
 #: This row's `source_kind` is "path" (Task 2/3: ingress dispatch now records
 #: where a value actually came from), so it also pins the L3 origin action
-#: (#40): a row naming a real origin gets a second action line, after
-#: "Protect future occurrences", offering to block that exact origin.
+#: (#40): a row naming a real origin gets a second action line, after the
+#: mask action, offering to block that exact origin.
 DETAIL_CREDENTIAL = (
     "Credential ×1\n"
     ".env → external_net\n"
@@ -328,7 +328,7 @@ DETAIL_CREDENTIAL = (
     "Protection   blocked\n"
     "Budget       +0 pts of 120\n"
     "\n"
-    "[ Protect future occurrences ]\n"
+    "[ Mask detected credential in future calls ]\n"
     "[ Block values read from .env ]\n"
     "\n"
     "Already disclosed data cannot be recalled from this session."
@@ -495,9 +495,14 @@ JSON_SUMMARY = {"percent": 6, "exposed_items": 2, "destinations": 2,
 #: `Ledger.start_session`, which records a `session_start` coverage row. That is
 #: the ordinary path, and it is what keeps every other golden in this file where
 #: it was.
+#: `shallow_scans` joined this payload in #47 item 1/6: it counts the
+#: observations whose deep scan applied and did not run, and it is the fourth
+#: thing that can make `verified` false. Additive — a client that does not
+#: know the key still reads `verified` and `reason`, which is why it was safe
+#: to change this golden rather than version the endpoint.
 JSON_UI_SUMMARY = dict(JSON_SUMMARY, coverage={
     "verified": True, "reason": "", "recorded": True, "observers": 1,
-    "attached": False, "unobserved_hooks": False,
+    "attached": False, "unobserved_hooks": False, "shallow_scans": 0,
 })
 
 JSON_ROWS = [

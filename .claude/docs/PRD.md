@@ -70,7 +70,7 @@ The gap: **there is no per-session, content-aware, local record of what an agent
 |---|---|---|
 | **Solo dev on a client codebase** | Agent reads logs/`.env`; unclear what left the machine | Level 1 HUD, `$privacy` before pasting a bug report |
 | **Support/ops engineer** | Triages logs full of real customer PII | `Prevented` tab, minimization on outbound MCP/HTTP |
-| **Privacy-conscious individual** | Personal agent touches personal files | Level 3 detail, `Protect future occurrences` |
+| **Privacy-conscious individual** | Personal agent touches personal files | Level 3 detail, `Mask detected <type> in future calls` |
 | **Team lead evaluating agents** | Needs an answer to "what does it send?" | Session privacy receipt at `SessionEnd` |
 
 ### Primary scenario (demo narrative)
@@ -187,7 +187,7 @@ First seen   12:41:08
 Protection   none
 Example      jo•••@acme.com
 
-[ Protect future occurrences ]
+[ Mask detected email in future calls ]
 
 Already disclosed data cannot be recalled from this session.
 ```
@@ -390,7 +390,7 @@ Non-negotiable properties, and the first thing a judge will ask:
 - [ ] Metadata-only SQLite ledger + budget math with the §5.3 invariants tested
 - [ ] `$privacy` skill
 - [ ] Local interactive audit UI: `Exposed / Prevented / All events` + exposure detail
-- [ ] Actions: `Protect future occurrences`, `Allow once`, and — on a row that names a real origin — `block_path`/`block_command` (#40; the earlier `Block this source`/`block_source` stays withdrawn, #38)
+- [ ] Actions: `Mask detected <type> in future calls`, `Allow once`, and — on a row that names a real origin — `block_path`/`block_command` (#40; the earlier `Block this source`/`block_source` stays withdrawn, #38)
 - [ ] One real MCP outbound minimization demo, end to end
 
 ### Should

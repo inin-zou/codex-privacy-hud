@@ -626,7 +626,7 @@ def detail(row: ExposureRow) -> str:
       why that field is optional and `None` when unknown, rather than
       defaulted), since fabricating 120 as a hardcoded constant here would
       silently go stale the moment tables.toml's budget_cap is retuned.
-    - `Protect future occurrences` is always rendered; a second action line,
+    - `Mask detected <type> in future calls` is always rendered; a second line,
       `Block values read from {source}` or `` Block values from `{source}`
       output ``, follows it only when `row.source_kind` is `"path"` or
       `"command"` -- i.e. only when `source` names a real origin rather than
@@ -672,7 +672,12 @@ def detail(row: ExposureRow) -> str:
             contrib += f" of {row.budget_cap:g}"
         lines.append(f"{'Budget':<12} {contrib}")
 
-    lines += ["", "[ Protect future occurrences ]"]
+    # Names the action, not an outcome. "Protect future occurrences"
+    # promised protection the rule cannot guarantee: it fires when a later
+    # call produces a matching finding, and for every type but `path` that
+    # needs the deep scan to have run (#49 item 2). `ui/app.js` renders the
+    # same label, so the two surfaces cannot drift apart.
+    lines += ["", f"[ Mask detected {row.data_type} in future calls ]"]
     # An unrecognised `source_kind` offers nothing, rather than a button
     # whose rule would never match (#40). The wording comes from
     # `origin.origin_phrase`, which the engine's deny message also uses, so

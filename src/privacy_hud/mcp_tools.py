@@ -34,7 +34,7 @@ and a dataclass can never reach `json.dumps` unserialized.
 **`apply_policy` and enforcement — read before wiring UI actions to this.**
 `apply_policy` writes a row to the `policy` table (schema from ledger.py /
 architecture.md §5) exactly as `Engine.observe` needs to read it to make
-"Protect future occurrences" real. `Engine.observe`
+"Mask detected <type> in future calls" real. `Engine.observe`
 (src/privacy_hud/engine.py) queries the `policy` table on every egress
 observation, before falling back to `Matrix.default_action()` (the static
 mask/block table in tables.toml): a user-written `mask` rule forces a
@@ -164,7 +164,7 @@ _ALLOW_DEST_WITHDRAWN = (
 #: with *every* finding on the observation, not with the finding that
 #: triggered the block, so a mask rule on any type that merely co-occurred
 #: with a hard-blocked one — a path on the same command line, the selector
-#: one click of the audit UI's "Protect future occurrences" writes — skipped
+#: one click of the audit UI's mask action writes — skipped
 #: the block for the whole call. Those selectors are innocuous and this
 #: function accepts them, so no refusal keyed on a selector could ever have
 #: covered that case.
@@ -194,6 +194,69 @@ _MASK_WOULD_DOWNGRADE = (
     "that protection was applied — and no path removes a rule once written "
     "(known limit 13). Nothing to do: the block is already the stronger "
     "outcome.")
+
+#: The data types the always-on cheap tiers can produce, and therefore the
+#: only ones a rule can match without a successful deep scan: `path` from
+#: `detect/paths.py` and `credential` from `detect/secrets.py`. Everything
+#: else in `detect/model.py`'s LABEL_MAP — person, address, email, phone,
+#: url, date, account — exists only if tier 3 ran.
+#:
+#: This distinction is why `rule_enforcement_note` does not give every rule
+#: the same caveat. Telling a user that a `path` rule might not fire because
+#: the deep scan was busy would be its own false statement, in the opposite
+#: direction: the path detector runs on every observation, at every
+#: boundary, at any size.
+CHEAP_DATA_TYPES = frozenset({"path", "credential"})
+
+#: What a saved rule can and cannot promise, appended to every confirmation.
+#:
+#: Saving a rule is not enforcing it, and the gap between the two is not a
+#: detail: a user who reads "enforced" and goes on to send the data has made
+#: a decision this plugin then cannot honour and cannot reverse (I5). Each
+#: clause below is a way a written rule leaves a value unchanged, and none
+#: of them is visible to the person clicking the button.
+#:
+#: Three strings rather than one, because the caveat is not uniform and a
+#: uniform one would be its own false statement. The first draft of this
+#: had exactly that bug: it keyed only on `selector`, so a `block_path` rule
+#: on `/home/u/.env` — whose selector is a file path, not a data type —
+#: fell through to the deep-scan text and was told its matching "needs the
+#: deep scan", while an origin that happened to be named `path` got the
+#: cheap text. An origin rule matches on where a value came from, which is
+#: a different question from which tier found it.
+_RULE_CONDITIONS_DEEP = (
+    " Matching {selector} needs the deep scan, which is skipped when it is "
+    "busy, out of time, over the size limit, or unavailable (known limit "
+    "21) — on those calls the rule matches nothing. Detection can also miss "
+    "values, and hosted tools never reach this plugin at all.")
+
+_RULE_CONDITIONS_CHEAP = (
+    " Detection is heuristic and can miss values, and hosted tools never "
+    "reach this plugin at all — on a call where nothing is detected the "
+    "rule matches nothing.")
+
+_RULE_CONDITIONS_ORIGIN = (
+    " It needs the value detected twice: once on the way in, for this "
+    "session to learn it came from there, and again on the outbound call "
+    "it should stop. Either can be missed — detection is heuristic, and a "
+    "deep scan that is busy, out of time, over the size limit or "
+    "unavailable (known limit 21) sees neither. Hosted tools never reach "
+    "this plugin at all.")
+
+
+def rule_enforcement_note(rule_type: str, selector: str) -> str:
+    """The conditions clause for one saved rule.
+
+    `rule_type` decides the shape of the question and `selector` only
+    refines it: an origin rule's selector is a path or a command, and
+    asking whether *that* is a cheap data type is a category error.
+    """
+    if rule_type in ("block_path", "block_command"):
+        return _RULE_CONDITIONS_ORIGIN
+    if selector in CHEAP_DATA_TYPES:
+        return _RULE_CONDITIONS_CHEAP
+    return _RULE_CONDITIONS_DEEP.format(selector=selector)
+
 
 #: How close two sessions' last hook events have to be, in seconds, before
 #: "which of these is the caller?" stops being answerable.

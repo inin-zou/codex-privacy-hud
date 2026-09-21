@@ -561,16 +561,44 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
     machine, essentially all of it one model forward pass.
 
     Where that actually hurt is not where a first reading suggests, so the
-    numbers are worth stating precisely. Tier 3 runs on **ingress only** —
-    `Engine._scan` skips it for `local` (B0) and for B3/B4, and
-    `dispatch._build_observation` only ever produces `mcp_tool` (B3) or
-    `external_net` (B4) for `PreToolUse`. So every expensive request is a
-    `UserPromptSubmit`/`PostToolUse`, and for those `dispatch()`'s reply is
-    unconditionally `{}`: ingress can never deny or rewrite (Ruling 3), so
-    the scan result affects the ledger and nothing else. Meanwhile
-    `PreToolUse` — the only event that can be egress, the only one whose
-    reply carries a real decision, and the one I6 makes fail closed — is
-    regex-only and inherently sub-millisecond.
+    numbers are worth stating precisely. **When these numbers were taken,
+    tier 3 ran on ingress only** — `Engine._scan` skipped it for `local`
+    (B0) and for B3/B4, and `dispatch._build_observation` only ever produces
+    `mcp_tool` (B3) or `external_net` (B4) for `PreToolUse`. So every
+    expensive request was a `UserPromptSubmit`/`PostToolUse`, and for those
+    `dispatch()`'s reply is unconditionally `{}`: ingress can never deny or
+    rewrite (Ruling 3), so the scan result affects the ledger and nothing
+    else. Meanwhile `PreToolUse` — the only event that can be egress, the
+    only one whose reply carries a real decision, and the one I6 makes fail
+    closed — was regex-only and inherently sub-millisecond.
+
+    **That last sentence is no longer true, and the measurements below are
+    why the change that broke it had to carry a deadline.** #47 item 1 put
+    tier 3 back on B3/B4, where architecture.md §4 always specified it: the
+    exclusion meant no outbound call could ever produce an `email`,
+    `person`, `address`, `phone` or `account` finding. An egress
+    `PreToolUse` is therefore a tier-3 consumer now, and would rejoin
+    exactly the queue this docstring measures. `engine.TIER3_EGRESS_BUDGET`
+    is what keeps it out: one outbound deep scan at a time, bounded from
+    admission to result, falling back to tiers 0-2 and recording the gap
+    (`Ledger.record_scan_gap`) rather than spend the client's budget.
+
+    Two things that first-reading intuition gets wrong here, both of which
+    an earlier version of this paragraph asserted and review disproved:
+
+    - **The deep scan is not only about recording.** `detect/model.py`'s
+      `LABEL_MAP` maps `SECRET` to `credential`, and `observe()`'s hard-block
+      test reads findings from every tier — so tier 3 can produce the finding
+      that denies a call. An egress that falls back to the cheap tiers can
+      therefore *allow* what a completed scan would have denied, and can fail
+      to fire a `mask` rule that a completed scan would have fired. The
+      fallback matches what every egress did before #47 item 1, which is why
+      it is acceptable; it is not decision-neutral, which is why it is
+      recorded rather than silent.
+    - **This bounds the engine, not the round trip.** `TIER3_EGRESS_BUDGET`
+      caps the time `Engine.scan` spends on the deep scan. `State.lock`
+      contention, sqlite and the socket are outside it, and the end-to-end
+      distribution against the client's 2.0s has not been measured.
 
     Holding one daemon-wide lock across inference put those two in the same
     queue. Measured on this machine (12 cores, torch 2.14, model warm, 6

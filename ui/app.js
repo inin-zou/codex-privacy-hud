@@ -21,12 +21,16 @@
 // together. Fixing this is a real product improvement, not a bug — it's
 // listed as an open design question for a reason.
 //
-// "Deep scan unavailable" banner (design.md §5): `Decision.degraded`
-// (engine.py) is never persisted to the ledger — it's a per-call return
-// value the daemon sees transiently and never writes to any table. There is
-// therefore no ledger-backed signal this after-the-fact audit page could
-// read to show that banner honestly, so it is intentionally never shown
-// here rather than fabricated. See task-13-report.md.
+// "Deep scan unavailable" banner (design.md §5): this used to say the
+// signal did not exist — `Decision.degraded` was a per-call return value
+// the daemon saw transiently and wrote to no table, so there was nothing a
+// historical audit page could honestly read. That changed with #47 item 6:
+// `Ledger.record_scan_gap` writes an append-only `scan_gaps` row, and
+// `SessionCoverage.shallow_scans` counts them, so the coverage banner this
+// page already renders now goes off for a session whose deep scans were
+// skipped. What still does not exist is per-EVENT degradation: the gap is
+// counted per session and no individual row is marked, which is why there
+// is still no per-row "fast-path results only" marker here.
 //
 // "Allow once" is intentionally not a button anywhere in this file — see
 // local_ui_server.py's module docstring for why (the ledger never stores
@@ -296,8 +300,14 @@
       </div>
     `).join("");
 
+    // "Protect future occurrences" promised an outcome the rule cannot
+    // guarantee — it fires when a later call produces a matching finding,
+    // and for every type but `path` that needs the deep scan to have run
+    // (#49 item 2). The label now says what the rule does; the server's
+    // confirmation says what it depends on.
     const actions = [
-      { text: "Protect future occurrences", rule_type: "mask", selector: row.data_type },
+      { text: `Mask detected ${row.data_type} in future calls`,
+        rule_type: "mask", selector: row.data_type },
     ];
     // A source-level rule is offered only when the row names a real origin
     // (#40): source_kind is null when `source` is a bare tool label.

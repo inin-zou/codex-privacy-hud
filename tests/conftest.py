@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from privacy_hud import dispatch
+from privacy_hud import dispatch, engine
 
 # `mcp/server.py` is a script, not a module in a package — deliberately, so a
 # top-level `mcp` package cannot shadow the real `mcp` distribution. Tests
@@ -28,3 +28,26 @@ def state(tmp_path, monkeypatch):
     st = dispatch.new_state(tmp_path)
     yield st
     st.ledger.conn.close()
+
+
+@pytest.fixture(autouse=True)
+def drain_the_egress_deep_scan_slot():
+    """Wait out any egress deep scan a test abandoned, suite-wide.
+
+    `engine._TIER3_EGRESS_SLOT` is module-global and, by design, outlives
+    the caller that stopped waiting for it (`Engine._deep_scan_on_a_deadline`
+    explains why the worker owns the release). A test that times out on
+    purpose therefore leaks a busy slot into whichever test runs next, which
+    with random ordering is a different one each run — and the symptom is a
+    scan reporting `busy` in a test that never mentioned concurrency.
+
+    Autouse and suite-wide rather than in one file: the leak crosses module
+    boundaries, and the first version of this lived in
+    `test_engine_tier_scheduling.py` while `test_engine.py` went red.
+
+    It doubles as an assertion every test makes: the slot always comes back.
+    """
+    yield
+    assert engine._TIER3_EGRESS_SLOT.acquire(timeout=10), (
+        "an egress deep scan never released its admission slot")
+    engine._TIER3_EGRESS_SLOT.release()

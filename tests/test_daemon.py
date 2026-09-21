@@ -22,6 +22,7 @@ import pytest
 
 import privacy_hud.daemon as daemon_mod
 import privacy_hud.dispatch as dispatch_mod
+from privacy_hud import engine
 from privacy_hud import doctor
 from privacy_hud.daemon import (
     EXIT_ALREADY_RUNNING,
@@ -710,15 +711,24 @@ def test_a_slow_scan_does_not_block_another_sessions_ledger_work(slow_scan_daemo
         "State.lock is being held across detection again")
 
 
-def test_a_slow_ingress_scan_does_not_delay_an_egress_decision(slow_scan_daemon):
+def test_a_slow_ingress_scan_does_not_delay_an_egress_decision(slow_scan_daemon,
+                                                                monkeypatch):
     # The I6 version of the same property, and the one that actually costs
     # the user something. `PreToolUse` is the only event that can be egress
-    # and the only one that must answer with a real decision; tier 3 never
-    # runs on it (Engine._scan skips B3/B4), so it is inherently a
-    # milliseconds-long, regex-only request. If it queues behind other
-    # sessions' inference it hits the client's 2.0s timeout, and the client
-    # then denies to fail closed — a false denial that breaks a working tool
-    # call for no privacy reason at all.
+    # and the only one that must answer with a real decision. If it queues
+    # behind other sessions' inference it hits the client's 2.0s timeout,
+    # and the client then denies to fail closed — a false denial that breaks
+    # a working tool call for no privacy reason at all.
+    #
+    # This test used to say tier 3 "never runs on it (Engine._scan skips
+    # B3/B4)", and to allow 500ms on the strength of that. Both halves went
+    # stale together in #47 item 1: the deep scan runs on egress now, so the
+    # request is no longer regex-only, and a 500ms allowance was wide enough
+    # to hide a 400ms wait that the first version of that change introduced.
+    # What holds the property up now is `TIER3_EGRESS_BUDGET`, so that is
+    # what this asserts against — pinned small here so a regression shows up
+    # as a failure rather than as a slow suite.
+    monkeypatch.setattr(engine, "TIER3_EGRESS_BUDGET", 0.2)
     daemon, sock_path, slow = slow_scan_daemon
     for sid in ("egr1", "egr2"):
         _raw_call(sock_path, {"hook_event_name": "SessionStart",
@@ -744,11 +754,21 @@ def test_a_slow_ingress_scan_does_not_delay_an_egress_decision(slow_scan_daemon)
     finally:
         t.join(timeout=30.0)
 
-    # Still the correct decision, and still promptly.
+    # Still the correct decision — the deny comes from the credential regex,
+    # which is a cheap tier and never waits for the model.
     assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert elapsed < 0.5, (
+    # And still inside its own budget rather than the client's. The margin
+    # is for thread start and the socket round trip, not for another scan.
+    assert elapsed < 0.2 + 0.3, (
         f"PreToolUse waited {elapsed:.2f}s behind an ingress scan — at the "
         "client's 2.0s timeout this becomes a false deny")
+    # The bound bit, so the deep scan did not run on that call. The session
+    # must therefore stop reading as a complete account (#47 item 6): a
+    # bounded scan that says nothing is the silent-fallback bug this whole
+    # change was reviewed for.
+    with daemon.state.lock:
+        assert daemon.state.ledger.scan_gaps("egr2") == 1
+        assert daemon.state.ledger.coverage("egr2").verified is False
 
 
 def test_daemon_fails_closed_when_the_unlocked_scan_phase_raises(

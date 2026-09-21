@@ -233,7 +233,7 @@ First seen   12:41:08
 Protection   none
 Example      jo•••@acme.com
 
-[ Protect future occurrences ]
+[ Mask detected email in future calls ]
 
 Already disclosed data cannot be recalled from this session.
 ```
@@ -248,7 +248,7 @@ support.log → main agent → GitHub MCP
 ```
 
 **Actions.** One always, a second where the row allows it:
-- `Protect future occurrences` — writes a policy rule to mask this data type from this source going forward.
+- `Mask detected <type> in future calls` — writes a policy rule to mask this data type going forward. *(Two corrections to what this line used to say. It said "from this source": the rule carries the data type only, and the engine matches type without source — issue #47 item 10. And the label used to be `Protect future occurrences`, which named an outcome the rule cannot guarantee; the rule fires when a later call produces a matching finding, and for every type but `path` that needs the deep scan to have run — #49 item 2.)*
 - On a row whose source names a real origin — a file path or a command, not a bare tool label — `Block values read from {source}` (path) or `` Block values from `{source}` output `` (command). It writes a `block_path` or `block_command` rule keyed to the `Origin` that finding's value was first seen with (#40).
 
 A source rule matches the whole value, normalised: it compares a later outbound value against the origin-tagged value under a salted HMAC of `value.strip().lower()` (`mask.py`), so if the model summarizes, rewrites, or quotes part of what it read, the copy no longer matches and the rule does not catch it (`docs/known-limits.md` #10). This said "only byte-identical values" until #49 item 7, which contradicted the salted hash described in the same sentence: case and surrounding whitespace do not defeat the rule, so the set that matches is wider than a byte comparison, not narrower. Origin extraction is best-effort too (`docs/known-limits.md` #11) — a row with no recognised origin offers no rule at all, rather than one that would not work.

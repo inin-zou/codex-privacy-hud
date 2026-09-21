@@ -5,9 +5,11 @@ Why a detector declares its own tier and cost
 ---------------------------------------------
 `Engine._scan()` does not treat all detectors alike. Some are microseconds
 of compiled regex and run on every observation; one is ~430-540ms of model
-inference and is therefore gated three ways (never on a local read, never on
-B3/B4, never above `engine.MAX_TIER3_CHARS`, and serialized on
-`engine._TIER3_LOCK`). That is a real scheduling decision, and the engine
+inference and is therefore gated three ways (never on a local read, never
+above `engine.MAX_TIER3_CHARS`, and serialized on `engine._TIER3_LOCK` —
+for which an egress budgets only `engine.TIER3_EGRESS_BUDGET` in total,
+because I6 turns a missed client deadline into a deny). That is a real scheduling
+decision, and the engine
 used to *guess* it: it asked `hasattr(detector, "available")` and treated a
 yes as "this is the expensive model tier", because at the time the model
 detector was the only thing that tracked whether its weights had loaded.
@@ -24,8 +26,9 @@ That guess conflated three facts that are genuinely independent:
 Collapsing them was silently wrong in both directions. A cheap detector that
 loads an optional ruleset — an entirely ordinary thing to write — grew an
 `available` flag and was thereby reclassified as tier 3: it stopped running
-on local destinations and on B3/B4 and was skipped past the size cap, with
-no error anywhere. And a second *expensive* detector that never fails to
+on local destinations (and, under the gate of the day, on B3/B4) and was
+skipped past the size cap, with no error anywhere. And a second *expensive*
+detector that never fails to
 load has no `available` flag to sniff, so it ran unconditionally on every
 observation with no cap and no serialization — precisely the synchronous
 latency risk Ruling 4 exists to bound.
@@ -90,10 +93,12 @@ class Cost(Enum):
     CHEAP = "cheap"
 
     #: Hundreds of milliseconds, and/or a shared non-reentrant resource. The
-    #: engine gates these: skipped for local destinations and for B3/B4,
-    #: skipped (not truncated) above `engine.MAX_TIER3_CHARS`, serialized on
-    #: `engine._TIER3_LOCK`, and reported via `Decision.degraded` whenever a
-    #: scan that should have run did not.
+    #: engine gates these: skipped for local destinations, skipped (not
+    #: truncated) above `engine.MAX_TIER3_CHARS`, serialized on
+    #: `engine._TIER3_LOCK` — which an egress gives up on after
+    #: `engine.TIER3_EGRESS_BUDGET` rather than miss the hook client's
+    #: deadline — and reported via `Decision.degraded` whenever a scan that
+    #: should have run did not.
     EXPENSIVE = "expensive"
 
 
