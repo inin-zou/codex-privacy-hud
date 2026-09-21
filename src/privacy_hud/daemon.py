@@ -579,8 +579,9 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
     `person`, `address`, `phone` or `account` finding. An egress
     `PreToolUse` is therefore a tier-3 consumer now, and would rejoin
     exactly the queue this docstring measures. `engine.TIER3_EGRESS_BUDGET`
-    is what keeps it out: one outbound deep scan at a time, bounded from
-    admission to result, falling back to tiers 0-2 and recording the gap
+    is what keeps it out: one outbound deep scan at a time, with a
+    requested wait timeout and a completion cutoff past which a result is
+    discarded, falling back to tiers 0-2 and recording the gap
     (`Ledger.record_scan_gap`) rather than spend the client's budget.
 
     Two things that first-reading intuition gets wrong here, both of which
@@ -595,8 +596,12 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
       fallback matches what every egress did before #47 item 1, which is why
       it is acceptable; it is not decision-neutral, which is why it is
       recorded rather than silent.
-    - **This bounds the engine, not the round trip.** `TIER3_EGRESS_BUDGET`
-      caps the time `Engine.scan` spends on the deep scan. `State.lock`
+    - **This is a requested timeout, not a wall-clock guarantee.**
+      `TIER3_EGRESS_BUDGET` is how long the caller ASKS to wait, and the
+      cutoff `_in_time` compares a worker's completion against. When the
+      caller actually resumes is the scheduler's business: measured, a call
+      under the 1.0s budget returned at 1.25s — correctly timed out, and
+      the late findings discarded, but 250ms after the number. `State.lock`
       contention, sqlite and the socket are outside it, and the end-to-end
       distribution against the client's 2.0s has not been measured.
 

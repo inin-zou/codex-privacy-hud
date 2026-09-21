@@ -143,7 +143,7 @@ So an outbound call waits at most `engine.TIER3_EGRESS_BUDGET` (1.0 s — half t
 
 **The budget bounds the wait, not the scan.** Nothing here stops a model call that is already running — Python cannot cancel one — so what the budget guarantees is that the call stops *waiting* at 1.0 s, and that a result arriving after that is discarded rather than used. The inference finishes on its own thread, releases the slot for the next call, and its findings go nowhere. Measured with this budget and a detector that holds the interpreter: the call returned at 1.25 s, reported a timeout, and dropped the findings.
 
-**This bounds the deep scan, not the round trip.** What is bounded is the time the detection phase spends waiting for, and accepting the result of, the deep scan — not the time the whole request takes. Lock contention on the ledger, sqlite and the socket are outside it, and nobody has measured the end-to-end distribution against the client's 2.0 s, so this is a guard against the failure that was measured, not a proof that the hook always answers in time.
+**This is a requested timeout, not a wall-clock guarantee.** 1.0 s is how long the call *asks* to wait, and the cutoff a result has to beat to be used. When the waiting thread actually resumes is the operating system's business: measured, a call under the 1.0 s budget returned at 1.25 s — it timed out correctly and discarded the findings, 250 ms after the number. Nothing here bounds the whole request either; the ledger lock, sqlite and the socket are all outside it. Lock contention on the ledger, sqlite and the socket are outside it, and nobody has measured the end-to-end distribution against the client's 2.0 s, so this is a guard against the failure that was measured, not a proof that the hook always answers in time.
 
 **The fallback is not decision-neutral.** It is tempting to say only the record suffers, and that is wrong: `detect/model.py`'s label map includes `SECRET`, so the deep scan can produce the `credential` finding that blocks a call, and a `mask` rule can only fire on a finding some tier actually produced. An outbound call that falls back to the fast tiers can therefore be allowed where a completed scan would have denied it, and can go unmasked where a completed scan would have masked it. That is exactly what every outbound call did before #47 item 1, which is why it is an acceptable fallback — and why it is recorded rather than silent.
 
@@ -153,7 +153,7 @@ One consequence of that worth knowing: a detector that fails mid-inference marks
 
 What is still missing is *which* calls: the gap count is per session, and no individual row is marked.
 
-How often this happens has not been measured on real sessions. The contention half needs a second scan in flight, which one idle session will not produce — but the size cap and a model that fails to load or fails mid-inference do not need contention at all, and the last of those is a scan that ran, crashed, and is counted here because it cannot be told apart from one that found nothing.
+How often this happens has not been measured on real sessions. The contention half needs a second scan in flight, which one idle session will not produce — but the size cap and a model that fails to load or fails mid-inference do not need contention at all, and the last of those is a scan that ran and crashed — which used to be counted as a scan that found nothing, and is now recorded as the gap it is.
 
 ## Note on tests
 

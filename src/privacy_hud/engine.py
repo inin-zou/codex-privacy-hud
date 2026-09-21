@@ -772,14 +772,19 @@ class Engine:
         Three properties, and each of them is the fix for a specific way the
         first version of this was wrong (#47 item 1, rejected in review):
 
-        **The deadline covers the whole thing, not just the wait.** The
+        **The deadline covers the wait and the result, not just the lock.** The
         first version took `_TIER3_LOCK` with a timeout and then ran the
         scan with no bound at all, which bounds nothing: inference is the
         slow part. A cold or oversized forward pass could still run past
         `hooks/handler.py`'s 2.0s, and I6 turns that into a deny of a call
-        the daemon would have allowed. `deadline` is absolute and the worker
-        re-checks it after it gets the lock, so a task that spent its whole
-        budget queueing never starts inference at all.
+        the daemon would have allowed. `deadline` is absolute, the worker
+        re-checks it after it gets the lock (so a task that spent its whole
+        budget queueing never starts inference at all), and `_in_time`
+        compares the worker's completion against it before any finding is
+        used. What none of that does is stop a running model call — Python
+        cannot — so this is a requested timeout plus a completion cutoff,
+        not a promise about wall-clock. Measured: a call under the 1.0s
+        budget returned at 1.25s, timed out correctly, and discarded.
 
         **One outstanding egress scan, and the slot is held by the worker.**
         `_TIER3_EGRESS_SLOT` is taken non-blocking: a second egress call

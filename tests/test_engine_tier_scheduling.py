@@ -490,8 +490,8 @@ def test_a_result_that_finished_after_the_deadline_is_not_accepted(tmp_path,
 
 def test_that_test_fails_when_the_completion_check_is_bypassed(tmp_path,
                                                                monkeypatch):
-    """The discriminator, and the reason this file now has three tests for
-    one branch instead of two.
+    """The discriminator, and the reason this file has three tests for one
+    branch instead of two.
 
     Two earlier versions of the test above passed without ever exercising
     `_in_time`: the first replaced the function with a constant `False` and
@@ -499,14 +499,29 @@ def test_that_test_fails_when_the_completion_check_is_bypassed(tmp_path,
     used a busy loop that still yielded, so `Event.wait()` timed out and the
     timeout path produced the same outcome. Review caught the second by
     replacing `_in_time` with an unconditional `True` and watching the test
-    pass anyway.
+    pass anyway. So that mutation is a test now.
 
-    So that mutation is a test now. If the completion-time check stops being
-    what rejects a late result, this goes red — and a green run above means
-    what it says.
+    It asserts lateness itself rather than trusting the setup to produce
+    it — review's next round pointed out that an earlier version of this
+    also passed with an on-time worker, which would have made it agree with
+    the test above for the wrong reason.
     """
-    monkeypatch.setattr(engine, "_in_time", lambda finished_at, deadline: True)
+    seen: list[tuple[float | None, float]] = []
+    real = engine._in_time
+
+    def always_in_time(finished_at, deadline):
+        seen.append((finished_at, deadline))
+        real(finished_at, deadline)          # exercised, result discarded
+        return True
+
+    monkeypatch.setattr(engine, "_in_time", always_in_time)
     scan = _scan_with_a_late_worker(tmp_path, monkeypatch)
+
+    assert seen, "`_in_time` was never consulted, so this proves nothing"
+    finished_at, deadline = seen[-1]
+    assert finished_at is not None and finished_at > deadline, (
+        f"the worker finished {deadline - (finished_at or 0):.3f}s EARLY, so "
+        "this run never produced the late-completion state it claims to test")
     assert TIER3_TYPE in _types(scan), (
         "the late result was rejected by something other than `_in_time`, so "
         "the test above would pass with the check removed")
