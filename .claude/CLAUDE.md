@@ -64,7 +64,7 @@ These are not style preferences. A change that violates one is a bug regardless 
 The ledger stores types, counts, sources, destinations, timestamps, and pre-masked exemplars. Never add a column, log line, cache entry, or debug dump that could hold file contents, prompts, secrets, or raw PII. If you find yourself adding a `content` field, stop.
 
 **I2 — No network calls except `127.0.0.1`.**
-The plugin makes no outbound requests. No telemetry, no analytics, no remote classification, no error reporting. Adding a dependency that phones home is a violation. `tests/test_network_isolation.py` enforces this with an import allowlist over `src/` and `hooks/` and a live socket guard; today the only non-stdlib runtime import is `transformers`, loaded lazily with `HF_HUB_OFFLINE=1`.
+The plugin makes no outbound requests. No telemetry, no analytics, no remote classification, no error reporting. Adding a dependency that phones home is a violation. `tests/test_network_isolation.py` enforces this with an import allowlist over `src/` and `hooks/` and a live socket guard; today the only non-stdlib runtime import is `transformers`, loaded lazily. This invariant applies to plugin runtime, setup probes and doctor checks regardless of inherited environment values. Offline flags are forced before ML imports, every pretrained load is local-only, and an already-imported online stack is treated as unavailable. Explicit installation downloads run separately and are never triggered by runtime cache misses.
 
 **I3 — Detection is not disclosure.**
 Never count a local scanner hit as an exposure. The `detected` / `local_access` / `exposed` / `prevented` distinction must survive every refactor. Conflating them destroys the product's reason to exist.

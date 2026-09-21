@@ -16,7 +16,7 @@ A local-first Codex plugin that maintains a live **disclosure ledger** for every
 
 Boundary, not recipient: a second MCP server is not a second destination today, and what a subagent inherited is not recorded at all (limits 19 and 20).
 
-Detection runs on your own machine, via [`openai/privacy-filter`](https://huggingface.co/openai/privacy-filter) loaded locally through `transformers` — no prompt, file, or secret is ever sent anywhere to be scanned. The plugin makes no outbound network calls at all; the only socket it opens is a local one to its own daemon on `127.0.0.1`.
+Detection runs locally; the plugin sends no prompt, file, or secret to a remote scanner. Runtime communication is limited to Unix-domain sockets and the local browser UI on `127.0.0.1`.
 
 ```text
 Token HUD:    How much context has been consumed?
@@ -89,11 +89,7 @@ Flags: `--yes` answers the model question with yes; `--no-model` skips the
 download without asking. Both are useful for scripted installs, and the
 script needs one of them when there is no terminal to ask on.
 
-Steps 2, 3, and 6 are the **only network access anything here ever causes**:
-the package, the weights, and the patched build, all downloaded by the
-installer, once, before any Codex session exists. The runtime itself never
-goes online: it sets `HF_HUB_OFFLINE=1` before importing `transformers` and
-opens no socket except its own on `127.0.0.1`.
+Installation downloads packages and the patched Codex build; model weights are downloaded only through the explicit model-download step. Runtime, setup probes and doctor checks enforce offline mode regardless of inherited environment values and never download missing weights. Missing or incomplete model weights leave tier 3 unavailable; the plugin does not fetch replacements. A process that already imported the ML stack in online mode also leaves tier 3 unavailable and must be restarted to load it offline.
 
 ### Plugin only, from the Codex CLI
 
@@ -283,7 +279,7 @@ There is **no second LLM call to audit the first one.** That would re-transmit t
 - Detection runs **entirely locally**. No content is sent anywhere for classification.
 - The ledger stores **metadata only** — types, counts, sources, destinations, timestamps, masked exemplars. There is no `content` column, no `prompt` column, no `raw_value` column. The schema *is* the guarantee.
 - Value identity uses a session-scoped salted HMAC held in memory and destroyed at session end, so cross-session correlation is impossible by construction.
-- No telemetry. No analytics. No network calls except `127.0.0.1`.
+- No telemetry or analytics. Plugin runtime makes no outbound network requests, regardless of inherited environment values.
 - The self-audit is a committed corpus with both controls, and it is a **requirement the tool does not yet meet**: four of its entries fail — two ordinary development strings the model reports personal data in, and two addresses it misses or fragments. Each is recorded rather than tolerated. [`docs/self-audit.md`](docs/self-audit.md) has them, and says what a passing run does not prove. The older, wider promise — that a development session yields zero exposures — was withdrawn when measurement contradicted it.
 
 ### What the forwarder is, and what it is not

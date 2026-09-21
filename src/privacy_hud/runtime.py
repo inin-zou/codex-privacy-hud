@@ -57,12 +57,14 @@ environment dump would carry the user's tokens and credentials into a file on
 disk, which is the exact opposite of this plugin's job. No session content, no
 prompt, no finding, ever.
 
-**I2 — no network.** Setup imports `transformers` to read a version number and
-sets `HF_HUB_OFFLINE=1` in every interpreter it probes, so nothing here can
-reach the hub even accidentally.
+**I2 — no network.** Setup imports `transformers` to read a version number.
+Every `offline.FORCED_ENV` flag is assigned — never defaulted — in this
+process before that import, in every interpreter it probes, and in the
+environment a spawned daemon gets, so an inherited value cannot turn the
+network back on.
 
-Stdlib only, and the only thing it imports from `privacy_hud` is `codex`,
-which is itself stdlib-only and imports nothing from the package. `doctor.py`
+Stdlib only, and the only things it imports from `privacy_hud` are `codex`
+and `offline`, each stdlib-only and importing nothing from the package. `doctor.py`
 imports this module at module level and must be able to diagnose a broken
 package, so nothing here may pull in the detector stack, the ledger or the
 renderer — and nothing here imports `doctor` at all any more. It used to, in
@@ -81,7 +83,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import codex
+from . import codex, offline
 
 #: Bumped only when the meaning of an existing field changes. A receipt whose
 #: `v` this code does not recognize is treated as unusable rather than
@@ -236,10 +238,14 @@ def spawn_env(receipt: dict, base: dict[str, str] | None = None) -> dict[str, st
     which is the authoritative source for `PLUGIN_DATA` and must stay
     untouched — and fills in only the recorded `sys.path` entry and any
     `PINNED_ENV_NAMES` the caller does not already set. Caller wins on every
-    key, deliberately: the live environment describes the machine as it is
-    now, while the receipt describes it as it was at setup time, and the only
-    values worth taking from the past are the ones nobody has an opinion
-    about in the present.
+    key except the offline flags, deliberately: the live environment
+    describes the machine as it is now, while the receipt describes it as it
+    was at setup time, and the only values worth taking from the past are
+    the ones nobody has an opinion about in the present.
+
+    The exception is `offline.FORCED_ENV`, assigned last, after every merge:
+    the daemon is the process that loads the model, and I2 does not let an
+    inherited value turn the network back on.
     """
     env = dict(os.environ if base is None else base)
 
@@ -255,6 +261,7 @@ def spawn_env(receipt: dict, base: dict[str, str] | None = None) -> dict[str, st
             value = recorded.get(name)
             if isinstance(value, str) and value and not env.get(name):
                 env[name] = value
+    offline.force_offline(env)
     return env
 
 
@@ -276,16 +283,18 @@ def probe_interpreter(python, pythonpath: str | None = None, *,
     setup as healthy. The cost is ~1.4 s, which is what buying a true answer
     costs here.
 
-    `HF_HUB_OFFLINE=1` is set in the child (I2). Nothing in an import of
-    `transformers` should reach the hub, and this makes that a property of
-    the probe rather than a hope about a library's import side effects.
+    Every `offline.FORCED_ENV` flag is assigned in the child (I2), after
+    the caller's environment is copied, so an inherited "0" never reaches
+    the interpreter under test. Nothing in an import of `transformers`
+    should reach the hub, and this makes that a property of the probe rather
+    than a hope about a library's import side effects.
     """
     child_env = dict(os.environ if env is None else env)
     if pythonpath:
         existing = child_env.get("PYTHONPATH", "")
         parts = [pythonpath] + [p for p in existing.split(os.pathsep) if p]
         child_env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(parts))
-    child_env["HF_HUB_OFFLINE"] = "1"
+    offline.force_offline(child_env)
 
     started = time.monotonic()
     try:
@@ -385,8 +394,13 @@ def _local_versions() -> dict[str, str | None]:
     from the environment that has the ML stack, and the only way to know that
     it was is to import the stack here, in this process, and refuse to record
     an interpreter that cannot (see `main`'s `--allow-degraded`).
+
+    I2: the offline flags are forced before the import. A stack this
+    process already imported in online mode is reported as unavailable
+    rather than imported further (`offline.prepare_process`).
     """
-    os.environ.setdefault("HF_HUB_OFFLINE", "1")  # I2, before transformers
+    if not offline.prepare_process():
+        return {"transformers": None, "torch": None}
     out: dict[str, str | None] = {}
     for name in ("transformers", "torch"):
         try:

@@ -89,9 +89,9 @@ README's known limits instead.
 """
 from __future__ import annotations
 
-import os
 from typing import Any
 
+from .. import offline
 from .base import Cost, DetectorProfile, Finding
 
 # Keys are the model's real entity_group values, uppercased (verified against
@@ -274,16 +274,33 @@ class ModelDetector:
 
     def _load(self) -> bool:
         try:
-            # I2: never reach the network. `pipeline()`'s own
-            # `local_files_only` kwarg was removed upstream (it now raises
-            # TypeError from _sanitize_parameters); HF_HUB_OFFLINE is the
-            # current supported way to force the whole huggingface_hub /
-            # transformers stack offline. Set it here rather than requiring
-            # every caller to export it, and never override an operator's
-            # own choice if they already set it to something.
-            os.environ.setdefault("HF_HUB_OFFLINE", "1")
+            # I2: never reach the network, whatever the environment
+            # inherited. `prepare_process` ASSIGNS the offline flags before
+            # the import below (the hub reads them once, at import) and
+            # reports False if an earlier import in this process already
+            # cached online mode — which setting the environment now cannot
+            # repair, so tier 3 stays unavailable rather than load online.
+            # See `privacy_hud.offline`.
+            if not offline.prepare_process():
+                return False
 
-            from transformers import pipeline
+            from transformers import (
+                AutoConfig,
+                AutoModelForTokenClassification,
+                AutoTokenizer,
+                pipeline,
+            )
+
+            # Every pretrained load says local-only itself, on top of the
+            # offline flags. Not passed to `pipeline()`: that keyword's
+            # handling there is version-sensitive (it once raised from
+            # `_sanitize_parameters`), so the pipeline is handed loaded
+            # objects instead of an id it would have to resolve.
+            local = {"local_files_only": True, "trust_remote_code": False}
+            config = AutoConfig.from_pretrained(self.model_id, **local)
+            tokenizer = AutoTokenizer.from_pretrained(self.model_id, **local)
+            model = AutoModelForTokenClassification.from_pretrained(
+                self.model_id, config=config, **local)
 
             # `"none"`: the library's own aggregation cannot read this
             # model's BIOES tags and splits every entity at its last token.
@@ -291,7 +308,8 @@ class ModelDetector:
             # docstring.
             self._pipe = pipeline(
                 "token-classification",
-                model=self.model_id,
+                model=model,
+                tokenizer=tokenizer,
                 aggregation_strategy="none",
             )
             return True

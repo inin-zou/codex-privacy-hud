@@ -261,7 +261,7 @@ if [ "${PRIVACY_HUD_FAKE:-0}" != "1" ]; then
       # abort the whole script under `set -e` right after step 2 already
       # installed the venv. Only prompt when /dev/tty is actually usable,
       # and never let a failed read propagate out of this statement.
-      if ans="$(printf 'step 3/9: download openai/privacy-filter weights (~2.8 GB, from Hugging Face, once; everything after is offline)? [y/N] ' 2>/dev/null >/dev/tty && read -r a 2>/dev/null </dev/tty && echo "$a")" 2>/dev/null; then
+      if ans="$(printf 'step 3/9: download openai/privacy-filter weights (~2.8 GB, from Hugging Face; runtime never downloads weights)? [y/N] ' 2>/dev/null >/dev/tty && read -r a 2>/dev/null </dev/tty && echo "$a")" 2>/dev/null; then
         case "$ans" in y|Y) ;; *) NO_MODEL=1 ;; esac
       else
         log "no terminal to ask about the model download; skipping it -- rerun with --yes to fetch the weights"
@@ -270,7 +270,9 @@ if [ "${PRIVACY_HUD_FAKE:-0}" != "1" ]; then
     fi
   fi
   if [ "$NO_MODEL" -eq 0 ]; then
-    "$SHARE/venv/bin/python" - <<'PY'
+    # The one online step (I2's installation boundary): the offline flags are
+    # turned off for this command only, never for this shell or the runtime.
+    HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 HF_DATASETS_OFFLINE=0 HF_HUB_DISABLE_TELEMETRY=1 "$SHARE/venv/bin/python" - <<'PY'
 from huggingface_hub import snapshot_download
 snapshot_download('openai/privacy-filter', allow_patterns=[
     'config.json', 'model.safetensors', 'tokenizer.json',

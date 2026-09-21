@@ -290,10 +290,7 @@ curl -fsSL https://raw.githubusercontent.com/inin-zou/codex-privacy-hud/main/ins
 | 9 | `venv/bin/privacy-hud-doctor`; print its table | – |
 | 10 | write contract C | – |
 
-Step 3 is the only network access the *plugin* ever causes, and it happens
-here, once, with consent, before any session exists. The runtime keeps
-`HF_HUB_OFFLINE=1` and its no-outbound-calls guarantee (I2). README states
-this split explicitly.
+Installation downloads packages and the patched Codex build; model weights are downloaded only through the explicit model-download step. Runtime, setup probes and doctor checks enforce offline mode regardless of inherited environment values and never download missing weights.
 
 No matching release for the user's Codex version: step 6 prints which
 versions exist and continues; the forwarding script then falls through to
