@@ -45,7 +45,7 @@ Privacy HUD:  How much sensitive context has been disclosed?
 
 - 2026-09-15: patched Codex 0.154.0 builds for `aarch64-apple-darwin` and `x86_64-apple-darwin` are published on the GitHub release `codex-0.154.0-hud` and on the rolling `latest`. `install.sh` finds them.
 - 2026-09-15: the `privacy` status-line item now renders inside a patched Codex, and the macOS install is one command.
-- 2026-09-21: the self-audit claim was withdrawn and replaced. Three read-only source-review sessions measured 88%, 100% and 100% of budget, against an invariant that said zero. What replaces it is a committed corpus with both controls — see [`docs/self-audit.md`](docs/self-audit.md), which also records the three planted values the detectors miss.
+- 2026-09-21: the self-audit claim was withdrawn and replaced. Three read-only source-review sessions measured 88%, 100% and 100% of budget, against an invariant that said zero. What replaces it is a committed corpus with both controls — see [`docs/self-audit.md`](docs/self-audit.md), which also records the four entries it does not satisfy — two clean strings the model reports personal data in, and two addresses it misses or fragments.
 - 2026-09-05: verified by hand against Codex CLI 0.153.0 that one session reading `src/privacy_hud/budget.py` recorded zero events, budget 0.0/120.0. That run was real; the general claim drawn from it was not.
 
 ## Install

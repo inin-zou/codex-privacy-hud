@@ -31,12 +31,19 @@ detector that fires on `SELECT COUNT(*) FROM events` has failed differently
 and more insidiously: an inflated budget is a number users learn to ignore,
 and then the real one arrives and they ignore that too.
 
-**What this is not.** It is not the session-level run. It exercises the
-detector stack directly, so it says nothing about hooks, the daemon, the
-ledger's accounting, or what a live Codex session does — which is where the
-88% came from. Closing that gap needs the accounting work in #43/#44/#47,
-and until then the honest reading of a green run here is "the detectors
-behave on these inputs", not "the tool is clean".
+**What a green run means**, stated here in the same words as
+`docs/self-audit.md` because the two drifting apart is how this file's
+earlier readings got weaker than the document's: **no unrecorded regression
+appeared in the cases this corpus covers.** Not "the detectors behave on
+these inputs" — an earlier version of this docstring said that, and the
+audit page had already retracted it. Four known violations pass as expected
+failures, every model check skips where the weights are absent (which is
+CI, so CI's green covers the cheap tiers only), and nothing here calls
+`is_sensitive_path`, so disabling the path guard entirely still passes.
+
+It is also not the session-level run: it exercises detectors directly, so
+it says nothing about hooks, the daemon, the ledger's accounting, or a live
+Codex session — which is where the 88% came from.
 """
 from __future__ import annotations
 
@@ -60,6 +67,15 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures" / "self_audit"
 CLEAN_FALSE_POSITIVE_BUDGET = 0
 
 
+class ModelUnavailable(RuntimeError):
+    """The model stopped working during a scan.
+
+    Deliberately not an `AssertionError`: the expected-failure markers in
+    this file are pinned to that type, so this one cannot be mistaken for
+    the detector miss it is recorded next to.
+    """
+
+
 def _load(name: str) -> list[dict]:
     return json.loads((FIXTURES / name).read_text(encoding="utf-8"))["entries"]
 
@@ -79,8 +95,9 @@ def _planted(tiers: tuple[int, ...]) -> list:
             continue
         marks = []
         if entry.get("known_gap"):
-            marks.append(pytest.mark.xfail(strict=True,
-                                           reason=entry["known_gap"]))
+            marks.append(pytest.mark.xfail(
+                strict=True, raises=AssertionError,
+                reason=entry["known_gap"]))
         out.append(pytest.param(entry, marks=marks, id=entry["id"]))
     return out
 
@@ -123,9 +140,17 @@ def _scan_deeply(model, text: str) -> list:
     item 6, one layer up, written by the same person on the same day.
     """
     found = model.scan(text, {"source": "self-audit"})
-    assert is_available(model), (
-        "the model marked itself unavailable during this scan, so its empty "
-        "result is a failure to examine the input, not a clean reading")
+    if not is_available(model):
+        # NOT an assertion. Every `known_gap` entry is an xfail, and an
+        # xfail marker swallows whatever exception the test raises — so an
+        # assertion here would be reported as "expected detector miss,
+        # fragmented into three spans" for a run where inference crashed
+        # and produced no spans at all. A distinct type, with the markers
+        # pinned to `raises=AssertionError`, makes a broken model an ERROR
+        # and keeps it out of the one bucket labelled "we know about this".
+        raise ModelUnavailable(
+            "the model marked itself unavailable during this scan, so its "
+            "empty result is a failure to examine the input, not a reading")
     return found
 
 
@@ -149,7 +174,7 @@ def _clean_params() -> list:
         fp = entry.get("known_false_positive")
         if fp:
             marks.append(pytest.mark.xfail(
-                strict=True,
+                strict=True, raises=AssertionError,
                 reason=f"model reports {fp['data_type']} {fp['value']!r}: "
                        f"{fp['why']}"))
         out.append(pytest.param(entry, marks=marks, id=entry["id"]))
