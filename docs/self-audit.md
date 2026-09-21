@@ -95,8 +95,15 @@ forms.
 `cred-03` was committed claiming `SecretDetector` has no GitHub token
 pattern. It has one — `ghp_[A-Za-z0-9]{36}` in `secrets.py` — and the
 fixture carried **38** suffix characters while its own note said 36. The
-accompanying entropy explanation was invented: the token's Shannon entropy
-is ~5.25, well above the 3.5 threshold. Review caught it before an issue was
+accompanying entropy explanation was invented. The entropy was never the
+problem: the original 38-character suffix has Shannon entropy ≈ 5.25 bits
+per symbol (`log2 38`, every character distinct), and the corrected
+36-character one ≈ 5.17 (`log2 36`) — both far above the 3.5 threshold.
+*(An earlier version of this sentence gave only "~5.25" and did not say
+which suffix it measured, so a reader naturally took it as the corrected
+one sitting beside it and computed 5.17. In a sentence that exists to
+correct an invented number, an ambiguous one is the same defect.)* Review
+caught it before an issue was
 filed against a defect that does not exist. A corpus can manufacture a false
 gap as easily as it can find a real one, and the difference is whether
 someone checks the detector rather than the fixture.
