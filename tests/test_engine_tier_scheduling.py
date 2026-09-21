@@ -416,15 +416,17 @@ class _CrashingStub(StubModelDetector):
 
 
 def test_a_detector_crash_on_egress_reaches_the_caller(tmp_path):
-    """I6, and the reason the worker catches `BaseException` and re-raises.
+    """I6, and the reason the worker catches `BaseException` for the caller to
+    re-raise after a true wait return.
 
     Before the deep scan moved to a worker thread, a detector exception on
     the egress path left `Engine.scan`, left `dispatch()`, and landed on the
     daemon's exception boundary, where I6 denies. On a worker thread it
     would instead hit `threading.excepthook` — which prints it, and a
     detector's exception text can quote the payload it was scanning — while
-    the caller read the task's initial `timeout` and **allowed** the call. A
-    crash must not be reported as slowness."""
+    the caller read the task's initial `timeout` and **allowed** the call. In
+    this fixture, the wait returns True, so the worker error is re-raised
+    rather than converted into an ordinary gap."""
     eng = _engine(tmp_path, [PathDetector(), SecretDetector(), _CrashingStub([])])
     with pytest.raises(RuntimeError, match="inference blew up"):
         eng.scan(_obs(destination="mcp_tool"))
@@ -442,9 +444,10 @@ class _GilHog(StubModelDetector):
 
     `_SlowStub` sleeps, which releases the GIL — the caller wakes on time,
     `wait()` returns False, and the timeout path is what gets tested. To
-    reach `_in_time` the worker has to finish *after* the deadline while the
-    caller was not scheduled to notice, which is what holding the GIL
-    produces.
+    reach `_in_time`, the wait must return True with no worker error and
+    a successful worker outcome. The late-worker fixture holds the GIL so
+    the worker finishes after the deadline while the caller is descheduled;
+    timely successful completion also reaches `_in_time`.
     """
 
     def __init__(self, hold, findings):
@@ -467,9 +470,9 @@ def _scan_with_a_late_worker(tmp_path, monkeypatch, hold=0.25):
     wakes on time, `Event.wait()` returns False, and the TIMEOUT path is
     what produces the result — `_in_time` is never even called. Raising the
     interval past the worker's hold keeps the caller off the CPU until the
-    worker has finished and set `done`, which is the one state that reaches
-    the completion-time check: `wait()` returns True, and the deadline has
-    already passed.
+    worker has finished and set `done`. In this fixture, `wait()` returns
+    True with no worker error and a successful worker outcome, so the
+    completion-time check is reached after the deadline.
     """
     monkeypatch.setattr(engine, "TIER3_EGRESS_BUDGET", 0.02)
     eng = _engine(tmp_path, [PathDetector(), SecretDetector(),

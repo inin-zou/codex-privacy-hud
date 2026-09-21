@@ -312,14 +312,14 @@ class ModelDetector:
             # That is the exact shape of #47 item 6 — a flag computed and
             # discarded — one layer further down than where it was filed.
             #
-            # `available` goes false rather than the exception propagating:
-            # I6 would turn a propagating exception into a deny of every
-            # outbound call for as long as the model stayed broken, which
-            # trades a silent gap for an unusable agent. Unavailable is the
-            # state this class already has for "cannot do its job"; a
-            # detector becoming unavailable during inference is one of the
-            # `GAP_UNAVAILABLE` histories the engine reports, and
-            # `privacy-hud-doctor` already asks about it.
+            # `available` goes false rather than the exception propagating.
+            # On egress, a false wait return yields `GAP_TIMEOUT`; after a
+            # true return, a worker error is re-raised and I6 denies the call.
+            # Unavailable is the state this class already has for "cannot do
+            # its job". The unavailable history requires that no expensive
+            # detector supplies a successful available result, including a
+            # detector becoming unavailable during inference.
+            # `privacy-hud-doctor` already asks about availability.
             self.available = False
             return []
         return spans_from_tokens(text, tokens, min_score=self.min_score)

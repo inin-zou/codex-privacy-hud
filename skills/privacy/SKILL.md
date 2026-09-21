@@ -335,7 +335,9 @@ the rc file by hand.
   (`docs/known-limits.md` #21); on that call this rule has no matching
   deep-scan finding. Egress uses a requested timeout based on the
   remaining budget and an inclusive completion cutoff; neither guarantees
-  elapsed time. At most one egress scan worker is admitted at a time. The
+  elapsed time. See `engine.TIER3_EGRESS_BUDGET`. At most one egress scan
+  worker is admitted at a time. Admission is nonblocking; the worker retains
+  its slot until it exits, including after caller abandonment. The
   tool's own reply carries the conditions; pass them on rather than
   summarizing them away.
 - A row whose `source` names a real origin — a file the value was read

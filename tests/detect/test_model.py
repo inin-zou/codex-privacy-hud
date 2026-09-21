@@ -26,9 +26,9 @@ def test_stub_detector_returns_findings_without_loading_weights():
 def test_detector_reports_unavailable_rather_than_raising_when_weights_absent():
     d = ModelDetector(model_id="does-not-exist/nope")
     assert d.available is False
-    # I6: an unavailable detector reports itself unavailable rather than
-    # crashing the daemon; where the deep scan applies, the engine records a
-    # GAP_UNAVAILABLE scan gap.
+    # An unavailable detector reports itself unavailable rather than raising.
+    # The unavailable history requires that no expensive detector supplies a
+    # successful available result, including missing weights.
     assert d.scan("contact jordan@acme.com", {}) == []
 
 
@@ -215,14 +215,15 @@ def test_real_model_still_finds_a_name_and_a_secret_at_the_confidence_floor():
 def test_an_inference_failure_makes_the_detector_unavailable():
     """A crash inside the pipeline is not a clean scan.
 
-    `scan()` catches the exception — I6 would otherwise turn a broken model
-    into a deny of every outbound call for as long as it stayed broken — but
-    catching it and returning `[]` said the scan had run and found nothing.
-    The engine counted the detector, the observation came out
-    `degraded=False`, and a session whose every deep scan crashed reported
-    as fully verified at 0%. A detector becoming unavailable during
-    inference is a `GAP_UNAVAILABLE` scan gap; an accepted empty result is a
-    clean scan, not a scan gap.
+    `scan()` catches the exception. On egress, a false wait return yields
+    `GAP_TIMEOUT`; after a true return, a worker error is re-raised and I6
+    denies the call. Previously, catching the exception and returning `[]`
+    said the scan had run and found nothing. The engine counted the
+    detector, the observation came out `degraded=False`, and a session
+    whose every deep scan crashed reported as fully verified at 0%.
+    The unavailable history requires that no expensive detector supplies a
+    successful available result, including a detector becoming unavailable
+    during inference. An accepted empty result is a clean scan, not a scan gap.
     """
     from privacy_hud.detect.model import ModelDetector
 

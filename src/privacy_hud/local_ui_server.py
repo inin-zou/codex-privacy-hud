@@ -158,7 +158,8 @@ def _rule_confirmation(rule_type: str, selector: str) -> str:
     Egress uses a requested timeout based on the remaining budget and an
     inclusive completion cutoff; neither guarantees elapsed time. See
     `engine.TIER3_EGRESS_BUDGET`. At most one egress scan worker is admitted
-    at a time. The user clicking the button
+    at a time. Admission is nonblocking; the worker retains its slot until
+    it exits, including after caller abandonment. The user clicking the button
     cannot see any of that, and a warning they find afterwards cannot
     unsend what they sent in the meantime (I5).
 

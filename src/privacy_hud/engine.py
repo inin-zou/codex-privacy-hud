@@ -277,12 +277,9 @@ class _DeepScanTask:
         #: otherwise. Initialised to `GAP_TIMEOUT` for a worker that returns
         #: before starting inference.
         self.outcome: str | None = GAP_TIMEOUT
-        #: What `scan()` raised, re-raised on the CALLER's thread so it
-        #: reaches the daemon's exception boundary and I6 denies. Left on
-        #: the worker's thread it would do the opposite of fail closed: the
-        #: `finally` below sets `done`, the caller would read the initial
-        #: `GAP_TIMEOUT`, and a detector that crashed outright would be
-        #: reported as an ordinary deadline and the call allowed.
+        #: What `scan()` raised. A false wait return yields `GAP_TIMEOUT`;
+        #: after a true return, a worker error is re-raised on the CALLER's
+        #: thread so it reaches the daemon's exception boundary and I6 denies.
         self.error: BaseException | None = None
         #: When the scan finished, by the same clock as the deadline. `done`
         #: being set says the worker completed; it does not say the result
@@ -387,7 +384,8 @@ def _deep_scan_worker(text, ctx, expensive, task: _DeepScanTask,
         # Caught, not propagated: an exception escaping this function would
         # reach `threading.excepthook`, which prints it — and a detector's
         # exception text can quote the payload it was scanning, which is an
-        # I1 problem, not just noise. The caller re-raises it instead.
+        # I1 problem, not just noise. After a true wait return, the caller
+        # re-raises it instead; a false wait return yields `GAP_TIMEOUT`.
         task.error = exc
     finally:
         task.done.set()
@@ -844,8 +842,9 @@ class Engine:
             # On this thread, so it leaves `Engine.scan` the way it would
             # have before the scan moved to a worker: out through
             # `dispatch()` to the daemon's exception boundary, where I6
-            # denies an outbound call whose engine failed. A detector that
-            # crashes must not read as a detector that was merely slow.
+            # denies an outbound call whose engine failed. After a true wait
+            # return, a worker error is re-raised rather than converted into
+            # an ordinary gap.
             raise task.error
         if task.outcome is None and _in_time(task.finished_at, deadline):
             findings.extend(task.findings)
