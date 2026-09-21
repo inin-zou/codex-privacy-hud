@@ -191,7 +191,7 @@ Only the first line supports the word "current", and it supports it for a specif
 - Prevented, empty: `Nothing has been blocked or minimized yet.`
 - All events, empty: `No privacy events recorded for this session.` — and, on a verified coverage reading, what the check found. The second sentence used to read `The engine is running.`, which answered the right question — an empty audit is otherwise indistinguishable from a broken plugin — with evidence that cannot answer it, since a ledger is history and cannot vouch for a live process (#49 item 3). Liveness belongs to `privacy-hud-doctor`.
 
-**Degraded state banner.** If the deep scanner timed out at any point: `⚠ Deep scan unavailable for 2 events — fast-path results only.` Never silently present partial results as complete.
+**Scan-gap banner.** A scan gap: an applicable deep scan supplied no accepted result. Over the event rows it is given: `⚠ 2 events had scan gaps — fast-path results only.` That line counts supplied rows carrying the flag; what the session actually counts — per observation, including observations with no event row — reaches the session-record banner below as `2 observations had scan gaps — fast-path results only`. Never silently present partial results as complete.
 
 **Session-record banner.** The same rule at session scope, and it takes
 precedence in reading order because it is the larger caveat. If the ledger's
@@ -248,7 +248,7 @@ support.log → main agent → GitHub MCP
 ```
 
 **Actions.** One always, a second where the row allows it:
-- `Mask detected <type> in future calls` — writes a policy rule to mask this data type going forward. *(Two corrections to what this line used to say. It said "from this source": the rule carries the data type only, and the engine matches type without source — issue #47 item 10. And the label used to be `Protect future occurrences`, which named an outcome the rule cannot guarantee; the rule fires when a later call produces a matching finding, and for every type but `path` that needs the deep scan to have run — #49 item 2.)*
+- `Mask detected <type> in future calls` — writes a policy rule to mask this data type going forward. *(Two corrections to what this line used to say. It said "from this source": the rule carries the data type only, and the engine matches type without source — issue #47 item 10. And the label used to be `Protect future occurrences`, which named an outcome the rule cannot guarantee; the rule fires when a later call produces a matching finding, and for every type other than `path` and `credential` matching requires an accepted deep-scan result — #49 item 2.)*
 - On a row whose source names a real origin — a file path or a command, not a bare tool label — `Block values read from {source}` (path) or `` Block values from `{source}` output `` (command). It writes a `block_path` or `block_command` rule keyed to the `Origin` that finding's value was first seen with (#40).
 
 A source rule matches the whole value, normalised: it compares a later outbound value against the origin-tagged value under a salted HMAC of `value.strip().lower()` (`mask.py`), so if the model summarizes, rewrites, or quotes part of what it read, the copy no longer matches and the rule does not catch it (`docs/known-limits.md` #10). This said "only byte-identical values" until #49 item 7, which contradicted the salted hash described in the same sentence: case and surrounding whitespace do not defeat the rule, so the set that matches is wider than a byte comparison, not narrower. Origin extraction is best-effort too (`docs/known-limits.md` #11) — a row with no recognised origin offers no rule at all, rather than one that would not work.
@@ -318,7 +318,7 @@ Pseudonyms are stable within the session, so the agent's reasoning survives the 
 | After any exposure | `Already disclosed data cannot be recalled from this session.` |
 | Policy action taken | `Applies from the next tool call.` |
 | Hosted-tool gap | `Hosted tools such as web search do not pass through local hooks and are not covered.` |
-| Deep scan skipped | `Fast-path results only.` |
+| Scan gap | `Scan gap — fast-path results only.` |
 
 **Forbidden phrasings**
 

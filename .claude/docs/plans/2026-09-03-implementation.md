@@ -1073,7 +1073,9 @@ def test_stub_detector_returns_findings_without_loading_weights():
 def test_detector_reports_unavailable_rather_than_raising_when_weights_absent():
     d = ModelDetector(model_id="does-not-exist/nope")
     assert d.available is False
-    # I6: unavailable deep scan degrades, it does not crash the daemon.
+    # I6: an unavailable detector reports itself unavailable rather than crashing
+    # the daemon; where the deep scan applies, the engine records that as a
+    # GAP_UNAVAILABLE scan gap. (Historical plan text; current tests differ.)
     assert d.scan("contact jordan@acme.com", {}) == []
 
 

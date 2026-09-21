@@ -782,11 +782,13 @@ def dispatch(state: State, payload: dict) -> dict:
       1. locked, microseconds: resolve (or start) this session's Engine.
       2. UNLOCKED, ~500ms on ingress (tier 3): `Engine.scan()`. Detection
          only; no sqlite. Egress was sub-millisecond and regex-only until
-         #47 item 1 put tier 3 back on B3/B4, under
-         `engine.TIER3_EGRESS_BUDGET` — a requested timeout and a
-         completion cutoff, not a bound on elapsed time; see that
-         constant. A scan whose budget runs out is abandoned by this
-         caller (it may still be running) and the gap is recorded.
+         #47 item 1 put tier 3 back on B3/B4. Egress uses a requested
+         timeout based on the remaining budget and an inclusive completion
+         cutoff; neither guarantees elapsed time. See
+         `engine.TIER3_EGRESS_BUDGET`. When an applicable deep scan
+         supplied no accepted result, that scan gap is recorded per
+         observation and counted per session, including observations with
+         no event row.
       3. locked, milliseconds: `Engine.observe(obs, scan=...)`. Every ledger
          read and write for this observation, in one critical section.
     """

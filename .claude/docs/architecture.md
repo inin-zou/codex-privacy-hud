@@ -234,9 +234,9 @@ Tier 3 runs only when Tier 1 hits, when the payload crosses B3/B4, or when the t
 
 **What ships, on the B3/B4 half of that sentence.** The engine did the opposite for most of this project's life — it excluded B3/B4 outright — so the types tier 3 owns (`person`, `address`, `email`, `phone`, `url`, `date`, `account`) could not appear on any outbound row (#47 item 1). The exclusion is gone, and the reason it could not simply be deleted is what the rest of this section has to account for: an outbound call is a `PreToolUse`, `hooks/handler.py` gives the daemon 2.0 s per socket operation, and I6 turns a missed deadline into a **deny** of a call that should have been allowed.
 
-So on B3/B4 the deep scan is admitted one at a time across the daemon, under `engine.TIER3_EGRESS_BUDGET` (1.0 s). **That constant's own comment is the contract; what follows is a summary and the constant wins wherever they differ** — a caveat worth the words, because seven review rounds found the same fact paraphrased into a promise about elapsed time at surface after surface. The summary: it is the timeout the caller *requests* and the cutoff a result's completion must fall at or before to be *used*, and it stops neither inference nor the clock (measured: a call under the 1.0 s budget returned at 1.25 s).
+On B3/B4 the deadline is `engine.TIER3_EGRESS_BUDGET` (1.0 s). Egress uses a requested timeout based on the remaining budget and an inclusive completion cutoff; neither guarantees elapsed time. See `engine.TIER3_EGRESS_BUDGET`, which states the exact acceptance condition; this summary must agree with it. At most one egress scan worker is admitted at a time. Admission is nonblocking; the worker retains its slot until it exits, including after caller abandonment. Ingress does not use the egress deadline.
 
-A call that does not get its scan proceeds on tiers 0-2. Ingress keeps waiting as long as the model takes, because Ruling 3 makes its reply `{}` either way. Each observation whose deep-scan result went unused is recorded — see §10 below and `docs/known-limits.md` #21.
+A scan gap means an applicable deep scan supplied no accepted result; the call is then decided on tiers 0-2. Each observed scan gap is recorded per observation and counted per session, including observations with no event row — see §10 below and `docs/known-limits.md` #21.
 
 **Shell destination extraction (Tier 2)** is what makes egress detection real. Parse the command, walk the AST, and classify each sink:
 
@@ -514,11 +514,11 @@ on PostToolUse(tool_response):
                                                                8192 characters
 
   if len(tool_response) > 8192 chars:
-      record the event as usual, and record a scan gap for the observation
-      → same "fast-path results only" degraded state design.md §5 already defines for
-        deep-scanner timeout; a payload over the bound is treated identically to a scan
-        that timed out, because from the ledger's point of view the effect is the same:
-        tier 3 coverage is incomplete for that event.
+      record the event as usual, and record a scan gap (`oversize`) for the
+      observation: inference is not attempted
+      → the same "Scan gap — fast-path results only." state design.md §5 defines;
+        every scan gap is treated alike, because from the ledger's point of view
+        the effect is the same: an applicable deep scan supplied no accepted result.
 ```
 
 **What ships, on truncation.** This section specified scanning the first 8 KB and marking the remainder. The engine skips the deep scan **entirely** above `MAX_TIER3_CHARS` (8192 characters) rather than scanning a prefix, and `Engine._scan` says why: a prefix scan reports a clean result for a payload it mostly did not read, and the resulting row looks the same as a fully scanned one. Skip-and-record was chosen over truncate-and-scan for that reason, and the paragraphs below are kept because the sizing argument is still the sizing argument.
@@ -527,9 +527,9 @@ on PostToolUse(tool_response):
 
 Tiers 0-2 are deliberately left unbounded (full payload, every time): they are cheap enough not to need a cap, and skipping them on the tail of a large payload would silently reintroduce the exact "large disclosure goes unrecorded" gap tier 3's bound is meant to close for the cheap, deterministic checks (credential patterns, path rules) that do not need a model to run.
 
-This connects directly to a piece of UI that already exists for a different reason: design.md §5's degraded-state banner (`⚠ Deep scan unavailable for N events — fast-path results only`) was designed for deep-scanner *timeout*. It now also covers every other way the deep scan can fail to cover an observation — same banner, same meaning to the user ("tier 3 did not fully cover this"), one fewer state for the UI layer to invent.
+This connects directly to a piece of UI that already exists for a different reason: design.md §5's degraded-state banner was designed for deep-scanner *timeout*. It now covers every scan gap — an applicable deep scan supplied no accepted result — under one string, "Scan gap — fast-path results only.", one fewer state for the UI layer to invent.
 
-**What ships, on where that is recorded.** This section says "mark the affected event degraded". The implementation records the *scan* instead, in an append-only `scan_gaps` table counted per session by `Ledger.coverage`, and the reason is the case a per-event mark cannot reach: an observation whose cheap tiers found nothing and whose deep-scan result went unused writes **no event row at all**, and is otherwise indistinguishable from a call that was fully scanned and was clean. The cost of that choice is real and is stated in `docs/known-limits.md` #21: the audit can say a session has three shallow scans and cannot say which calls they were.
+**What ships, on where that is recorded.** This section says "mark the affected event degraded". The implementation records the *scan* instead, in an append-only `scan_gaps` table counted per session by `Ledger.coverage`, and the reason is the case a per-event mark cannot reach: an observation whose cheap tiers found nothing and which had a scan gap writes **no event row at all**, and is otherwise indistinguishable from a clean scan. Each observed scan gap is recorded per observation and counted per session, including observations with no event row. The cost of that choice is real and is stated in `docs/known-limits.md` #21: the audit can say a session had three scan gaps and cannot say which calls they were.
 
 ---
 

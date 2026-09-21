@@ -149,9 +149,11 @@ def test_empty_prevented_tab_says_nothing_recorded_as_blocked_yet():
 
 
 def test_audit_degraded_banner_covers_deep_scan_gaps():
+    """A `degraded` row had a scan gap: an applicable deep scan supplied no
+    accepted result. The line counts supplied rows, not the session."""
     row = replace(ROW, degraded=True)
     out = audit(SUMMARY, [row], "Exposed")
-    assert "fast-path results only." in out
+    assert "1 event had scan gaps — fast-path results only." in out
 
 
 def test_audit_no_degraded_banner_when_nothing_is_degraded():

@@ -34,9 +34,9 @@ def state(tmp_path, monkeypatch):
 def drain_the_egress_deep_scan_slot():
     """Wait out any egress deep scan a test abandoned, suite-wide.
 
-    `engine._TIER3_EGRESS_SLOT` is module-global and, by design, outlives
-    the caller that stopped waiting for it (`Engine._deep_scan_on_a_deadline`
-    explains why the worker owns the release). A test that times out on
+    `engine._TIER3_EGRESS_SLOT` is module-global. At most one egress scan
+    worker is admitted at a time. Admission is nonblocking; the worker
+    retains its slot until it exits, including after caller abandonment. A test that times out on
     purpose therefore leaks a busy slot into whichever test runs next, which
     with random ordering is a different one each run — and the symptom is a
     scan reporting `busy` in a test that never mentioned concurrency.

@@ -617,10 +617,12 @@ class _SlowTier3Detector:
     """A stand-in for `ModelDetector` that is slow and controllable.
 
     Declares the same `DetectorProfile` as the real tier 3, which is what
-    makes it scheduled like it: it runs on ingress to `model_context`, runs
-    on B3/B4 egress under `engine.TIER3_EGRESS_BUDGET` (it used to be
-    excluded there, until #47 item 1), and is skipped on local reads —
-    exactly like the real one.
+    makes it scheduled like it: it runs on ingress to `model_context`
+    (ingress does not use the egress deadline), runs on B3/B4 egress (it
+    used to be excluded there, until #47 item 1), and is skipped on local
+    reads — exactly like the real one. Egress uses a requested timeout
+    based on the remaining budget and an inclusive completion cutoff;
+    neither guarantees elapsed time. See `engine.TIER3_EGRESS_BUDGET`.
     (It used to earn that classification by carrying an `available`
     attribute, back when `engine` inferred the tier from the presence of one
     — see `detect/base.py` for why that inference is gone.)
@@ -727,9 +729,11 @@ def test_a_slow_ingress_scan_does_not_delay_an_egress_decision(slow_scan_daemon,
     # stale together in #47 item 1: the deep scan runs on egress now, so the
     # request is no longer regex-only, and a 500ms allowance was wide enough
     # to hide a 400ms wait that the first version of that change introduced.
-    # What holds the property up now is `TIER3_EGRESS_BUDGET`, so that is
-    # what this asserts against — pinned small here so a regression shows up
-    # as a failure rather than as a slow suite.
+    # Egress uses a requested timeout based on the remaining budget and an
+    # inclusive completion cutoff; neither guarantees elapsed time. See
+    # `engine.TIER3_EGRESS_BUDGET`. The budget is pinned small here so a
+    # regression shows up as a failure rather than as a slow suite; the
+    # elapsed-time assertion below is about this fixture only.
     monkeypatch.setattr(engine, "TIER3_EGRESS_BUDGET", 0.2)
     daemon, sock_path, slow = slow_scan_daemon
     for sid in ("egr1", "egr2"):
@@ -759,16 +763,16 @@ def test_a_slow_ingress_scan_does_not_delay_an_egress_decision(slow_scan_daemon,
     # Still the correct decision — the deny comes from the credential regex,
     # which is a cheap tier and never waits for the model.
     assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
-    # And still inside its own budget rather than the client's. The margin
-    # is for thread start and the socket round trip, not for another scan.
+    # Fixture-specific: well under the client's 2.0s. The margin is for
+    # thread start and the socket round trip, not for another scan.
     assert elapsed < 0.2 + 0.3, (
         f"PreToolUse waited {elapsed:.2f}s behind an ingress scan — at the "
         "client's 2.0s timeout this becomes a false deny")
-    # The budget bit. In this fixture the ingress scan holds the model lock
-    # throughout, so the egress deep scan never started. The session
-    # must therefore stop reading as a complete account (#47 item 6): a
-    # bounded scan that says nothing is the silent-fallback bug this whole
-    # change was reviewed for.
+    # The scan-gap bit. In this fixture the ingress scan holds the model lock
+    # throughout, so the egress worker cannot start inference within its
+    # deadline — a `timeout` scan gap. The session must therefore stop
+    # reading as a complete account (#47 item 6): a scan gap that says
+    # nothing is the silent-fallback bug this whole change was reviewed for.
     with daemon.state.lock:
         assert daemon.state.ledger.scan_gaps("egr2") == 1
         assert daemon.state.ledger.coverage("egr2").verified is False

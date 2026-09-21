@@ -140,14 +140,14 @@ def test_cheap_detector_with_available_attribute_is_not_capped_by_size(tmp_path)
     eng = _engine(tmp_path, [cheap])
     scan = eng.scan(_obs(text=TEXT + "x" * MAX_TIER3_CHARS))
     assert cheap.calls == 1
-    # And its absence-of-weights story is its own business: a cheap
-    # detector never flies the "deep scan unavailable" banner.
+    # And its absence-of-weights story is its own business: a scan gap is
+    # about an applicable deep scan, and a cheap detector never causes one.
     assert scan.degraded is False
 
 
 def test_an_unavailable_cheap_detector_does_not_degrade_the_deep_scan(tmp_path):
-    """`degraded` is a statement about the *deep scan*, which is what
-    design.md §5's banner names. A cheap detector that cannot load its
+    """`degraded` marks a scan gap — an applicable deep scan supplied no
+    accepted result — which is what design.md §5's banner names. A cheap detector that cannot load its
     optional ruleset must not make the HUD claim the model tier is down."""
     cheap = _CheapDetectorThatTracksAvailability(available=False)
     eng = _engine(tmp_path, [PathDetector(), SecretDetector(), cheap,

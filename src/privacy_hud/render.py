@@ -582,15 +582,15 @@ def audit(summary: SessionSummary, rows: Sequence[ExposureRow], tab: str, *,
         lines.append(banner)
         lines.append("")
 
-    # Deep-scan degradation covers two situations (task-11 brief): the model
-    # being unavailable, and a payload too large for the bounded synchronous
-    # scan (Task 8's degraded flag). Both surface identically here as a
-    # `degraded` flag on the affected row.
+    # A `degraded` row had a scan gap: an applicable deep scan supplied no
+    # accepted result (`engine.GAP_*` has the histories). This counts the
+    # supplied rows that carry the flag; the session's own count, which also
+    # covers observations with no event row, is `coverage.shallow_scans`.
     degraded_n = sum(1 for r in ordered if r.degraded)
     if degraded_n:
         plural = "" if degraded_n == 1 else "s"
         lines.append(
-            f"⚠ Deep scan unavailable for {degraded_n} event{plural} "
+            f"⚠ {degraded_n} event{plural} had scan gaps "
             "— fast-path results only."
         )
         lines.append("")
@@ -674,8 +674,9 @@ def detail(row: ExposureRow) -> str:
 
     # Names the action, not an outcome. "Protect future occurrences"
     # promised protection the rule cannot guarantee: it fires when a later
-    # call produces a matching finding, and for every type but `path` that
-    # needs the deep scan to have run (#49 item 2). `ui/app.js` renders the
+    # call produces a matching finding, and for every type outside
+    # `mcp_tools.CHEAP_DATA_TYPES` (`path`, `credential`) matching requires
+    # an accepted deep-scan result (#49 item 2). `ui/app.js` renders the
     # same label, so the two surfaces cannot drift apart.
     lines += ["", f"[ Mask detected {row.data_type} in future calls ]"]
     # An unrecognised `source_kind` offers nothing, rather than a button

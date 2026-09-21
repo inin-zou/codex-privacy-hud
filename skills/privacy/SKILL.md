@@ -329,13 +329,15 @@ the rc file by hand.
   observation. Say the rule is **saved**, and that a later outbound call is
   rewritten **when that data type is detected on it**. Do not say it is
   enforced, and do not say later calls will be masked: the rule fires only
-  on a finding some tier actually produced, and for every type but `path`
-  that means the deep scan ran *and its result was used* — it runs one at
-  a time, the caller does not wait on it indefinitely, and its findings go
-  unused when the model is busy, when the payload is over the size limit,
-  when the weights are unavailable, or when the scan is still running once
-  the caller has stopped waiting (`docs/known-limits.md` #21). The tool's own reply carries
-  the conditions; pass them on rather than summarizing them away.
+  on a finding some tier actually produced. For every type other than
+  `path` and `credential`, matching requires an accepted deep-scan result.
+  A scan gap means an applicable deep scan supplied no accepted result
+  (`docs/known-limits.md` #21); on that call this rule has no matching
+  deep-scan finding. Egress uses a requested timeout based on the
+  remaining budget and an inclusive completion cutoff; neither guarantees
+  elapsed time. At most one egress scan worker is admitted at a time. The
+  tool's own reply carries the conditions; pass them on rather than
+  summarizing them away.
 - A row whose `source` names a real origin — a file the value was read
   from, or the command whose output carried it — gets a second action, and
   `render.detail()` prints it as one of two labels (#40):

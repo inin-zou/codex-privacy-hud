@@ -590,7 +590,8 @@ def test_record_defaults_source_kind_to_null(led):
 
 
 # ---------------------------------------------------------------------------
-# scan_gaps: deep scans whose result went unused (#47 items 1 and 6).
+# scan_gaps: one row per observed scan gap — an applicable deep scan
+# supplied no accepted result (#47 items 1 and 6).
 # ---------------------------------------------------------------------------
 
 def test_the_gap_reasons_the_engine_writes_are_the_ones_this_schema_documents():
@@ -619,18 +620,19 @@ def test_a_gap_makes_the_session_unverified_and_names_the_count(led):
     cov = led.coverage("s1")
     assert cov.shallow_scans == 2
     assert cov.verified is False
-    assert cov.reason == "2 observations got the fast detectors only"
+    assert cov.reason == "2 observations had scan gaps — fast-path results only"
 
 
 def test_one_gap_reads_as_singular(led):
     led.record_scan_gap("s1", boundary="B4", reason="oversize")
-    assert led.coverage("s1").reason == "1 observation got the fast detectors only"
+    assert led.coverage("s1").reason == \
+        "1 observation had scan gaps — fast-path results only"
 
 
 def test_gaps_are_not_deduped(led):
     """Append-only, and deliberately not `INSERT OR IGNORE` like `coverage`:
-    two outbound calls that each lost their deep scan are two lost scans, and
-    collapsing them would under-report exactly the burst case the admission
+    each observed scan gap is recorded per observation, so two outbound calls
+    with scan gaps are two rows, and collapsing them would under-report exactly the burst case the admission
     control in `engine` exists to handle."""
     for _ in range(3):
         led.record_scan_gap("s1", boundary="B3", reason="busy")
@@ -646,10 +648,11 @@ def test_a_gap_in_another_session_does_not_count_against_this_one(led):
 
 def test_a_gap_row_holds_nothing_about_what_the_payload_contained(led):
     """I1, checked at the schema rather than trusted. A row here records a
-    deep scan whose result went unused — and that scan may well have read
-    the payload (a `timeout` row can describe inference that ran and was
-    abandoned), which is exactly why the row must not carry anything about
-    what it read."""
+    scan gap: an applicable deep scan supplied no accepted result. It makes
+    no claim about whether inference executed — a `timeout` row can
+    describe inference that was running or had completed, so a scan gap is
+    not proof the payload was unread — which is why the row must not carry
+    anything about the payload."""
     led.record_scan_gap("s1", boundary="B3", reason="timeout")
     row = dict(led.conn.execute("SELECT * FROM scan_gaps").fetchone())
     assert set(row) == {"id", "session_id", "ts", "boundary", "reason"}

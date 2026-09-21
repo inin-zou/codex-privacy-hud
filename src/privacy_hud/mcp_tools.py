@@ -196,14 +196,14 @@ _MASK_WOULD_DOWNGRADE = (
     "outcome.")
 
 #: The data types the always-on cheap tiers can produce, and therefore the
-#: only ones a rule can match without a successful deep scan: `path` from
+#: only ones a rule can match without an accepted deep-scan result: `path` from
 #: `detect/paths.py` and `credential` from `detect/secrets.py`. Everything
 #: else in `detect/model.py`'s LABEL_MAP — person, address, email, phone,
-#: url, date, account — exists only if tier 3 ran.
+#: url, date, account — exists only in an accepted deep-scan result.
 #:
 #: This distinction is why `rule_enforcement_note` does not give every rule
 #: the same caveat. Telling a user that a `path` rule might not fire because
-#: the deep scan was busy would be its own false statement, in the opposite
+#: of a scan gap would be its own false statement, in the opposite
 #: direction: the path detector runs on every observation, at every
 #: boundary, at any size.
 CHEAP_DATA_TYPES = frozenset({"path", "credential"})
@@ -225,12 +225,11 @@ CHEAP_DATA_TYPES = frozenset({"path", "credential"})
 #: cheap text. An origin rule matches on where a value came from, which is
 #: a different question from which tier found it.
 _RULE_CONDITIONS_DEEP = (
-    " Matching {selector} needs a deep scan whose result the call actually "
-    "uses, and there is none when the model is busy, the payload is over "
-    "the size limit, the weights are unavailable, or the scan is still "
-    "running or finishes late when the call stops waiting (known limit "
-    "21) — on those calls the rule matches nothing. Detection can also miss "
-    "values, and hosted tools never reach this plugin at all.")
+    " Matching {selector} requires an accepted deep-scan result. A scan gap "
+    "means an applicable deep scan supplied no accepted result (known limit "
+    "21); on that call this rule has no matching deep-scan finding. "
+    "Detection can also miss values, and hosted tools never reach this "
+    "plugin at all.")
 
 _RULE_CONDITIONS_CHEAP = (
     " Detection is heuristic and can miss values, and hosted tools never "
@@ -238,13 +237,10 @@ _RULE_CONDITIONS_CHEAP = (
     "rule matches nothing.")
 
 _RULE_CONDITIONS_ORIGIN = (
-    " It needs the value detected twice: once on the way in, for this "
-    "session to learn it came from there, and again on the outbound call "
-    "it should stop. Either can be missed — detection is heuristic, and a "
-    "value only the deep scan finds is missed whenever that scan's result "
-    "goes unused (known limit 21: busy, over the size limit, unavailable, "
-    "or still running or late when the call stops waiting). Hosted tools "
-    "never reach this plugin at all.")
+    " The value must be detected on ingress and again on egress. When "
+    "either detection depends on the deep scan, a scan gap can prevent this "
+    "rule from matching (known limit 21). Detection is heuristic and can "
+    "miss values, and hosted tools never reach this plugin at all.")
 
 
 def rule_enforcement_note(rule_type: str, selector: str) -> str:

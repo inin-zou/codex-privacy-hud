@@ -21,16 +21,18 @@
 // together. Fixing this is a real product improvement, not a bug — it's
 // listed as an open design question for a reason.
 //
-// "Deep scan unavailable" banner (design.md §5): this used to say the
+// Scan-gap banner (design.md §5): this used to say the
 // signal did not exist — `Decision.degraded` was a per-call return value
 // the daemon saw transiently and wrote to no table, so there was nothing a
 // historical audit page could honestly read. That changed with #47 item 6:
 // `Ledger.record_scan_gap` writes an append-only `scan_gaps` row, and
 // `SessionCoverage.shallow_scans` counts them, so the coverage banner this
-// page already renders now goes off for a session with a deep scan whose
-// result went unused (never started, abandoned while running, or late). What still does not exist is per-EVENT degradation: the gap is
-// counted per session and no individual row is marked, which is why there
-// is still no per-row "fast-path results only" marker here.
+// page already renders now goes off for a session with a scan gap: an
+// applicable deep scan supplied no accepted result. Each observed scan gap
+// is recorded per observation and counted per session, including
+// observations with no event row. What still does not exist is a persisted
+// per-EVENT flag: no individual row is marked, which is why there is still
+// no per-row "fast-path results only" marker here.
 //
 // "Allow once" is intentionally not a button anywhere in this file — see
 // local_ui_server.py's module docstring for why (the ledger never stores
@@ -302,8 +304,8 @@
 
     // "Protect future occurrences" promised an outcome the rule cannot
     // guarantee — it fires when a later call produces a matching finding,
-    // and for every type but `path` that needs the deep scan to have run
-    // (#49 item 2). The label now says what the rule does; the server's
+    // and for every type outside `path` and `credential` matching requires
+    // an accepted deep-scan result (#49 item 2). The label now says what the rule does; the server's
     // confirmation says what it depends on.
     const actions = [
       { text: `Mask detected ${row.data_type} in future calls`,

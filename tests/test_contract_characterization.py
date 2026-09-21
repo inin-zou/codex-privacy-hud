@@ -495,8 +495,10 @@ JSON_SUMMARY = {"percent": 6, "exposed_items": 2, "destinations": 2,
 #: `Ledger.start_session`, which records a `session_start` coverage row. That is
 #: the ordinary path, and it is what keeps every other golden in this file where
 #: it was.
-#: `shallow_scans` joined this payload in #47 item 1/6: it counts the
-#: observations whose deep scan applied and whose result went unused, and it is the fourth
+#: `shallow_scans` joined this payload in #47 item 1/6: it counts scan gaps —
+#: an applicable deep scan supplied no accepted result. Each observed scan
+#: gap is recorded per observation and counted per session, including
+#: observations with no event row. It is the fourth
 #: thing that can make `verified` false. Additive — a client that does not
 #: know the key still reads `verified` and `reason`, which is why it was safe
 #: to change this golden rather than version the endpoint.

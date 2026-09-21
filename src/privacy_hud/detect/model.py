@@ -304,8 +304,9 @@ class ModelDetector:
         try:
             tokens = self._pipe(text)
         except Exception:
-            # An inference failure is not a clean scan, and returning `[]`
-            # here said it was: the engine counted the detector as having
+            # An inference failure is not a clean scan (an accepted empty
+            # result is a clean scan, not a scan gap), and returning `[]`
+            # here with `available` still true said it was: the engine counted the detector as having
             # run, the observation came out `degraded=False`, and a session
             # whose every deep scan crashed read as a fully verified 0%.
             # That is the exact shape of #47 item 6 — a flag computed and
@@ -315,8 +316,9 @@ class ModelDetector:
             # I6 would turn a propagating exception into a deny of every
             # outbound call for as long as the model stayed broken, which
             # trades a silent gap for an unusable agent. Unavailable is the
-            # state this class already has for "cannot do its job", the
-            # engine already reports it (`GAP_UNAVAILABLE`), and
+            # state this class already has for "cannot do its job"; a
+            # detector becoming unavailable during inference is one of the
+            # `GAP_UNAVAILABLE` histories the engine reports, and
             # `privacy-hud-doctor` already asks about it.
             self.available = False
             return []
