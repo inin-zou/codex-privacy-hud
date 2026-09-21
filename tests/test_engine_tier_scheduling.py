@@ -55,10 +55,12 @@ TIER3_TYPE = "email"
 class _SlowStub(StubModelDetector):
     """`StubModelDetector` that takes measurable time inside `scan()`.
 
-    The egress budget bounds admission, the wait for the model, and
-    inference. Only a detector that is slow *while holding the model* can
-    tell a real deadline from one that merely bounds the wait — which is the
-    distinction the first version of this change got wrong."""
+    Egress uses a requested timeout based on the remaining budget and an
+    inclusive completion cutoff; neither guarantees elapsed time. See
+    `engine.TIER3_EGRESS_BUDGET`. Only a detector that is slow *while
+    holding the model* can tell a deadline that applies to the result from
+    one that only applies to the lock wait, which is the distinction the
+    first version of this change got wrong."""
 
     def __init__(self, delay, findings):
         super().__init__(findings)
@@ -144,11 +146,11 @@ def test_tier3_is_skipped_for_a_local_read(tmp_path):
 
 
 def test_skipping_tier3_by_schedule_does_not_mark_the_scan_degraded(tmp_path):
-    """`degraded` means "the deep scan would have applied here and did not
-    run", not "the deep scan did not run". A local read is *out of the deep
-    scan's domain by design*, so surfacing design.md §5's "fast-path results
-    only" banner for it would tell the user the tool is impaired when it is
-    behaving exactly as specified.
+    """`degraded` marks a scan gap: an applicable deep scan supplied no
+    accepted result. An out-of-scope scan has no gap. A local read is *out
+    of the deep scan's domain by design*, so surfacing design.md §5's
+    "fast-path results only" banner for it would tell the user the tool is
+    impaired when it is behaving exactly as specified.
 
     B3/B4 used to be listed here alongside `local`. It no longer is, and the
     difference is the whole of #47 item 1: an egress that does not get the
@@ -198,8 +200,8 @@ def test_payload_exactly_at_the_cap_still_runs_the_expensive_tier(tmp_path):
 
 
 def test_the_cap_does_not_apply_where_the_expensive_tier_is_out_of_scope(tmp_path):
-    """An oversized *local* read is not degraded: tier 3 was never going to
-    run there, so there is nothing lost to report."""
+    """An oversized *local* read is not degraded: the deep scan is out of
+    scope there, and an out-of-scope scan has no scan gap."""
     scan = _full_stack(tmp_path).scan(
         _obs(destination="local", text=TEXT + ("x" * MAX_TIER3_CHARS)))
     assert scan.degraded is False
@@ -207,7 +209,8 @@ def test_the_cap_does_not_apply_where_the_expensive_tier_is_out_of_scope(tmp_pat
 
 def test_an_oversized_egress_degrades_now_that_the_deep_scan_applies_there(tmp_path):
     """The mirror of the test above, and the reason the two cannot share a
-    parametrize: `local` is out of scope, B3/B4 is in scope and capped."""
+    parametrize: `local` is out of scope, B3/B4 is in scope and capped. An
+    oversize payload is a scan gap: inference is not attempted."""
     scan = _full_stack(tmp_path).scan(
         _obs(destination="mcp_tool", text=TEXT + ("x" * MAX_TIER3_CHARS)))
     assert scan.degraded is True
@@ -216,7 +219,7 @@ def test_an_oversized_egress_degrades_now_that_the_deep_scan_applies_there(tmp_p
 
 
 # ---------------------------------------------------------------------------
-# Egress waits for the model on a budget; ingress waits as long as it takes.
+# Egress uses a deadline; ingress does not use the egress deadline.
 # ---------------------------------------------------------------------------
 #
 # Why the two differ, in one paragraph, because it is the only genuinely
@@ -225,18 +228,19 @@ def test_an_oversized_egress_degrades_now_that_the_deep_scan_applies_there(tmp_p
 # (`_TIER3_LOCK`), so before this change `daemon.Daemon`'s docstring could
 # measure an egress `PreToolUse` taking 3060ms behind six in-flight ingress
 # scans — and a benign `curl .../health` was denied because an unrelated
-# session was busy. Putting tier 3 on the egress path re-opens that queue,
-# so egress takes the lock with a timeout and falls back to the cheap tiers
-# rather than risk the client's deadline. Ingress has no deadline worth
-# protecting: its reply is `{}` either way (Ruling 3), so it blocks.
+# session was busy. Putting tier 3 on the egress path re-opens that queue.
+# Egress uses a requested timeout based on the remaining budget and an
+# inclusive completion cutoff; neither guarantees elapsed time. See
+# `engine.TIER3_EGRESS_BUDGET`. Ingress does not use the egress deadline:
+# its reply is `{}` either way (Ruling 3), so it blocks.
 
 def test_an_egress_whose_budget_expires_reports_a_timeout_gap(tmp_path,
                                                               monkeypatch):
-    """The deadline covers inference, not just the wait for the lock.
+    """The deadline applies to the result, not just the wait for the lock.
 
     The first version of this change took the lock with a timeout and then
-    ran the scan unbounded, which bounds nothing — a slow forward pass could
-    still run past the hook client's 2.0s and be denied by I6. A slow
+    ran the scan with no deadline at all — a slow forward pass could still
+    run past the hook client's 2.0s and be denied by I6. A slow
     detector with the lock free is exactly the case that version let
     through."""
     monkeypatch.setattr(engine, "TIER3_EGRESS_BUDGET", 0.05)
@@ -249,18 +253,20 @@ def test_an_egress_whose_budget_expires_reports_a_timeout_gap(tmp_path,
     assert TIER3_TYPE not in _types(scan)
     assert scan.degraded_reason == engine.GAP_TIMEOUT
     assert CHEAP_TYPES <= _types(scan), "the cheap tiers still ran"
-    assert elapsed < 0.5, f"egress waited {elapsed:.2f}s past its budget"
+    # Fixture-specific: 0.05s budget against a 0.6s detector.
+    assert elapsed < 0.5, f"this fixture's egress took {elapsed:.2f}s"
 
 
 def test_a_second_egress_is_refused_admission_rather_than_queued(tmp_path,
                                                                  monkeypatch):
     """Admission control, and the reason it is not just a nicety.
 
-    Without it, abandoning a scan at the deadline still leaves the work
-    queued for the model, so a burst of outbound calls each starts a scan,
-    each gives up, and each leaves inference running — and every later
-    egress spends its whole budget behind results nobody is waiting for.
-    The second call here must come back fast and say `busy`, not wait."""
+    At most one egress scan worker is admitted at a time. Admission is
+    nonblocking; the worker retains its slot until it exits, including after
+    caller abandonment. Without it, a burst of outbound calls whose callers
+    abandoned their results would leave workers queued for the model, and
+    later egress scans would queue behind work nobody will use. In this
+    fixture the second call comes back fast and says `busy`."""
     monkeypatch.setattr(engine, "TIER3_EGRESS_BUDGET", 0.05)
     eng = _engine(tmp_path, [PathDetector(), SecretDetector(),
                              _SlowStub(0.5, [EMAIL_FINDING])])
@@ -278,7 +284,8 @@ def test_a_second_egress_is_refused_admission_rather_than_queued(tmp_path,
 
 def test_the_admission_slot_comes_back_when_the_abandoned_scan_finishes(
         tmp_path, monkeypatch):
-    """The worker owns the slot's release, so the slot outlives the caller.
+    """The worker retains its slot until it exits, including after caller
+    abandonment.
 
     If the caller released it on giving up, the next egress would be
     admitted while the model was still busy with the last one — which is the
@@ -304,12 +311,13 @@ def test_the_admission_slot_comes_back_when_the_abandoned_scan_finishes(
 
 
 def test_a_late_result_is_dropped_rather_than_merged(tmp_path, monkeypatch):
-    """A scan that lands after its caller answered must change nothing.
+    """A result the caller did not accept must change nothing.
 
-    The caller reads the worker's task only when `wait()` returned True, so
-    the findings this scan returns are the ones it had at the deadline — the
-    email the abandoned worker eventually produces never appears in them,
-    and so never reaches a ledger row or a block ruling built from them."""
+    Findings are used only under the acceptance condition stated at
+    `engine.TIER3_EGRESS_BUDGET`, and the worker writes only to its own
+    task. So the email this worker records after its caller's wait returned
+    False never appears in the returned `ScanResult`, and so never reaches
+    a ledger row or a block ruling built from it."""
     monkeypatch.setattr(engine, "TIER3_EGRESS_BUDGET", 0.05)
     slow = _SlowStub(0.4, [EMAIL_FINDING])
     eng = _engine(tmp_path, [PathDetector(), SecretDetector(), slow])
@@ -329,12 +337,14 @@ def test_a_contended_ingress_waits_for_the_model_instead_of_degrading(tmp_path):
     scan = eng.scan(_obs())           # ingress, B1
     releaser.join()
 
-    assert TIER3_TYPE in _types(scan), "ingress must wait, not give up"
+    # Ingress does not use the egress deadline.
+    assert TIER3_TYPE in _types(scan), "ingress must block for the model"
     assert scan.degraded is False
 
 
 # ---------------------------------------------------------------------------
-# Availability: a tier-3 detector that cannot work degrades the scan.
+# Availability: the unavailable history requires that no expensive detector
+# supplies a successful available result.
 # ---------------------------------------------------------------------------
 
 def test_unavailable_expensive_detector_marks_the_scan_degraded(tmp_path):
@@ -407,15 +417,17 @@ class _CrashingStub(StubModelDetector):
 
 
 def test_a_detector_crash_on_egress_reaches_the_caller(tmp_path):
-    """I6, and the reason the worker catches `BaseException` and re-raises.
+    """I6, and the reason the worker catches `BaseException` for the caller to
+    re-raise after a true wait return.
 
     Before the deep scan moved to a worker thread, a detector exception on
     the egress path left `Engine.scan`, left `dispatch()`, and landed on the
     daemon's exception boundary, where I6 denies. On a worker thread it
     would instead hit `threading.excepthook` — which prints it, and a
     detector's exception text can quote the payload it was scanning — while
-    the caller read the task's initial `timeout` and **allowed** the call. A
-    crash must not be reported as slowness."""
+    the caller read the task's initial `timeout` and **allowed** the call. In
+    this fixture, the wait returns True, so the worker error is re-raised
+    rather than converted into an ordinary gap."""
     eng = _engine(tmp_path, [PathDetector(), SecretDetector(), _CrashingStub([])])
     with pytest.raises(RuntimeError, match="inference blew up"):
         eng.scan(_obs(destination="mcp_tool"))
@@ -433,9 +445,10 @@ class _GilHog(StubModelDetector):
 
     `_SlowStub` sleeps, which releases the GIL — the caller wakes on time,
     `wait()` returns False, and the timeout path is what gets tested. To
-    reach `_in_time` the worker has to finish *after* the deadline while the
-    caller was not scheduled to notice, which is what holding the GIL
-    produces.
+    reach `_in_time`, the wait must return True with no worker error and
+    a successful worker outcome. The late-worker fixture holds the GIL so
+    the worker finishes after the deadline while the caller is descheduled;
+    timely successful completion also reaches `_in_time`.
     """
 
     def __init__(self, hold, findings):
@@ -458,9 +471,9 @@ def _scan_with_a_late_worker(tmp_path, monkeypatch, hold=0.25):
     wakes on time, `Event.wait()` returns False, and the TIMEOUT path is
     what produces the result — `_in_time` is never even called. Raising the
     interval past the worker's hold keeps the caller off the CPU until the
-    worker has finished and set `done`, which is the one state that reaches
-    the completion-time check: `wait()` returns True, and the deadline has
-    already passed.
+    worker has finished and set `done`. In this fixture, `wait()` returns
+    True with no worker error and a successful worker outcome, so the
+    completion-time check is reached after the deadline.
     """
     monkeypatch.setattr(engine, "TIER3_EGRESS_BUDGET", 0.02)
     eng = _engine(tmp_path, [PathDetector(), SecretDetector(),
@@ -475,11 +488,11 @@ def _scan_with_a_late_worker(tmp_path, monkeypatch, hold=0.25):
 
 def test_a_result_that_finished_after_the_deadline_is_not_accepted(tmp_path,
                                                                    monkeypatch):
-    """`done` being set proves the work completed, not that it was in time.
-
-    A caller descheduled past its own budget wakes to a set event, and
-    without a completion timestamp it accepts findings its deadline had
-    already excluded — which makes the bound advisory rather than a bound.
+    """`done` being set says the worker completed, not that the result is
+    accepted. Completion at or before the deadline is necessary but not
+    sufficient for accepting the result; see `engine.TIER3_EGRESS_BUDGET`.
+    Here the wait returns True and the completion is after the deadline, so
+    the result is rejected and the outcome is `GAP_TIMEOUT`.
     """
     scan = _scan_with_a_late_worker(tmp_path, monkeypatch)
     assert TIER3_TYPE not in _types(scan), (
@@ -490,8 +503,8 @@ def test_a_result_that_finished_after_the_deadline_is_not_accepted(tmp_path,
 
 def test_that_test_fails_when_the_completion_check_is_bypassed(tmp_path,
                                                                monkeypatch):
-    """The discriminator, and the reason this file now has three tests for
-    one branch instead of two.
+    """The discriminator, and the reason this file has three tests for one
+    branch instead of two.
 
     Two earlier versions of the test above passed without ever exercising
     `_in_time`: the first replaced the function with a constant `False` and
@@ -499,14 +512,29 @@ def test_that_test_fails_when_the_completion_check_is_bypassed(tmp_path,
     used a busy loop that still yielded, so `Event.wait()` timed out and the
     timeout path produced the same outcome. Review caught the second by
     replacing `_in_time` with an unconditional `True` and watching the test
-    pass anyway.
+    pass anyway. So that mutation is a test now.
 
-    So that mutation is a test now. If the completion-time check stops being
-    what rejects a late result, this goes red — and a green run above means
-    what it says.
+    It asserts lateness itself rather than trusting the setup to produce
+    it — review's next round pointed out that an earlier version of this
+    also passed with an on-time worker, which would have made it agree with
+    the test above for the wrong reason.
     """
-    monkeypatch.setattr(engine, "_in_time", lambda finished_at, deadline: True)
+    seen: list[tuple[float | None, float]] = []
+    real = engine._in_time
+
+    def always_in_time(finished_at, deadline):
+        seen.append((finished_at, deadline))
+        real(finished_at, deadline)          # exercised, result discarded
+        return True
+
+    monkeypatch.setattr(engine, "_in_time", always_in_time)
     scan = _scan_with_a_late_worker(tmp_path, monkeypatch)
+
+    assert seen, "`_in_time` was never consulted, so this proves nothing"
+    finished_at, deadline = seen[-1]
+    assert finished_at is not None and finished_at > deadline, (
+        f"the worker finished {deadline - (finished_at or 0):.3f}s EARLY, so "
+        "this run never produced the late-completion state it claims to test")
     assert TIER3_TYPE in _types(scan), (
         "the late result was rejected by something other than `_in_time`, so "
         "the test above would pass with the check removed")
@@ -539,7 +567,10 @@ def test_a_detector_that_fails_mid_scan_degrades_rather_than_reading_clean(
     engine had already checked availability before the call, so `ran_any`
     went True, `degraded` came out False, and a session whose every deep
     scan crashed read as fully verified with nothing found — #47 item 6 one
-    layer below where it was filed."""
+    layer below where it was filed. In this ingress fixture, the only
+    expensive detector becomes unavailable during inference, so the scan
+    reports `GAP_UNAVAILABLE`. An accepted empty result is a clean scan,
+    not a scan gap, and this is not one."""
     eng = _engine(tmp_path, [PathDetector(), SecretDetector(), _FailingModel([])])
     scan = eng.scan(_obs())
     assert scan.degraded_reason == engine.GAP_UNAVAILABLE

@@ -351,6 +351,11 @@ purpose** — one flag, one UI banner ("Deep scan unavailable — fast-path resu
 one fewer state for the renderer to invent. The banner was designed for detector failure
 and now also covers large payloads.
 *Lives in:* `engine.py::Decision.degraded`; `render.py::audit`.
+*Superseded (#47 items 1 and 6):* the two-case scope above is historical. Current
+behaviour: `degraded` marks a scan gap — an applicable deep scan supplied no accepted
+result (`engine.GAP_*`: oversize, unavailable, busy, timeout). Each observed scan gap is
+recorded per observation and counted per session, including observations with no event
+row; the banner reads "Scan gap — fast-path results only."
 
 **The daemon-wide lock exists because of one shared `sqlite3.Connection`, and that scope
 is not negotiable — but its *hold time* is.**
@@ -394,6 +399,9 @@ is a place where a maintainer might otherwise "fix" the renderer by inventing da
   rather than presented as certain.
 - **`degraded` is not persisted to the ledger**, so a UI reading history after the fact has
   no honest signal — the banner is omitted rather than defaulting to "not degraded".
+  *Superseded (#47 item 6):* `degraded` is still not a column, but each observed scan gap
+  (an applicable deep scan supplied no accepted result) is now recorded per observation
+  and counted per session, including observations with no event row.
 - **Tab counts for non-"All events" tabs are a documented best-effort estimate** that
   undercounts when `local_access`/`retention` events exist. It errs toward *understating*
   exposure, which is the wrong direction for a privacy tool to err in reverse.

@@ -151,9 +151,15 @@ def _rule_confirmation(rule_type: str, selector: str) -> str:
     being conflated** (#49 item 2). It used to end "Applies from the next
     tool call.", which reads as a promise about every later call. It is not
     one. A rule fires when some tier produces a finding its selector
-    matches, and for every type but `path` that means the deep scan ran --
-    bounded, admitted one at a time, and skipped outright when the model is
-    busy or unavailable (known limit 21). The user clicking the button
+    matches. For every type outside `mcp_tools.CHEAP_DATA_TYPES` (`path`,
+    `credential`), matching requires an accepted deep-scan result. A scan
+    gap means an applicable deep scan supplied no accepted result (known
+    limit 21); on that call this rule has no matching deep-scan finding.
+    Egress uses a requested timeout based on the remaining budget and an
+    inclusive completion cutoff; neither guarantees elapsed time. See
+    `engine.TIER3_EGRESS_BUDGET`. At most one egress scan worker is admitted
+    at a time. Admission is nonblocking; the worker retains its slot until
+    it exits, including after caller abandonment. The user clicking the button
     cannot see any of that, and a warning they find afterwards cannot
     unsend what they sent in the meantime (I5).
 

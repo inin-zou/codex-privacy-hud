@@ -5,10 +5,13 @@ Why a detector declares its own tier and cost
 ---------------------------------------------
 `Engine._scan()` does not treat all detectors alike. Some are microseconds
 of compiled regex and run on every observation; one is ~430-540ms of model
-inference and is therefore gated three ways (never on a local read, never
-above `engine.MAX_TIER3_CHARS`, and serialized on `engine._TIER3_LOCK` —
-for which an egress budgets only `engine.TIER3_EGRESS_BUDGET` in total,
-because I6 turns a missed client deadline into a deny). That is a real scheduling
+inference and is therefore gated three ways: never on a local read, never
+above `engine.MAX_TIER3_CHARS`, and serialized on `engine._TIER3_LOCK`. On
+egress, where I6 turns a missed client deadline into a deny, egress uses a
+requested timeout based on the remaining budget and an inclusive completion
+cutoff; neither guarantees elapsed time. See `engine.TIER3_EGRESS_BUDGET`.
+When an applicable deep scan supplied no accepted result, that is a scan
+gap, reported via `Decision.degraded`. That is a real scheduling
 decision, and the engine
 used to *guess* it: it asked `hasattr(detector, "available")` and treated a
 yes as "this is the expensive model tier", because at the time the model
@@ -94,11 +97,13 @@ class Cost(Enum):
 
     #: Hundreds of milliseconds, and/or a shared non-reentrant resource. The
     #: engine gates these: skipped for local destinations, skipped (not
-    #: truncated) above `engine.MAX_TIER3_CHARS`, serialized on
-    #: `engine._TIER3_LOCK` — which an egress gives up on after
-    #: `engine.TIER3_EGRESS_BUDGET` rather than miss the hook client's
-    #: deadline — and reported via `Decision.degraded` whenever a scan that
-    #: should have run did not.
+    #: truncated) above `engine.MAX_TIER3_CHARS`, and serialized on
+    #: `engine._TIER3_LOCK`. Egress uses a requested timeout based on the
+    #: remaining budget and an inclusive completion cutoff; neither
+    #: guarantees elapsed time. See `engine.TIER3_EGRESS_BUDGET`. A scan gap
+    #: — an applicable deep scan supplied no accepted result — is reported
+    #: via `Decision.degraded`. An accepted empty result is a clean scan,
+    #: not a scan gap.
     EXPENSIVE = "expensive"
 
 
@@ -195,9 +200,10 @@ def is_available(detector: object) -> bool:
     `available` is the normal case (a compiled regex is always usable) and
     means "no reason to think otherwise", so the permissive default is the
     honest one. A detector that *can* be non-functional is expected to say
-    so — `ModelDetector.available` is False when the weights are absent, and
-    the engine then reports the scan degraded rather than pretending tier 3
-    ran.
+    so — `ModelDetector.available` is False when the weights are absent.
+    The unavailable history requires that no expensive detector supplies a
+    successful available result. See `engine.GAP_*` for the recorded histories
+    and `engine.TIER3_EGRESS_BUDGET` for egress wait/error ordering.
 
     Unlike `profile_of`, this is optional-by-design, which is why the two are
     separate functions: a missing profile is a bug in the detector, a missing

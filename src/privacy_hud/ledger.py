@@ -109,7 +109,7 @@ CREATE TABLE IF NOT EXISTS coverage (     -- append-only; who was watching, when
   UNIQUE(session_id, observer)          -- one row per observer per session
 );
 
-CREATE TABLE IF NOT EXISTS scan_gaps (   -- append-only; deep scans that did not run
+CREATE TABLE IF NOT EXISTS scan_gaps (   -- append-only; one row per observed scan gap
   id          INTEGER PRIMARY KEY,
   session_id  TEXT NOT NULL,
   ts          INTEGER NOT NULL,
@@ -231,9 +231,11 @@ class SessionCoverage:
     observers: int
     attached: bool
     unobserved_hooks: bool
-    #: How many observations in this session had a deep scan that applied to
-    #: them and did not run — `engine.GAP_*`, written by
-    #: `record_scan_gap`. Unlike the three fields above, this one does not
+    #: How many observations in this session had a scan gap: an applicable
+    #: deep scan supplied no accepted result (`engine.GAP_*` has the
+    #: histories). Each observed scan gap is recorded per observation and
+    #: counted per session, including observations with no event row;
+    #: written by `record_scan_gap`. Unlike the three fields above, this one does not
     #: say a stretch of the session went unwatched: the hooks fired, the
     #: cheap tiers ran, and the row (if any) is in `events`. What is missing
     #: is the tier-3 finding types on those specific calls, which is why it
@@ -276,8 +278,8 @@ class SessionCoverage:
             return "tool calls went unverified with no daemon listening"
         if self.shallow_scans:
             n = self.shallow_scans
-            return (f"{n} observation{'' if n == 1 else 's'} got the fast "
-                    "detectors only")
+            return (f"{n} observation{'' if n == 1 else 's'} had scan gaps "
+                    "— fast-path results only")
         return ""
 
     def as_dict(self) -> dict:
@@ -366,9 +368,9 @@ class ExposureRow:
     reached the ledger. There is no `text`, `content`, `prompt` or `raw_value`
     field, and adding one would be an I1 violation, not a feature.
 
-    `degraded` is not a ledger column. It is a render-time flag (Task 8's
-    bounded-deep-scan gap and an unavailable model both surface through it --
-    see `render.audit`'s "Deep scan unavailable" banner), set by a caller that
+    `degraded` is not a ledger column. It is a render-time flag -- True when
+    the row's observation had a scan gap: an applicable deep scan supplied no
+    accepted result (see `render.audit`'s scan-gap line) -- set by a caller that
     has the `Decision` in hand, and it is deliberately absent from
     `_EXPOSURE_JSON_FIELDS` because it was never part of the wire format.
 
@@ -565,12 +567,14 @@ class Ledger:
 
     def record_scan_gap(self, session_id: str, *, boundary: str,
                         reason: str, ts: float | None = None) -> None:
-        """Write down that a deep scan which applied to an observation did
-        not run. Append-only; one row per observation, never deduped.
+        """Write down one scan gap: an applicable deep scan supplied no
+        accepted result. Each observed scan gap is recorded per observation
+        and counted per session, including observations with no event row.
+        Append-only; never deduped.
 
         **Why this is a row and not a column on `events`.** The case that
         matters most is the one that writes no event at all: an outbound
-        call whose cheap tiers found nothing and whose deep scan was skipped
+        call whose cheap tiers found nothing and which had a scan gap
         produces zero `events` rows, and is therefore indistinguishable in
         the ledger from a call that was fully scanned and was clean. A
         column could only mark rows that exist. This table records the
@@ -578,18 +582,16 @@ class Ledger:
         stops reading as clean — which is the whole job of `coverage`.
 
         `reason` is one of `engine.GAP_*`, and like `COVERAGE_*` above each
-        value names evidence rather than a guess: the payload was over the
-        cap, no detector could run, another scan held the slot, or the
-        budget expired. This module does not import `engine` (engine imports
+        value names evidence rather than a guess; `engine.GAP_*` lists the
+        history each one covers. This module does not import `engine` (engine imports
         ledger), so the values are not validated here — `engine` owns the
         taxonomy and `tests/test_ledger.py` pins the two lists together.
 
         I1: a row is a session id, a timestamp, a boundary and a reason.
-        Nothing about what the payload contained. Note that "the scan did
-        not run" does not always mean "nothing read the payload" — a
-        `timeout` row can describe inference that was under way and was
-        abandoned — which is the reason this docstring says what the row
-        holds rather than reasoning from what the scan did.
+        Nothing about what the payload contained. A row makes no claim about
+        whether inference executed: a `timeout` row can describe inference
+        that was running or had completed, so a scan gap is not proof the
+        payload was unread.
         """
         self.conn.execute(
             "INSERT INTO scan_gaps(session_id,ts,boundary,reason)"
@@ -598,7 +600,7 @@ class Ledger:
              reason))
 
     def scan_gaps(self, session_id: str) -> int:
-        """How many observations in `session_id` lost their deep scan."""
+        """How many observations in `session_id` had a scan gap."""
         return self.conn.execute(
             "SELECT COUNT(*) FROM scan_gaps WHERE session_id=?",
             (session_id,)).fetchone()[0]

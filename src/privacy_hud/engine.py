@@ -27,20 +27,22 @@ task-8-report.md for the full account):
              table) is consulted only when `direction == "egress"`. Applying
              it to an ingress observation would claim we can still decide
              the fate of bytes that have already entered context.
-  Ruling 4 — tier 3 (the model/NER detector) is bounded two ways. By size:
+  Ruling 4 — tier 3 (the model/NER detector) is gated two ways. By size:
              it runs on the observation text only when under
              `MAX_TIER3_CHARS`; above that it is skipped entirely (not
-             truncated-and-run). And, on egress only, by time and by
-             admission: one outbound deep scan runs at a time, and the
-             caller waits at most `TIER3_EGRESS_BUDGET` for it, because I6
-             turns a missed client deadline into a deny of a call that
-             should have been allowed. The budget bounds the WAIT and the
-             acceptance of a result, not inference itself — nothing here
-             can cancel a running model call. Whichever bound bites, the scan
-             carries a `GAP_*` reason, the `Decision` is `degraded`, and
-             `Ledger.record_scan_gap` writes it down — so the session's
-             coverage stops reading as complete and design.md §5's
-             "fast-path results only" banner has something to fly.
+             truncated-and-run). And, on egress only, by a deadline and by
+             admission, because I6 turns a missed client deadline into a
+             deny of a call that should have been allowed. Egress uses a
+             requested timeout based on the remaining budget and an
+             inclusive completion cutoff; neither guarantees elapsed time.
+             See `engine.TIER3_EGRESS_BUDGET`. At most one egress scan
+             worker is admitted at a time. Admission is nonblocking; the
+             worker retains its slot until it exits, including after
+             caller abandonment. When an applicable deep scan supplied no
+             accepted result, the scan carries a `GAP_*` reason and the
+             `Decision` is `degraded`. Each observed scan gap is recorded
+             per observation and counted per session, including
+             observations with no event row (`Ledger.record_scan_gap`).
 
 Which detectors those gates apply to is a declaration, not a deduction:
 each detector states its own `DetectorProfile(tier=..., cost=...)` and
@@ -118,7 +120,7 @@ from .matrix.loader import HARD_BLOCKED_DATA_TYPES, UnknownKey
 from .minimize import consume_token, minimize_tool_input
 from .origin import Origin, OriginKind, origin_phrase
 
-# --- Ruling 4: bound the synchronous deep scan --------------------------
+# --- Ruling 4: cap the deep scan's input size ---------------------------
 #
 # PostToolUse is now synchronous (Codex 0.145.0 silently skips `async: true`
 # hooks) and carries the largest payloads in the system (tool results, i.e.
@@ -195,65 +197,76 @@ _TIER3_LOCK = threading.Lock()
 # before the scan/observe split: a benign `curl .../health`, real answer
 # allow, took 2002ms behind six ingress scans and was denied.
 #
-# 1.0s is the egress deep scan's budget: how long the calling thread will
-# wait for a result, and the cutoff past which a result that arrives is
-# discarded rather than used (`_in_time`). It does NOT stop inference — a
-# model call already under way runs to completion on its worker, and Python
-# cannot cancel a C extension call mid-flight. Measured with this budget and
-# a detector that holds the interpreter: the call returned at 1.25s, having
-# correctly timed out and dropped the findings. "We stop waiting, and we do
-# not use what comes late" is the promise; "the scan is over at 1.0s" is not
-# one this design can make. The number is deliberately half the client's
-# 2.0s rather than as much of it as one warm scan (~430-540ms) seems to
-# leave spare, and the reason is the thing this bound does NOT cover.
+# --- The contract ------------------------------------------------------
 #
-# It bounds the time `Engine.scan` spends on the deep scan. It is not a
-# proof that the hook round trip fits in 2.0s: `State.lock` contention,
-# sqlite, the socket and the client's own read are outside it, and nobody
-# has measured that distribution. Half is the split you can defend without
-# that measurement — the other half is margin for the parts nobody bounded,
-# not headroom to spend. `tests/test_daemon.py`'s lock-scope tests are
-# where a change to this number shows up as a number.
+# `TIER3_EGRESS_BUDGET` sets an egress deadline using `time.monotonic()`
+# before task creation, admission and thread creation. The caller requests
+# `task.done.wait(max(0.0, deadline - time.monotonic()))`. Deep-scan
+# findings are used if and only if that wait returns `True`,
+# `task.error is None`, `task.outcome is None`, `task.finished_at is not
+# None`, and `task.finished_at <= deadline`; an accepted result may contain
+# zero findings. Completion before the caller starts waiting is allowed,
+# including a timely completion observed after the deadline. A false wait
+# return yields `GAP_TIMEOUT`; after a true return, a worker error is
+# re-raised, otherwise an unsuccessful outcome supplies its gap reason, or a
+# rejected completion yields `GAP_TIMEOUT`. This mechanism neither cancels
+# inference nor guarantees actual wait duration, caller return time or hook
+# round-trip time. Ingress does not use this deadline.
 #
-# Ingress has no such budget and blocks for as long as the model takes:
-# Ruling 3 makes its reply `{}` either way, so a slow ingress scan costs
-# latency and never a wrong answer.
+# MEASURED, as a measurement and not a bound: with a detector holding the
+# interpreter, a call under this 1.0s budget returned at 1.25s, having
+# correctly rejected the result. Half of the client's 2.0s is the split
+# defensible without measuring the rest of the hook round trip (`State.lock`,
+# sqlite, the socket), which nobody has; `tests/test_daemon.py`'s lock-scope
+# tests are where a change to this number shows up as a number.
 TIER3_EGRESS_BUDGET = 1.0
 
 #: The boundaries an outbound call crosses, and the only ones whose decision
 #: a timeout can turn into a deny.
 EGRESS_BOUNDARIES = ("B3", "B4")
 
-#: Admission control for the egress deep scan: at most one in flight across
-#: the whole daemon, taken non-blocking, and released by the worker thread
-#: when it actually finishes rather than when its caller stops waiting.
+#: Admission control for the egress deep scan. At most one egress scan
+#: worker is admitted at a time. Admission is nonblocking; the worker retains
+#: its slot until it exits, including after caller abandonment.
 #:
-#: Without this, abandoning a scan at the deadline would leave the work
-#: queued for the model anyway: a burst of outbound calls would each start a
-#: scan, each give up, and each leave inference running, so every later
-#: egress would spend its whole budget behind a backlog of results nobody is
-#: waiting for. The worst case with admission control is that one hung
-#: inference makes tier 3 unavailable to egress until it finishes — a
-#: bounded loss of coverage, which the ledger records, rather than an
-#: unbounded backlog that turns into cascading hook timeouts.
+#: Without this, a burst of outbound calls whose callers abandoned their
+#: results would each leave a worker queued for the model, and later egress
+#: scans would queue behind work whose results nobody will use. With it, a
+#: worker that never exits retains the admission slot. Later egress scans
+#: that reach admission fail it and return `GAP_BUSY`; applicable oversized
+#: payloads return `GAP_OVERSIZE` before admission.
 _TIER3_EGRESS_SLOT = threading.BoundedSemaphore(1)
 
-#: Why a deep scan that applied to an observation did not produce findings.
-#: Each names a specific, recorded piece of evidence — the same discipline
-#: `ledger.COVERAGE_*` holds itself to. `None` means the scan ran.
-GAP_OVERSIZE = "oversize"          #: text over MAX_TIER3_CHARS; never truncated
-GAP_UNAVAILABLE = "unavailable"    #: no expensive detector could run (no weights)
-GAP_BUSY = "busy"                  #: egress: another deep scan already in flight
-GAP_TIMEOUT = "timeout"            #: egress: TIER3_EGRESS_BUDGET spent
+#: Scan-gap reasons. A scan gap: an applicable deep scan supplied no accepted
+#: result. Each reason names a specific, recorded history — the same
+#: discipline `ledger.COVERAGE_*` holds itself to. `None` means no scan gap,
+#: not necessarily "the scan ran": an out-of-scope scan has no gap either.
+#: An accepted empty result is a clean scan, not a scan gap.
+#:
+#: oversize    — applicable payload exceeds `MAX_TIER3_CHARS`; inference is
+#:               not attempted.
+#: unavailable — no expensive detector supplies a successful available
+#:               result, including missing weights and a detector becoming
+#:               unavailable during inference.
+#: busy        — nonblocking egress admission fails.
+#: timeout     — egress only, three histories: the worker cannot start
+#:               inference within its deadline (including model-lock
+#:               contention); the caller's wait returns False, whether the
+#:               work is pending, running or completed; or the wait returns
+#:               True but an otherwise successful result has no completion
+#:               timestamp or completed after the deadline.
+GAP_OVERSIZE = "oversize"
+GAP_UNAVAILABLE = "unavailable"
+GAP_BUSY = "busy"
+GAP_TIMEOUT = "timeout"
 
 
 class _DeepScanTask:
     """One egress deep scan's handoff between its worker and its caller.
 
-    Written by the worker, read by the caller *only* after `done` is set and
-    only when the caller was still waiting — see
-    `Engine._deep_scan_on_a_deadline` for why that ordering is the whole
-    point.
+    The worker records its outcome here; whether the caller accepts it is
+    decided by the contract above `TIER3_EGRESS_BUDGET`, not by the worker.
+    Completion before the caller starts waiting is allowed.
     """
 
     __slots__ = ("done", "findings", "outcome", "error", "finished_at")
@@ -261,31 +274,28 @@ class _DeepScanTask:
     def __init__(self) -> None:
         self.done = threading.Event()
         self.findings: list[Finding] = []
-        #: None once the scan has actually run; a `GAP_*` reason otherwise.
+        #: The worker's outcome: None for a successful scan, a `GAP_*` reason
+        #: otherwise. Initialised to `GAP_TIMEOUT` for a worker that returns
+        #: before starting inference.
         self.outcome: str | None = GAP_TIMEOUT
-        #: What `scan()` raised, re-raised on the CALLER's thread so it
-        #: reaches the daemon's exception boundary and I6 denies. Left on
-        #: the worker's thread it would do the opposite of fail closed: the
-        #: `finally` below sets `done`, the caller would read the initial
-        #: `GAP_TIMEOUT`, and a detector that crashed outright would be
-        #: reported as an ordinary deadline and the call allowed.
+        #: What `scan()` raised. A false wait return yields `GAP_TIMEOUT`;
+        #: after a true return, a worker error is re-raised on the CALLER's
+        #: thread so it reaches the daemon's exception boundary and I6 denies.
         self.error: BaseException | None = None
-        #: When the scan finished, by the same clock as the deadline.
-        #: `done` being set proves the work completed, not that it completed
-        #: in time — a caller descheduled past its own budget would
-        #: otherwise accept a result its deadline had already excluded.
+        #: When the scan finished, by the same clock as the deadline. `done`
+        #: being set says the worker completed; it does not say the result
+        #: is accepted. Completion at or before the deadline is necessary but
+        #: not sufficient for accepting the result; see
+        #: `engine.TIER3_EGRESS_BUDGET`.
         self.finished_at: float | None = None
 
 
 def _in_time(finished_at: float | None, deadline: float) -> bool:
-    """Did the scan finish before the budget ran out?
+    """The completion-cutoff part of the acceptance condition.
 
-    `Event.wait()` returning True says the work completed, not that it
-    completed in time: a caller descheduled past its own deadline wakes to a
-    set event and would otherwise accept a result its budget had already
-    excluded. Accepting it is not a safety problem — the findings are real —
-    but it makes the bound advisory rather than a bound, and an advisory
-    bound is the thing this whole path was rejected for once.
+    Inclusive: a completion exactly at the deadline passes (`<=`).
+    Completion at or before the deadline is necessary but not sufficient for
+    accepting the result; see `engine.TIER3_EGRESS_BUDGET`.
     """
     return finished_at is not None and finished_at <= deadline
 
@@ -293,8 +303,10 @@ def _in_time(finished_at: float | None, deadline: float) -> bool:
 def _run_expensive(text, ctx, expensive, into: list) -> str | None:
     """Every available expensive detector, appending to `into`.
 
-    Returns `GAP_UNAVAILABLE` when none of them could run, `None` otherwise.
-    Assumes `_TIER3_LOCK` is held.
+    Returns `GAP_UNAVAILABLE` when no expensive detector supplies a
+    successful available result, `None` when at least one does. An accepted
+    empty result is a clean scan, not a scan gap. Assumes `_TIER3_LOCK` is
+    held.
     """
     ran_any = False
     for d in expensive:
@@ -322,7 +334,9 @@ def _run_expensive(text, ctx, expensive, into: list) -> str | None:
 
 
 def _deep_scan_blocking(text, ctx, expensive, findings) -> str | None:
-    """The ingress path: wait as long as the model takes.
+    """The ingress path: blocks until the model finishes.
+
+    Ingress does not use the egress deadline.
 
     `_TIER3_LOCK`, not the daemon lock: the shared inference pipeline is not
     safe to call concurrently (and is slower when you try) — see that lock's
@@ -337,10 +351,14 @@ def _deep_scan_worker(text, ctx, expensive, task: _DeepScanTask,
                       deadline: float) -> None:
     """Run one egress deep scan, then release the admission slot.
 
-    Runs on its own thread. Nothing here touches the ledger, the policy
-    tables or the caller's findings list: a result that arrives after its
-    caller gave up must be droppable without consequence, and the only way
-    to guarantee that is for the worker to own nothing but `task`.
+    Runs on its own thread. At most one egress scan worker is admitted at a
+    time. Admission is nonblocking; the worker retains its slot until it
+    exits, including after caller abandonment. Nothing here touches the
+    ledger, the policy tables or the caller's findings list: the worker owns
+    nothing but `task`, so a result the caller does not accept is dropped
+    without consequence. Completion at or before the deadline is necessary
+    but not sufficient for accepting the result; see
+    `engine.TIER3_EGRESS_BUDGET`.
     """
     try:
         remaining = deadline - time.monotonic()
@@ -349,9 +367,11 @@ def _deep_scan_worker(text, ctx, expensive, task: _DeepScanTask,
         if not _TIER3_LOCK.acquire(timeout=remaining):
             return
         try:
-            # Spent the budget queueing. Starting inference now would run
-            # the model for a caller that has already answered, and hold the
-            # admission slot against the next egress call for no benefit.
+            # The deadline passed while queueing for the model. A result
+            # completed from here would fail the completion cutoff, so
+            # starting inference would only hold the model and the admission
+            # slot against the next egress call. The outcome stays
+            # `GAP_TIMEOUT`.
             if time.monotonic() >= deadline:
                 return
             found: list[Finding] = []
@@ -365,7 +385,8 @@ def _deep_scan_worker(text, ctx, expensive, task: _DeepScanTask,
         # Caught, not propagated: an exception escaping this function would
         # reach `threading.excepthook`, which prints it — and a detector's
         # exception text can quote the payload it was scanning, which is an
-        # I1 problem, not just noise. The caller re-raises it instead.
+        # I1 problem, not just noise. After a true wait return, the caller
+        # re-raises it instead; a false wait return yields `GAP_TIMEOUT`.
         task.error = exc
     finally:
         task.done.set()
@@ -421,10 +442,11 @@ class ScanResult:
     dest_kind: str
     boundary: str
     findings: tuple[Finding, ...]
-    # Ruling 4: a deep scan that applied to this observation did not run.
+    # Ruling 4: a scan gap — an applicable deep scan supplied no accepted
+    # result (see the `GAP_*` reasons for the histories that covers).
     degraded: bool
-    # Which of the four `GAP_*` reasons it was; None when the scan ran. The
-    # bool above is `degraded_reason is not None` and is kept because every
+    # Which `GAP_*` reason it was; None means no scan gap, not necessarily
+    # that the scan ran. The bool above is `degraded_reason is not None` and is kept because every
     # reader that only asks "is this partial?" should not have to know the
     # taxonomy. `Ledger.record_scan_gap` is the reader that does.
     degraded_reason: str | None = None
@@ -443,17 +465,16 @@ class Decision:
     # real, non-None value here; a caller that ever sees rewrite+None has
     # found a bug, not a no-op.
     updated_input: str | dict | None = None
-    # Ruling 4: True when the expensive tier *would* have applied to this
-    # observation but did not run — over `MAX_TIER3_CHARS`, no available
-    # detector to run, or (egress only) the model lock was still busy at
-    # `TIER3_EGRESS_BUDGET`. NOT set when the deep scan was simply out
-    # of scope (a local read, or a stack configured without tier 3): nothing
-    # was lost there, so claiming otherwise would tell the user the tool is
-    # impaired when it is behaving as specified. A B3/B4 egress was on that
-    # out-of-scope list until #47 item 1 and is not any more — the deep scan
-    # applies there now, so an egress that misses it has lost something.
-    # Renderer shows design.md §5's "Deep scan unavailable — fast-path
-    # results only" banner when this is set.
+    # Ruling 4: True when this observation had a scan gap: an applicable
+    # deep scan supplied no accepted result. The histories are the `GAP_*`
+    # reasons above. An accepted empty result is a clean scan, not a scan
+    # gap. NOT set when the deep scan was out of scope (a local destination,
+    # or no configured expensive detector): claiming a gap there would tell
+    # the user the tool is impaired when it is behaving as specified. A
+    # B3/B4 egress was on that out-of-scope list until #47 item 1 and is not
+    # any more. A scan gap can omit findings that would otherwise cause
+    # blocking or masking. Renderer shows design.md §5's "Scan gap —
+    # fast-path results only." banner when this is set.
     degraded: bool = False
 
 
@@ -682,8 +703,8 @@ class Engine:
         """Run every cheap detector unconditionally, then the expensive ones
         only when they are gated on and the payload is small enough
         (Ruling 4). Returns (findings, gap) — `gap` is a `GAP_*` reason
-        when a deep scan that applied to this observation did not
-        produce findings, and None when it ran.
+        when an applicable deep scan supplied no accepted result, and None
+        when there is no scan gap (including an out-of-scope scan).
 
         The split is read off each detector's own `DetectorProfile.cost`, not
         guessed from its shape. This used to ask
@@ -715,8 +736,8 @@ class Engine:
             # inside `scan()` by returning no findings (as
             # `ModelDetector.scan` does), because there is no degradation
             # story to tell about it: `Decision.degraded` drives design.md
-            # §5's "Deep scan unavailable" banner, which is a claim about
-            # the model tier specifically. Skipping cheap detectors here
+            # §5's "Scan gap — fast-path results only." banner, which is a
+            # claim about the model tier specifically. Skipping cheap detectors here
             # would either fly that banner dishonestly or drop findings with
             # no signal at all.
             findings.extend(d.scan(obs.text, {"source": obs.source}))
@@ -750,9 +771,11 @@ class Engine:
             # would only ever admit the categories that needed it least
             # (email/phone/SSN, which tiers 0-2 already have some coverage
             # for) and permanently exclude the rest. The guard already in
-            # this `if` (dest_kind), MAX_TIER3_CHARS below, and the egress
-            # budget are the intended cost bound, not a shape heuristic on
-            # top.
+            # this `if` (dest_kind) and MAX_TIER3_CHARS below are the cost
+            # gates — not a shape heuristic on top. Egress additionally uses
+            # a requested timeout based on the remaining budget and an
+            # inclusive completion cutoff; neither guarantees elapsed time.
+            # See `engine.TIER3_EGRESS_BUDGET`.
             ctx = {"source": obs.source}
             if len(obs.text) > MAX_TIER3_CHARS:
                 gap = GAP_OVERSIZE
@@ -764,42 +787,43 @@ class Engine:
         return findings, gap
 
     def _deep_scan_on_a_deadline(self, text, ctx, expensive, findings):
-        """The egress path: a bounded wait, and admitted one at a time.
+        """The egress path: a deadline, and admission one worker at a time.
 
-        Returns a `GAP_*` reason, or None when the deep findings are in
-        `findings`.
+        Returns a `GAP_*` reason, or None when the result is accepted and
+        its findings are in `findings`. Which of those it is follows the
+        contract above `TIER3_EGRESS_BUDGET` exactly; this method is its
+        implementation, not a second statement of it.
 
-        Three properties, and each of them is the fix for a specific way the
-        first version of this was wrong (#47 item 1, rejected in review):
+        Three properties, each the fix for a specific way the first version
+        of this was wrong (#47 item 1, rejected in review):
 
-        **The deadline covers the whole thing, not just the wait.** The
+        **The deadline applies to the result, not only to the lock.** The
         first version took `_TIER3_LOCK` with a timeout and then ran the
-        scan with no bound at all, which bounds nothing: inference is the
-        slow part. A cold or oversized forward pass could still run past
-        `hooks/handler.py`'s 2.0s, and I6 turns that into a deny of a call
-        the daemon would have allowed. `deadline` is absolute and the worker
-        re-checks it after it gets the lock, so a task that spent its whole
-        budget queueing never starts inference at all.
+        scan with no deadline at all, and inference is the slow part.
+        `deadline` is absolute; the worker re-checks it after it gets the
+        lock, so a worker whose deadline passed while queueing never starts
+        inference; and `_in_time` applies the completion cutoff before any
+        finding is used. Completion at or before the deadline is necessary
+        but not sufficient for accepting the result; see
+        `engine.TIER3_EGRESS_BUDGET`.
 
-        **One outstanding egress scan, and the slot is held by the worker.**
-        `_TIER3_EGRESS_SLOT` is taken non-blocking: a second egress call
-        while one is in flight degrades immediately rather than joining a
-        queue. Abandoning a scan does not abandon the work — the thread runs
-        to completion and releases the slot itself — so a burst of outbound
-        calls cannot build a backlog of orphaned inference behind which
-        every later egress waits out its own deadline.
+        **Admission.** At most one egress scan worker is admitted at a time.
+        Admission is nonblocking; the worker retains its slot until it
+        exits, including after caller abandonment. A failed admission is
+        `GAP_BUSY`.
 
-        **A late result cannot change an answer already given.** The worker
-        writes only to its own `_DeepScanTask` and this method reads that
-        task only when `wait()` returned True. Once we return, the decision
-        is made from what `findings` holds now; a scan that lands afterwards
-        is dropped, never merged into a ledger row or a block ruling.
+        **Result isolation.** The worker writes only to its own
+        `_DeepScanTask`, and this method reads the task's findings only when
+        the result is accepted. Once this method returns, a result the
+        worker records later is never merged into a ledger row or a block
+        ruling.
         """
         deadline = time.monotonic() + TIER3_EGRESS_BUDGET
         # Built before the slot is taken, so that nothing between the
         # acquire and the `try` below can raise: an allocation failure there
-        # would leave a slot nobody holds and nobody releases, and every
-        # later egress would read `busy` for the life of the daemon.
+        # would leave the admission slot acquired with nobody to release it.
+        # Later egress scans that reach admission would return `GAP_BUSY`;
+        # applicable oversized payloads return `GAP_OVERSIZE` before admission.
         task = _DeepScanTask()
         if not _TIER3_EGRESS_SLOT.acquire(blocking=False):
             return GAP_BUSY
@@ -820,8 +844,9 @@ class Engine:
             # On this thread, so it leaves `Engine.scan` the way it would
             # have before the scan moved to a worker: out through
             # `dispatch()` to the daemon's exception boundary, where I6
-            # denies an outbound call whose engine failed. A detector that
-            # crashes must not read as a detector that was merely slow.
+            # denies an outbound call whose engine failed. After a true wait
+            # return, a worker error is re-raised rather than converted into
+            # an ordinary gap.
             raise task.error
         if task.outcome is None and _in_time(task.finished_at, deadline):
             findings.extend(task.findings)
@@ -915,11 +940,12 @@ class Engine:
         findings = scan.findings
         degraded = scan.degraded
 
-        # Write the gap down before the ruling, not after, and unconditionally
-        # — including for an observation that produces no `events` row at all.
-        # That case is the reason this is recorded at all: a call whose cheap
-        # tiers found nothing and whose deep scan was skipped leaves the ledger
-        # looking exactly like a call that was fully scanned and was clean.
+        # Write the gap down before the ruling, not after, and unconditionally.
+        # Each observed scan gap is recorded per observation and counted per
+        # session, including observations with no event row. That last case
+        # is the reason this is recorded at all: a call whose cheap tiers
+        # found nothing and which had a scan gap leaves no event row, and
+        # would otherwise look exactly like a clean scan.
         # `Ledger.record_scan_gap` has the argument; the consequence is that
         # `coverage().verified` goes false, so the audit's banner and its
         # empty-state line both stop claiming a complete account (#47 item 6).

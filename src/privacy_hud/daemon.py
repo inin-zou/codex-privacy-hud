@@ -578,10 +578,16 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
     exclusion meant no outbound call could ever produce an `email`,
     `person`, `address`, `phone` or `account` finding. An egress
     `PreToolUse` is therefore a tier-3 consumer now, and would rejoin
-    exactly the queue this docstring measures. `engine.TIER3_EGRESS_BUDGET`
-    is what keeps it out: one outbound deep scan at a time, bounded from
-    admission to result, falling back to tiers 0-2 and recording the gap
-    (`Ledger.record_scan_gap`) rather than spend the client's budget.
+    exactly the queue this docstring measures. Egress uses a requested
+    timeout based on the remaining budget and an inclusive completion
+    cutoff; neither guarantees elapsed time. See
+    `engine.TIER3_EGRESS_BUDGET`. At most one egress scan worker is admitted
+    at a time. Admission is nonblocking; the worker retains its slot until
+    it exits, including after caller abandonment. When an applicable deep
+    scan supplied no accepted result, the decision uses tiers 0-2 only.
+    Each observed scan gap is recorded per observation and counted per
+    session, including observations with no event row
+    (`Ledger.record_scan_gap`).
 
     Two things that first-reading intuition gets wrong here, both of which
     an earlier version of this paragraph asserted and review disproved:
@@ -589,15 +595,15 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
     - **The deep scan is not only about recording.** `detect/model.py`'s
       `LABEL_MAP` maps `SECRET` to `credential`, and `observe()`'s hard-block
       test reads findings from every tier — so tier 3 can produce the finding
-      that denies a call. An egress that falls back to the cheap tiers can
-      therefore *allow* what a completed scan would have denied, and can fail
-      to fire a `mask` rule that a completed scan would have fired. The
+      that denies a call. A scan gap can omit findings that would otherwise
+      cause blocking or masking. The
       fallback matches what every egress did before #47 item 1, which is why
       it is acceptable; it is not decision-neutral, which is why it is
       recorded rather than silent.
-    - **This bounds the engine, not the round trip.** `TIER3_EGRESS_BUDGET`
-      caps the time `Engine.scan` spends on the deep scan. `State.lock`
-      contention, sqlite and the socket are outside it, and the end-to-end
+    - **Neither the timeout nor the cutoff guarantees elapsed time.**
+      Measured, as a measurement: a call under the 1.0s budget returned at
+      1.25s, having correctly rejected the result. `State.lock` contention,
+      sqlite and the socket are outside the deadline, and the end-to-end
       distribution against the client's 2.0s has not been measured.
 
     Holding one daemon-wide lock across inference put those two in the same
