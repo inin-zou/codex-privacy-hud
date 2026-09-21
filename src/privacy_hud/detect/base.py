@@ -200,9 +200,10 @@ def is_available(detector: object) -> bool:
     `available` is the normal case (a compiled regex is always usable) and
     means "no reason to think otherwise", so the permissive default is the
     honest one. A detector that *can* be non-functional is expected to say
-    so — `ModelDetector.available` is False when the weights are absent. When
-    the deep scan applies and no expensive detector supplies a successful
-    available result, the engine reports a `GAP_UNAVAILABLE` scan gap.
+    so — `ModelDetector.available` is False when the weights are absent.
+    The unavailable history requires that no expensive detector supplies a
+    successful available result. See `engine.GAP_*` for the recorded histories
+    and `engine.TIER3_EGRESS_BUDGET` for egress wait/error ordering.
 
     Unlike `profile_of`, this is optional-by-design, which is why the two are
     separate functions: a missing profile is a bug in the detector, a missing
