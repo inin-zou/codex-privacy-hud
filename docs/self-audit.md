@@ -5,20 +5,33 @@ development session must produce zero exposures.*
 
 That was false. Three read-only source-review sessions, measured on
 2026-09-21 during the SDK 2.x reinstall, recorded **88%, 100% and 100%** of
-the disclosure budget. Nothing left the machine — I2 held, and the failure
-is detection and accounting rather than disclosure — but the invariant every
-agent reads before working in this repository was contradicted by the tool's
-own output, and it stayed that way for sixteen days, because the measurement
-was written in a commit message and nothing automated could reach it.
+the disclosure budget.
+
+**What that does and does not establish.** It establishes that the tool
+contradicted its own stated invariant. It does **not** establish that those
+sessions were harmless: this project counts model context as B1, a boundary
+that leaves the machine, so "read-only" is not a synonym for "disclosed
+nothing". Whether those numbers were detector error, accounting inflation,
+or real crossings is exactly what is unseparated today — and separating them
+is the work, not a detail. An earlier draft of this page asserted "nothing
+left the machine"; that was a claim about Codex's behaviour made from a fact
+about the plugin's, and review removed it.
+
+The provenance is also thinner than it should be. The figures come from a
+commit message (`abd3321`) with no session ids or receipts attached, so they
+are a recorded report rather than something a reader can re-derive. Record
+future runs **here**, with enough detail to check them.
 
 ## Why the claim was not fixable as written
 
-"Zero exposures on a development session" cannot be tested, and not for a
-practical reason. Sessions differ. A session that reads a file containing a
-real street address *should* record an exposure — that is the product
-working. So "zero" is only meaningful against **stated inputs**, which is
-why the corpus is committed rather than described, and why the two halves
-are labelled rather than counted.
+It was not unfalsifiable — one counterexample disproves it, and one arrived.
+It was an **invalid requirement**: sessions differ, and a session that reads
+a file containing a real street address *should* record an exposure. That is
+the product working. A rule demanding otherwise asks a correct tool to fail.
+
+So "zero" is only meaningful against **stated inputs**, which is why the
+corpus is committed rather than described, and why both halves are labelled
+rather than counted.
 
 Two fixes were available and both are wrong:
 
@@ -43,11 +56,18 @@ would be a way to keep a known false positive without deciding anything
 about it.
 
 **`planted.json` — 12 planted entries.** Synthetic values planted on
-purpose, each labelled with the tier expected to find it: three credentials
-(tier 1), three sensitive paths (tier 0), and six values only the model can
-find — email, person, phone and three addresses (tier 3). Every value is
-invented or a public landmark. The tier-3 half skips when the weights are
-not on the machine, which is CI.
+purpose, each labelled with the tier expected to find it: three
+credential-shaped strings (tier 1), three sensitive paths (tier 0), and six
+values only the model can find — email, person, phone and three addresses
+(tier 3). Every value is invented or a public landmark. The tier-3 half
+skips when the weights are not on the machine, which is CI.
+
+**Both halves run through both tiers.** That sounds obvious and was not: the
+first version of this suite ran only the cheap detectors over the clean
+corpus and reported green, while two of its own entries fired on the model.
+A false-positive corpus that never runs the detector producing the false
+positives is not a weaker check — it is a check of nothing, wearing the
+green tick of a real one. Review found it by running the model itself.
 
 ## What the corpus found on its first run
 
@@ -60,9 +80,20 @@ forms.
 
 | entry | what happens |
 |---|---|
-| `cred-03` | `SecretDetector` has no GitHub token pattern, so `ghp_` + 36 characters is not matched by shape, and its entropy does not trip the generic rule. A token pasted into a shell command crosses a boundary unrecorded. |
-| `address-01` | `1600 Pennsylvania Avenue NW, Washington` returns **nothing at all**. The model appears to read a landmark address as an organisation. Confident silence is the worst failure mode a privacy tool has. |
-| `address-03` | `42 Rue de Rivoli, 75001 Paris` is found and **fragmented** into `42`, `Rue de Rivoli` and `75001`, so no single finding carries the address. Task 12 masks on these offsets, which makes a fragmented span a masking hole as well as a reporting one — the same class as the BIOES splitting `detect/model.py` documents, surviving on a non-English street line. |
+| `json-01` (clean) | The model reads the JSON string value `"Bash"` as a **person**, confidently. Known limit 7's class, and the confidence floor cannot reach it without dropping real disclosures first. |
+| `log-01` (clean) | A log timestamp scores as a **date**, indistinguishable from a date of birth in the same shape. Also known limit 7. |
+| `address-01` | `1600 Pennsylvania Avenue NW, Washington` returns **nothing at all**. Confident silence is the worst failure mode a privacy tool has. Why it happens is not established — an earlier draft asserted the model reads a landmark as an organisation, which was a guess. |
+| `address-03` | `42 Rue de Rivoli, 75001 Paris` is found and **fragmented** into `42`, `Rue de Rivoli` and `75001`, so no single finding carries the street line — the BIOES class `detect/model.py` documents, surviving on a non-English address. Not a masking hole: passing all three findings through `minimize_text` does replace all three spans. What is lost is the reported value. |
+
+**One entry in that table was wrong and is worth keeping as a record.**
+`cred-03` was committed claiming `SecretDetector` has no GitHub token
+pattern. It has one — `ghp_[A-Za-z0-9]{36}` in `secrets.py` — and the
+fixture carried **38** suffix characters while its own note said 36. The
+accompanying entropy explanation was invented: the token's Shannon entropy
+is ~5.25, well above the 3.5 threshold. Review caught it before an issue was
+filed against a defect that does not exist. A corpus can manufacture a false
+gap as easily as it can find a real one, and the difference is whether
+someone checks the detector rather than the fixture.
 
 `address-03` is also why the tier-3 assertion compares the **value** and not
 just the data type. A first version compared type sets, and three `address`

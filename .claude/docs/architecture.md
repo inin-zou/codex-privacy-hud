@@ -560,9 +560,10 @@ This connects directly to a piece of UI that already exists for a different reas
 | Hook client | Fixture hook payloads on stdin → assert stdout JSON | No |
 | Consent loop | Token mint → consume → replay must fail | No |
 | End-to-end | Scripted Codex session; assert receipt matches expectation | Yes |
-| Self-audit | Corpus in `tests/fixtures/self_audit/`; clean half silent, planted half found | Yes |
+| Self-audit (corpus) | `tests/fixtures/self_audit/`; clean half silent, planted half found | No |
+| Self-audit (session) | Run the plugin on a real session and record what it scored | Yes |
 
-Everything except the last two rows runs without Codex, which is what makes the build order in `PRD.md` §11 viable — the hard platform integration is isolated to one thin, fixture-testable client.
+Everything except the two `Yes` rows runs without Codex, which is what makes the build order in `PRD.md` §11 viable — the hard platform integration is isolated to one thin, fixture-testable client. The self-audit is split across both because the corpus half needs no session and the session half cannot be faked by one.
 
 ---
 

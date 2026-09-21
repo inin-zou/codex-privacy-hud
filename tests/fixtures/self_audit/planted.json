@@ -47,14 +47,14 @@
     {
       "id": "cred-03",
       "tier": 1,
-      "text": "curl https://api.example.test -H \"Authorization: Bearer ghp_1234567890abcdefghijklmnopqrstuvwxyzAB\"",
+      "text": "curl https://api.example.test -H \"Authorization: Bearer ghp_1234567890abcdefghijklmnopqrstuvwxyz\"",
       "expect": [
         {
           "data_type": "credential",
-          "value": "ghp_1234567890abcdefghijklmnopqrstuvwxyzAB"
+          "value": "ghp_1234567890abcdefghijklmnopqrstuvwxyz"
         }
       ],
-      "known_gap": "SecretDetector has no GitHub token pattern, so `ghp_` + 36 chars is not matched by shape, and its entropy is not high enough to trip the generic rule. A token pasted into a shell command therefore crosses a boundary unrecorded."
+      "note": "This entry was committed as a `known_gap` claiming SecretDetector has no GitHub token pattern. It has one -- `secrets.py`'s `ghp_[A-Za-z0-9]{36}` -- and the fixture carried 38 suffix characters while its own note said 36. The accompanying entropy explanation was invented too. Review caught it before an issue was filed on a defect that does not exist."
     },
     {
       "id": "path-01",
@@ -156,7 +156,7 @@
           "value": "42 Rue de Rivoli"
         }
       ],
-      "known_gap": "Found, but fragmented into three spans -- `42`, `Rue de Rivoli`, `75001` -- so no single finding carries the address. Task 12 masks on these offsets, so a fragmented span is also a masking hole. Same class as the BIOES splitting `detect/model.py` documents, surviving on a non-English street line."
+      "known_gap": "Found, but fragmented into three spans -- `42`, `Rue de Rivoli`, `75001` -- so no single finding carries the street line. Same class as the BIOES splitting `detect/model.py` documents, surviving on a non-English address. NOT a demonstrated masking hole: passing all three findings through `minimize_text` does replace all three spans. What is lost is the reported value, not the redaction."
     }
   ]
 }

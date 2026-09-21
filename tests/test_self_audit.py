@@ -102,6 +102,29 @@ def _scan(detectors, text: str) -> list:
 # The negative control: ordinary development text is not a disclosure.
 # ---------------------------------------------------------------------------
 
+def _clean_params() -> list:
+    """Clean entries, with the ones the MODEL fires on marked xfail.
+
+    The cheap tiers are silent on all 20, so the cheap test below takes them
+    unmarked. The model is not silent, and the first version of this file
+    never asked it — a false-positive corpus that did not run the detector
+    producing the false positives, reporting green while two of its own
+    entries failed the property it advertised. Review found it by running
+    the model itself.
+    """
+    out = []
+    for entry in _load("clean.json"):
+        marks = []
+        fp = entry.get("known_false_positive")
+        if fp:
+            marks.append(pytest.mark.xfail(
+                strict=True,
+                reason=f"model reports {fp['data_type']} {fp['value']!r}: "
+                       f"{fp['why']}"))
+        out.append(pytest.param(entry, marks=marks, id=entry["id"]))
+    return out
+
+
 @pytest.mark.parametrize("entry", _load("clean.json"), ids=lambda e: e["id"])
 def test_a_clean_development_string_produces_no_cheap_finding(entry):
     found = _scan(_cheap_stack(), entry["text"])
@@ -121,6 +144,40 @@ def test_the_clean_corpus_is_silent_as_a_whole():
     assert len(noisy) <= CLEAN_FALSE_POSITIVE_BUDGET, (
         f"{len(noisy)} of {len(_load('clean.json'))} clean entries fired: "
         f"{noisy}")
+
+
+@pytest.mark.parametrize("entry", _clean_params())
+def test_a_clean_development_string_produces_no_deep_finding(entry):
+    """The check the first version of this file was missing.
+
+    Known limit 7 measured 9 of 61 clean strings producing a finding, all of
+    them the model's confident output. A corpus that asserts "ordinary
+    development text is not a disclosure" and then only runs regex is not
+    checking that claim at all."""
+    model = _model_detector()
+    if model is None:
+        pytest.skip("tier 3 weights are not on this machine")
+    found = _scan([model], entry["text"])
+    assert found == [], (
+        f"{entry['id']} ({entry['kind']}) is ordinary {entry['kind']} with "
+        f"nothing sensitive in it, and the model reported "
+        f"{[(f.data_type, f.value) for f in found]}")
+
+
+def test_the_clean_corpus_records_every_model_false_positive_it_has():
+    """No unmarked entry may fire on the model, and no marked one may be
+    clean. The first half stops a new false positive arriving unrecorded;
+    the second stops a stale marker outliving the behaviour it describes —
+    the same job `strict=True` does per entry, checked in one place so the
+    fixture and the model cannot drift apart quietly."""
+    model = _model_detector()
+    if model is None:
+        pytest.skip("tier 3 weights are not on this machine")
+    for entry in _load("clean.json"):
+        fires = bool(_scan([model], entry["text"]))
+        recorded = bool(entry.get("known_false_positive"))
+        assert fires == recorded, (
+            f"{entry['id']}: model fires={fires}, fixture records={recorded}")
 
 
 # ---------------------------------------------------------------------------
