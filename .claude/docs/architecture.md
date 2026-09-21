@@ -232,7 +232,11 @@ scan(text) →
 
 Tier 3 runs only when Tier 1 hits, when the payload crosses B3/B4, or when the text contains PII-shaped tokens that Tier 1 could not classify. Roughly 10–15% of events in practice.
 
-**What ships, on the B3/B4 half of that sentence.** For a year the engine did the opposite — it excluded B3/B4 outright — and the only types tier 3 owns (`person`, `address`, `email`, `phone`, `url`, `date`, `account`) could not appear on any outbound row (#47 item 1). The exclusion is gone, and the reason it could not simply be deleted is the shape the rest of this section has to account for: an outbound call is a `PreToolUse`, `hooks/handler.py` gives the daemon 2.0 s, and I6 turns a missed deadline into a **deny** of a call that should have been allowed. So on B3/B4 the deep scan is admitted one at a time across the daemon and bounded end to end by `engine.TIER3_EGRESS_BUDGET` (1.0 s, covering admission, the wait for the model, and inference); a call that does not get it proceeds on tiers 0-2. Ingress keeps waiting as long as the model takes, because Ruling 3 makes its reply `{}` either way. Each skipped scan is recorded — see §4's note on degraded coverage below and `docs/known-limits.md` #21.
+**What ships, on the B3/B4 half of that sentence.** The engine did the opposite for most of this project's life — it excluded B3/B4 outright — so the types tier 3 owns (`person`, `address`, `email`, `phone`, `url`, `date`, `account`) could not appear on any outbound row (#47 item 1). The exclusion is gone, and the reason it could not simply be deleted is what the rest of this section has to account for: an outbound call is a `PreToolUse`, `hooks/handler.py` gives the daemon 2.0 s per socket operation, and I6 turns a missed deadline into a **deny** of a call that should have been allowed.
+
+So on B3/B4 the deep scan is admitted one at a time across the daemon, under `engine.TIER3_EGRESS_BUDGET` (1.0 s). **Be precise about what that budget is, because the obvious reading is wrong**: it bounds how long the calling thread *waits*, and whether a result that arrives is *accepted* — it does not stop inference. A model call already under way runs to completion on its worker; the caller stops waiting at the budget, and a result that finished after it is discarded rather than used (`engine._in_time`). Measured: with the 1.0 s budget and a detector that holds the interpreter, the call returned at 1.25 s, correctly reporting a timeout and discarding the findings. Python has no way to cancel a running C extension call, so "the deep scan is over at 1.0 s" is not a promise this design can make; "we stop waiting, and we do not use what comes late" is.
+
+A call that does not get its scan proceeds on tiers 0-2. Ingress keeps waiting as long as the model takes, because Ruling 3 makes its reply `{}` either way. Each skipped scan is recorded — see §10 below and `docs/known-limits.md` #21.
 
 **Shell destination extraction (Tier 2)** is what makes egress detection real. Parse the command, walk the AST, and classify each sink:
 
@@ -438,7 +442,7 @@ The guard is in that branch and not at the rule's mint site because the
 branch intersects its selectors with *every* finding on the observation, not
 with the finding that triggers the block: a `mask` rule on any type that
 merely co-occurs with a credential — a path on the same command line, which
-is what one click of the audit UI's "Protect future occurrences" on a path
+is what one click of the audit UI's "Mask detected <type> in future calls" on a path
 exposure writes — skipped the block for the whole call. Those selectors are
 innocuous, so no refusal keyed on a selector reaches that case.
 `mcp_tools.apply_policy` still refuses a `mask` rule whose selector *is* a

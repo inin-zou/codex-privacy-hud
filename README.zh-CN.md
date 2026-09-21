@@ -169,7 +169,7 @@ API credential ×1     .env             none             [PREVENTED]
 
 标签页：`Exposed`（已暴露）· `Prevented`（已阻止）· `All events`（全部事件）。
 
-**Level 3：暴露详情。** 查看单条数据流、脱敏后的证据，以及面向后续披露的补救措施（`Protect future occurrences`；对于标明真实来源的行，还可使用 `Block values read from <file>`）。这些措施无法撤销披露——已经披露的数据无法收回，且来源规则仅匹配未经改动就向外发送的值。
+**Level 3：暴露详情。** 查看单条数据流、脱敏后的证据，以及面向后续披露的补救措施（`Mask detected <type> in future calls`；对于标明真实来源的行，还可使用 `Block values read from <file>`）。这些措施无法撤销披露——已经披露的数据无法收回，且来源规则仅匹配未经改动就向外发送的值。
 
 **MCP 工具。** Codex 还提供五个可由模型调用的工具：查看会话摘要、暴露列表、单次暴露的详情和读取防护状态，以及写入策略规则。服务器以 `privacy.<name>` 注册这些工具，Codex 向模型提供的名称则使用下划线，因此会话记录中显示的是 `privacy_get_session_summary`、`privacy_list_exposures`、`privacy_get_exposure_detail`、`privacy_read_guard_status` 和 `privacy_update_policy`。前四个只提供查询，第五个只能收紧防护，因为引擎会优先执行唯一的无条件硬拦截——拦截携带凭据的出站调用——再考虑你或模型能写入的任何规则：携带凭据的调用直接由内置默认策略决定，即予以拦截，完全跳过用户掩码规则。无论规则的选择器指定什么，这一点都成立，而这正是关键所在：即使规则针对的是文件路径这类无害类型，它也可能匹配到同时携带凭据的调用。选择器直接指定被硬拦截类型的掩码规则仍会在写入时被拒绝，因为这样的规则如今无法决定任何处理结果，却会让人误以为已经施加了防护。关闭读取防护和隐藏 HUD 不在这五个工具之中，因为 MCP 工具由模型调用，而放宽防护的开关不能交给防护所约束的模型。这两项操作只能通过你亲自输入的 `$privacy` 执行。临时放行一次被拦截的调用也不在其中，但原因不同：这项操作根本没有任何入口——`$privacy` 不提供，审计界面不提供，MCP 工具也不提供——见[已知限制第 13 条](docs/known-limits.md#13-no-policy-rule-can-be-removed-within-the-session-that-wrote-it)。
 
@@ -271,7 +271,7 @@ flowchart TD
 10. **来源规则匹配的是规范化后的完整值，不是摘要，也不是逐字节比较。** 模型对读取的内容进行总结、改写或仅引用一部分后，规则就无法匹配。规则保证的是“这个值不会原样传出”，而不是“这个文件的任何信息都不会传出”。匹配依据是 `value.strip().lower()` 的 HMAC，因此只在大小写或首尾空白上有差异的值也会匹配，匹配范围比“逐字节相同”更宽。（[详情](docs/known-limits.md#10-a-source-rule-matches-the-whole-value-normalised--not-a-summary-of-it-and-not-a-byte-comparison-either)）
 11. **来源提取会尽力识别，但不保证成功。** 能识别 `cat .env`，但不能识别 `python -c "open('.env')"`。没有来源的行不提供规则，以免提供无法生效的规则。（[详情](docs/known-limits.md#11-origin-extraction-is-best-effort)）
 12. **污点映射随守护进程终止而丢失。** 如果在会话中途替换守护进程，映射就会丢失，来源规则会停止匹配，且不会报错。（[详情](docs/known-limits.md#12-the-taint-map-dies-with-the-daemon)）
-13. **任何策略规则都无法在写入它的会话中移除。** 早在来源规则出现之前，`Protect future occurrences` 就已如此。只有新建 Codex 对话才能从没有这些规则的状态开始。（[详情](docs/known-limits.md#13-no-policy-rule-can-be-removed-within-the-session-that-wrote-it)）
+13. **任何策略规则都无法在写入它的会话中移除。** 早在来源规则出现之前，脱敏规则就已如此。只有新建 Codex 对话才能从没有这些规则的状态开始。（[详情](docs/known-limits.md#13-no-policy-rule-can-be-removed-within-the-session-that-wrote-it)）
 14. **只有提取器能识别出读取操作的 shell 命令才会被拦截。** 防护只检查 shell 这一种工具，因为 Codex 通过它读取文件；其他工具一律不经检查直接放行。即使是 shell 命令，也只有 `cat .env` 这样的读取会被拦截；`wc -l .env`、`source .env`、`cp .env /tmp/x`、`strings id_rsa`、`head -5 .env` 和 `python -c "open('.env')"` 都不会被拦截：不拒绝、不提示、不写入记录。具体机制见第 11 条。（[详情](docs/known-limits.md#14-only-a-shell-command-whose-read-the-extractor-recognises-is-stopped)）
 15. **模板文件永远不会被拦截。** 即使其中确实包含密钥也一样，但检测仍会将其标记出来。（[详情](docs/known-limits.md#15-a-template-file-is-never-blocked)）
 16. **只有手动开启防护后，读取才会被拦截。** 默认只记录读取，并在每个会话中提示一次防护功能，不会拦截任何读取。（[详情](docs/known-limits.md#16-nothing-is-blocked-until-you-turn-it-on)）

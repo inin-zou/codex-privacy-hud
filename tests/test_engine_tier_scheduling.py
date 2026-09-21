@@ -21,6 +21,7 @@ because the ledger rows are what a user actually sees and they must agree.
 """
 from __future__ import annotations
 
+import sys
 import threading
 import time
 
@@ -448,6 +449,30 @@ class _GilHog(StubModelDetector):
         return super().scan(text, ctx)
 
 
+def _scan_with_a_late_worker(tmp_path, monkeypatch, hold=0.25):
+    """Run one egress scan whose worker finishes after the deadline, with
+    the caller genuinely descheduled for the whole of it.
+
+    `sys.setswitchinterval` is what makes this real. A Python busy loop
+    still yields at the normal switch interval (5 ms here), so the caller
+    wakes on time, `Event.wait()` returns False, and the TIMEOUT path is
+    what produces the result — `_in_time` is never even called. Raising the
+    interval past the worker's hold keeps the caller off the CPU until the
+    worker has finished and set `done`, which is the one state that reaches
+    the completion-time check: `wait()` returns True, and the deadline has
+    already passed.
+    """
+    monkeypatch.setattr(engine, "TIER3_EGRESS_BUDGET", 0.02)
+    eng = _engine(tmp_path, [PathDetector(), SecretDetector(),
+                             _GilHog(hold, [EMAIL_FINDING])])
+    previous = sys.getswitchinterval()
+    sys.setswitchinterval(hold * 20)
+    try:
+        return eng.scan(_obs(destination="mcp_tool"))
+    finally:
+        sys.setswitchinterval(previous)
+
+
 def test_a_result_that_finished_after_the_deadline_is_not_accepted(tmp_path,
                                                                    monkeypatch):
     """`done` being set proves the work completed, not that it was in time.
@@ -455,23 +480,36 @@ def test_a_result_that_finished_after_the_deadline_is_not_accepted(tmp_path,
     A caller descheduled past its own budget wakes to a set event, and
     without a completion timestamp it accepts findings its deadline had
     already excluded — which makes the bound advisory rather than a bound.
-
-    This test reaches that state for real rather than by patching
-    `_in_time`: the detector holds the GIL well past the budget, so the
-    caller does not get to run until after the worker has finished and set
-    `done`. An earlier version of this test patched `_in_time` to return
-    False and described itself as "moving the deadline into the past",
-    which tested the branch without ever producing the state that reaches
-    it."""
-    monkeypatch.setattr(engine, "TIER3_EGRESS_BUDGET", 0.02)
-    eng = _engine(tmp_path, [PathDetector(), SecretDetector(),
-                             _GilHog(0.25, [EMAIL_FINDING])])
-    scan = eng.scan(_obs(destination="mcp_tool"))
-
+    """
+    scan = _scan_with_a_late_worker(tmp_path, monkeypatch)
     assert TIER3_TYPE not in _types(scan), (
         "a scan that finished after its deadline was accepted")
-    assert scan.degraded_reason in (engine.GAP_TIMEOUT,)
+    assert scan.degraded_reason == engine.GAP_TIMEOUT
     assert CHEAP_TYPES <= _types(scan)
+
+
+def test_that_test_fails_when_the_completion_check_is_bypassed(tmp_path,
+                                                               monkeypatch):
+    """The discriminator, and the reason this file now has three tests for
+    one branch instead of two.
+
+    Two earlier versions of the test above passed without ever exercising
+    `_in_time`: the first replaced the function with a constant `False` and
+    described itself as moving the deadline into the past, and the second
+    used a busy loop that still yielded, so `Event.wait()` timed out and the
+    timeout path produced the same outcome. Review caught the second by
+    replacing `_in_time` with an unconditional `True` and watching the test
+    pass anyway.
+
+    So that mutation is a test now. If the completion-time check stops being
+    what rejects a late result, this goes red — and a green run above means
+    what it says.
+    """
+    monkeypatch.setattr(engine, "_in_time", lambda finished_at, deadline: True)
+    scan = _scan_with_a_late_worker(tmp_path, monkeypatch)
+    assert TIER3_TYPE in _types(scan), (
+        "the late result was rejected by something other than `_in_time`, so "
+        "the test above would pass with the check removed")
 
 
 def test_the_same_scan_inside_its_budget_is_accepted(tmp_path, monkeypatch):

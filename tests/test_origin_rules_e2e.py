@@ -441,7 +441,12 @@ def test_an_origin_rule_is_not_described_as_if_its_selector_were_a_data_type(ui,
     assert status == 200, body
     message = body["message"]
     assert "Matching /home/u/.env needs the deep scan" not in message
-    assert "came from there" in message
+    assert "detected twice" in message
+    # The claim review disproved: an origin rule is not defeated only by
+    # the *inbound* scan missing the value. A value whose origin this
+    # session did learn still escapes when the outbound scan is the one
+    # that misses it, so the note has to name both halves.
+    assert "and again on the outbound call" in message
 
 
 def test_the_confirmation_does_not_certify_what_the_call_is_allowed_to_do(ui,

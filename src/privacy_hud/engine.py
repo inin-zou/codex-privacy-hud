@@ -31,10 +31,12 @@ task-8-report.md for the full account):
              it runs on the observation text only when under
              `MAX_TIER3_CHARS`; above that it is skipped entirely (not
              truncated-and-run). And, on egress only, by time and by
-             admission: one outbound deep scan runs at a time, for at most
-             `TIER3_EGRESS_BUDGET` from admission to result, because I6
+             admission: one outbound deep scan runs at a time, and the
+             caller waits at most `TIER3_EGRESS_BUDGET` for it, because I6
              turns a missed client deadline into a deny of a call that
-             should have been allowed. Whichever bound bites, the scan
+             should have been allowed. The budget bounds the WAIT and the
+             acceptance of a result, not inference itself — nothing here
+             can cancel a running model call. Whichever bound bites, the scan
              carries a `GAP_*` reason, the `Decision` is `degraded`, and
              `Ledger.record_scan_gap` writes it down — so the session's
              coverage stops reading as complete and design.md §5's
@@ -193,8 +195,15 @@ _TIER3_LOCK = threading.Lock()
 # before the scan/observe split: a benign `curl .../health`, real answer
 # allow, took 2002ms behind six ingress scans and was denied.
 #
-# 1.0s is the whole egress deep-scan budget: admission, the wait for the
-# model, and inference itself. The number is deliberately half the client's
+# 1.0s is the egress deep scan's budget: how long the calling thread will
+# wait for a result, and the cutoff past which a result that arrives is
+# discarded rather than used (`_in_time`). It does NOT stop inference — a
+# model call already under way runs to completion on its worker, and Python
+# cannot cancel a C extension call mid-flight. Measured with this budget and
+# a detector that holds the interpreter: the call returned at 1.25s, having
+# correctly timed out and dropped the findings. "We stop waiting, and we do
+# not use what comes late" is the promise; "the scan is over at 1.0s" is not
+# one this design can make. The number is deliberately half the client's
 # 2.0s rather than as much of it as one warm scan (~430-540ms) seems to
 # leave spare, and the reason is the thing this bound does NOT cover.
 #
@@ -755,7 +764,7 @@ class Engine:
         return findings, gap
 
     def _deep_scan_on_a_deadline(self, text, ctx, expensive, findings):
-        """The egress path: bounded end to end, and admitted one at a time.
+        """The egress path: a bounded wait, and admitted one at a time.
 
         Returns a `GAP_*` reason, or None when the deep findings are in
         `findings`.
@@ -987,7 +996,7 @@ class Engine:
         # hard-blocked one — a path on the same command line — fired and
         # skipped the block for the whole call. Those selectors are
         # innocuous and `apply_policy` accepts them (one click of the audit
-        # UI's "Protect future occurrences" on a path exposure writes one),
+        # UI's "Mask detected <type> in future calls" on a path exposure writes one),
         # so no refusal keyed on the selector can reach that case. An earlier
         # fix wave asserted it could, on the false premise that `mask` +
         # `credential` was the only loosening combination; the comment that

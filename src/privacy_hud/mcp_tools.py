@@ -34,7 +34,7 @@ and a dataclass can never reach `json.dumps` unserialized.
 **`apply_policy` and enforcement — read before wiring UI actions to this.**
 `apply_policy` writes a row to the `policy` table (schema from ledger.py /
 architecture.md §5) exactly as `Engine.observe` needs to read it to make
-"Protect future occurrences" real. `Engine.observe`
+"Mask detected <type> in future calls" real. `Engine.observe`
 (src/privacy_hud/engine.py) queries the `policy` table on every egress
 observation, before falling back to `Matrix.default_action()` (the static
 mask/block table in tables.toml): a user-written `mask` rule forces a
@@ -164,7 +164,7 @@ _ALLOW_DEST_WITHDRAWN = (
 #: with *every* finding on the observation, not with the finding that
 #: triggered the block, so a mask rule on any type that merely co-occurred
 #: with a hard-blocked one — a path on the same command line, the selector
-#: one click of the audit UI's "Protect future occurrences" writes — skipped
+#: one click of the audit UI's mask action writes — skipped
 #: the block for the whole call. Those selectors are innocuous and this
 #: function accepts them, so no refusal keyed on a selector could ever have
 #: covered that case.
@@ -236,11 +236,12 @@ _RULE_CONDITIONS_CHEAP = (
     "rule matches nothing.")
 
 _RULE_CONDITIONS_ORIGIN = (
-    " It matches a value only while this session still knows that value "
-    "came from there, which it knows from the scan that first saw it — so "
-    "a value the deep scan missed or never got to (known limit 21) is not "
-    "connected to its origin and this rule does not see it. Detection can "
-    "also miss values, and hosted tools never reach this plugin at all.")
+    " It needs the value detected twice: once on the way in, for this "
+    "session to learn it came from there, and again on the outbound call "
+    "it should stop. Either can be missed — detection is heuristic, and a "
+    "deep scan that is busy, out of time, over the size limit or "
+    "unavailable (known limit 21) sees neither. Hosted tools never reach "
+    "this plugin at all.")
 
 
 def rule_enforcement_note(rule_type: str, selector: str) -> str:
