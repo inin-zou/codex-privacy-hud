@@ -208,3 +208,29 @@ def test_real_model_still_finds_a_name_and_a_secret_at_the_confidence_floor():
     types = {f.data_type for f in found}
     assert "person" in types and "credential" in types
     assert "Sofia Kowalczyk" in [f.value for f in found]
+
+
+def test_an_inference_failure_makes_the_detector_unavailable():
+    """A crash inside the pipeline is not a clean scan.
+
+    `scan()` catches the exception — I6 would otherwise turn a broken model
+    into a deny of every outbound call for as long as it stayed broken — but
+    catching it and returning `[]` said the scan had run and found nothing.
+    The engine counted the detector, the observation came out
+    `degraded=False`, and a session whose every deep scan crashed reported
+    as fully verified at 0%.
+    """
+    from privacy_hud.detect.model import ModelDetector
+
+    det = ModelDetector.__new__(ModelDetector)
+    det.available = True
+    det.min_score = 0.85
+
+    def boom(text):
+        raise RuntimeError("pipeline is broken")
+
+    det._pipe = boom
+    assert det.scan("contact jordan@acme.com", {}) == []
+    assert det.available is False, (
+        "a detector that cannot do its job must say so, or the engine "
+        "reports the gap as a clean scan")

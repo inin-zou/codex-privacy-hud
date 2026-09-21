@@ -117,6 +117,11 @@ CREATE TABLE IF NOT EXISTS scan_gaps (   -- append-only; deep scans that did not
   reason      TEXT NOT NULL             -- oversize|unavailable|busy|timeout
 );
 
+-- `coverage()` counts this table per session on every HUD publish, under
+-- `State.lock`. Without the index that is a full scan over every session's
+-- history the ledger has ever accumulated, on the hook path.
+CREATE INDEX IF NOT EXISTS scan_gaps_session ON scan_gaps(session_id);
+
 CREATE TABLE IF NOT EXISTS policy_tokens (  -- one-shot consent, §8
   token      TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
@@ -580,8 +585,11 @@ class Ledger:
         taxonomy and `tests/test_ledger.py` pins the two lists together.
 
         I1: a row is a session id, a timestamp, a boundary and a reason.
-        Nothing about what the payload contained — least of all from a scan
-        that by definition never read it.
+        Nothing about what the payload contained. Note that "the scan did
+        not run" does not always mean "nothing read the payload" — a
+        `timeout` row can describe inference that was under way and was
+        abandoned — which is the reason this docstring says what the row
+        holds rather than reasoning from what the scan did.
         """
         self.conn.execute(
             "INSERT INTO scan_gaps(session_id,ts,boundary,reason)"

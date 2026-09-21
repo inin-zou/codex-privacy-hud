@@ -247,13 +247,38 @@ class _DeepScanTask:
     point.
     """
 
-    __slots__ = ("done", "findings", "outcome")
+    __slots__ = ("done", "findings", "outcome", "error", "finished_at")
 
     def __init__(self) -> None:
         self.done = threading.Event()
         self.findings: list[Finding] = []
         #: None once the scan has actually run; a `GAP_*` reason otherwise.
         self.outcome: str | None = GAP_TIMEOUT
+        #: What `scan()` raised, re-raised on the CALLER's thread so it
+        #: reaches the daemon's exception boundary and I6 denies. Left on
+        #: the worker's thread it would do the opposite of fail closed: the
+        #: `finally` below sets `done`, the caller would read the initial
+        #: `GAP_TIMEOUT`, and a detector that crashed outright would be
+        #: reported as an ordinary deadline and the call allowed.
+        self.error: BaseException | None = None
+        #: When the scan finished, by the same clock as the deadline.
+        #: `done` being set proves the work completed, not that it completed
+        #: in time — a caller descheduled past its own budget would
+        #: otherwise accept a result its deadline had already excluded.
+        self.finished_at: float | None = None
+
+
+def _in_time(finished_at: float | None, deadline: float) -> bool:
+    """Did the scan finish before the budget ran out?
+
+    `Event.wait()` returning True says the work completed, not that it
+    completed in time: a caller descheduled past its own deadline wakes to a
+    set event and would otherwise accept a result its budget had already
+    excluded. Accepting it is not a safety problem — the findings are real —
+    but it makes the bound advisory rather than a bound, and an advisory
+    bound is the thing this whole path was rejected for once.
+    """
+    return finished_at is not None and finished_at <= deadline
 
 
 def _run_expensive(text, ctx, expensive, into: list) -> str | None:
@@ -272,7 +297,17 @@ def _run_expensive(text, ctx, expensive, into: list) -> str | None:
         # conflation is the bug the DetectorProfile refactor removed.
         if not is_available(d):
             continue
-        into.extend(d.scan(text, ctx))
+        found = d.scan(text, ctx)
+        # Read availability AGAIN, because a detector is allowed to discover
+        # mid-scan that it cannot do its job and say so by going
+        # unavailable — `ModelDetector.scan` does exactly that when the
+        # inference pipeline raises. Without this re-read the empty list it
+        # returns is indistinguishable from a clean scan, `ran_any` goes
+        # True, and a session whose every deep scan crashed reports as
+        # fully verified with nothing found.
+        if not is_available(d):
+            continue
+        into.extend(found)
         ran_any = True
     return None if ran_any else GAP_UNAVAILABLE
 
@@ -314,8 +349,15 @@ def _deep_scan_worker(text, ctx, expensive, task: _DeepScanTask,
             outcome = _run_expensive(text, ctx, expensive, found)
             task.findings = found
             task.outcome = outcome
+            task.finished_at = time.monotonic()
         finally:
             _TIER3_LOCK.release()
+    except BaseException as exc:                           # noqa: BLE001
+        # Caught, not propagated: an exception escaping this function would
+        # reach `threading.excepthook`, which prints it — and a detector's
+        # exception text can quote the payload it was scanning, which is an
+        # I1 problem, not just noise. The caller re-raises it instead.
+        task.error = exc
     finally:
         task.done.set()
         _TIER3_EGRESS_SLOT.release()
@@ -676,8 +718,14 @@ class Engine:
         #
         # B3/B4 (mcp_tool/external_net) used to be excluded here too, on the
         # argument that "tiers 0-2 already fully determine the block/mask
-        # decision". That is true of the *block* — only a credential blocks —
-        # and false of everything else a scan is for. `email`, `person`,
+        # decision". That argument is false twice over. It is false about the
+        # mask, obviously. It is also false about the *block*, less
+        # obviously: `detect/model.py`'s LABEL_MAP maps `SECRET` to
+        # `credential`, and `observe`'s hard-block test reads findings from
+        # every tier, so tier 3 can produce the finding that denies a call.
+        # (An earlier version of this comment repeated "only a credential
+        # blocks" as if that settled it. It does not — the deep tier is one
+        # of the things that can find a credential.) `email`, `person`,
         # `address`, `phone` and `account` are tier-3-only, so the exclusion
         # meant no outbound call could produce a finding of any of them: the
         # session's whole outbound record was paths and credentials, a `mask`
@@ -738,10 +786,13 @@ class Engine:
         is dropped, never merged into a ledger row or a block ruling.
         """
         deadline = time.monotonic() + TIER3_EGRESS_BUDGET
+        # Built before the slot is taken, so that nothing between the
+        # acquire and the `try` below can raise: an allocation failure there
+        # would leave a slot nobody holds and nobody releases, and every
+        # later egress would read `busy` for the life of the daemon.
+        task = _DeepScanTask()
         if not _TIER3_EGRESS_SLOT.acquire(blocking=False):
             return GAP_BUSY
-
-        task = _DeepScanTask()
         try:
             threading.Thread(
                 target=_deep_scan_worker,
@@ -755,10 +806,17 @@ class Engine:
 
         if not task.done.wait(max(0.0, deadline - time.monotonic())):
             return GAP_TIMEOUT
-        if task.outcome is None:
+        if task.error is not None:
+            # On this thread, so it leaves `Engine.scan` the way it would
+            # have before the scan moved to a worker: out through
+            # `dispatch()` to the daemon's exception boundary, where I6
+            # denies an outbound call whose engine failed. A detector that
+            # crashes must not read as a detector that was merely slow.
+            raise task.error
+        if task.outcome is None and _in_time(task.finished_at, deadline):
             findings.extend(task.findings)
             return None
-        return task.outcome
+        return task.outcome if task.outcome is not None else GAP_TIMEOUT
 
     def scan(self, obs: Observation) -> ScanResult:
         """Phase 1: classify the destination and run detection. No ledger.

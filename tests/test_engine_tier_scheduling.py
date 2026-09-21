@@ -394,3 +394,83 @@ def test_oversized_ingress_records_cheap_findings_and_reports_degraded(tmp_path)
     assert d.degraded is True
     types = {r.data_type for r in eng.ledger.list_events("s1", "exposed")}
     assert types == CHEAP_TYPES
+
+
+# ---------------------------------------------------------------------------
+# What the worker must not swallow, and what it must not accept late.
+# ---------------------------------------------------------------------------
+
+class _CrashingStub(StubModelDetector):
+    def scan(self, text, ctx):
+        raise RuntimeError("inference blew up")
+
+
+def test_a_detector_crash_on_egress_reaches_the_caller(tmp_path):
+    """I6, and the reason the worker catches `BaseException` and re-raises.
+
+    Before the deep scan moved to a worker thread, a detector exception on
+    the egress path left `Engine.scan`, left `dispatch()`, and landed on the
+    daemon's exception boundary, where I6 denies. On a worker thread it
+    would instead hit `threading.excepthook` — which prints it, and a
+    detector's exception text can quote the payload it was scanning — while
+    the caller read the task's initial `timeout` and **allowed** the call. A
+    crash must not be reported as slowness."""
+    eng = _engine(tmp_path, [PathDetector(), SecretDetector(), _CrashingStub([])])
+    with pytest.raises(RuntimeError, match="inference blew up"):
+        eng.scan(_obs(destination="mcp_tool"))
+
+
+def test_an_ingress_detector_crash_still_reaches_the_caller(tmp_path):
+    """The path that never changed, pinned beside it so the two agree."""
+    eng = _engine(tmp_path, [PathDetector(), SecretDetector(), _CrashingStub([])])
+    with pytest.raises(RuntimeError, match="inference blew up"):
+        eng.scan(_obs())
+
+
+def test_a_result_that_finished_after_the_deadline_is_not_accepted(tmp_path,
+                                                                   monkeypatch):
+    """`done` being set proves the work completed, not that it was in time.
+
+    A caller descheduled past its own budget wakes to a set event, and
+    without a completion timestamp it accepts findings its deadline had
+    already excluded — which makes the bound advisory rather than a bound.
+    Forced here by moving the deadline into the past after the scan
+    finished, which is the same state a stalled caller observes."""
+    monkeypatch.setattr(engine, "TIER3_EGRESS_BUDGET", 0.4)
+    slow = _SlowStub(0.2, [EMAIL_FINDING])
+    eng = _engine(tmp_path, [PathDetector(), SecretDetector(), slow])
+
+    real_in_time = engine._in_time
+    monkeypatch.setattr(engine, "_in_time",
+                        lambda finished_at, deadline: False)
+    scan = eng.scan(_obs(destination="mcp_tool"))
+    assert TIER3_TYPE not in _types(scan)
+    assert scan.degraded_reason == engine.GAP_TIMEOUT
+
+    monkeypatch.setattr(engine, "_in_time", real_in_time)
+    scan = eng.scan(_obs(destination="mcp_tool"))
+    assert TIER3_TYPE in _types(scan), "the same scan in time must be accepted"
+
+
+class _FailingModel(StubModelDetector):
+    """A detector that discovers mid-scan that it cannot work, and says so
+    the way `ModelDetector.scan` does."""
+
+    def scan(self, text, ctx):
+        self.available = False
+        return []
+
+
+def test_a_detector_that_fails_mid_scan_degrades_rather_than_reading_clean(
+        tmp_path):
+    """The failure that used to report as a clean scan.
+
+    `ModelDetector.scan` caught inference exceptions and returned `[]`. The
+    engine had already checked availability before the call, so `ran_any`
+    went True, `degraded` came out False, and a session whose every deep
+    scan crashed read as fully verified with nothing found — #47 item 6 one
+    layer below where it was filed."""
+    eng = _engine(tmp_path, [PathDetector(), SecretDetector(), _FailingModel([])])
+    scan = eng.scan(_obs())
+    assert scan.degraded_reason == engine.GAP_UNAVAILABLE
+    assert CHEAP_TYPES <= _types(scan)
