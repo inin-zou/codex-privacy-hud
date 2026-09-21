@@ -51,6 +51,23 @@ CHEAP_TYPES = {"path", "credential"}
 TIER3_TYPE = "email"
 
 
+class _SlowStub(StubModelDetector):
+    """`StubModelDetector` that takes measurable time inside `scan()`.
+
+    The egress budget bounds admission, the wait for the model, and
+    inference. Only a detector that is slow *while holding the model* can
+    tell a real deadline from one that merely bounds the wait — which is the
+    distinction the first version of this change got wrong."""
+
+    def __init__(self, delay, findings):
+        super().__init__(findings)
+        self.delay = delay
+
+    def scan(self, text, ctx):
+        time.sleep(self.delay)
+        return super().scan(text, ctx)
+
+
 def _engine(tmp_path, detectors, name="l"):
     led = Ledger(tmp_path / f"{name}.db", M)
     led.start_session("s1", cwd="/r", model="gpt-5")
@@ -212,30 +229,98 @@ def test_an_oversized_egress_degrades_now_that_the_deep_scan_applies_there(tmp_p
 # rather than risk the client's deadline. Ingress has no deadline worth
 # protecting: its reply is `{}` either way (Ruling 3), so it blocks.
 
-def test_a_contended_egress_gives_up_the_deep_scan_rather_than_risk_the_deadline(
-        tmp_path, monkeypatch):
-    monkeypatch.setattr(engine, "TIER3_EGRESS_LOCK_TIMEOUT", 0.05)
-    eng = _full_stack(tmp_path)
-    engine._TIER3_LOCK.acquire()
-    try:
-        started = time.monotonic()
-        scan = eng.scan(_obs(destination="mcp_tool"))
-        elapsed = time.monotonic() - started
-    finally:
-        engine._TIER3_LOCK.release()
+def test_an_egress_whose_budget_expires_reports_a_timeout_gap(tmp_path,
+                                                              monkeypatch):
+    """The deadline covers inference, not just the wait for the lock.
+
+    The first version of this change took the lock with a timeout and then
+    ran the scan unbounded, which bounds nothing — a slow forward pass could
+    still run past the hook client's 2.0s and be denied by I6. A slow
+    detector with the lock free is exactly the case that version let
+    through."""
+    monkeypatch.setattr(engine, "TIER3_EGRESS_BUDGET", 0.05)
+    eng = _engine(tmp_path, [PathDetector(), SecretDetector(),
+                             _SlowStub(0.6, [EMAIL_FINDING])])
+    started = time.monotonic()
+    scan = eng.scan(_obs(destination="mcp_tool"))
+    elapsed = time.monotonic() - started
 
     assert TIER3_TYPE not in _types(scan)
-    # It did not merely skip: it says so, which is what makes the fallback
-    # a reported degradation rather than a silent one.
-    assert scan.degraded is True
-    # The cheap tiers — and therefore the block decision — are untouched.
-    assert CHEAP_TYPES <= _types(scan)
-    assert elapsed < 1.0, "an egress must not sit on a contended lock"
+    assert scan.degraded_reason == engine.GAP_TIMEOUT
+    assert CHEAP_TYPES <= _types(scan), "the cheap tiers still ran"
+    assert elapsed < 0.5, f"egress waited {elapsed:.2f}s past its budget"
 
 
-def test_a_contended_ingress_waits_for_the_lock_instead_of_degrading(tmp_path,
-                                                                     monkeypatch):
-    monkeypatch.setattr(engine, "TIER3_EGRESS_LOCK_TIMEOUT", 0.05)
+def test_a_second_egress_is_refused_admission_rather_than_queued(tmp_path,
+                                                                 monkeypatch):
+    """Admission control, and the reason it is not just a nicety.
+
+    Without it, abandoning a scan at the deadline still leaves the work
+    queued for the model, so a burst of outbound calls each starts a scan,
+    each gives up, and each leaves inference running — and every later
+    egress spends its whole budget behind results nobody is waiting for.
+    The second call here must come back fast and say `busy`, not wait."""
+    monkeypatch.setattr(engine, "TIER3_EGRESS_BUDGET", 0.05)
+    eng = _engine(tmp_path, [PathDetector(), SecretDetector(),
+                             _SlowStub(0.5, [EMAIL_FINDING])])
+    first = eng.scan(_obs(destination="mcp_tool"))
+    assert first.degraded_reason == engine.GAP_TIMEOUT
+
+    started = time.monotonic()
+    second = eng.scan(_obs(destination="external_net"))
+    elapsed = time.monotonic() - started
+
+    assert second.degraded_reason == engine.GAP_BUSY
+    assert elapsed < 0.2, "a refused egress must not wait for the slot"
+    assert CHEAP_TYPES <= _types(second)
+
+
+def test_the_admission_slot_comes_back_when_the_abandoned_scan_finishes(
+        tmp_path, monkeypatch):
+    """The worker owns the slot's release, so the slot outlives the caller.
+
+    If the caller released it on giving up, the next egress would be
+    admitted while the model was still busy with the last one — which is the
+    queue admission control exists to prevent. If nobody released it, egress
+    would degrade forever after the first timeout. This pins the third
+    behaviour: released, but only once the work is actually done."""
+    monkeypatch.setattr(engine, "TIER3_EGRESS_BUDGET", 0.05)
+    slow = _SlowStub(0.3, [EMAIL_FINDING])
+    eng = _engine(tmp_path, [PathDetector(), SecretDetector(), slow])
+    assert eng.scan(_obs(destination="mcp_tool")).degraded_reason == \
+        engine.GAP_TIMEOUT
+
+    # Wait for the abandoned worker on the slot itself, rather than sleeping
+    # a guessed interval: this is the handoff under test.
+    assert engine._TIER3_EGRESS_SLOT.acquire(timeout=5)
+    engine._TIER3_EGRESS_SLOT.release()
+
+    slow.delay = 0.0
+    monkeypatch.setattr(engine, "TIER3_EGRESS_BUDGET", 1.0)
+    scan = eng.scan(_obs(destination="mcp_tool"))
+    assert scan.degraded_reason is None, "the slot never came back"
+    assert TIER3_TYPE in _types(scan)
+
+
+def test_a_late_result_is_dropped_rather_than_merged(tmp_path, monkeypatch):
+    """A scan that lands after its caller answered must change nothing.
+
+    The caller reads the worker's task only when `wait()` returned True, so
+    the findings this scan returns are the ones it had at the deadline — the
+    email the abandoned worker eventually produces never appears in them,
+    and so never reaches a ledger row or a block ruling built from them."""
+    monkeypatch.setattr(engine, "TIER3_EGRESS_BUDGET", 0.05)
+    slow = _SlowStub(0.4, [EMAIL_FINDING])
+    eng = _engine(tmp_path, [PathDetector(), SecretDetector(), slow])
+    scan = eng.scan(_obs(destination="mcp_tool"))
+    assert TIER3_TYPE not in _types(scan)
+
+    time.sleep(0.6)                                     # the worker lands
+    assert TIER3_TYPE not in _types(scan), "a late result mutated the result"
+    assert scan.degraded_reason == engine.GAP_TIMEOUT
+
+
+def test_a_contended_ingress_waits_for_the_model_instead_of_degrading(tmp_path):
     eng = _full_stack(tmp_path)
     engine._TIER3_LOCK.acquire()
     releaser = threading.Timer(0.3, engine._TIER3_LOCK.release)

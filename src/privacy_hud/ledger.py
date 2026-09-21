@@ -109,6 +109,14 @@ CREATE TABLE IF NOT EXISTS coverage (     -- append-only; who was watching, when
   UNIQUE(session_id, observer)          -- one row per observer per session
 );
 
+CREATE TABLE IF NOT EXISTS scan_gaps (   -- append-only; deep scans that did not run
+  id          INTEGER PRIMARY KEY,
+  session_id  TEXT NOT NULL,
+  ts          INTEGER NOT NULL,
+  boundary    TEXT NOT NULL,            -- B0..B4
+  reason      TEXT NOT NULL             -- oversize|unavailable|busy|timeout
+);
+
 CREATE TABLE IF NOT EXISTS policy_tokens (  -- one-shot consent, §8
   token      TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
@@ -218,6 +226,15 @@ class SessionCoverage:
     observers: int
     attached: bool
     unobserved_hooks: bool
+    #: How many observations in this session had a deep scan that applied to
+    #: them and did not run — `engine.GAP_*`, written by
+    #: `record_scan_gap`. Unlike the three fields above, this one does not
+    #: say a stretch of the session went unwatched: the hooks fired, the
+    #: cheap tiers ran, and the row (if any) is in `events`. What is missing
+    #: is the tier-3 finding types on those specific calls, which is why it
+    #: is the least severe entry in `reason` and still enough to make
+    #: `verified` false.
+    shallow_scans: int = 0
 
     @property
     def verified(self) -> bool:
@@ -230,7 +247,7 @@ class SessionCoverage:
         beginning". It reads unverified, which is the honest answer.
         """
         return (self.recorded and self.observers == 1 and not self.attached
-                and not self.unobserved_hooks)
+                and not self.unobserved_hooks and not self.shallow_scans)
 
     @property
     def reason(self) -> str:
@@ -252,6 +269,10 @@ class SessionCoverage:
             return "Privacy HUD restarted during this session"
         if self.unobserved_hooks:
             return "tool calls went unverified with no daemon listening"
+        if self.shallow_scans:
+            n = self.shallow_scans
+            return (f"{n} observation{'' if n == 1 else 's'} got the fast "
+                    "detectors only")
         return ""
 
     def as_dict(self) -> dict:
@@ -266,6 +287,7 @@ class SessionCoverage:
             "observers": self.observers,
             "attached": self.attached,
             "unobserved_hooks": self.unobserved_hooks,
+            "shallow_scans": self.shallow_scans,
         }
 
 
@@ -536,6 +558,43 @@ class Ledger:
             "SELECT COUNT(*) FROM coverage WHERE session_id=? AND reason=?",
             (UNATTRIBUTED_SESSION, COVERAGE_UNOBSERVED_HOOKS)).fetchone()[0]
 
+    def record_scan_gap(self, session_id: str, *, boundary: str,
+                        reason: str, ts: float | None = None) -> None:
+        """Write down that a deep scan which applied to an observation did
+        not run. Append-only; one row per observation, never deduped.
+
+        **Why this is a row and not a column on `events`.** The case that
+        matters most is the one that writes no event at all: an outbound
+        call whose cheap tiers found nothing and whose deep scan was skipped
+        produces zero `events` rows, and is therefore indistinguishable in
+        the ledger from a call that was fully scanned and was clean. A
+        column could only mark rows that exist. This table records the
+        *scan*, so a clean-looking session that was never properly looked at
+        stops reading as clean — which is the whole job of `coverage`.
+
+        `reason` is one of `engine.GAP_*`, and like `COVERAGE_*` above each
+        value names evidence rather than a guess: the payload was over the
+        cap, no detector could run, another scan held the slot, or the
+        budget expired. This module does not import `engine` (engine imports
+        ledger), so the values are not validated here — `engine` owns the
+        taxonomy and `tests/test_ledger.py` pins the two lists together.
+
+        I1: a row is a session id, a timestamp, a boundary and a reason.
+        Nothing about what the payload contained — least of all from a scan
+        that by definition never read it.
+        """
+        self.conn.execute(
+            "INSERT INTO scan_gaps(session_id,ts,boundary,reason)"
+            " VALUES(?,?,?,?)",
+            (session_id, int(time.time() if ts is None else ts), boundary,
+             reason))
+
+    def scan_gaps(self, session_id: str) -> int:
+        """How many observations in `session_id` lost their deep scan."""
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM scan_gaps WHERE session_id=?",
+            (session_id,)).fetchone()[0]
+
     def coverage(self, session_id: str) -> SessionCoverage:
         """Whether this ledger's account of `session_id` is known to be complete.
 
@@ -597,7 +656,8 @@ class Ledger:
 
         return SessionCoverage(recorded=True, observers=len(reasons),
                                attached=COVERAGE_ATTACHED in reasons,
-                               unobserved_hooks=gap)
+                               unobserved_hooks=gap,
+                               shallow_scans=self.scan_gaps(session_id))
 
     def record(self, session_id: str, *, turn_id, kind, data_type, source,
                destination, value_hash, masked_example, tool_name,

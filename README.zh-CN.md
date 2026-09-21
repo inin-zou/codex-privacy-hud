@@ -279,7 +279,7 @@ flowchart TD
 18. **被拦截读取的记录不包含文件名。** 记录依据的是匹配到的模式（`.pem`、`.env` 等），因此两个匹配同一模式的不同文件会被去重为一行。你能看到有读取被拦截，但无法知道是哪个文件。计数标记统计的是行数，因此对两个 `.pem` 文件的两次读取均被拒绝时，显示的计数为 `1`。（[详情](docs/known-limits.md#18-a-blocked-reads-row-does-not-name-the-file)）
 19. **子智能体继承了什么，没有记录。** `SubagentStart` 的观测事件不携带文本，因此不会运行任何检测器，也不会产生账本记录。“子智能体是否继承了 `.env`？”这个问题在账本中没有答案。（[详情](docs/known-limits.md#19-what-a-subagent-inherited-is-not-recorded)）
 20. **目的地表示边界类别，不代表具体接收方。** 所有 MCP 调用都归为 `mcp_tool`；将同一个值发送给第二个 MCP 服务器不算新的目的地，也不会再增加披露预算用量。`destinations` 卡片统计的是类别数，不是服务数。（[详情](docs/known-limits.md#20-a-destination-is-a-boundary-category-not-a-recipient)）
-21. **出站调用不保证执行深度扫描，放弃扫描也不会留下记录。** 模型串行执行扫描，出站调用最多等待 400 ms 获取模型锁；超时后只运行第 0–2 层快速检测，以免超过 hook 的时限，被 I6 判为拒绝。放行或拒绝的决策不受影响，但这次调用的深度检测结果会丢失，审计记录无法区分它与实际经过模型扫描的调用。（[详情](docs/known-limits.md#21-on-an-outbound-call-the-deep-scan-is-best-effort-and-giving-it-up-is-not-recorded)）
+21. **出站调用的深度扫描尽力而为。** 模型串行执行扫描，同一时间只允许一个出站调用进行深度扫描，整个扫描的时间预算为 1.0 秒；超过预算后，调用仅依据快速检测层的结果继续处理，以免超过 hook 的时限，被 I6 判为拒绝。这种回退可能放行完整扫描本应拦截的调用，也可能漏掉完整扫描本应脱敏的值——在引入出站深度扫描之前，所有出站调用都是如此。每次跳过深度扫描都会留下记录，因此会话不再显示为已完全验证，但审计无法指出具体是哪些调用。（[详情](docs/known-limits.md#21-on-an-outbound-call-the-deep-scan-is-best-effort)）
 
 ## 配置
 
