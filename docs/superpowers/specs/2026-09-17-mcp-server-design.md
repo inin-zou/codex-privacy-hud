@@ -1,4 +1,9 @@
 # Wire the MCP server, and stop the block message promising what no surface does
+> Historical implementation snapshot. The policy labels, confirmations,
+> enforcement wording and response examples below predate #49 item 2.
+> They are retained as history, not current implementation instructions.
+> Current behavior reports a saved rule with conditional enforcement;
+> `mcp_tools.rule_enforcement_note` supplies its conditions.
 
 **Status:** Design · **Date:** 2026-09-17 · **Builds on:** [#38](https://github.com/inin-zou/codex-privacy-hud/issues/38), [#40](https://github.com/inin-zou/codex-privacy-hud/issues/40), [#36](https://github.com/inin-zou/codex-privacy-hud/issues/36)
 

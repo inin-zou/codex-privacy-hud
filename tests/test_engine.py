@@ -390,7 +390,7 @@ def test_a_mask_rule_on_email_reaches_an_mcp_call(eng):
     above could not see either of them.
 
     That test sends to `subagent` (B2), where the deep scan always ran. The
-    surface a user actually clicks `Protect future occurrences` from is an
+    surface a user actually clicks `Mask detected email in future calls` from is an
     exposure row, and the destination that makes the feature worth having is
     an MCP tool (B3). Until the egress gate came off, policy matching
     intersected the rule's selectors with the *current scan's* findings, no

@@ -1,4 +1,9 @@
 # Codex Privacy HUD Implementation Plan
+> Historical implementation snapshot. The policy labels, confirmations,
+> enforcement wording and response examples below predate #49 item 2.
+> They are retained as history, not current implementation instructions.
+> Current behavior reports a saved rule with conditional enforcement;
+> `mcp_tools.rule_enforcement_note` supplies its conditions.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
