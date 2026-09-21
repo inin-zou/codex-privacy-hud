@@ -48,6 +48,7 @@ import sys
 import tempfile
 import textwrap
 import threading
+import time
 import tomllib
 from pathlib import Path
 
@@ -65,7 +66,7 @@ BANNED = ("undo", "revoke", "remove from context", "your data is protected",
           "100% secure")
 
 
-def _fake_mcp_server_body(tools, *, crash=False, says="") -> str:
+def _fake_mcp_server_body(tools, *, crash=False, says="", call="ok") -> str:
     """The stdlib stdio MCP server body `_write_fake_plugin` and the
     all-green end-to-end test both ship: answers `initialize` and
     `tools/list`, nothing else. Real enough to prove the handshake, small
@@ -73,15 +74,20 @@ def _fake_mcp_server_body(tools, *, crash=False, says="") -> str:
     conversation, not FastMCP's.
 
     `says` makes it die the way the real launcher dies: one line of cause on
-    stderr, nothing on stdout, non-zero exit."""
+    stderr, nothing on stdout, non-zero exit.
+
+    `call` is how it answers the doctor's ledger-read probe (`tools/call`):
+    "ok" a summary, "error" a tool error carrying a sentinel payload,
+    "malformed" a result that is not a summary, "hang" no answer at all."""
     if crash:
         if says:
             return (f"import sys; print({says!r}, file=sys.stderr); "
                     "sys.exit(1)\n")
         return "import sys; sys.exit(3)\n"
     return f"""
-import json, sys
+import json, sys, time
 TOOLS = {tools!r}
+CALL = {call!r}
 for line in sys.stdin:
     line = line.strip()
     if not line:
@@ -95,12 +101,32 @@ for line in sys.stdin:
         sys.stdout.write(json.dumps({{"jsonrpc": "2.0", "id": msg["id"],
             "result": {{"tools": [{{"name": n, "inputSchema": {{"type": "object"}}}}
                                  for n in TOOLS]}}}}) + "\\n")
+    elif msg.get("method") == "tools/call":
+        if CALL == "hang":
+            time.sleep(60)
+        elif CALL == "error":
+            result = {{"isError": True, "content": [{{"type": "text",
+                "text": "SENTINEL-tool-error-payload-7d2e"}}]}}
+        elif CALL == "malformed":
+            result = {{"content": [{{"type": "text", "text": "[]"}}]}}
+        elif CALL.startswith("value:"):
+            bad = json.loads(CALL[len("value:"):])
+            result = {{"content": [{{"type": "text", "text": json.dumps(
+                {{"percent": bad, "exposed_items": 0, "destinations": 0,
+                  "prevented": 0}})}}]}}
+        else:
+            result = {{"content": [{{"type": "text", "text": json.dumps(
+                {{"percent": 0, "exposed_items": 0, "destinations": 0,
+                  "prevented": 0}})}}]}}
+        if CALL != "hang":
+            sys.stdout.write(json.dumps({{"jsonrpc": "2.0", "id": msg["id"],
+                "result": result}}) + "\\n")
     sys.stdout.flush()
 """
 
 
 def _write_fake_plugin(root, *, tools, declare=True, crash=False, says="",
-                       server_name="privacy-hud"):
+                       server_name="privacy-hud", call="ok"):
     """A plugin directory shaped like an installed one, whose `mcp/server.py`
     is a stdlib stdio MCP server answering `initialize` and `tools/list`.
 
@@ -119,7 +145,8 @@ def _write_fake_plugin(root, *, tools, declare=True, crash=False, says="",
         json.dumps(manifest), encoding="utf-8")
     (root / "mcp").mkdir(parents=True, exist_ok=True)
     (root / "mcp" / "server.py").write_text(
-        _fake_mcp_server_body(tools, crash=crash, says=says), encoding="utf-8")
+        _fake_mcp_server_body(tools, crash=crash, says=says, call=call),
+        encoding="utf-8")
 
 
 # --------------------------------------------------------------------- #
@@ -1425,8 +1452,8 @@ def test_check_mcp_server_quotes_the_reason_the_server_gave(
     while the answer (`no usable runtime.json (FileNotFoundError); run
     privacy-hud-setup`) sat unread in a pipe this check had already opened.
 
-    Safe to quote by construction: `mcp/server.py::_fail` emits a cause and
-    never a payload (I1), which is what that error-handling rule was for.
+    Preserve that diagnosis through an exact startup allowlist match.
+    Arbitrary stderr does not inherit the launcher's disclosure policy.
     """
     monkeypatch.setattr(doctor, "_installed_plugin_root", lambda: tmp_path)
     _write_fake_plugin(
@@ -1434,18 +1461,32 @@ def test_check_mcp_server_quotes_the_reason_the_server_gave(
         says="privacy-hud mcp: no usable runtime.json (FileNotFoundError); "
              "run privacy-hud-setup")
     check = doctor.check_mcp_server(timeout=30)
+    reason = (
+        "privacy-hud mcp: no usable runtime.json (FileNotFoundError); "
+        "run privacy-hud-setup"
+    )
     assert check.status == doctor.FAIL
-    assert "run privacy-hud-setup" in " ".join(check.details)
+    assert check.details[0] == f"probe diagnostic: {reason}"
+    assert reason in doctor.format_report([check])
+    assert doctor._STDERR_WITHHELD not in doctor.format_report([check])
 
 
 def test_check_mcp_server_caps_what_it_quotes(monkeypatch, tmp_path):
-    """A server that dumps instead of diagnosing must not take the report
-    over."""
+    """A stderr dump is withheld, not merely shortened. The diagnostic
+    remains bounded and carries none of the dumped text."""
     monkeypatch.setattr(doctor, "_installed_plugin_root", lambda: tmp_path)
-    _write_fake_plugin(tmp_path, tools=[], crash=True, says="x" * 5000)
+    sentinel = "SENTINEL-private-exception"
+    _write_fake_plugin(
+        tmp_path, tools=[], crash=True, says=sentinel + "x" * 5000)
     check = doctor.check_mcp_server(timeout=30)
+    report = doctor.format_report([check])
     assert check.status == doctor.FAIL
+    assert check.details[0] == (
+        f"probe diagnostic: {doctor._STDERR_WITHHELD}"
+    )
     assert max(len(d) for d in check.details) < 400
+    assert sentinel not in report
+    assert "x" * 200 not in report
 
 
 def test_check_mcp_server_reads_the_server_the_manifest_names(
@@ -1461,6 +1502,407 @@ def test_check_mcp_server_reads_the_server_the_manifest_names(
     assert check.status == doctor.FAIL
     assert "somebody-elses-server" in " ".join(check.details)
     assert doctor.MCP_SERVER_NAME in check.summary
+
+
+def test_check_mcp_server_fails_when_list_succeeds_but_call_errors(
+        monkeypatch, tmp_path):
+    """The failure 0.7.4 and earlier shipped with MCP SDK 2.x: the tools
+    listed, every ledger-backed call errored, and listing was all this
+    check looked at."""
+    monkeypatch.setattr(doctor, "_installed_plugin_root", lambda: tmp_path)
+    _write_fake_plugin(tmp_path, tools=list(doctor.MCP_TOOLS), call="error")
+    check = doctor.check_mcp_server(timeout=30)
+    assert check.status == doctor.FAIL
+    assert check.summary == ("server started, but the MCP ledger-read probe "
+                             "failed")
+
+
+def test_check_mcp_server_fails_on_malformed_tool_result(monkeypatch,
+                                                         tmp_path):
+    monkeypatch.setattr(doctor, "_installed_plugin_root", lambda: tmp_path)
+    _write_fake_plugin(tmp_path, tools=list(doctor.MCP_TOOLS),
+                       call="malformed")
+    check = doctor.check_mcp_server(timeout=30)
+    assert check.status == doctor.FAIL
+    assert "ledger-read probe failed" in check.summary
+
+
+@pytest.mark.parametrize("bad", [None, "0", True, -1, 1.5])
+def test_check_mcp_server_fails_on_a_summary_with_malformed_values(
+        monkeypatch, tmp_path, bad):
+    """The right keys are not enough: a summary whose values are not
+    non-negative integers is not evidence that the ledger was read."""
+    monkeypatch.setattr(doctor, "_installed_plugin_root", lambda: tmp_path)
+    _write_fake_plugin(tmp_path, tools=list(doctor.MCP_TOOLS),
+                       call="value:" + json.dumps(bad))
+    check = doctor.check_mcp_server(timeout=30)
+    assert check.status == doctor.FAIL
+    assert "ledger-read probe failed" in check.summary
+
+
+def test_check_mcp_server_fails_when_tool_call_times_out(monkeypatch,
+                                                         tmp_path):
+    monkeypatch.setattr(doctor, "_installed_plugin_root", lambda: tmp_path)
+    _write_fake_plugin(tmp_path, tools=list(doctor.MCP_TOOLS), call="hang")
+    started = time.monotonic()
+    check = doctor.check_mcp_server(timeout=3)
+    assert time.monotonic() - started < 20, "the child was not cleaned up"
+    assert check.status == doctor.FAIL
+    assert "ledger-read probe failed" in check.summary
+
+
+def test_check_mcp_server_does_not_echo_tool_error_payload(monkeypatch,
+                                                           tmp_path):
+    """A tool error can carry anything; the report quotes none of it."""
+    monkeypatch.setattr(doctor, "_installed_plugin_root", lambda: tmp_path)
+    _write_fake_plugin(tmp_path, tools=list(doctor.MCP_TOOLS), call="error")
+    check = doctor.check_mcp_server(timeout=30)
+    text = " ".join([check.summary, *check.details, *check.fixes])
+    assert "SENTINEL-tool-error-payload-7d2e" not in text
+
+
+def test_check_mcp_server_probe_does_not_write_ledger_rows(monkeypatch,
+                                                           tmp_path):
+    """Against the real `mcp/server.py`: the probe passes, and every table
+    holds exactly what it held before -- no session, policy, event or
+    coverage row for the probe's synthetic session."""
+    import shutil
+
+    from privacy_hud.ledger import Ledger
+    from privacy_hud.matrix.loader import load_matrix
+
+    repo = Path(__file__).resolve().parents[1]
+    root = tmp_path / "plugin"
+    _write_fake_plugin(root, tools=list(doctor.MCP_TOOLS))
+    shutil.copy(repo / "mcp" / "server.py", root / "mcp" / "server.py")
+    data = tmp_path / "data"
+    data.mkdir()
+    led = Ledger(data / "ledger.db", load_matrix())
+    led.start_session("real", cwd="/r", model="gpt-5")
+    led.conn.close()
+    receipt = data / "runtime.json"
+    receipt.write_text(json.dumps({
+        "v": 1, "python": sys.executable, "pythonpath": str(repo / "src"),
+        "plugin_data": str(data), "env": {}}), encoding="utf-8")
+    receipt.chmod(0o600)
+
+    def counts() -> dict[str, int]:
+        conn = sqlite3.connect(data / "ledger.db")
+        try:
+            tables = [r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")]
+            return {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                    for t in tables}
+        finally:
+            conn.close()
+
+    before = counts()
+    monkeypatch.setattr(doctor, "_installed_plugin_root", lambda: root)
+    monkeypatch.setattr(doctor, "_ledger_path", lambda: data / "ledger.db")
+    monkeypatch.delenv("PRIVACY_HUD_MCP_REEXEC", raising=False)
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "no-codex-home"))
+    check = doctor.check_mcp_server(timeout=60)
+    assert check.status == doctor.OK, (check.summary, check.details)
+    assert check.summary.endswith("ledger read succeeded")
+    assert counts() == before
+
+
+def test_doctor_stderr_allowlist_matches_all_launcher_fail_calls():
+    import ast
+    import re
+
+    path = Path(__file__).resolve().parent.parent / "mcp" / "server.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+
+    receipt = [
+        node.value.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "RECEIPT_NAME"
+                for t in node.targets)
+        and isinstance(node.value, ast.Constant)
+    ]
+    assert receipt == ["runtime.json"]
+
+    fail = next(node for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name == "_fail")
+    prints = [
+        node for node in ast.walk(fail)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name) and node.func.id == "print"
+    ]
+    expected_print = ast.parse(
+        'print(f"privacy-hud mcp: {message}", file=sys.stderr)',
+        mode="eval",
+    ).body
+    assert len(prints) == 1
+    assert ast.dump(prints[0]) == ast.dump(expected_print)
+
+    calls = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name) and node.func.id == "_fail"
+    ]
+    assert len(calls) == 4
+
+    class_expr = ast.dump(ast.parse("type(exc).__name__", mode="eval").body)
+    fixed = set()
+    variable = []
+
+    for call in calls:
+        assert len(call.args) == 1
+        assert not call.keywords
+        value = call.args[0]
+        parts = value.values if isinstance(value, ast.JoinedStr) else [value]
+        pieces = ["privacy-hud mcp: "]
+        class_slots = 0
+
+        for part in parts:
+            if isinstance(part, ast.Constant):
+                assert isinstance(part.value, str)
+                pieces.append(part.value)
+            else:
+                assert isinstance(part, ast.FormattedValue)
+                assert part.conversion == -1
+                assert part.format_spec is None
+                if isinstance(part.value, ast.Name):
+                    assert part.value.id == "RECEIPT_NAME"
+                    pieces.append("runtime.json")
+                else:
+                    assert ast.dump(part.value) == class_expr
+                    class_slots += 1
+                    pieces.append("{exception_class}")
+
+        message = "".join(pieces)
+        if class_slots:
+            assert class_slots == 1
+            variable.append(message)
+        else:
+            fixed.add(message)
+
+    assert fixed == doctor._LAUNCHER_STDERR_LINES
+    assert variable == [
+        "privacy-hud mcp: no usable runtime.json ({exception_class}); "
+        "run privacy-hud-setup"
+    ]
+    assert doctor._LAUNCHER_RECEIPT_ERROR == (
+        r"privacy-hud mcp: no usable runtime\.json "
+        r"\([A-Za-z_][A-Za-z0-9_]*\); run privacy-hud-setup"
+    )
+
+    for line in fixed:
+        expected = (
+            line if len(line) <= 200 else line[:200] + "…"
+        )
+        assert doctor._stderr_tail(
+            line + "\n", allow_launcher=True) == expected
+
+    for name in ("FileNotFoundError", "JSONDecodeError", "_CustomError2"):
+        line = variable[0].format(exception_class=name)
+        assert re.fullmatch(doctor._LAUNCHER_RECEIPT_ERROR, line)
+        assert doctor._stderr_tail(line, allow_launcher=True) == line
+
+
+_SENTINEL = "SENTINEL-private-exception"
+_REASON = ("privacy-hud mcp: no usable runtime.json (FileNotFoundError); "
+           "run privacy-hud-setup")
+
+
+@pytest.mark.parametrize("text", [
+    f"RuntimeError: {_SENTINEL}",
+    f"SystemExit: cannot import SDK: {_SENTINEL}",
+    " " + _REASON,
+    _REASON + " ",
+    _REASON + _SENTINEL,
+    _SENTINEL + _REASON,
+    _REASON + "\r" + _SENTINEL,
+    _REASON + "\x1b[0m",
+    _REASON.replace("FileNotFoundError", "Error: " + _SENTINEL),
+    _REASON.replace("FileNotFoundError", "Érror"),
+    _REASON + "\n" + _SENTINEL,
+])
+def test_stderr_allowlist_requires_a_complete_unmodified_line(text):
+    sentinel = _SENTINEL
+    assert doctor._stderr_tail(text, allow_launcher=True) == (
+        doctor._STDERR_WITHHELD
+    )
+    exc = ValueError("fixed probe failure")
+    doctor._attach_stderr(exc, text, allow_launcher=True)
+    assert exc.__notes__ == [doctor._STDERR_WITHHELD]
+    assert sentinel not in "\n".join(exc.__notes__)
+
+
+def test_stderr_allowlist_caps_only_after_matching():
+    line = (
+        "privacy-hud mcp: no usable runtime.json ("
+        + "E" * 5000
+        + "); run privacy-hud-setup"
+    )
+    assert doctor._stderr_tail(line, allow_launcher=True) == line[:200] + "…"
+    assert doctor._stderr_tail(
+        line + " SENTINEL-private-exception", allow_launcher=True
+    ) == doctor._STDERR_WITHHELD
+    assert doctor._stderr_tail("") == ""
+    assert doctor._stderr_tail(" \n\t\n") == ""
+
+
+def _scripted_mcp_body(scenario: str, stderr_text: str) -> str:
+    """A stdio server that fails at one chosen step, writing `stderr_text`
+    to stderr (flushed) just before it does."""
+    return f"""
+import json, sys, time
+SCENARIO = {scenario!r}
+ERR = {stderr_text!r}
+TOOLS = {sorted(doctor.MCP_TOOLS)!r}
+SENTINEL = {_SENTINEL!r}
+
+def say(obj):
+    sys.stdout.write(json.dumps(obj) + "\\n")
+    sys.stdout.flush()
+
+def err():
+    sys.stderr.write(ERR + "\\n")
+    sys.stderr.flush()
+
+if SCENARIO == "pre_init":
+    err()
+    sys.exit(1)
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        say({{"jsonrpc": "2.0", "id": msg["id"], "result": {{
+            "protocolVersion": "2024-11-05", "capabilities": {{}},
+            "serverInfo": {{"name": "fake", "version": "1"}}}}}})
+    elif method == "tools/list":
+        if SCENARIO.startswith("list_"):
+            err()
+            if SCENARIO == "list_eof":
+                sys.exit(1)
+            if SCENARIO == "list_error":
+                say({{"jsonrpc": "2.0", "id": msg["id"],
+                     "error": {{"code": -32000, "message": SENTINEL}}}})
+                continue
+            time.sleep(60)
+        say({{"jsonrpc": "2.0", "id": msg["id"], "result": {{"tools": [
+            {{"name": n, "inputSchema": {{"type": "object"}}}}
+            for n in TOOLS]}}}})
+    elif method == "tools/call":
+        err()
+        if SCENARIO == "call_iserror":
+            say({{"jsonrpc": "2.0", "id": msg["id"], "result": {{
+                "isError": True,
+                "content": [{{"type": "text", "text": SENTINEL}}]}}}})
+        elif SCENARIO == "call_error":
+            say({{"jsonrpc": "2.0", "id": msg["id"],
+                 "error": {{"code": -32000, "message": SENTINEL}}}})
+        elif SCENARIO == "call_eof":
+            sys.exit(1)
+        else:
+            time.sleep(60)
+"""
+
+
+def _run_scripted(monkeypatch, tmp_path, scenario, stderr_text, timeout=30):
+    """Run the check against a scripted server, recording what `_mcp_probe`
+    raised or returned and every `_attach_stderr` call."""
+    monkeypatch.setattr(doctor, "_installed_plugin_root", lambda: tmp_path)
+    _write_fake_plugin(tmp_path, tools=list(doctor.MCP_TOOLS))
+    (tmp_path / "mcp" / "server.py").write_text(
+        _scripted_mcp_body(scenario, stderr_text), encoding="utf-8")
+    caught: list[BaseException] = []
+    probe_returns: list = []
+    attached_exceptions: list[BaseException] = []
+    real_probe = doctor._mcp_probe
+    real_attach = doctor._attach_stderr
+
+    def probe(*args, **kwargs):
+        try:
+            out = real_probe(*args, **kwargs)
+        except BaseException as exc:            # noqa: BLE001
+            caught.append(exc)
+            raise
+        probe_returns.append(out)
+        return out
+
+    def attach(exc, err, **kwargs):
+        attached_exceptions.append(exc)
+        return real_attach(exc, err, **kwargs)
+
+    monkeypatch.setattr(doctor, "_mcp_probe", probe)
+    monkeypatch.setattr(doctor, "_attach_stderr", attach)
+    check = doctor.check_mcp_server(timeout=timeout)
+    return check, doctor.format_report([check]), caught, probe_returns, \
+        attached_exceptions
+
+
+def _assert_withheld(check, report, caught):
+    sentinel, reason = _SENTINEL, _REASON
+    assert check.status == doctor.FAIL
+    assert len(caught) == 1
+    assert caught[0].__notes__ == [doctor._STDERR_WITHHELD]
+    assert sentinel not in "\n".join(caught[0].__notes__)
+    assert check.details[0] == (
+        f"probe diagnostic: {doctor._STDERR_WITHHELD}"
+    )
+    assert sentinel not in report
+    assert reason not in report
+
+
+def test_mcp_stderr_before_initialize_is_withheld(monkeypatch, tmp_path):
+    check, report, caught, _returns, _attached = _run_scripted(
+        monkeypatch, tmp_path, "pre_init", f"RuntimeError: {_SENTINEL}")
+    _assert_withheld(check, report, caught)
+    assert type(caught[0]) is ValueError
+
+
+@pytest.mark.parametrize("scenario", ["list_eof", "list_error"])
+@pytest.mark.parametrize("stderr_text", [
+    f"RuntimeError: {_SENTINEL}",
+    f"RuntimeError: {_SENTINEL}\n{_REASON}",
+])
+def test_mcp_listing_eof_or_error_withholds_stderr(monkeypatch, tmp_path,
+                                                   scenario, stderr_text):
+    check, report, caught, _returns, _attached = _run_scripted(
+        monkeypatch, tmp_path, scenario, stderr_text)
+    _assert_withheld(check, report, caught)
+    assert type(caught[0]) is ValueError
+
+
+@pytest.mark.parametrize("stderr_text", [
+    f"RuntimeError: {_SENTINEL}",
+    f"RuntimeError: {_SENTINEL}\n{_REASON}",
+])
+def test_mcp_listing_timeout_withholds_stderr(monkeypatch, tmp_path,
+                                              stderr_text):
+    check, report, caught, _returns, _attached = _run_scripted(
+        monkeypatch, tmp_path, "list_hang", stderr_text, timeout=3)
+    _assert_withheld(check, report, caught)
+    assert type(caught[0]) is TimeoutError
+
+
+@pytest.mark.parametrize("scenario", ["call_iserror", "call_error",
+                                      "call_eof", "call_hang"])
+def test_mcp_tool_call_failure_quotes_nothing(monkeypatch, tmp_path,
+                                              scenario):
+    sentinel, reason = _SENTINEL, _REASON
+    check, report, caught, probe_returns, attached_exceptions = \
+        _run_scripted(monkeypatch, tmp_path, scenario,
+                      f"RuntimeError: {sentinel}\n{reason}", timeout=3)
+    assert check.status == doctor.FAIL
+    assert check.summary == (
+        "server started, but the MCP ledger-read probe failed"
+    )
+    assert probe_returns == [(sorted(doctor.MCP_TOOLS), False)]
+    assert caught == []
+    assert attached_exceptions == []
+    assert sentinel not in report
+    assert reason not in report
+    assert doctor._STDERR_WITHHELD not in report
+    assert "probe diagnostic:" not in report
 
 
 def test_the_doctor_probes_the_server_the_real_manifest_declares():

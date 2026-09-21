@@ -11,6 +11,8 @@ UI so the same data is also browsable — the ASCII table is the one that
 always works; the browser UI is an enhancement, never a dependency
 (design.md P6).
 
+This skill reads the ledger directly; it does not call the MCP server. The MCP worker-thread failure in 0.7.4 and earlier does not affect this audit path.
+
 Both surfaces are built from the exact same functions:
 `privacy_hud.mcp_tools.get_session_summary` / `list_exposures` for the
 data, and `privacy_hud.render.audit` for the ASCII table's wording — do

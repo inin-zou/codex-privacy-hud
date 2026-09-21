@@ -467,7 +467,9 @@ class EventRow(ExposureRow):
 
 
 class Ledger:
-    def __init__(self, path: Path, matrix: Matrix, *, observer: str | None = None):
+    def __init__(self, path: Path, matrix: Matrix, *,
+                 observer: str | None = None,
+                 check_same_thread: bool = True):
         """`observer` identifies this `Ledger` instance in the `coverage` table.
 
         One id per instance, defaulted to a fresh random one, because "who was
@@ -478,10 +480,15 @@ class Ledger:
         daemon was replaced while that session was running. It is opaque and
         random rather than a pid or a hostname — I1: it must identify a process
         to us without describing the machine to anyone reading the file.
+
+        Thread affinity is enforced by default. A caller passing
+        `check_same_thread=False` must serialize every use and closure of this
+        connection.
         """
         self.matrix = matrix
         self.observer = observer or uuid.uuid4().hex[:16]
-        self.conn = sqlite3.connect(path, isolation_level=None)
+        self.conn = sqlite3.connect(path, isolation_level=None,
+                                    check_same_thread=check_same_thread)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(SCHEMA)

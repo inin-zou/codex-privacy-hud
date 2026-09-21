@@ -387,14 +387,10 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 class UIServer(HTTPServer):
-    """Deliberately single-threaded (`http.server.HTTPServer`, not
-    `ThreadingHTTPServer`): `Ledger`'s sqlite3 connection is opened with
-    the default `check_same_thread=True`, which is correct and safe for a
-    single-threaded server, and this is a local, single-operator audit
-    tool with no concurrency requirement worth the locking machinery
-    `daemon.py`'s `_allow_cross_thread_access` needs for the real,
-    multi-session daemon. Requests are served one at a time; a browser
-    issuing a few requests in quick succession simply queues briefly."""
+    """Serve requests sequentially with `HTTPServer`. `serve()` disables
+    SQLite thread affinity before handing the connection to the background
+    request thread. Once serving starts, that thread exclusively owns ledger
+    access. A threaded server would also require connection serialization."""
 
     allow_reuse_address = True
 

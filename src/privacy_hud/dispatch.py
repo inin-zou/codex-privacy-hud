@@ -304,11 +304,10 @@ def _allow_cross_thread_access(ledger: Ledger, db_path: Path) -> None:
     process-wide lock guarding every touch of this connection — see
     `daemon.Daemon`'s docstring) for the serialization sqlite3's own docs
     say becomes the caller's responsibility once same-thread checking is
-    disabled. This is a workaround at the call site rather than a change
-    to `Ledger.__init__`'s signature, since `ledger.py` is outside this
-    task's file list (daemon.py/dispatch.py/tests/test_daemon.py) and its
-    existing single-threaded-by-default contract is correct for every
-    OTHER caller.
+    disabled. This daemon reopens its connection with thread affinity
+    disabled and serializes access with `State.lock`. MCP uses a separate
+    connection and lock; the browser UI hands its connection to one
+    sequential request thread.
     """
     ledger.conn.close()
     conn = sqlite3.connect(db_path, isolation_level=None, check_same_thread=False)

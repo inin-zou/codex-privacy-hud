@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "privacy-hud"
-version = "0.7.4"
+version = "0.7.5"
 description = "Local-first privacy plugin for the Codex CLI: a session-level disclosure ledger with upstream enforcement."
 requires-python = ">=3.11"
 license = "MIT"
@@ -65,7 +65,7 @@ detectors = ["transformers>=5.16", "torch>=2.5"]
 # renamed `FastMCP` to `MCPServer` and left `mcp.server.fastmcp` as a module
 # that raises on import. With a bare `mcp`, which side of that rename an
 # install landed on depended on the date: a venv built 2026-09-15 got 1.x and
-# worked, the same install.sh on 2026-09-20 got 2.2.0 and the server never
+# started, the same install.sh on 2026-09-20 got 2.2.0 and the server never
 # started -- silently, since Codex reports nothing when an MCP server fails
 # to launch. Same lesson as `detectors` above, ten lines down.
 mcp = ["mcp>=2"]
