@@ -233,13 +233,19 @@ def _normalize_with_lines(text: str, *, offsets: bool = False
             ch = " " if ch == "_" or ch.isspace() else ch.lower()
             if ch == " " and (not out or out[-1] == " "):
                 continue
-            out.append(ch)
-            lines.append(position + column if offsets else number)
+            out.extend(ch)
+            lines.extend([position + column if offsets else number] * len(ch))
         if out and out[-1] != " ":
             out.append(" ")
             lines.append(position + len(raw) if offsets else number)
         position += len(raw) + 1
-    return "".join(out), lines
+    normalized = "".join(out)
+    # Chinese prose can wrap between characters without a word separator.
+    # Retain the original positions for the characters that survive.
+    gaps = {match.start() for match in re.finditer(
+        r"(?<=[\u3400-\u9fff“”]) (?=[\u3400-\u9fff“”])", normalized)}
+    return ("".join(ch for i, ch in enumerate(normalized) if i not in gaps),
+            [line for i, line in enumerate(lines) if i not in gaps])
 
 
 def _normalize(text: str) -> str:
@@ -435,7 +441,11 @@ def _forms(claim: str) -> list[str]:
     middle = max(1, len(words) // 2)
     wrapped = (" ".join(words[:middle]) + "\n    # "
                + " ".join(words[middle:]))
-    return [claim, wrapped, claim.replace(" ", "_"), claim.upper()]
+    forms = [claim, wrapped, claim.replace(" ", "_"), claim.upper()]
+    if any("\u3400" <= ch <= "\u9fff" for ch in claim):
+        forms.extend(claim[:i] + "\n    # " + claim[i:]
+                     for i in range(1, len(claim)))
+    return forms
 
 
 @pytest.mark.parametrize("claim", RETRACTED)
