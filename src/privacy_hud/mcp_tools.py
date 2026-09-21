@@ -195,6 +195,46 @@ _MASK_WOULD_DOWNGRADE = (
     "(known limit 13). Nothing to do: the block is already the stronger "
     "outcome.")
 
+#: The data types the always-on cheap tiers can produce, and therefore the
+#: only ones a rule can match without a successful deep scan: `path` from
+#: `detect/paths.py` and `credential` from `detect/secrets.py`. Everything
+#: else in `detect/model.py`'s LABEL_MAP — person, address, email, phone,
+#: url, date, account — exists only if tier 3 ran.
+#:
+#: This distinction is why `rule_enforcement_note` does not give every rule
+#: the same caveat. Telling a user that a `path` rule might not fire because
+#: the deep scan was busy would be its own false statement, in the opposite
+#: direction: the path detector runs on every observation, at every
+#: boundary, at any size.
+CHEAP_DATA_TYPES = frozenset({"path", "credential"})
+
+#: What a saved rule can and cannot promise, appended to every confirmation.
+#:
+#: Saving a rule is not enforcing it, and the gap between the two is not a
+#: detail: a user who reads "enforced" and goes on to send the data has made
+#: a decision this plugin then cannot honour and cannot reverse (I5). The
+#: three clauses are the three ways a written rule leaves a value unchanged,
+#: and none of them is visible to the person clicking the button.
+_RULE_CONDITIONS_DEEP = (
+    " Matching {selector} needs the deep scan, which is skipped when it is "
+    "busy, out of time, over the size limit, or unavailable (known limit "
+    "21) — on those calls the rule changes nothing and the call still goes. "
+    "Detection can also miss values, and hosted tools never reach this "
+    "plugin at all.")
+
+_RULE_CONDITIONS_CHEAP = (
+    " Detection is heuristic and can miss values, and hosted tools never "
+    "reach this plugin at all — on a call where nothing is detected the "
+    "rule changes nothing and the call still goes.")
+
+
+def rule_enforcement_note(selector: str) -> str:
+    """The conditions clause for a rule on `selector`."""
+    if selector in CHEAP_DATA_TYPES:
+        return _RULE_CONDITIONS_CHEAP
+    return _RULE_CONDITIONS_DEEP.format(selector=selector)
+
+
 #: How close two sessions' last hook events have to be, in seconds, before
 #: "which of these is the caller?" stops being answerable.
 #:

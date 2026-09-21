@@ -389,7 +389,14 @@ def build_app():
         loosen enforcement."""
         mcp_tools.apply_policy(ledger, session_id, rule_type=rule_type,
                                 selector=selector)
-        return {"applied": True, "rule_type": rule_type, "selector": selector}
+        # `saved`, not `applied`. The rule is in the policy table; whether it
+        # ever fires depends on a later call producing a finding it matches,
+        # and for every type but `path` that needs the deep scan to have run
+        # (#49 item 2, known limit 21). Report what happened, not what the
+        # user hopes will happen.
+        return {"saved": True, "enforcement": "conditional",
+                "rule_type": rule_type, "selector": selector,
+                "conditions": mcp_tools.rule_enforcement_note(selector).strip()}
 
     @app.tool(name="privacy.read_guard_status")
     def read_guard_status() -> dict:

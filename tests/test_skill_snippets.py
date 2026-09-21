@@ -188,3 +188,17 @@ def test_read_block_says_so_when_the_setting_cannot_be_written(env, tmp_path):
     first, rest = out.splitlines()[0], out.splitlines()[1:]
     assert first == "off"
     assert rest and "unchanged" in rest[0]
+
+
+def test_the_skill_does_not_tell_the_model_to_announce_enforcement():
+    """The instruction that made the model repeat the overclaim.
+
+    SKILL.md used to end this bullet "It is correct to tell the user the
+    rule is now enforced, not merely recorded." — a direct instruction to
+    assert the thing #49 item 2 is about. The model is the surface the user
+    actually hears, so an honest API reply with this line still in the skill
+    would have changed nothing they see.
+    """
+    text = (REPO / "skills" / "privacy" / "SKILL.md").read_text(encoding="utf-8")
+    assert "now enforced, not merely recorded" not in text
+    assert "Say the rule is **saved**" in text

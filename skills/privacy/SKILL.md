@@ -323,11 +323,17 @@ the rc file by hand.
   data is protected", no severity adjectives); a paraphrase can silently
   reintroduce exactly the claims those rules forbid.
 - Do not claim protection this tool cannot back up. The
-  `[ Protect future occurrences ]` action writes a real, durable `mask`
-  rule to the session's policy table, and `Engine.observe()` consults that
-  table before its own defaults on every subsequent egress observation, so
-  a later outbound call carrying that data type is rewritten. It is correct
-  to tell the user the rule is now enforced, not merely recorded.
+  `[ Mask detected <type> in future calls ]` action writes a real, durable
+  `mask` rule to the session's policy table, and `Engine.observe()`
+  consults that table before its own defaults on every subsequent egress
+  observation. Say the rule is **saved**, and that a later outbound call is
+  rewritten **when that data type is detected on it**. Do not say it is
+  enforced, and do not say later calls will be masked: the rule fires only
+  on a finding some tier actually produced, and for every type but `path`
+  that means the deep scan ran — it is bounded, runs one at a time, and is
+  skipped when the model is busy, out of time, over the size limit, or
+  unavailable (`docs/known-limits.md` #21). The tool's own reply carries
+  the conditions; pass them on rather than summarizing them away.
 - A row whose `source` names a real origin — a file the value was read
   from, or the command whose output carried it — gets a second action, and
   `render.detail()` prints it as one of two labels (#40):

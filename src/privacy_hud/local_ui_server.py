@@ -145,16 +145,31 @@ def _latest_session_id(ledger: Ledger) -> str | None:
 
 def _rule_confirmation(rule_type: str, selector: str) -> str:
     """design.md §6: every action confirms what rule it wrote, in plain
-    terms -- and, for an origin rule, what it cannot do. Matching is on the
-    whole value, normalised (known limit 10), so a model that summarizes
-    what it read still sends it; saying so here is cheaper than a user
-    discovering it later."""
+    terms -- and what it cannot do.
+
+    **Saved is not enforced, and this sentence is where the two stopped
+    being conflated** (#49 item 2). It used to end "Applies from the next
+    tool call.", which reads as a promise about every later call. It is not
+    one. A rule fires when some tier produces a finding its selector
+    matches, and for every type but `path` that means the deep scan ran --
+    bounded, admitted one at a time, and skipped outright when the model is
+    busy or unavailable (known limit 21). The user clicking the button
+    cannot see any of that, and a warning they find afterwards cannot
+    unsend what they sent in the meantime (I5).
+
+    Matching is also on the whole value, normalised (known limit 10), so a
+    model that summarizes what it read still sends it.
+    """
+    conditions = mcp_tools.rule_enforcement_note(selector)
     if rule_type in ("block_path", "block_command"):
-        return (f"Rule added: block values from {selector}. Applies to later "
-                "outbound calls. Only the whole value matches — if the model "
-                "summarizes or rewrites the content, it still leaves.")
-    return (f"Rule added: {rule_type} {selector}. "
-            "Applies from the next tool call.")
+        return (f"Rule saved: block values from {selector}. It applies to "
+                "later outbound calls, not to anything already sent. Only "
+                "the whole value matches — if the model summarizes or "
+                "rewrites the content, it still leaves." + conditions)
+    return (f"Rule saved: {rule_type} {selector}, for this session. On later "
+            "outbound calls this plugin checks, a detected "
+            f"{selector} is masked unless the call is blocked outright."
+            + conditions)
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -351,8 +366,12 @@ class _Handler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 self._send_json(400, {"error": str(exc)})
                 return
+            # `saved`, not `applied`: the write happened, and that is the
+            # only thing this response can honestly certify. `enforcement`
+            # carries the rest — see `_rule_confirmation` and #49 item 2.
             self._send_json(200, {
-                "applied": True,
+                "saved": True,
+                "enforcement": "conditional",
                 "message": _rule_confirmation(rule_type, selector),
             })
             return

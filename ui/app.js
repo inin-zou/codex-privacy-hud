@@ -296,8 +296,14 @@
       </div>
     `).join("");
 
+    // "Protect future occurrences" promised an outcome the rule cannot
+    // guarantee — it fires when a later call produces a matching finding,
+    // and for every type but `path` that needs the deep scan to have run
+    // (#49 item 2). The label now says what the rule does; the server's
+    // confirmation says what it depends on.
     const actions = [
-      { text: "Protect future occurrences", rule_type: "mask", selector: row.data_type },
+      { text: `Mask detected ${row.data_type} in future calls`,
+        rule_type: "mask", selector: row.data_type },
     ];
     // A source-level rule is offered only when the row names a real origin
     // (#40): source_kind is null when `source` is a bare tool label.
