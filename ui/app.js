@@ -27,8 +27,8 @@
 // historical audit page could honestly read. That changed with #47 item 6:
 // `Ledger.record_scan_gap` writes an append-only `scan_gaps` row, and
 // `SessionCoverage.shallow_scans` counts them, so the coverage banner this
-// page already renders now goes off for a session whose deep scans were
-// skipped. What still does not exist is per-EVENT degradation: the gap is
+// page already renders now goes off for a session with a deep scan whose
+// result went unused (never started, abandoned while running, or late). What still does not exist is per-EVENT degradation: the gap is
 // counted per session and no individual row is marked, which is why there
 // is still no per-row "fast-path results only" marker here.
 //

@@ -196,7 +196,7 @@ _TIER3_LOCK = threading.Lock()
 # before the scan/observe split: a benign `curl .../health`, real answer
 # allow, took 2002ms behind six ingress scans and was denied.
 #
-# --- THE CONTRACT. Every other surface points here; none restates it. -----
+# --- THE CONTRACT. The authoritative statement; summaries elsewhere defer to it.
 #
 # `TIER3_EGRESS_BUDGET` is two things, and neither of them is a clock:
 #
@@ -207,9 +207,17 @@ _TIER3_LOCK = threading.Lock()
 #   2. the cutoff a worker's completion must fall AT OR BEFORE for its
 #      findings to be used (`_in_time` compares `<=`).
 #
-# Meeting the cutoff is necessary and not sufficient: the caller must also
-# still be waiting when the result lands, the worker must not have raised,
-# and the scan must have produced an outcome.
+# Meeting the cutoff is necessary and not sufficient. The exact condition
+# for the findings to be used is:
+#
+#     wait() returned True           # the caller had not abandoned the result
+#     and task.error is None         # the worker did not raise
+#     and task.outcome is None       # the scan succeeded (not a GAP_* reason)
+#     and task.finished_at <= deadline
+#
+# The caller need not be waiting at the moment the worker finishes — a
+# result completed before `wait()` is entered is accepted too. What matters
+# is that the caller has not given up on it.
 #
 # It does not stop inference. Python cannot cancel a running C extension
 # call, so a model call already under way runs to completion on its worker;
@@ -278,8 +286,9 @@ GAP_TIMEOUT = "timeout"            #: egress: TIER3_EGRESS_BUDGET spent
 class _DeepScanTask:
     """One egress deep scan's handoff between its worker and its caller.
 
-    Written by the worker, read by the caller *only* after `done` is set and
-    only when the caller was still waiting — see
+    Written by the worker, read by the caller *only* when `wait()` returned
+    True — that is, only if the caller had not abandoned the result; the
+    worker may well have finished before `wait()` was entered — see
     `Engine._deep_scan_on_a_deadline` for why that ordering is the whole
     point.
     """
@@ -308,6 +317,7 @@ class _DeepScanTask:
 def _in_time(finished_at: float | None, deadline: float) -> bool:
     """Did the scan finish before the budget ran out?
 
+    Inclusive: a completion exactly AT the deadline counts (`<=`).
     `Event.wait()` returning True says the work completed, not that it
     completed in time: a caller descheduled past its own deadline wakes to a
     set event and would otherwise accept a result its budget had already
@@ -377,9 +387,12 @@ def _deep_scan_worker(text, ctx, expensive, task: _DeepScanTask,
         if not _TIER3_LOCK.acquire(timeout=remaining):
             return
         try:
-            # Spent the budget queueing. Starting inference now would run
-            # the model for a caller that has already answered, and hold the
-            # admission slot against the next egress call for no benefit.
+            # Spent the budget queueing. The caller's deadline has passed, so
+            # a result from here could never be used (`_in_time` would
+            # reject it) — starting inference would only hold the model and
+            # the admission slot against the next egress call. Whether the
+            # caller has actually resumed yet is the scheduler's business
+            # and does not change that.
             if time.monotonic() >= deadline:
                 return
             found: list[Finding] = []
@@ -449,7 +462,8 @@ class ScanResult:
     dest_kind: str
     boundary: str
     findings: tuple[Finding, ...]
-    # Ruling 4: a deep scan that applied to this observation did not run.
+    # Ruling 4: a deep scan applied to this observation and its result was
+    # not used (see `Decision.degraded` for the histories that covers).
     degraded: bool
     # Which of the four `GAP_*` reasons it was; None when the scan ran. The
     # bool above is `degraded_reason is not None` and is kept because every
@@ -471,13 +485,15 @@ class Decision:
     # real, non-None value here; a caller that ever sees rewrite+None has
     # found a bug, not a no-op.
     updated_input: str | dict | None = None
-    # Ruling 4: True when the expensive tier *would* have applied to this
-    # observation and produced no findings for it — over `MAX_TIER3_CHARS`,
-    # no available detector to run, or (egress only) the budget was spent
-    # first. That last case covers two different histories: a scan still
-    # waiting for the model, and a scan that ran and finished too late to
-    # be used. Both leave the observation without deep findings, which is
-    # what this flag is about. NOT set when the deep scan was simply out
+    # Ruling 4: True when the expensive tier applied to this observation and
+    # its result was NOT USED — which is different from "found nothing": a
+    # clean scan that ran and found nothing is not degraded. The histories
+    # that set it: never started (over `MAX_TIER3_CHARS`, no available
+    # detector, or on egress another scan holding the admission slot);
+    # started and abandoned (still running when the caller stopped
+    # waiting); finished after the budget's cutoff; or finished with the
+    # detector unavailable. In every one the observation has no deep
+    # findings to show for a scan that should have contributed them. NOT set when the deep scan was simply out
     # of scope (a local read, or a stack configured without tier 3): nothing
     # was lost there, so claiming otherwise would tell the user the tool is
     # impaired when it is behaving as specified. A B3/B4 egress was on that
@@ -956,8 +972,9 @@ class Engine:
         # Write the gap down before the ruling, not after, and unconditionally
         # — including for an observation that produces no `events` row at all.
         # That case is the reason this is recorded at all: a call whose cheap
-        # tiers found nothing and whose deep scan was skipped leaves the ledger
-        # looking exactly like a call that was fully scanned and was clean.
+        # tiers found nothing and whose deep-scan result went unused — never
+        # started, abandoned while running, or finished too late — leaves the
+        # ledger looking exactly like a call that was fully scanned and clean.
         # `Ledger.record_scan_gap` has the argument; the consequence is that
         # `coverage().verified` goes false, so the audit's banner and its
         # empty-state line both stop claiming a complete account (#47 item 6).

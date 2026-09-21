@@ -109,7 +109,7 @@ CREATE TABLE IF NOT EXISTS coverage (     -- append-only; who was watching, when
   UNIQUE(session_id, observer)          -- one row per observer per session
 );
 
-CREATE TABLE IF NOT EXISTS scan_gaps (   -- append-only; deep scans that did not run
+CREATE TABLE IF NOT EXISTS scan_gaps (   -- append-only; deep scans whose result went unused
   id          INTEGER PRIMARY KEY,
   session_id  TEXT NOT NULL,
   ts          INTEGER NOT NULL,
@@ -232,7 +232,9 @@ class SessionCoverage:
     attached: bool
     unobserved_hooks: bool
     #: How many observations in this session had a deep scan that applied to
-    #: them and did not run — `engine.GAP_*`, written by
+    #: them and whose result was not used — never started, abandoned while
+    #: running, finished too late, or finished unavailable (`engine.GAP_*`,
+    #: and `engine.Decision.degraded` for the full account), written by
     #: `record_scan_gap`. Unlike the three fields above, this one does not
     #: say a stretch of the session went unwatched: the hooks fired, the
     #: cheap tiers ran, and the row (if any) is in `events`. What is missing
@@ -565,12 +567,14 @@ class Ledger:
 
     def record_scan_gap(self, session_id: str, *, boundary: str,
                         reason: str, ts: float | None = None) -> None:
-        """Write down that a deep scan which applied to an observation did
-        not run. Append-only; one row per observation, never deduped.
+        """Write down that a deep scan which applied to an observation had
+        its result go unused — whether it never started or ran and was
+        abandoned or late. Append-only; one row per observation, never
+        deduped.
 
         **Why this is a row and not a column on `events`.** The case that
         matters most is the one that writes no event at all: an outbound
-        call whose cheap tiers found nothing and whose deep scan was skipped
+        call whose cheap tiers found nothing and whose deep-scan result went unused
         produces zero `events` rows, and is therefore indistinguishable in
         the ledger from a call that was fully scanned and was clean. A
         column could only mark rows that exist. This table records the

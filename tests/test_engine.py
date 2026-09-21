@@ -208,7 +208,8 @@ def test_propagate_credential_is_never_rewritten(eng):
 
 
 # ---------------------------------------------------------------------------
-# Ruling 4 — bounded synchronous deep scan; degraded flag when skipped.
+# Ruling 4 — the size cap, and the degraded flag when a deep scan's result
+# goes unused.
 # ---------------------------------------------------------------------------
 
 def test_large_ingress_payload_skips_tier3_and_marks_degraded(eng):
@@ -422,12 +423,16 @@ def test_an_email_bound_for_an_mcp_tool_is_recorded_as_an_exposure(eng):
             if r.data_type == "email"] == [("email", "mcp_tool")]
 
 
-def test_a_skipped_deep_scan_is_recorded_even_when_it_finds_nothing(eng, monkeypatch):
+def test_an_unused_deep_scan_is_recorded_even_when_it_finds_nothing(eng, monkeypatch):
     """The case a column on `events` could not have covered.
 
-    A call whose cheap tiers find nothing and whose deep scan is skipped
-    writes **no ledger row at all**, so before this it was indistinguishable
-    from a call that was fully scanned and was clean — an audit reading 0%
+    A call whose cheap tiers find nothing and whose deep-scan result goes
+    unused writes **no ledger row at all**. (This fixture's model does run —
+    it sleeps past the budget and is abandoned — which is why the test is not
+    called "skipped" any more: a scan that ran and was not used is recorded
+    exactly like one that never started.) Before this, such a call was
+    indistinguishable from one that was fully scanned and clean — an audit
+    reading 0%
     over a session nobody properly looked at. The gap row is what makes
     `coverage().verified` false, and #50's `empty_message` then replaces the
     reassuring empty state with one that says the record has a hole."""

@@ -146,8 +146,9 @@ def test_tier3_is_skipped_for_a_local_read(tmp_path):
 
 
 def test_skipping_tier3_by_schedule_does_not_mark_the_scan_degraded(tmp_path):
-    """`degraded` means "the deep scan would have applied here and did not
-    run", not "the deep scan did not run". A local read is *out of the deep
+    """`degraded` means "the deep scan applied here and its result was not
+    used" — whether it never started, was abandoned while running, or
+    finished late — and not "no deep scan happened". A local read is *out of the deep
     scan's domain by design*, so surfacing design.md §5's "fast-path results
     only" banner for it would tell the user the tool is impaired when it is
     behaving exactly as specified.

@@ -590,7 +590,7 @@ def test_record_defaults_source_kind_to_null(led):
 
 
 # ---------------------------------------------------------------------------
-# scan_gaps: the deep scans that did not run (#47 items 1 and 6).
+# scan_gaps: deep scans whose result went unused (#47 items 1 and 6).
 # ---------------------------------------------------------------------------
 
 def test_the_gap_reasons_the_engine_writes_are_the_ones_this_schema_documents():
@@ -645,9 +645,11 @@ def test_a_gap_in_another_session_does_not_count_against_this_one(led):
 
 
 def test_a_gap_row_holds_nothing_about_what_the_payload_contained(led):
-    """I1, checked at the schema rather than trusted: this table records a
-    scan that did not happen, and a scan that did not happen has even less
-    business holding content than one that did."""
+    """I1, checked at the schema rather than trusted. A row here records a
+    deep scan whose result went unused — and that scan may well have read
+    the payload (a `timeout` row can describe inference that ran and was
+    abandoned), which is exactly why the row must not carry anything about
+    what it read."""
     led.record_scan_gap("s1", boundary="B3", reason="timeout")
     row = dict(led.conn.execute("SELECT * FROM scan_gaps").fetchone())
     assert set(row) == {"id", "session_id", "ts", "boundary", "reason"}

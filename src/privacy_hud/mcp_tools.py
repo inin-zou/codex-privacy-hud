@@ -225,8 +225,10 @@ CHEAP_DATA_TYPES = frozenset({"path", "credential"})
 #: cheap text. An origin rule matches on where a value came from, which is
 #: a different question from which tier found it.
 _RULE_CONDITIONS_DEEP = (
-    " Matching {selector} needs the deep scan, which is skipped when it is "
-    "busy, out of time, over the size limit, or unavailable (known limit "
+    " Matching {selector} needs a deep scan whose result the call actually "
+    "uses, and there is none when the model is busy, the payload is over "
+    "the size limit, the weights are unavailable, or the scan is still "
+    "running or finishes late when the call stops waiting (known limit "
     "21) — on those calls the rule matches nothing. Detection can also miss "
     "values, and hosted tools never reach this plugin at all.")
 
@@ -239,9 +241,10 @@ _RULE_CONDITIONS_ORIGIN = (
     " It needs the value detected twice: once on the way in, for this "
     "session to learn it came from there, and again on the outbound call "
     "it should stop. Either can be missed — detection is heuristic, and a "
-    "deep scan that is busy, out of time, over the size limit or "
-    "unavailable (known limit 21) sees neither. Hosted tools never reach "
-    "this plugin at all.")
+    "value only the deep scan finds is missed whenever that scan's result "
+    "goes unused (known limit 21: busy, over the size limit, unavailable, "
+    "or still running or late when the call stops waiting). Hosted tools "
+    "never reach this plugin at all.")
 
 
 def rule_enforcement_note(rule_type: str, selector: str) -> str:

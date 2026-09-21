@@ -496,7 +496,7 @@ JSON_SUMMARY = {"percent": 6, "exposed_items": 2, "destinations": 2,
 #: the ordinary path, and it is what keeps every other golden in this file where
 #: it was.
 #: `shallow_scans` joined this payload in #47 item 1/6: it counts the
-#: observations whose deep scan applied and did not run, and it is the fourth
+#: observations whose deep scan applied and whose result went unused, and it is the fourth
 #: thing that can make `verified` false. Additive — a client that does not
 #: know the key still reads `verified` and `reason`, which is why it was safe
 #: to change this golden rather than version the endpoint.

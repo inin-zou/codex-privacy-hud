@@ -101,7 +101,8 @@ class Cost(Enum):
     #: on indefinitely, under `engine.TIER3_EGRESS_BUDGET` (read that
     #: constant for what the budget is; it promises nothing about when the
     #: call returns) — and reported via `Decision.degraded` whenever a scan
-    #: that should have run did not produce findings.
+    #: that applied had its result go unused. (Not "produced no findings":
+    #: a clean scan produces none and is not degraded.)
     EXPENSIVE = "expensive"
 
 

@@ -617,8 +617,10 @@ class _SlowTier3Detector:
     """A stand-in for `ModelDetector` that is slow and controllable.
 
     Declares the same `DetectorProfile` as the real tier 3, which is what
-    makes it scheduled like it: it runs on ingress to `model_context` and is
-    skipped on B3/B4 egress and on local reads, exactly like the real one.
+    makes it scheduled like it: it runs on ingress to `model_context`, runs
+    on B3/B4 egress under `engine.TIER3_EGRESS_BUDGET` (it used to be
+    excluded there, until #47 item 1), and is skipped on local reads —
+    exactly like the real one.
     (It used to earn that classification by carrying an `available`
     attribute, back when `engine` inferred the tier from the presence of one
     — see `detect/base.py` for why that inference is gone.)
@@ -762,7 +764,8 @@ def test_a_slow_ingress_scan_does_not_delay_an_egress_decision(slow_scan_daemon,
     assert elapsed < 0.2 + 0.3, (
         f"PreToolUse waited {elapsed:.2f}s behind an ingress scan — at the "
         "client's 2.0s timeout this becomes a false deny")
-    # The bound bit, so the deep scan did not run on that call. The session
+    # The budget bit. In this fixture the ingress scan holds the model lock
+    # throughout, so the egress deep scan never started. The session
     # must therefore stop reading as a complete account (#47 item 6): a
     # bounded scan that says nothing is the silent-fallback bug this whole
     # change was reviewed for.

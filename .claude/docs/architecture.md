@@ -236,7 +236,7 @@ Tier 3 runs only when Tier 1 hits, when the payload crosses B3/B4, or when the t
 
 So on B3/B4 the deep scan is admitted one at a time across the daemon, under `engine.TIER3_EGRESS_BUDGET` (1.0 s). **That constant's own comment is the contract; what follows is a summary and the constant wins wherever they differ** — a caveat worth the words, because seven review rounds found the same fact paraphrased into a promise about elapsed time at surface after surface. The summary: it is the timeout the caller *requests* and the cutoff a result's completion must fall at or before to be *used*, and it stops neither inference nor the clock (measured: a call under the 1.0 s budget returned at 1.25 s).
 
-A call that does not get its scan proceeds on tiers 0-2. Ingress keeps waiting as long as the model takes, because Ruling 3 makes its reply `{}` either way. Each skipped scan is recorded — see §10 below and `docs/known-limits.md` #21.
+A call that does not get its scan proceeds on tiers 0-2. Ingress keeps waiting as long as the model takes, because Ruling 3 makes its reply `{}` either way. Each observation whose deep-scan result went unused is recorded — see §10 below and `docs/known-limits.md` #21.
 
 **Shell destination extraction (Tier 2)** is what makes egress detection real. Parse the command, walk the AST, and classify each sink:
 
@@ -529,7 +529,7 @@ Tiers 0-2 are deliberately left unbounded (full payload, every time): they are c
 
 This connects directly to a piece of UI that already exists for a different reason: design.md §5's degraded-state banner (`⚠ Deep scan unavailable for N events — fast-path results only`) was designed for deep-scanner *timeout*. It now also covers every other way the deep scan can fail to cover an observation — same banner, same meaning to the user ("tier 3 did not fully cover this"), one fewer state for the UI layer to invent.
 
-**What ships, on where that is recorded.** This section says "mark the affected event degraded". The implementation records the *scan* instead, in an append-only `scan_gaps` table counted per session by `Ledger.coverage`, and the reason is the case a per-event mark cannot reach: an observation whose cheap tiers found nothing and whose deep scan was skipped writes **no event row at all**, and is otherwise indistinguishable from a call that was fully scanned and was clean. The cost of that choice is real and is stated in `docs/known-limits.md` #21: the audit can say a session has three shallow scans and cannot say which calls they were.
+**What ships, on where that is recorded.** This section says "mark the affected event degraded". The implementation records the *scan* instead, in an append-only `scan_gaps` table counted per session by `Ledger.coverage`, and the reason is the case a per-event mark cannot reach: an observation whose cheap tiers found nothing and whose deep-scan result went unused writes **no event row at all**, and is otherwise indistinguishable from a call that was fully scanned and was clean. The cost of that choice is real and is stated in `docs/known-limits.md` #21: the audit can say a session has three shallow scans and cannot say which calls they were.
 
 ---
 
