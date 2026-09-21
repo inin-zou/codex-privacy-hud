@@ -330,9 +330,11 @@ the rc file by hand.
   rewritten **when that data type is detected on it**. Do not say it is
   enforced, and do not say later calls will be masked: the rule fires only
   on a finding some tier actually produced, and for every type but `path`
-  that means the deep scan ran — it runs one at a time, the caller waits
-  only so long for it, and it is skipped when the model is busy, out of
-  time, over the size limit, or unavailable (`docs/known-limits.md` #21). The tool's own reply carries
+  that means the deep scan ran *and its result was used* — it runs one at
+  a time, the caller does not wait on it indefinitely, and its findings go
+  unused when the model is busy, when the payload is over the size limit,
+  when the weights are unavailable, or when the scan is still running once
+  the caller has stopped waiting (`docs/known-limits.md` #21). The tool's own reply carries
   the conditions; pass them on rather than summarizing them away.
 - A row whose `source` names a real origin — a file the value was read
   from, or the command whose output carried it — gets a second action, and

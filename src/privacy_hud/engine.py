@@ -200,9 +200,16 @@ _TIER3_LOCK = threading.Lock()
 #
 # `TIER3_EGRESS_BUDGET` is two things, and neither of them is a clock:
 #
-#   1. the timeout the caller REQUESTS of `task.done.wait()`, and
-#   2. the cutoff a worker's completion must beat for its findings to be
-#      used at all (`_in_time`).
+#   1. the timeout the caller REQUESTS — `task.done.wait()` is given
+#      whatever remains of the budget at that moment, not the whole of it,
+#      because the deadline is fixed before the task and thread are
+#      created; and
+#   2. the cutoff a worker's completion must fall AT OR BEFORE for its
+#      findings to be used (`_in_time` compares `<=`).
+#
+# Meeting the cutoff is necessary and not sufficient: the caller must also
+# still be waiting when the result lands, the worker must not have raised,
+# and the scan must have produced an outcome.
 #
 # It does not stop inference. Python cannot cancel a running C extension
 # call, so a model call already under way runs to completion on its worker;
@@ -225,13 +232,16 @@ _TIER3_LOCK = threading.Lock()
 # headroom to spend. `tests/test_daemon.py`'s lock-scope tests are where a
 # change to this number shows up as a number.
 #
-# Why this paragraph is the only one: six review rounds found the same
-# contradiction five separate times, because the fact was restated at
-# seventeen surfaces in five different paraphrases — "waits at most",
-# "bounds the wait", "bounds the time Engine.scan spends", "gives up
-# after", "is now bounded" — each of which drifts back toward a wall-clock
-# promise. A claim restated in seventeen places drifts in seventeen
-# directions. Everywhere else now says "see `TIER3_EGRESS_BUDGET`".
+# Why this paragraph exists: seven review rounds found the same
+# contradiction, because the fact was restated across seventeen surfaces in
+# five different paraphrases — "waits at most", "bounds the wait", "bounds
+# the time Engine.scan spends", "gives up after", "is now bounded" — each
+# shorter than the truth and each drifting the same way, back toward a
+# promise about elapsed time. This is the authoritative statement. Some
+# surfaces point here; the user-facing ones (README, known limits,
+# SKILL.md) still have to say it in their own words, and those are the ones
+# that have drifted every time, so they are worth reading against this
+# paragraph rather than trusting.
 #
 # Ingress has no budget at all and blocks for as long as the model takes:
 # Ruling 3 makes its reply `{}` either way, so a slow ingress scan costs
@@ -462,9 +472,12 @@ class Decision:
     # found a bug, not a no-op.
     updated_input: str | dict | None = None
     # Ruling 4: True when the expensive tier *would* have applied to this
-    # observation but did not run — over `MAX_TIER3_CHARS`, no available
-    # detector to run, or (egress only) the model lock was still busy at
-    # `TIER3_EGRESS_BUDGET`. NOT set when the deep scan was simply out
+    # observation and produced no findings for it — over `MAX_TIER3_CHARS`,
+    # no available detector to run, or (egress only) the budget was spent
+    # first. That last case covers two different histories: a scan still
+    # waiting for the model, and a scan that ran and finished too late to
+    # be used. Both leave the observation without deep findings, which is
+    # what this flag is about. NOT set when the deep scan was simply out
     # of scope (a local read, or a stack configured without tier 3): nothing
     # was lost there, so claiming otherwise would tell the user the tool is
     # impaired when it is behaving as specified. A B3/B4 egress was on that

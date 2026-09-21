@@ -7,9 +7,10 @@ Why a detector declares its own tier and cost
 of compiled regex and run on every observation; one is ~430-540ms of model
 inference and is therefore gated three ways (never on a local read, never
 above `engine.MAX_TIER3_CHARS`, and serialized on `engine._TIER3_LOCK` —
-for which an egress waits only as long as `engine.TIER3_EGRESS_BUDGET`
-asks it to, because I6 turns a missed client deadline into a deny — that
-constant's comment says what the budget does and does not promise). That is a real scheduling
+which an egress abandons rather than waits on indefinitely, because I6
+turns a missed client deadline into a deny — `engine.TIER3_EGRESS_BUDGET`
+is that mechanism, and its comment is the one place that says what it does
+and does not promise). That is a real scheduling
 decision, and the engine
 used to *guess* it: it asked `hasattr(detector, "available")` and treated a
 yes as "this is the expensive model tier", because at the time the model
@@ -96,11 +97,11 @@ class Cost(Enum):
     #: Hundreds of milliseconds, and/or a shared non-reentrant resource. The
     #: engine gates these: skipped for local destinations, skipped (not
     #: truncated) above `engine.MAX_TIER3_CHARS`, serialized on
-    #: `engine._TIER3_LOCK` — which an egress stops waiting on once
-    #: `engine.TIER3_EGRESS_BUDGET` is spent, in the hope of answering
-    #: before the hook client's deadline rather than the guarantee of it
-    #: (see that constant) — and reported via `Decision.degraded` whenever
-    #: a scan that should have run did not.
+    #: `engine._TIER3_LOCK` — which an egress abandons rather than waits
+    #: on indefinitely, under `engine.TIER3_EGRESS_BUDGET` (read that
+    #: constant for what the budget is; it promises nothing about when the
+    #: call returns) — and reported via `Decision.degraded` whenever a scan
+    #: that should have run did not produce findings.
     EXPENSIVE = "expensive"
 
 
