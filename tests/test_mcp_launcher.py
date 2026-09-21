@@ -42,7 +42,8 @@ def _fake_interpreter(tmp_path: Path) -> Path:
         "print(json.dumps({'argv': sys.argv[1:],\n"
         "                  'pythonpath': os.environ.get('PYTHONPATH', ''),\n"
         "                  'plugin_data': os.environ.get('PLUGIN_DATA', ''),\n"
-        "                  'marker': os.environ.get('PRIVACY_HUD_MCP_REEXEC', '')}))\n",
+        "                  'marker': os.environ.get('PRIVACY_HUD_MCP_REEXEC', ''),\n"
+        "                  'env': dict(os.environ)}))\n",
         encoding="utf-8")
     path.chmod(0o755)
     return path
@@ -96,6 +97,18 @@ def test_it_re_execs_under_the_recorded_interpreter(tmp_path):
     payload = json.loads(result.stdout)
     assert payload["argv"] == [str(SERVER)]
     assert payload["marker"] == "1", "the guard must be set before execve"
+
+
+def test_reexec_forces_offline_flags(tmp_path):
+    """The server half never loads the model today, but it runs under the
+    pinned interpreter that can; an inherited "0" must not reach it. The
+    launcher cannot import the package before the re-exec, so it carries its
+    own copy of the policy (`OFFLINE_ENV`), pinned by `tests/test_offline.py`."""
+    from privacy_hud import offline
+    data = _receipt(tmp_path, _fake_interpreter(tmp_path))
+    result = _run(data, env_extra={name: "0" for name in offline.FORCED_ENV})
+    env = json.loads(result.stdout)["env"]
+    assert {k: env.get(k) for k in offline.FORCED_ENV} == offline.FORCED_ENV
 
 
 def test_the_recorded_pythonpath_is_prepended(tmp_path):

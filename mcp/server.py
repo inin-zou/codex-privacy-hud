@@ -101,6 +101,20 @@ RECEIPT_VERSION = 1
 #: interpreter that re-enters this file loops until the process table gives up.
 REEXEC_MARKER = "PRIVACY_HUD_MCP_REEXEC"
 
+#: I2: assigned into the child's environment last, after every merge, so an
+#: inherited value cannot turn the network back on in the pinned
+#: interpreter. A copy of `privacy_hud.offline.FORCED_ENV`, which this file
+#: cannot import; `tests/test_offline.py` pins the two together.
+OFFLINE_ENV = {
+    "HF_HUB_OFFLINE": "1",
+    "TRANSFORMERS_OFFLINE": "1",
+    "HF_DATASETS_OFFLINE": "1",
+    "HF_HUB_DISABLE_TELEMETRY": "1",
+    "DO_NOT_TRACK": "1",
+    "HF_HUB_DISABLE_UPDATE_CHECK": "1",
+    "DISABLE_SAFETENSORS_CONVERSION": "1",
+}
+
 
 #: Codex's own name for this plugin's data directory is
 #: `<marketplace>-<plugin>`, and `codex.PLUGIN_NAME` is the substring both
@@ -230,6 +244,7 @@ def _reexec_under_pinned_interpreter() -> None:
                 seen.add(part)
                 ordered.append(part)
         env["PYTHONPATH"] = os.pathsep.join(ordered)
+    env.update(OFFLINE_ENV)
     os.execve(python, [python, os.path.abspath(__file__)], env)
 
 

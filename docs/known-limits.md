@@ -153,6 +153,8 @@ What is still missing is *which* calls: the gap count is per session, and no ind
 
 How often this happens has not been measured on real sessions. The `busy` history means nonblocking egress admission fails. A timeout can occur before inference, when the worker cannot start inference within its deadline, including model-lock contention; when the caller’s wait returns `False`, whether work is pending, running or completed; or when the wait returns `True`, but an otherwise successful result has no completion timestamp or completed after the deadline. A timeout does not require contention or slow inference.
 
+Missing or incomplete model weights leave tier 3 unavailable; the plugin does not fetch replacements. A process that already imported the ML stack in online mode also leaves tier 3 unavailable and must be restarted to load it offline.
+
 ## Note on tests
 
 `cargo test -p codex-tui` and the upstream `insta` picker snapshots have not been run anywhere.

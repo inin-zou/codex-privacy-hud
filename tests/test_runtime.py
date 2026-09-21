@@ -477,3 +477,67 @@ def test_handler_restates_the_egress_event_set_correctly():
     receipt literals above, and as `daemon.sock`.
     """
     assert _handler_constants()["EGRESS_EVENTS"] == set(codex.EGRESS_EVENTS)
+
+
+# --------------------------------------------------------------------- #
+# I2: every path that can load the model stack is forced offline
+# --------------------------------------------------------------------- #
+
+def test_local_versions_forces_offline_before_import(monkeypatch):
+    """Setup imports the stack in-process. The flags must already be forced
+    when it does, whatever the shell running setup exported."""
+    import builtins
+
+    from privacy_hud import offline
+    for name in offline.FORCED_ENV:
+        monkeypatch.setenv(name, "0")
+    monkeypatch.setattr(offline, "loaded_stack_is_offline", lambda: True)
+    seen = {}
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name in ("transformers", "torch"):
+            seen[name] = {k: os.environ.get(k) for k in offline.FORCED_ENV}
+            raise ImportError("intercepted")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    assert runtime._local_versions() == {"transformers": None, "torch": None}
+    assert seen["transformers"] == offline.FORCED_ENV
+
+
+def test_local_versions_reports_nothing_from_an_online_preloaded_stack(
+        monkeypatch):
+    """A stack this process already imported online cannot be made offline
+    by setting the environment now; setup must not record it as usable."""
+    from privacy_hud import offline
+    monkeypatch.setattr(offline, "loaded_stack_is_offline", lambda: False)
+    assert runtime._local_versions() == {"transformers": None, "torch": None}
+
+
+def test_probe_overrides_inherited_offline_flags(monkeypatch):
+    """The child reports what it saw. An inherited "0" in the environment
+    handed to the probe must not reach the interpreter under test, and the
+    parent's own environment must be left as it was."""
+    from privacy_hud import offline
+    monkeypatch.setenv("HF_HUB_OFFLINE", "0")
+    result, _elapsed, error = runtime.probe_interpreter(
+        sys.executable, str(SRC), timeout=60.0,
+        env={**os.environ, **{k: "0" for k in offline.FORCED_ENV}})
+    assert error == ""
+    assert result["hf_hub_offline"] == "1"
+    assert os.environ["HF_HUB_OFFLINE"] == "0"
+
+
+def test_spawn_env_forces_offline_after_merge(tmp_path, monkeypatch):
+    """Caller wins on every key except the offline ones: a hook's inherited
+    "0" must not reach the daemon that loads the model."""
+    from privacy_hud import offline
+    receipt = runtime.build_receipt(tmp_path)
+    receipt["env"] = {"HF_HUB_OFFLINE": "0"}
+    base = {k: "0" for k in offline.FORCED_ENV}
+    base["HF_HOME"] = "/live/value"
+    env = runtime.spawn_env(receipt, base)
+    assert {k: env[k] for k in offline.FORCED_ENV} == offline.FORCED_ENV
+    assert env["HF_HOME"] == "/live/value"
+    assert base["HF_HUB_OFFLINE"] == "0", "the caller's mapping is not mutated"

@@ -46,6 +46,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import tomllib
 from pathlib import Path
@@ -977,6 +978,45 @@ def test_check_model_flag_reports_a_detector_that_says_available(
 
     monkeypatch.setattr(model_module, "ModelDetector", _Available)
     assert doctor.check_tier3(load_model=True).status == doctor.OK
+
+
+def test_check_model_missing_weights_warns_without_network(tmp_path):
+    """`--check-model` against an empty cache, with the offline flags
+    inherited OFF: the real detector runs, reports unavailable, and nothing
+    resolves or connects anywhere. A cache miss is a warning and a printed
+    recipe, never a download.
+
+    In a fresh interpreter, because the hub caches both its offline flag and
+    its cache location at import: in-process, an earlier test's import
+    decides which cache this one sees."""
+    from privacy_hud import offline
+    script = textwrap.dedent("""
+        import json, socket
+        attempts = []
+
+        def refuse(*args, **kwargs):
+            attempts.append(repr(args[:1]))
+            raise OSError("network refused by test")
+
+        socket.getaddrinfo = refuse
+        socket.create_connection = refuse
+        socket.socket.connect = lambda self, address: refuse(address)
+        from privacy_hud import doctor
+        check = doctor.check_tier3(load_model=True)
+        print(json.dumps({"status": check.status, "fixes": check.fixes,
+                          "attempts": attempts}))
+    """)
+    env = {**os.environ, **{name: "0" for name in offline.FORCED_ENV},
+           "HF_HOME": str(tmp_path / "hf"),
+           "HF_HUB_CACHE": str(tmp_path / "hf" / "hub"),
+           "PYTHONPATH": str(Path(doctor.__file__).parents[1])}
+    proc = subprocess.run([sys.executable, "-c", script], env=env,
+                          capture_output=True, text=True, timeout=300)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert out["status"] == doctor.WARN
+    assert out["attempts"] == []
+    assert any(offline.download_env_prefix() in fix for fix in out["fixes"])
 
 
 def test_default_run_does_not_load_the_model(isolated_env, monkeypatch):

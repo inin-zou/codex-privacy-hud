@@ -20,7 +20,7 @@ pip install -e ".[detectors]"
 **Then fetch the model weights (~2.8 GB).** Download only the files the pipeline actually loads — the full repo is ~17 GB because it also ships ONNX export variants and a duplicate `original/` checkpoint, neither of which this project ever touches:
 
 ```bash
-python3 -c "
+HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 HF_DATASETS_OFFLINE=0 HF_HUB_DISABLE_TELEMETRY=1 python3 -c "
 from huggingface_hub import snapshot_download
 snapshot_download('openai/privacy-filter', allow_patterns=[
     'config.json', 'model.safetensors', 'tokenizer.json',
@@ -28,7 +28,7 @@ snapshot_download('openai/privacy-filter', allow_patterns=[
 "
 ```
 
-That exact file set is verified sufficient. Everything afterwards runs offline: the plugin sets `HF_HUB_OFFLINE=1` before importing `transformers`, so nothing reaches the network once the weights are on disk (Global Constraint I2).
+That exact file set is verified sufficient. The variables in front of the command turn the offline flags off for that one command only. Installation downloads packages and the patched Codex build; model weights are downloaded only through the explicit model-download step. Runtime, setup probes and doctor checks enforce offline mode regardless of inherited environment values and never download missing weights.
 
 All three prerequisites fail quietly rather than loudly — an old `transformers`, a missing torch and absent weights all leave you with a running engine that is simply blind to names and addresses. `privacy-hud-doctor` (below) checks each of them by version and by file, and `privacy-hud-doctor --check-model` goes further and constructs the detector to read its real availability.
 

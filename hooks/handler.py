@@ -63,6 +63,19 @@ SPAWN_COOLDOWN = 30.0
 DAEMON_MODULE = "privacy_hud.daemon"
 NO_SPAWN_ENV = "PRIVACY_HUD_NO_SPAWN"
 PINNED_ENV_NAMES = ("HF_HOME", "HF_HUB_CACHE", "TRANSFORMERS_CACHE")
+#: I2: assigned into the child's environment last, after every merge, so an
+#: inherited value cannot turn the network back on in the process that loads
+#: the model. A copy of `privacy_hud.offline.FORCED_ENV`, which this file
+#: cannot import; `tests/test_offline.py` pins the two together.
+OFFLINE_ENV = {
+    "HF_HUB_OFFLINE": "1",
+    "TRANSFORMERS_OFFLINE": "1",
+    "HF_DATASETS_OFFLINE": "1",
+    "HF_HUB_DISABLE_TELEMETRY": "1",
+    "DO_NOT_TRACK": "1",
+    "HF_HUB_DISABLE_UPDATE_CHECK": "1",
+    "DISABLE_SAFETENSORS_CONVERSION": "1",
+}
 # `daemon.main`'s "nothing is wrong -- the daemon you wanted already exists"
 # exit code, deliberately outside the 0/1 usable/broken convention. Not a
 # failure, so a child that exits with it does not latch as one.
@@ -264,6 +277,7 @@ def _spawn_daemon(data_dir):
             value = recorded_env.get(name)
             if isinstance(value, str) and value and not env.get(name):
                 env[name] = value
+    env.update(OFFLINE_ENV)
 
     try:
         proc = subprocess.Popen(

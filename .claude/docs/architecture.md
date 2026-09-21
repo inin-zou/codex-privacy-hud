@@ -545,7 +545,7 @@ This connects directly to a piece of UI that already exists for a different reas
 4. **Side channels** — a determined agent could encode data to evade regex/NER. Detection is heuristic.
 5. **Model memorization** — nothing recalls data once disclosed.
 
-**Self-audit requirement.** The plugin makes no outbound network calls. On the committed self-audit corpus, the clean half must yield zero exposures and the planted half must be found (`tests/test_self_audit.py`). *(This said "running Privacy HUD on its own development session must yield zero exposures; this is a test, not an aspiration". It was neither: three read-only source reviews measured 88%, 100% and 100% of budget, and no test existed. `docs/self-audit.md` has the replacement, and why the old form was an invalid requirement rather than an untestable one.)*
+**Self-audit requirement.** The plugin runtime makes no outbound network requests: offline settings override inherited values, model loading is local-only, and an unsafe preloaded ML stack disables tier 3 rather than permitting network access. On the committed self-audit corpus, the clean half must yield zero exposures and the planted half must be found (`tests/test_self_audit.py`). *(This said "running Privacy HUD on its own development session must yield zero exposures; this is a test, not an aspiration". It was neither: three read-only source reviews measured 88%, 100% and 100% of budget, and no test existed. `docs/self-audit.md` has the replacement, and why the old form was an invalid requirement rather than an untestable one.)*
 
 ---
 

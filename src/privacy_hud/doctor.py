@@ -128,7 +128,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import codex, runtime
+from . import codex, offline, runtime
 from .runtime import ledger_path as _ledger_path
 
 # `runtime` is imported at module level, unlike `daemon` (see `_socket_path`
@@ -1325,8 +1325,8 @@ def check_tier3(load_model: bool = False) -> Check:
                 details=["openai/privacy-filter loaded from the local "
                          "HuggingFace cache; person, address, date and "
                          "account-number detection is live.",
-                         "No network call was made: HF_HUB_OFFLINE=1 is set "
-                         "before transformers is imported (I2)."],
+                         "Model loading enforces offline mode and local-only "
+                         "files regardless of inherited environment values."],
             )
         snapshot, missing = _find_model_snapshot()
         details = [f"ModelDetector reports available = False after "
@@ -1379,11 +1379,12 @@ def _model_fixes() -> list[str]:
     return [
         "Fetch only the files the pipeline loads (~2.8 GB, not the repo's "
         "~17 GB):",
-        "  python3 -c \"from huggingface_hub import snapshot_download; "
+        f"  {offline.download_env_prefix()} python3 -c \"from huggingface_hub "
+        "import snapshot_download; "
         "snapshot_download('openai/privacy-filter', allow_patterns=["
         + ", ".join(f"'{name}'" for name in MODEL_FILES) + "])\"",
-        "Everything runs offline afterwards; the plugin sets "
-        "HF_HUB_OFFLINE=1 before importing transformers (I2).",
+        "Only the explicit download command accesses Hugging Face; runtime "
+        "and diagnostic checks never fetch missing weights.",
     ]
 
 

@@ -61,6 +61,7 @@ def _fake_interpreter(tmp_path, *, sleep: float = 20.0) -> tuple[Path, Path]:
         '; echo "PLUGIN_DATA=$PLUGIN_DATA"'
         '; echo "PYTHONPATH=$PYTHONPATH"'
         '; echo "HF_HOME=$HF_HOME"'
+        '; env | grep -E "OFFLINE|TELEMETRY|DO_NOT_TRACK|UPDATE_CHECK|SAFETENSORS"'
         '; echo "cwd=$(pwd)"'
         f'; }} > "{marker}"\n'
         f"exec sleep {sleep}\n"
@@ -176,6 +177,31 @@ def test_a_missing_daemon_is_started_from_the_recorded_interpreter(tmp_path):
     assert f"PLUGIN_DATA={tmp_path}" in recorded
     assert str(SRC) in recorded            # the recorded sys.path entry
     assert f"HF_HOME={tmp_path / 'hf'}" in recorded  # the weights location
+
+
+def test_spawn_daemon_forces_offline_flags(tmp_path):
+    """I2 at the process that loads the model. Codex's environment -- or a
+    receipt -- saying "0" must not reach the daemon: the flags are assigned
+    after every merge. The stdlib-only client carries its own copy of the
+    policy (`OFFLINE_ENV`), pinned to `privacy_hud.offline` by
+    `tests/test_offline.py`."""
+    from privacy_hud import offline
+    script, marker = _fake_interpreter(tmp_path)
+    _write_receipt(tmp_path, script,
+                   env={"HF_HOME": str(tmp_path / "hf"),
+                        "HF_HUB_OFFLINE": "0"})
+    hostile = {name: "0" for name in offline.FORCED_ENV}
+    try:
+        code, _out = run(INGRESS, {"PLUGIN_DATA": str(tmp_path), **hostile})
+        deadline = time.time() + 5.0
+        while not marker.exists() and time.time() < deadline:
+            time.sleep(0.02)
+        assert code == 0
+        recorded = marker.read_text()
+    finally:
+        _kill_marked(marker)
+    for name, value in offline.FORCED_ENV.items():
+        assert f"{name}={value}" in recorded.splitlines(), name
 
 
 def test_the_hook_does_not_wait_for_the_daemon_to_be_ready(tmp_path):
