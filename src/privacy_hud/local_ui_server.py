@@ -145,12 +145,13 @@ def _latest_session_id(ledger: Ledger) -> str | None:
 
 def _rule_confirmation(rule_type: str, selector: str) -> str:
     """design.md §6: every action confirms what rule it wrote, in plain
-    terms -- and, for an origin rule, what it cannot do. Only byte-identical
-    values match, so a model that summarizes what it read still sends it;
-    saying so here is cheaper than a user discovering it later."""
+    terms -- and, for an origin rule, what it cannot do. Matching is on the
+    whole value, normalised (known limit 10), so a model that summarizes
+    what it read still sends it; saying so here is cheaper than a user
+    discovering it later."""
     if rule_type in ("block_path", "block_command"):
         return (f"Rule added: block values from {selector}. Applies to later "
-                "outbound calls. Only exact values match — if the model "
+                "outbound calls. Only the whole value matches — if the model "
                 "summarizes or rewrites the content, it still leaves.")
     return (f"Rule added: {rule_type} {selector}. "
             "Applies from the next tool call.")

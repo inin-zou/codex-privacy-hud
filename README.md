@@ -12,7 +12,9 @@ English | [简体中文](README.zh-CN.md)
 
 > **See what your agent knows. Control where it goes.**
 
-A local-first Codex plugin that maintains a live **disclosure ledger** for every Codex session, minimizes sensitive context **before** tool execution, and lets you inspect exactly what data reached the model, subagents, MCP tools, or external services.
+A local-first Codex plugin that maintains a live **disclosure ledger** for every Codex session, minimizes sensitive context **before** tool execution, and lets you inspect what it observed crossing each boundary — into model context, out to an MCP tool, out to an external host.
+
+Boundary, not recipient: a second MCP server is not a second destination today, and what a subagent inherited is not recorded at all (limits 19 and 20).
 
 Detection runs on your own machine, via [`openai/privacy-filter`](https://huggingface.co/openai/privacy-filter) loaded locally through `transformers` — no prompt, file, or secret is ever sent anywhere to be scanned. The plugin makes no outbound network calls at all; the only socket it opens is a local one to its own daemon on `127.0.0.1`.
 
@@ -207,7 +209,7 @@ Tabs: `Exposed` · `Prevented` · `All events`.
 
 **Level 3 — Exposure detail.** One flow, its masked evidence, and forward-looking remedies (`Protect future occurrences`; on a row that names a real origin, `Block values read from <file>`). Never an undo — already disclosed data cannot be recalled, and a source rule only matches values that leave unchanged.
 
-**The MCP tools.** Codex also gets five `privacy.*` tools the model can call: a session summary, the exposure list, one exposure's detail, the read-guard state, and writing a policy rule. The first four read; the fifth can only tighten, because the engine keeps its one unconditional block — a credential on an outbound call — ahead of every rule you or the model can write: a call carrying a credential is decided by the built-in default, and a mask rule on it is not consulted at all. That holds whatever the rule names, which is the point — a rule written about something innocuous, like a file path, can still land on a call that happens to carry a credential too. A mask rule naming a blocked type outright is refused when written, because it would now decide nothing while looking like protection you applied. Turning the read guard off and hiding the HUD are not among the five at all, because an MCP tool is called by the model, and a switch that loosens protection is not one to hand to the thing being enforced against; those two stay behind `$privacy`, which you type. Allowing a blocked call once is not among them either, but for a different reason: it has no surface at all — not `$privacy`, not the audit UI, not an MCP tool — see [known limit 13](docs/known-limits.md#13-no-policy-rule-can-be-removed-within-the-session-that-wrote-it).
+**The MCP tools.** Codex also gets five tools the model can call: a session summary, the exposure list, one exposure's detail, the read-guard state, and writing a policy rule. The server registers them as `privacy.<name>`; Codex presents them to the model with underscores, so what you will see in a transcript is `privacy_get_session_summary`, `privacy_list_exposures`, `privacy_get_exposure_detail`, `privacy_read_guard_status` and `privacy_update_policy`. The first four read; the fifth can only tighten, because the engine keeps its one unconditional block — a credential on an outbound call — ahead of every rule you or the model can write: a call carrying a credential is decided by the built-in default, and a mask rule on it is not consulted at all. That holds whatever the rule names, which is the point — a rule written about something innocuous, like a file path, can still land on a call that happens to carry a credential too. A mask rule naming a blocked type outright is refused when written, because it would now decide nothing while looking like protection you applied. Turning the read guard off and hiding the HUD are not among the five at all, because an MCP tool is called by the model, and a switch that loosens protection is not one to hand to the thing being enforced against; those two stay behind `$privacy`, which you type. Allowing a blocked call once is not among them either, but for a different reason: it has no surface at all — not `$privacy`, not the audit UI, not an MCP tool — see [known limit 13](docs/known-limits.md#13-no-policy-rule-can-be-removed-within-the-session-that-wrote-it).
 
 ## How it works
 
@@ -230,12 +232,13 @@ The distinction the product is built on:
 |---|---|
 | A local scanner detects an email in a file | **No** |
 | File content enters model context | **Yes** |
-| Data is passed to a subagent | **Yes** — new destination |
+| Data is passed to a subagent *through a tool call* | **Yes** — new destination |
+| What a subagent inherits at spawn | **No** — not observed at all (limit 19) |
 | Arguments sent to an MCP tool | **Yes** |
 | A shell command sends data to an external host | **Yes** |
 | Content redacted or blocked before send | **No** — counted as *prevented* |
 
-So the audit shows **flows**, not findings:
+So the audit shows **crossings**, not findings — one row per value observed crossing a boundary, with the boundary's category as its destination. Not a multi-hop chain: the `flows` table exists and nothing writes it, and a `×N` count is N hits on one dedupe key, not N distinct values:
 
 ```text
 support.log → main agent → GitHub MCP
@@ -304,13 +307,13 @@ Stated up front, because a privacy tool that overclaims is worse than none:
 1. **The start of a session is unmonitored.** **Whatever is disclosed in those first seconds is not in the ledger, and no later reading can say what it was.** ([details](docs/known-limits.md#1-the-start-of-a-session-is-unmonitored))
 2. **"Unverified" marks the gaps it can see, and there are gaps it cannot.** So `⚠unverified` means "the ledger holds evidence of a hole"; its absence means "nothing on record contradicts a complete account", which is a weaker claim than "complete" and must not be read as the stronger one. ([details](docs/known-limits.md#2-unverified-marks-the-gaps-it-can-see-and-there-are-gaps-it-cannot))
 3. **Hosted tools bypass hooks.** WebSearch and similar do not trigger local function-tool hook paths. ([details](docs/known-limits.md#3-hosted-tools-bypass-hooks))
-4. **No `ask` decision in Codex hooks.** Interactive consent is a deny → review → one-shot-token → retry loop rather than a modal. ([details](docs/known-limits.md#4-no-ask-decision-in-codex-hooks))
+4. **No `ask` decision in Codex hooks, and no interactive consent at all.** A hook can allow or deny, not ask. The designed deny → review → token → retry loop cannot be entered: no surface mints a token, so a denied call stays denied for the session. ([details](docs/known-limits.md#4-no-ask-decision-in-codex-hooks-and-no-interactive-consent-at-all))
 5. **The status-line item lives in a separately built Codex — never in your official one.** **The plugin never modifies your official Codex binary.** ([details](docs/known-limits.md#5-the-status-line-item-lives-in-a-separately-built-codex--never-in-your-official-one))
 6. **A command that reads a file itself is not inspected.** The engine scans the *text of a tool call*, not what that call will read at runtime. ([details](docs/known-limits.md#6-a-command-that-reads-a-file-itself-is-not-inspected))
 7. **Detection is heuristic.** A determined adversary can encode around regex and NER. ([details](docs/known-limits.md#7-detection-is-heuristic))
 8. **Which session is being shown is inferred, not read — and the audit says so when it cannot be sure.** The fallback pane carries no such marker; pin it with `--session-id` when it matters. ([details](docs/known-limits.md#8-which-session-is-being-shown-is-inferred-not-read--and-the-audit-says-so-when-it-cannot-be-sure))
 9. **Nothing recalls disclosed data.** Ever. ([details](docs/known-limits.md#9-nothing-recalls-disclosed-data))
-10. **A source rule matches only byte-identical values.** A model that summarizes or rewrites what it read defeats it. The promise is "this value does not leave unchanged", not "nothing about this file leaves". ([details](docs/known-limits.md#10-a-source-rule-matches-only-byte-identical-values))
+10. **A source rule matches the whole value, normalised.** A model that summarizes or rewrites what it read defeats it. The promise is "this value does not leave unchanged", not "nothing about this file leaves" — and matching keys on an HMAC of `value.strip().lower()`, so it is not a byte comparison either. ([details](docs/known-limits.md#10-a-source-rule-matches-the-whole-value-normalised--not-a-summary-of-it-and-not-a-byte-comparison-either))
 11. **Origin extraction is best-effort.** `cat .env` is recognised; `python -c "open('.env')"` is not. A row with no origin offers no rule, rather than one that would not work. ([details](docs/known-limits.md#11-origin-extraction-is-best-effort))
 12. **The taint map dies with the daemon.** A daemon replaced mid-session loses it, and source rules stop matching with no error. ([details](docs/known-limits.md#12-the-taint-map-dies-with-the-daemon))
 13. **No policy rule can be removed within the session that wrote it.** True of `Protect future occurrences` since long before source rules existed. A new Codex conversation is the only clean slate. ([details](docs/known-limits.md#13-no-policy-rule-can-be-removed-within-the-session-that-wrote-it))
@@ -319,6 +322,8 @@ Stated up front, because a privacy tool that overclaims is worse than none:
 16. **Nothing is blocked until you turn it on.** The default records the read and mentions the guard once per session; it stops nothing. ([details](docs/known-limits.md#16-nothing-is-blocked-until-you-turn-it-on))
 17. **A blocked read can leave a record that says the opposite, in one sequence.** Read with the guard off, turn it on, read again: the ledger dedupes on `(session_id, value_hash, destination)`, so the deny lands as a `count` increment on the earlier row. What stays is one `local_access` row saying the first file was read twice and nothing was blocked. No `prevented` row is written, so the status item's blocked badge stays `0` through a deny that did happen. ([details](docs/known-limits.md#17-a-blocked-read-can-leave-a-record-that-says-the-opposite-in-one-sequence))
 18. **A blocked read's row does not name the file.** It rides on the pattern that matched (`.pem`, `.env`, …), so two different files that match the same pattern dedupe into one row. You can see something was blocked; not which file. The badge counts rows, so two denied reads of two `.pem` files read as `1`. ([details](docs/known-limits.md#18-a-blocked-reads-row-does-not-name-the-file))
+19. **What a subagent inherited is not recorded.** The `SubagentStart` observation carries no text, so no detector runs on it and no row results. "Did the subagent inherit the `.env`?" has no answer in the ledger. ([details](docs/known-limits.md#19-what-a-subagent-inherited-is-not-recorded))
+20. **A destination is a boundary category, not a recipient.** Every MCP call is `mcp_tool`; a second MCP server is not a second destination, and adds nothing further to the budget. The `destinations` tile counts categories, not services. ([details](docs/known-limits.md#20-a-destination-is-a-boundary-category-not-a-recipient))
 
 ## Configuration
 
@@ -381,7 +386,7 @@ You want this if there is no `install.sh` for your platform, if you are on Linux
 | doc | what it covers | read it when |
 |---|---|---|
 | [`docs/installing-by-hand.md`](docs/installing-by-hand.md) | Each install step run by hand, the `privacy-hud-setup` and `privacy-hud-doctor` commands, and the fallback pane. | You cannot use `install.sh`, or you want to control each step. |
-| [`docs/known-limits.md`](docs/known-limits.md) | All eighteen limits in full, with the measurements behind them. | You are deciding how far to trust a number the HUD shows. |
+| [`docs/known-limits.md`](docs/known-limits.md) | All twenty limits in full, with the measurements behind them. | You are deciding how far to trust a number the HUD shows. |
 | [`patches/README.md`](patches/README.md) | The one-item Codex status-line patch and how to regenerate it against a new tag. | You want to audit or rebuild the patched Codex binary. |
 | [`.claude/docs/architecture.md`](.claude/docs/architecture.md) | Component map, process model, ledger schema, hook dispatch, and the consent loop. | You are working on the plugin itself. |
 

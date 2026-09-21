@@ -339,8 +339,21 @@ def build_app():
 
     @app.tool(name="privacy.get_session_summary")
     def get_session_summary(session_id: str) -> dict:
-        """The four L2 tiles: disclosure percent, exposed items,
-        destinations, prevented (design.md §5)."""
+        """The four L2 tile numbers (design.md §5), under the field names
+        `percent`, `exposed_items`, `destinations` and `prevented`.
+
+        What each one IS, since the model reads this to decide what they
+        mean (#49 item 9, and the field names are the wire contract, so they
+        do not move even though the labels shown to a human did):
+        `percent` is score over cap -- an assigned budget occupancy, not a
+        probability of leakage and not a fraction of data disclosed.
+        `exposed_items` counts crossings the plugin permitted, written
+        before the host returns its own decision, so permitted and not
+        delivered. `destinations` is a DISTINCT over normalised boundary
+        kinds, so it counts categories -- a handful at most -- and never
+        services or recipients (known limit 20). `prevented` contributes
+        exactly zero to the budget (I4).
+        """
         return mcp_tools.get_session_summary(ledger, session_id).as_dict()
 
     @app.tool(name="privacy.list_exposures")
@@ -364,10 +377,12 @@ def build_app():
         that blocks later outbound calls carrying a value from that exact
         origin (design.md §6, #40). See this file's module docstring:
         `Engine.observe` enforces any of these starting with the next
-        matching call, not retroactively, and matches only byte-identical
-        values. `rule_type="block_source"` is refused (#38): it named a
-        label, not a source, and `block_path`/`block_command` are the
-        replacement rather than a revival of it. A `mask` rule on a data
+        matching call, not retroactively, and matches the whole value
+        normalised -- an HMAC of `value.strip().lower()`, so not a byte
+        comparison and not a summary of what was read (known limit 10).
+        `rule_type="block_source"` is refused (#38): it named a label, not a
+        source, and `block_path`/`block_command` are the replacement rather
+        than a revival of it. A `mask` rule on a data
         type the engine hard-blocks (`credential`) is refused as well: that
         rule would take effect ahead of the block and replace it with an
         executed, masked call, which is the only way this tool could ever

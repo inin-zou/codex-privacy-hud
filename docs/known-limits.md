@@ -20,9 +20,11 @@ What is **not** detectable, and is not marked: a gap in the middle of a session 
 
 WebSearch and similar do not trigger local function-tool hook paths. This is a practical guardrail, not a complete enforcement boundary.
 
-## 4. No `ask` decision in Codex hooks.
+## 4. No `ask` decision in Codex hooks, and no interactive consent at all.
 
-Interactive consent is a deny → review → one-shot-token → retry loop rather than a modal.
+A hook can allow or deny. It cannot ask. The design's answer was a deny → review → one-shot-token → retry loop rather than a modal, and **that loop cannot be entered**: the engine's half exists — `Engine.observe` calls `consume_token` and handles `allow_once` — but no surface mints a token. Not `$privacy`, not the audit UI, not an MCP tool. See limit 13, which says the same thing from the other end.
+
+So in practice a denied call stays denied for the session. Until a mint site exists, read any description of the retry loop — in `design.md` §8 or `architecture.md` §8 — as design intent, not as behaviour.
 
 ## 5. The status-line item lives in a separately built Codex — never in your official one.
 
@@ -57,9 +59,13 @@ The ambient line (limit 5) resolves the same way, so the pane beside your window
 
 Ever.
 
-## 10. A source rule matches only byte-identical values.
+## 10. A source rule matches the whole value, normalised — not a summary of it, and not a byte comparison either.
 
 A model that summarizes, rewrites, or quotes part of what it read defeats it, and that is a likely path rather than an exotic one. The rule's promise is "this value does not leave unchanged", not "nothing about this file leaves".
+
+This said "byte-identical" until #49 item 7, and that was wrong in the other direction. Matching keys on `mask.value_hash`, which is an HMAC of `value.strip().lower()` (`mask.py:21`) — the same hash the taint map is keyed by (`engine.py:448`). So the set that matches is **wider** than byte-identical: two values differing only in case or surrounding whitespace are one value here. Whether that is the right identity is open (#43, #44); what is not open is describing it as a byte comparison.
+
+Collapsing two sightings into one ledger row needs more than a hash collision — the row's key is `(session_id, value_hash, destination)` — so a `×N` count is N hits on that key, not N distinct values and not N hops.
 
 ## 11. Origin extraction is best-effort.
 
@@ -114,6 +120,18 @@ Enforcement holds; the evidence does not. This is pre-existing on the egress sid
 The finding behind a blocked read is the tier-0 pattern that matched the command text (`.pem`, `.env`, `id_rsa`, …), not the path itself, so its `value_hash` is a hash of that pattern text. `cat deploy/key1.pem` and `cat deploy/key2.pem` both record `.pem` at the same `destination` and dedupe into one row. You can see that something was blocked; you cannot see which file.
 
 The count on screen goes with it. Two clean denies of those two files — no earlier `local_access` row, so limit 17 does not apply — write one `prevented` row with `count=2`, and `Ledger.summary` counts rows, not calls: `prevented=1`, so the status item's blocked badge reads `1` for two denied reads. The badge counts distinct patterns blocked, not reads stopped, and under-counts by however many files share a pattern.
+
+## 19. What a subagent inherited is not recorded.
+
+`SubagentStart` is one of the four accounting chokepoints in `architecture.md`, and the observation built for it carries no text: `dispatch.py:527` constructs it with `text=""`, so no detector ever runs on it and no row can result. A subagent is still a `destination` for data sent to it through a tool call, but the question "did the subagent inherit the `.env` the main agent had read?" — named in `PRD.md` as one the product answers — has no answer in the ledger.
+
+This says nothing about what happens *inside* a subagent's own session, which has its own hooks and its own session id.
+
+## 20. A destination is a boundary category, not a recipient.
+
+`destination` holds the kind of boundary crossed — `model_context`, `subagent`, `mcp_tool`, `external_net`, `local` — and not who was on the other side. `dispatch.py:489` collapses every MCP call to `mcp_tool` before the engine sees it, so sending the same value to a second MCP server adds no destination and no further contribution to the budget.
+
+The `destinations` tile therefore counts boundary categories — a handful at most — not services. `architecture.md` specifies `subagent:<id>`, `mcp:<server>` and `net:<host>`; that detail is stripped today.
 
 ## Note on tests
 

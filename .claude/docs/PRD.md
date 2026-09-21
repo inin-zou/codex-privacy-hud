@@ -8,6 +8,8 @@
 
 > **Codex Privacy HUD is a local-first plugin that maintains a live disclosure ledger for every Codex session, minimizes sensitive context before tool execution, and lets users inspect exactly what data reached the model, subagents, MCP tools, or external services.**
 
+*(Product intent, and two clauses of it are not built — do not read this as current behavior. What a subagent inherited is never observed, and a destination is a boundary category rather than a recipient, so "MCP tools" is one destination however many servers are called: `docs/known-limits.md` #19 and #20. The shipped equivalent of this sentence is `README.md`'s, which says "what it observed crossing each boundary".)*
+
 **Tagline:** See what your agent knows. Control where it goes.
 
 **Product shape:** A Codex plugin with a local privacy runtime and a progressive session-audit UI. Not a status bar. Not an after-the-fact compliance dashboard. The HUD is the *entry point*; the product is the **session-level disclosure ledger + upstream enforcement**.
@@ -112,7 +114,7 @@ B3  MCP tool / external service       (disclosure — third party)
 B4  arbitrary network egress (shell)  (disclosure — unbounded third party)
 ```
 
-A single sensitive value can generate multiple disclosure events, one per boundary crossed. The audit UI therefore renders **flows**, not findings:
+A single sensitive value can generate multiple disclosure events, one per boundary crossed. The audit UI therefore renders **crossings**, not findings — one row per value observed crossing a boundary. *(The multi-hop **flow** view below this line is designed and never built: the `flows` table has no writer.)*
 
 ```text
 support.log → main agent → github MCP

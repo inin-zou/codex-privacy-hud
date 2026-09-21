@@ -314,9 +314,14 @@ READ_BLOCK_TEMPLATE = (
 
 # Shown once per session, not once per path: this is how the feature is
 # discovered, and a line on every read would be noise.
+#: Present tense, because this is emitted from `PreToolUse` and the read has
+#: not happened: the file may not exist, another approval layer may still
+#: refuse, the command may fail. It said "this session read {path}" until
+#: #49 item 4 — the same tense error as writing an `exposed` row before the
+#: host returns its decision, and cheaper to fix here than there.
 READ_NOTICE_TEMPLATE = (
-    "PRIVACY HUD: this session read {path} — a path it can stop before it\n"
-    "reaches the model. Turn that on with `$privacy read on`."
+    "PRIVACY HUD: this call is about to read {path} — a path it can stop\n"
+    "before it reaches the model. Turn that on with `$privacy read on`."
 )
 
 

@@ -121,7 +121,19 @@ def test_the_skill_describes_the_source_rules_that_actually_ship():
 
     # Known limit 10 travels with the claim: the promise is "this value
     # does not leave unchanged", not "nothing about this file leaves".
-    assert "byte-identical" in text
+    #
+    # This asserted `"byte-identical" in text` until #49 item 7, which is
+    # the third test in this repository found enforcing a claim the code
+    # contradicts. Matching keys on an HMAC of `value.strip().lower()`
+    # (`mask.py:21`), so the matching set is WIDER than a byte comparison.
+    # The skill is the surface that speaks for the tool at runtime, and a
+    # test pinning its wording is the last place a stale claim should be
+    # able to hide.
+    # Short enough not to span a line wrap: SKILL.md is hand-wrapped prose,
+    # and the first version of this assertion looked for a phrase that a
+    # newline ran through.
+    assert "whole value, normalised" in text
+    assert "byte-identical" not in text
 
 
 def test_resolve_block_names_the_session(env):
