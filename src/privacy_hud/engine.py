@@ -232,8 +232,9 @@ EGRESS_BOUNDARIES = ("B3", "B4")
 #: Without this, a burst of outbound calls whose callers abandoned their
 #: results would each leave a worker queued for the model, and later egress
 #: scans would queue behind work whose results nobody will use. With it, a
-#: worker that never exits keeps every later egress scan out: each of those
-#: is a `GAP_BUSY` scan gap, recorded, for as long as that lasts.
+#: worker that never exits retains the admission slot. Later egress scans
+#: that reach admission fail it and return `GAP_BUSY`; applicable oversized
+#: payloads return `GAP_OVERSIZE` before admission.
 _TIER3_EGRESS_SLOT = threading.BoundedSemaphore(1)
 
 #: Scan-gap reasons. A scan gap: an applicable deep scan supplied no accepted
@@ -820,8 +821,9 @@ class Engine:
         deadline = time.monotonic() + TIER3_EGRESS_BUDGET
         # Built before the slot is taken, so that nothing between the
         # acquire and the `try` below can raise: an allocation failure there
-        # would leave a slot nobody holds and nobody releases, and every
-        # later egress would read `busy` for the life of the daemon.
+        # would leave the admission slot acquired with nobody to release it.
+        # Later egress scans that reach admission would return `GAP_BUSY`;
+        # applicable oversized payloads return `GAP_OVERSIZE` before admission.
         task = _DeepScanTask()
         if not _TIER3_EGRESS_SLOT.acquire(blocking=False):
             return GAP_BUSY

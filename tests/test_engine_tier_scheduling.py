@@ -343,7 +343,8 @@ def test_a_contended_ingress_waits_for_the_model_instead_of_degrading(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Availability: a tier-3 detector that cannot work degrades the scan.
+# Availability: the unavailable history requires that no expensive detector
+# supplies a successful available result.
 # ---------------------------------------------------------------------------
 
 def test_unavailable_expensive_detector_marks_the_scan_degraded(tmp_path):
@@ -566,9 +567,10 @@ def test_a_detector_that_fails_mid_scan_degrades_rather_than_reading_clean(
     engine had already checked availability before the call, so `ran_any`
     went True, `degraded` came out False, and a session whose every deep
     scan crashed read as fully verified with nothing found — #47 item 6 one
-    layer below where it was filed. A detector becoming unavailable during
-    inference is a `GAP_UNAVAILABLE` scan gap; an accepted empty result is a
-    clean scan, not a scan gap, and this is not one."""
+    layer below where it was filed. In this ingress fixture, the only
+    expensive detector becomes unavailable during inference, so the scan
+    reports `GAP_UNAVAILABLE`. An accepted empty result is a clean scan,
+    not a scan gap, and this is not one."""
     eng = _engine(tmp_path, [PathDetector(), SecretDetector(), _FailingModel([])])
     scan = eng.scan(_obs())
     assert scan.degraded_reason == engine.GAP_UNAVAILABLE

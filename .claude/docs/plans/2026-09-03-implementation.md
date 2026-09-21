@@ -1073,9 +1073,11 @@ def test_stub_detector_returns_findings_without_loading_weights():
 def test_detector_reports_unavailable_rather_than_raising_when_weights_absent():
     d = ModelDetector(model_id="does-not-exist/nope")
     assert d.available is False
-    # I6: an unavailable detector reports itself unavailable rather than crashing
-    # the daemon; where the deep scan applies, the engine records that as a
-    # GAP_UNAVAILABLE scan gap. (Historical plan text; current tests differ.)
+    # Historical detector-only example; current tests differ. An unavailable
+    # detector reports itself unavailable rather than crashing the daemon.
+    # The unavailable history requires that no expensive detector supplies a
+    # successful available result. See engine.GAP_* for the recorded histories
+    # and engine.TIER3_EGRESS_BUDGET for egress wait/error ordering.
     assert d.scan("contact jordan@acme.com", {}) == []
 
 
