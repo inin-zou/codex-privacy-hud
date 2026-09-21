@@ -133,6 +133,16 @@ This says nothing about what happens *inside* a subagent's own session, which ha
 
 The `destinations` tile therefore counts boundary categories — a handful at most — not services. `architecture.md` specifies `subagent:<id>`, `mcp:<server>` and `net:<host>`; that detail is stripped today.
 
+## 21. On an outbound call, the deep scan is best-effort, and giving it up is not recorded.
+
+Until #47 item 1 the deep scan never ran on an outbound call at all, so `email`, `person`, `address`, `phone` and `account` — the five types only it can find — could not appear on any egress row, whatever the tool was sending. It runs there now, with one bound that the ingress path does not have.
+
+The model is a serial resource: one inference pipeline, one lock, ~430–540 ms per scan. The hook client gives the daemon 2.0 s, and I6 turns a missed deadline on an outbound call into a **deny**. Before this, an egress decision was pure regex and never queued; a version that simply queued behind other sessions' scans would have reproduced a failure already measured here — a benign `curl https://example.com/health` denied, at 2002 ms, because six unrelated ingress scans were in flight. So an outbound call waits `engine.TIER3_EGRESS_LOCK_TIMEOUT` (400 ms) for the model and, if it does not get it, proceeds on tiers 0–2 alone.
+
+What that costs is the deep findings on that one call — never the decision, which is tier 0/1 and never waits. A credential still blocks. What it costs you is that **nothing tells you it happened**: the engine sets `degraded` on the scan, and `degraded` is a render-time flag with no ledger column behind it (`ledger.py`), so a later `$privacy` reads a row that looks exactly like a call the model did scan. The same is true of the other two ways the deep scan can be skipped on a call that qualified for it: a payload over `engine.MAX_TIER3_CHARS` (8192 characters), and a machine whose weights never loaded. Persisting it is #47 item 6.
+
+An idle machine running one session never hits this: the lock is uncontended and the scan runs. It is concurrent sessions, or a burst of tool calls against a warm daemon, that produce the silent fast path.
+
 ## Note on tests
 
 `cargo test -p codex-tui` and the upstream `insta` picker snapshots have not been run anywhere.

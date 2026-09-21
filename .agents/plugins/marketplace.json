@@ -6,7 +6,7 @@
       "name": "codex-privacy-hud",
       "source": "./",
       "description": "Local-first disclosure ledger and privacy enforcement for Codex sessions",
-      "version": "0.7.2"
+      "version": "0.7.3"
     }
   ]
 }

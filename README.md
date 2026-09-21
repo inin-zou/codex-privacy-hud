@@ -324,6 +324,7 @@ Stated up front, because a privacy tool that overclaims is worse than none:
 18. **A blocked read's row does not name the file.** It rides on the pattern that matched (`.pem`, `.env`, …), so two different files that match the same pattern dedupe into one row. You can see something was blocked; not which file. The badge counts rows, so two denied reads of two `.pem` files read as `1`. ([details](docs/known-limits.md#18-a-blocked-reads-row-does-not-name-the-file))
 19. **What a subagent inherited is not recorded.** The `SubagentStart` observation carries no text, so no detector runs on it and no row results. "Did the subagent inherit the `.env`?" has no answer in the ledger. ([details](docs/known-limits.md#19-what-a-subagent-inherited-is-not-recorded))
 20. **A destination is a boundary category, not a recipient.** Every MCP call is `mcp_tool`; a second MCP server is not a second destination, and adds nothing further to the budget. The `destinations` tile counts categories, not services. ([details](docs/known-limits.md#20-a-destination-is-a-boundary-category-not-a-recipient))
+21. **On an outbound call, the deep scan is best-effort, and giving it up is not recorded.** The model is serial and an outbound call waits 400 ms for it, then proceeds on the fast tiers alone rather than risk the hook deadline — which I6 would turn into a deny. The decision is unaffected; the deep findings on that call are lost, and nothing in the audit distinguishes it from a call the model did scan. ([details](docs/known-limits.md#21-on-an-outbound-call-the-deep-scan-is-best-effort-and-giving-it-up-is-not-recorded))
 
 ## Configuration
 
@@ -386,7 +387,7 @@ You want this if there is no `install.sh` for your platform, if you are on Linux
 | doc | what it covers | read it when |
 |---|---|---|
 | [`docs/installing-by-hand.md`](docs/installing-by-hand.md) | Each install step run by hand, the `privacy-hud-setup` and `privacy-hud-doctor` commands, and the fallback pane. | You cannot use `install.sh`, or you want to control each step. |
-| [`docs/known-limits.md`](docs/known-limits.md) | All twenty limits in full, with the measurements behind them. | You are deciding how far to trust a number the HUD shows. |
+| [`docs/known-limits.md`](docs/known-limits.md) | All twenty-one limits in full, with the measurements behind them. | You are deciding how far to trust a number the HUD shows. |
 | [`patches/README.md`](patches/README.md) | The one-item Codex status-line patch and how to regenerate it against a new tag. | You want to audit or rebuild the patched Codex binary. |
 | [`.claude/docs/architecture.md`](.claude/docs/architecture.md) | Component map, process model, ledger schema, hook dispatch, and the consent loop. | You are working on the plugin itself. |
 

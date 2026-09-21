@@ -27,10 +27,13 @@ task-8-report.md for the full account):
              table) is consulted only when `direction == "egress"`. Applying
              it to an ingress observation would claim we can still decide
              the fate of bytes that have already entered context.
-  Ruling 4 — tier 3 (the model/NER detector) is bounded: it runs on the
-             observation text only when under `MAX_TIER3_CHARS`; above that,
-             it is skipped entirely (not truncated-and-run) and the
-             `Decision` is marked `degraded` so the renderer can show
+  Ruling 4 — tier 3 (the model/NER detector) is bounded two ways. By size:
+             it runs on the observation text only when under
+             `MAX_TIER3_CHARS`; above that it is skipped entirely (not
+             truncated-and-run). And, on egress only, by time: it waits at
+             most `TIER3_EGRESS_LOCK_TIMEOUT` for the serial model lock,
+             because I6 turns a missed client deadline into a deny. Either
+             bound marks the `Decision` `degraded`, so the renderer can show
              design.md §5's "fast-path results only" banner.
 
 Which detectors those gates apply to is a declaration, not a deduction:
@@ -167,6 +170,48 @@ MAX_TIER3_CHARS = 8192
 _TIER3_LOCK = threading.Lock()
 
 
+# --- The egress half of Ruling 4: a deadline, not just a size cap ---------
+#
+# #47 item 1 put tier 3 back on B3/B4, where architecture.md §4 always said
+# it belonged. That reopens a queue `daemon.Daemon`'s docstring measured and
+# closed, and the measurement is the reason this constant exists rather than
+# a plain `with _TIER3_LOCK`:
+#
+#   * tier 3 is a serial resource (see the block above), ~430-540ms warm;
+#   * `hooks/handler.py`'s client timeout is 2.0s;
+#   * I6 makes an egress timeout **deny**.
+#
+# So an egress `PreToolUse` that queues behind a few in-flight ingress scans
+# does not merely answer late — it answers never, and Codex is told to block
+# a call the daemon would have allowed. That was demonstrated end to end
+# before the scan/observe split: a benign `curl .../health`, real answer
+# allow, took 2002ms behind six ingress scans and was denied.
+#
+# Egress therefore asks for the lock with a deadline and, if it does not get
+# one, scans with tiers 0-2 and sets `degraded`. What it loses is the deep
+# *findings* on that one call — never the block decision, which is tier 0/1
+# and unaffected — so the fallback is exactly the behavior every egress had
+# before this change, plus a flag saying it happened.
+#
+# 400ms: four-fifths of one warm scan, and with a worst case of one full
+# scan behind it (400 + ~540) it leaves over half the client's 2.0s budget
+# unspent. Ingress keeps blocking indefinitely (`timeout=-1`) because it has
+# no deadline worth protecting — Ruling 3 makes its reply `{}` either way,
+# so a slow ingress scan costs latency and never a wrong answer.
+TIER3_EGRESS_LOCK_TIMEOUT = 0.4
+
+
+def _acquire_tier3(boundary: str) -> bool:
+    """Take `_TIER3_LOCK`; on egress, give up rather than miss the deadline.
+
+    Returns whether the lock is now held by this thread — a False is the
+    caller's signal to degrade, and carries no obligation to release.
+    """
+    egress = boundary in ("B3", "B4")
+    return _TIER3_LOCK.acquire(
+        timeout=TIER3_EGRESS_LOCK_TIMEOUT if egress else -1)
+
+
 # Detailed destination literals architecture.md's schema comments suggest
 # (`subagent:<id>`, `mcp:<server>`, `net:<host>`) map to the bare kinds
 # `[destination_boundary]` in tables.toml actually indexes by.
@@ -234,13 +279,16 @@ class Decision:
     # found a bug, not a no-op.
     updated_input: str | dict | None = None
     # Ruling 4: True when the expensive tier *would* have applied to this
-    # observation but did not run — over `MAX_TIER3_CHARS`, or no available
-    # detector to run. NOT set when the deep scan was simply out of scope (a
-    # local read, a B3/B4 egress, or a stack configured without tier 3):
-    # nothing was lost there, so claiming otherwise would tell the user the
-    # tool is impaired when it is behaving as specified. Renderer shows
-    # design.md §5's "Deep scan unavailable — fast-path results only" banner
-    # when this is set.
+    # observation but did not run — over `MAX_TIER3_CHARS`, no available
+    # detector to run, or (egress only) the model lock was still busy at
+    # `TIER3_EGRESS_LOCK_TIMEOUT`. NOT set when the deep scan was simply out
+    # of scope (a local read, or a stack configured without tier 3): nothing
+    # was lost there, so claiming otherwise would tell the user the tool is
+    # impaired when it is behaving as specified. A B3/B4 egress was on that
+    # out-of-scope list until #47 item 1 and is not any more — the deep scan
+    # applies there now, so an egress that misses it has lost something.
+    # Renderer shows design.md §5's "Deep scan unavailable — fast-path
+    # results only" banner when this is set.
     degraded: bool = False
 
 
@@ -474,10 +522,11 @@ class Engine:
         `hasattr(detector, "available")` and call a yes "tier 3", which
         silently reclassified any cheap detector that tracked availability
         (an optional ruleset, a config file) as expensive — it stopped
-        running on local reads and on B3/B4 and was skipped past the size
-        cap, with nothing raised — and left any expensive detector without an
-        `available` flag running unconditionally on every observation with no
-        cap at all. See `detect/base.py`'s module docstring.
+        running on local reads (and, at the time, on B3/B4) and was skipped
+        past the size cap, with nothing raised — and left any expensive
+        detector without an `available` flag running unconditionally on
+        every observation with no cap at all. See `detect/base.py`'s module
+        docstring.
 
         Re-read from `self.detectors` on every call rather than partitioned
         once in `__init__`: `dispatch`/`daemon` build one shared detector
@@ -508,31 +557,41 @@ class Engine:
         # Never run the deep scan on a purely local read (Ruling 1's
         # domain): B0 never crosses a boundary worth a model call, and
         # architecture.md's "Never on local" is explicit about this.
-        # B3/B4 (mcp_tool/external_net) is reached only via PreToolUse
-        # egress in this taxonomy, where tiers 0-2's credential regex and
-        # the shell parser already fully determine the block/mask decision
-        # — a redundant deep scan there only adds synchronous latency risk
-        # (the exact thing Ruling 4 exists to bound) for no new signal.
-        if expensive and dest_kind != "local" and boundary not in ("B3", "B4"):
+        #
+        # B3/B4 (mcp_tool/external_net) used to be excluded here too, on the
+        # argument that "tiers 0-2 already fully determine the block/mask
+        # decision". That is true of the *block* — only a credential blocks —
+        # and false of everything else a scan is for. `email`, `person`,
+        # `address`, `phone` and `account` are tier-3-only, so the exclusion
+        # meant no outbound call could produce a finding of any of them: the
+        # session's whole outbound record was paths and credentials, a `mask`
+        # rule on `email` had nothing to intersect and could never fire, and
+        # architecture.md §4's "Tier 3 runs ... when the payload crosses
+        # B3/B4" was the opposite of what ran (#47 item 1).
+        if expensive and dest_kind != "local":
             # Always deep-scan (no cheap-shape pre-filter): tier 3's whole
             # purpose is catching categories tiers 0-2 cannot shape-match at
             # all (address, person, date, account number) — gating its
             # invocation on "does this already look PII-shaped by regex"
             # would only ever admit the categories that needed it least
             # (email/phone/SSN, which tiers 0-2 already have some coverage
-            # for) and permanently exclude the rest. The two guards already
-            # in this `if` (boundary, dest_kind) plus MAX_TIER3_CHARS below
-            # are the intended cost bound, not a shape heuristic on top.
+            # for) and permanently exclude the rest. The guard already in
+            # this `if` (dest_kind) plus MAX_TIER3_CHARS below and the
+            # egress lock budget are the intended cost bound, not a shape
+            # heuristic on top.
             if len(obs.text) > MAX_TIER3_CHARS:
+                degraded = True
+            # `_TIER3_LOCK`, not the daemon lock: the shared inference
+            # pipeline is not safe to call concurrently (and is slower when
+            # you try) — see that lock's own comment. Held only around the
+            # model call, so ledger work in other threads is never blocked
+            # by it. Taken with a deadline on egress and without one on
+            # ingress; `_acquire_tier3` carries that argument.
+            elif not _acquire_tier3(boundary):
                 degraded = True
             else:
                 ran_any = False
-                # `_TIER3_LOCK`, not the daemon lock: the shared inference
-                # pipeline is not safe to call concurrently (and is slower
-                # when you try) — see that lock's own comment. Held only
-                # around the model call, so ledger work in other threads is
-                # never blocked by it.
-                with _TIER3_LOCK:
+                try:
                     for d in expensive:
                         # Availability, unlike cost, is per-instance runtime
                         # state — the weights loaded on this machine or they
@@ -545,6 +604,8 @@ class Engine:
                             continue
                         findings.extend(d.scan(obs.text, {"source": obs.source}))
                         ran_any = True
+                finally:
+                    _TIER3_LOCK.release()
                 if not ran_any:
                     degraded = True
         return findings, degraded

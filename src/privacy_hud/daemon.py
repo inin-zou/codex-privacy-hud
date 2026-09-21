@@ -561,16 +561,28 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
     machine, essentially all of it one model forward pass.
 
     Where that actually hurt is not where a first reading suggests, so the
-    numbers are worth stating precisely. Tier 3 runs on **ingress only** —
-    `Engine._scan` skips it for `local` (B0) and for B3/B4, and
-    `dispatch._build_observation` only ever produces `mcp_tool` (B3) or
-    `external_net` (B4) for `PreToolUse`. So every expensive request is a
-    `UserPromptSubmit`/`PostToolUse`, and for those `dispatch()`'s reply is
-    unconditionally `{}`: ingress can never deny or rewrite (Ruling 3), so
-    the scan result affects the ledger and nothing else. Meanwhile
-    `PreToolUse` — the only event that can be egress, the only one whose
-    reply carries a real decision, and the one I6 makes fail closed — is
-    regex-only and inherently sub-millisecond.
+    numbers are worth stating precisely. **When these numbers were taken,
+    tier 3 ran on ingress only** — `Engine._scan` skipped it for `local`
+    (B0) and for B3/B4, and `dispatch._build_observation` only ever produces
+    `mcp_tool` (B3) or `external_net` (B4) for `PreToolUse`. So every
+    expensive request was a `UserPromptSubmit`/`PostToolUse`, and for those
+    `dispatch()`'s reply is unconditionally `{}`: ingress can never deny or
+    rewrite (Ruling 3), so the scan result affects the ledger and nothing
+    else. Meanwhile `PreToolUse` — the only event that can be egress, the
+    only one whose reply carries a real decision, and the one I6 makes fail
+    closed — was regex-only and inherently sub-millisecond.
+
+    **That last sentence is no longer true, and the measurements below are
+    why the change that broke it had to carry a deadline.** #47 item 1 put
+    tier 3 back on B3/B4, where architecture.md §4 always specified it: the
+    exclusion meant no outbound call could ever produce an `email`,
+    `person`, `address`, `phone` or `account` finding. An egress
+    `PreToolUse` is therefore a tier-3 consumer now, and would rejoin
+    exactly the queue this docstring measures — so it takes
+    `engine._TIER3_LOCK` with `engine.TIER3_EGRESS_LOCK_TIMEOUT` and falls
+    back to tiers 0-2 (marking the scan `degraded`) rather than spend the
+    client's 2.0s budget waiting. The fallback is the pre-#47 behavior plus
+    a flag; the block decision is tier 0/1 either way and never waits.
 
     Holding one daemon-wide lock across inference put those two in the same
     queue. Measured on this machine (12 cores, torch 2.14, model warm, 6

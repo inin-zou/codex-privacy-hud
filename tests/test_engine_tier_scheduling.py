@@ -21,8 +21,12 @@ because the ledger rows are what a user actually sees and they must agree.
 """
 from __future__ import annotations
 
+import threading
+import time
+
 import pytest
 
+from privacy_hud import engine
 from privacy_hud.detect.model import StubModelDetector
 from privacy_hud.detect.paths import PathDetector
 from privacy_hud.detect.secrets import SecretDetector
@@ -86,25 +90,52 @@ def test_tier3_runs_for_b1_and_b2_destinations(tmp_path, destination, boundary):
 
 
 @pytest.mark.parametrize("destination,boundary", [
-    ("local", "B0"),
     ("mcp_tool", "B3"),
     ("external_net", "B4"),
 ])
-def test_tier3_is_skipped_for_local_and_for_b3_b4(tmp_path, destination, boundary):
+def test_tier3_runs_for_b3_and_b4_egress(tmp_path, destination, boundary):
+    """`architecture.md` §4: "Tier 3 runs ... when the payload crosses
+    B3/B4". The engine excluded exactly that boundary until #47 item 1, and
+    the exclusion was not a small one: `email`, `person`, `address`, `phone`
+    and `account` are tier-3-only, so no outbound call could ever produce a
+    finding of any of them. The README's own `support.log → GitHub MCP`
+    illustration could not be recorded at its last hop, and a `mask` rule on
+    `email` had nothing to intersect and so could never fire."""
     scan = _full_stack(tmp_path).scan(_obs(destination=destination))
     assert scan.boundary == boundary
+    assert TIER3_TYPE in _types(scan)
+    assert scan.degraded is False
+
+
+def test_tier3_runs_on_a_pretooluse_egress_the_shape_that_actually_ships(tmp_path):
+    """The parametrized test above keeps this file's default `PostToolUse`
+    shape so it isolates one variable. This one is the shape `dispatch`
+    really builds for B3/B4 — the only event that can be egress, and the
+    only one whose reply carries a decision."""
+    scan = _full_stack(tmp_path).scan(
+        _obs(hook_event="PreToolUse", direction="egress",
+             destination="mcp_tool", source="github", tool_name="mcp__github"))
+    assert scan.boundary == "B3"
+    assert TIER3_TYPE in _types(scan)
+
+
+def test_tier3_is_skipped_for_a_local_read(tmp_path):
+    scan = _full_stack(tmp_path).scan(_obs(destination="local"))
+    assert scan.boundary == "B0"
     assert TIER3_TYPE not in _types(scan)
 
 
-@pytest.mark.parametrize("destination", ["local", "mcp_tool", "external_net"])
-def test_skipping_tier3_by_schedule_does_not_mark_the_scan_degraded(
-        tmp_path, destination):
+def test_skipping_tier3_by_schedule_does_not_mark_the_scan_degraded(tmp_path):
     """`degraded` means "the deep scan would have applied here and did not
-    run", not "the deep scan did not run". A local read or a B3/B4 egress
-    is *out of the deep scan's domain by design*, so surfacing design.md
-    §5's "fast-path results only" banner for it would tell the user the
-    tool is impaired when it is behaving exactly as specified."""
-    scan = _full_stack(tmp_path).scan(_obs(destination=destination))
+    run", not "the deep scan did not run". A local read is *out of the deep
+    scan's domain by design*, so surfacing design.md §5's "fast-path results
+    only" banner for it would tell the user the tool is impaired when it is
+    behaving exactly as specified.
+
+    B3/B4 used to be listed here alongside `local`. It no longer is, and the
+    difference is the whole of #47 item 1: an egress that does not get the
+    deep scan has now genuinely lost something, and says so."""
+    scan = _full_stack(tmp_path).scan(_obs(destination="local"))
     assert scan.degraded is False
 
 
@@ -153,6 +184,66 @@ def test_the_cap_does_not_apply_where_the_expensive_tier_is_out_of_scope(tmp_pat
     run there, so there is nothing lost to report."""
     scan = _full_stack(tmp_path).scan(
         _obs(destination="local", text=TEXT + ("x" * MAX_TIER3_CHARS)))
+    assert scan.degraded is False
+
+
+def test_an_oversized_egress_degrades_now_that_the_deep_scan_applies_there(tmp_path):
+    """The mirror of the test above, and the reason the two cannot share a
+    parametrize: `local` is out of scope, B3/B4 is in scope and capped."""
+    scan = _full_stack(tmp_path).scan(
+        _obs(destination="mcp_tool", text=TEXT + ("x" * MAX_TIER3_CHARS)))
+    assert scan.degraded is True
+    assert TIER3_TYPE not in _types(scan)
+    assert CHEAP_TYPES <= _types(scan)
+
+
+# ---------------------------------------------------------------------------
+# Egress waits for the model on a budget; ingress waits as long as it takes.
+# ---------------------------------------------------------------------------
+#
+# Why the two differ, in one paragraph, because it is the only genuinely
+# subtle thing in this file. `hooks/handler.py`'s client timeout is 2.0s and
+# I6 makes an egress timeout DENY. Tier 3 is a serial resource
+# (`_TIER3_LOCK`), so before this change `daemon.Daemon`'s docstring could
+# measure an egress `PreToolUse` taking 3060ms behind six in-flight ingress
+# scans — and a benign `curl .../health` was denied because an unrelated
+# session was busy. Putting tier 3 on the egress path re-opens that queue,
+# so egress takes the lock with a timeout and falls back to the cheap tiers
+# rather than risk the client's deadline. Ingress has no deadline worth
+# protecting: its reply is `{}` either way (Ruling 3), so it blocks.
+
+def test_a_contended_egress_gives_up_the_deep_scan_rather_than_risk_the_deadline(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(engine, "TIER3_EGRESS_LOCK_TIMEOUT", 0.05)
+    eng = _full_stack(tmp_path)
+    engine._TIER3_LOCK.acquire()
+    try:
+        started = time.monotonic()
+        scan = eng.scan(_obs(destination="mcp_tool"))
+        elapsed = time.monotonic() - started
+    finally:
+        engine._TIER3_LOCK.release()
+
+    assert TIER3_TYPE not in _types(scan)
+    # It did not merely skip: it says so, which is what makes the fallback
+    # a reported degradation rather than a silent one.
+    assert scan.degraded is True
+    # The cheap tiers — and therefore the block decision — are untouched.
+    assert CHEAP_TYPES <= _types(scan)
+    assert elapsed < 1.0, "an egress must not sit on a contended lock"
+
+
+def test_a_contended_ingress_waits_for_the_lock_instead_of_degrading(tmp_path,
+                                                                     monkeypatch):
+    monkeypatch.setattr(engine, "TIER3_EGRESS_LOCK_TIMEOUT", 0.05)
+    eng = _full_stack(tmp_path)
+    engine._TIER3_LOCK.acquire()
+    releaser = threading.Timer(0.3, engine._TIER3_LOCK.release)
+    releaser.start()
+    scan = eng.scan(_obs())           # ingress, B1
+    releaser.join()
+
+    assert TIER3_TYPE in _types(scan), "ingress must wait, not give up"
     assert scan.degraded is False
 
 

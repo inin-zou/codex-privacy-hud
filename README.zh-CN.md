@@ -279,6 +279,7 @@ flowchart TD
 18. **被拦截读取的记录不包含文件名。** 记录依据的是匹配到的模式（`.pem`、`.env` 等），因此两个匹配同一模式的不同文件会被去重为一行。你能看到有读取被拦截，但无法知道是哪个文件。计数标记统计的是行数，因此对两个 `.pem` 文件的两次读取均被拒绝时，显示的计数为 `1`。（[详情](docs/known-limits.md#18-a-blocked-reads-row-does-not-name-the-file)）
 19. **子智能体继承了什么，没有记录。** `SubagentStart` 的观测事件不携带文本，因此不会运行任何检测器，也不会产生账本记录。“子智能体是否继承了 `.env`？”这个问题在账本中没有答案。（[详情](docs/known-limits.md#19-what-a-subagent-inherited-is-not-recorded)）
 20. **目的地表示边界类别，不代表具体接收方。** 所有 MCP 调用都归为 `mcp_tool`；将同一个值发送给第二个 MCP 服务器不算新的目的地，也不会再增加披露预算用量。`destinations` 卡片统计的是类别数，不是服务数。（[详情](docs/known-limits.md#20-a-destination-is-a-boundary-category-not-a-recipient)）
+21. **出站调用不保证执行深度扫描，放弃扫描也不会留下记录。** 模型串行执行扫描，出站调用最多等待 400 ms 获取模型锁；超时后只运行第 0–2 层快速检测，以免超过 hook 的时限，被 I6 判为拒绝。放行或拒绝的决策不受影响，但这次调用的深度检测结果会丢失，审计记录无法区分它与实际经过模型扫描的调用。（[详情](docs/known-limits.md#21-on-an-outbound-call-the-deep-scan-is-best-effort-and-giving-it-up-is-not-recorded)）
 
 ## 配置
 
@@ -318,7 +319,7 @@ curl -fsSL https://raw.githubusercontent.com/inin-zou/codex-privacy-hud/main/ins
 | 文档 | 内容 | 适用情况 |
 |---|---|---|
 | [`docs/installing-by-hand.md`](docs/installing-by-hand.md) | 手动执行各安装步骤，使用 `privacy-hud-setup` 和 `privacy-hud-doctor` 命令，以及使用伴随窗格。 | 无法使用 `install.sh`，或希望控制每一步。 |
-| [`docs/known-limits.md`](docs/known-limits.md) | 二十条限制的完整说明，以及相应的测量依据。 | 判断 HUD 显示的数值在多大程度上可信。 |
+| [`docs/known-limits.md`](docs/known-limits.md) | 二十一条限制的完整说明，以及相应的测量依据。 | 判断 HUD 显示的数值在多大程度上可信。 |
 | [`patches/README.md`](patches/README.md) | 只增加一个 Codex 状态行项的补丁，以及如何针对新 tag 重新生成补丁。 | 审计或重新构建补丁版 Codex 二进制。 |
 | [`.claude/docs/architecture.md`](.claude/docs/architecture.md) | 组件关系、进程模型、账本结构、hook 分发和授权循环。 | 开发插件本身。 |
 

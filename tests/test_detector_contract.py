@@ -161,13 +161,26 @@ def test_an_unavailable_cheap_detector_does_not_degrade_the_deep_scan(tmp_path):
 # Defect 2 — an expensive detector without `available` is still cost-gated.
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("destination", ["local", "mcp_tool", "external_net"])
-def test_expensive_detector_without_available_is_skipped_where_tier3_is(
+def test_expensive_detector_without_available_is_skipped_where_tier3_is(tmp_path):
+    pricey = _ExpensiveDetectorWithoutAvailability()
+    eng = _engine(tmp_path, [pricey], name="l-local")
+    eng.scan(_obs(destination="local"))
+    assert pricey.calls == 0
+
+
+@pytest.mark.parametrize("destination", ["mcp_tool", "external_net"])
+def test_expensive_detector_without_available_runs_on_egress_too(
         tmp_path, destination):
+    """`local` used to have B3/B4 alongside it in the parametrize above.
+    The point of this test is that cost-gating follows the *declaration*
+    rather than the presence of an `available` attribute, and that point is
+    unchanged — but the gate it is checked against moved in #47 item 1, and
+    a test still asserting `calls == 0` here would be pinning the drift
+    rather than the contract."""
     pricey = _ExpensiveDetectorWithoutAvailability()
     eng = _engine(tmp_path, [pricey], name=f"l-{destination}")
     eng.scan(_obs(destination=destination))
-    assert pricey.calls == 0
+    assert pricey.calls == 1
 
 
 def test_expensive_detector_without_available_obeys_the_size_cap(tmp_path):

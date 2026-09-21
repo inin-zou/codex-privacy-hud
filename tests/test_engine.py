@@ -370,6 +370,46 @@ def test_a_mask_policy_rule_rewrites_a_later_egress(eng):
     assert "jordan@acme.com" not in blob
 
 
+def test_a_mask_rule_on_email_reaches_an_mcp_call(eng):
+    """#47 item 1 and #49 item 2, in one call — and the reason the test
+    above could not see either of them.
+
+    That test sends to `subagent` (B2), where the deep scan always ran. The
+    surface a user actually clicks `Protect future occurrences` from is an
+    exposure row, and the destination that makes the feature worth having is
+    an MCP tool (B3). Until the egress gate came off, policy matching
+    intersected the rule's selectors with the *current scan's* findings, no
+    scan on B3 could ever produce an `email` finding, and so this rule was
+    written, reported as enforced, and could not fire. The assertion that
+    catches the regression is not `action == "rewrite"` on its own — it is
+    that the address is gone from what the tool would receive."""
+    from privacy_hud.mcp_tools import apply_policy
+    apply_policy(eng.ledger, "s1", rule_type="mask", selector="email")
+    d = eng.observe(_obs(hook_event="PreToolUse", direction="egress",
+                         source="tool input", destination="mcp_tool",
+                         text="contact jordan@acme.com about ticket 4412",
+                         tool_name="mcp__github__create_issue"))
+    assert d.action == "rewrite"
+    assert d.updated_input is not None
+    assert "jordan@acme.com" not in json.dumps(d.updated_input)
+
+
+def test_an_email_bound_for_an_mcp_tool_is_recorded_as_an_exposure(eng):
+    """The other half of #47 item 1: with no rule at all, the crossing must
+    still reach the ledger. `support.log → main agent → GitHub MCP` is the
+    README's own illustration, and before this its last hop recorded
+    nothing — the destinations tile never learned the MCP server received
+    anything, because on B3 the only findings possible were paths and
+    credentials."""
+    eng.observe(_obs(hook_event="PreToolUse", direction="egress",
+                     source="tool input", destination="mcp_tool",
+                     text="contact jordan@acme.com about ticket 4412",
+                     tool_name="mcp__github__create_issue"))
+    rows = eng.ledger.list_events("s1", "exposed")
+    assert [(r.data_type, r.destination) for r in rows
+            if r.data_type == "email"] == [("email", "mcp_tool")]
+
+
 def test_a_mask_rule_still_rewrites_when_no_hard_blocked_type_is_present(eng):
     """The half of the mask branch the hard-block guard must leave alone.
 
