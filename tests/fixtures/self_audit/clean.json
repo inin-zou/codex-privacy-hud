@@ -1,0 +1,67 @@
+{
+  "_README": [
+    "Ordinary development text that carries NO personal data, NO credential,",
+    "and NO sensitive file path. The correct number of findings on every",
+    "entry here is zero, so any finding is a false positive and the test can",
+    "say so without a judgement call.",
+    "",
+    "What is deliberately NOT here: text that mentions `.env`, `id_rsa` or",
+    "`~/.aws` in passing. Whether flagging those is right depends on whether",
+    "the session READ the file or merely named it, and this corpus is not the",
+    "place to smuggle that decision in — see docs/self-audit.md.",
+    "",
+    "`kind` groups entries by the shape of development text they stand for,",
+    "so a regression can be reported as 'SQL started firing' rather than as a",
+    "count going up."
+  ],
+  "entries": [
+    {"id": "path-01", "kind": "paths",
+     "text": "src/privacy_hud/detect/secrets.py:94: appended Finding(\"credential\", ...)"},
+    {"id": "path-02", "kind": "paths",
+     "text": "moved tests/detect/test_model.py -> tests/detect/test_model_spans.py"},
+    {"id": "path-03", "kind": "paths",
+     "text": "build output written to target/release/deps/libcodex_tui-3f9a.rlib"},
+
+    {"id": "git-01", "kind": "git",
+     "text": "commit 4b10367ee1 Merge pull request #46 from inin-zou/feat/mcp-wiring"},
+    {"id": "git-02", "kind": "git",
+     "text": " 12 files changed, 301 insertions(+), 67 deletions(-)"},
+    {"id": "git-03", "kind": "git",
+     "text": "On branch main\nYour branch is up to date with 'origin/main'.\nnothing to commit, working tree clean"},
+
+    {"id": "sql-01", "kind": "sql",
+     "text": "SELECT COUNT(*) FROM events WHERE session_id=? AND kind='exposed' GROUP BY data_type"},
+    {"id": "sql-02", "kind": "sql",
+     "text": "CREATE INDEX IF NOT EXISTS scan_gaps_session ON scan_gaps(session_id);"},
+
+    {"id": "shell-01", "kind": "shell",
+     "text": "rg -n 'TIER3_EGRESS_BUDGET' src/ | cut -d: -f1 | sort -u | head -20"},
+    {"id": "shell-02", "kind": "shell",
+     "text": "python -m pytest -q -p no:randomly 2>&1 | tail -5"},
+    {"id": "shell-03", "kind": "shell",
+     "text": "for f in dist/*.tar.gz; do shasum -a 256 \"$f\"; done"},
+
+    {"id": "json-01", "kind": "json",
+     "text": "{\"hook_event_name\": \"PreToolUse\", \"tool_name\": \"Bash\", \"permissionDecision\": \"deny\"}"},
+    {"id": "json-02", "kind": "json",
+     "text": "{\"verified\": false, \"reason\": \"2 observations got the fast detectors only\", \"observers\": 1}"},
+
+    {"id": "log-01", "kind": "logs",
+     "text": "2026-09-21T11:04:18Z INFO daemon bound socket, model warm, 140/140 weights"},
+    {"id": "log-02", "kind": "logs",
+     "text": "WARN deep scan skipped: budget spent waiting (boundary=B3, reason=timeout)"},
+
+    {"id": "trace-01", "kind": "stack traces",
+     "text": "Traceback (most recent call last):\n  File \"src/privacy_hud/engine.py\", line 754, in _scan\n    gap = self._deep_scan_on_a_deadline(obs.text, ctx, expensive, findings)\nRuntimeError: inference blew up"},
+
+    {"id": "src-01", "kind": "source",
+     "text": "def _in_time(finished_at: float | None, deadline: float) -> bool:\n    return finished_at is not None and finished_at <= deadline"},
+    {"id": "src-02", "kind": "source",
+     "text": "class _DeepScanTask:\n    __slots__ = (\"done\", \"findings\", \"outcome\", \"error\", \"finished_at\")"},
+
+    {"id": "prose-01", "kind": "prose",
+     "text": "The budget bounds the wait and the acceptance, not the scan; nothing here can cancel a running model call."},
+    {"id": "prose-02", "kind": "prose",
+     "text": "Four review rounds, each finding the same correction stopped one surface short."}
+  ]
+}

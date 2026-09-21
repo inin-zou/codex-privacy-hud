@@ -78,10 +78,14 @@ No UI copy, log message, or API name may suggest disclosed data can be withdrawn
 **I6 — Fail open on ingress, fail closed on egress.**
 Engine timeout on a read path: allow with an "unverified" warning. Engine timeout on an outbound call crossing B3/B4: deny. Never block Codex because of our own crash — the hook client exits 0 with empty stdout if it throws. The daemon's half of the egress set is `EGRESS_EVENTS` in `codex.py`; the client's half is in `hooks/handler.py`.
 
-**I7 — The tool survives its own audit.**
-Running Privacy HUD on this repo's own development session must produce zero exposures.
+**I7 — The tool survives its own audit, on stated inputs.**
+On the committed self-audit corpus, the clean half must produce zero exposures and the planted half must produce exactly the values planted in it. Neither number may be reached by exempting this repository or by raising the budget cap.
 
-This is verified **by hand, not by a test** — it needs a live Codex session, which CI has neither the binary nor the network for. Do not add "there is a test for this" back until one exists. Last verified on 2026-09-05 against Codex CLI 0.153.0 with a warm daemon: a session that read `src/privacy_hud/budget.py` and answered a question about it recorded zero events, budget 0.0/120.0. Re-run it after any change to the detector stack, and note that a cold daemon invalidates the result — the session goes unrecorded rather than clean (known limit 1), which looks identical in the ledger.
+**This used to read "running Privacy HUD on this repo's own development session must produce zero exposures", and that was false.** Three read-only source-review sessions measured on 2026-09-21, during #51's reinstall, recorded **88%, 100% and 100%** of budget. Nothing was sent anywhere — the failure is detection and accounting, not disclosure — but an invariant stated in the file every agent reads before working here was contradicted by the tool's own output, and it stood for sixteen days after the measurement because nobody wrote the measurement down anywhere a check could reach.
+
+The replacement is deliberately narrower, and the narrowing is the point. "Zero on a development session" is not falsifiable: sessions differ, and a session that reads a file containing a real address *should* record an exposure. Zero is an acceptance result for **specified inputs**, which is why the corpus is committed rather than described. `tests/test_self_audit.py` runs it; the numbers it pins are in `docs/self-audit.md`.
+
+What survives unchanged from the old wording: a live end-to-end run still needs a Codex session CI has neither the binary nor the network for, so the **session-level** check is still by hand. Note that a cold daemon invalidates that run — the session goes unrecorded rather than clean (known limit 1), which looks identical in the ledger.
 
 ---
 

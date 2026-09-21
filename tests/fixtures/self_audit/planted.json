@@ -1,0 +1,162 @@
+{
+  "_README": [
+    "The positive control. Every value under `expect` is planted on purpose",
+    "and must be found: a detector that stops seeing these has failed at the",
+    "only job that matters, and it fails silently, which is why this half of",
+    "the corpus exists at all.",
+    "",
+    "`tier` says which detector is expected to produce the finding, so a",
+    "failure reads as 'tier 1 stopped matching' rather than as a count.",
+    "Entries marked tier 3 are skipped when the model weights are absent --",
+    "CI has neither the weights nor the network for them.",
+    "",
+    "`known_gap` marks an entry the shipped detectors do NOT find. It is an",
+    "expected failure, asserted strictly, so fixing the gap turns the test",
+    "red and forces the entry to be promoted rather than leaving a stale",
+    "note behind. These are not tolerances -- the corpus records what the",
+    "tool misses instead of quietly choosing inputs it happens to catch.",
+    "",
+    "EVERY VALUE HERE IS SYNTHETIC. The keys are well-formed but issued by",
+    "nobody, and the names and addresses are invented or public landmarks.",
+    "I1 applies to the ledger, not to a test fixture, but a corpus that",
+    "needed real secrets to be useful would be a bad corpus."
+  ],
+  "entries": [
+    {
+      "id": "cred-01",
+      "tier": 1,
+      "text": "export OPENAI_API_KEY=sk-proj-Ab3xY9zQw1Er5Ty7Ui0OpAs2Df4Gh6Jk8Lm",
+      "expect": [
+        {
+          "data_type": "credential",
+          "value": "sk-proj-Ab3xY9zQw1Er5Ty7Ui0OpAs2Df4Gh6Jk8Lm"
+        }
+      ]
+    },
+    {
+      "id": "cred-02",
+      "tier": 1,
+      "text": "aws_access_key_id = AKIAABCDEFGHIJKLMNOP",
+      "expect": [
+        {
+          "data_type": "credential",
+          "value": "AKIAABCDEFGHIJKLMNOP"
+        }
+      ]
+    },
+    {
+      "id": "cred-03",
+      "tier": 1,
+      "text": "curl https://api.example.test -H \"Authorization: Bearer ghp_1234567890abcdefghijklmnopqrstuvwxyzAB\"",
+      "expect": [
+        {
+          "data_type": "credential",
+          "value": "ghp_1234567890abcdefghijklmnopqrstuvwxyzAB"
+        }
+      ],
+      "known_gap": "SecretDetector has no GitHub token pattern, so `ghp_` + 36 chars is not matched by shape, and its entropy is not high enough to trip the generic rule. A token pasted into a shell command therefore crosses a boundary unrecorded."
+    },
+    {
+      "id": "path-01",
+      "tier": 0,
+      "text": "cat /home/dev/project/.env",
+      "expect": [
+        {
+          "data_type": "path",
+          "value": ".env"
+        }
+      ]
+    },
+    {
+      "id": "path-02",
+      "tier": 0,
+      "text": "ssh -i ~/.ssh/id_rsa deploy@10.0.0.4",
+      "expect": [
+        {
+          "data_type": "path",
+          "value": "id_rsa"
+        }
+      ]
+    },
+    {
+      "id": "path-03",
+      "tier": 0,
+      "text": "openssl x509 -in certs/server.pem -noout -subject",
+      "expect": [
+        {
+          "data_type": "path",
+          "value": ".pem"
+        }
+      ],
+      "note": "The finding's value is the PATTERN `.pem`, not `server.pem`: the detector reports what it matched, not the file it matched in. That is issue #44 and known limit 18, recorded here so the corpus says what the tool does rather than what it should do."
+    },
+    {
+      "id": "email-01",
+      "tier": 3,
+      "text": "contact jordan@acme.test about ticket 4412",
+      "expect": [
+        {
+          "data_type": "email",
+          "value": "jordan@acme.test"
+        }
+      ]
+    },
+    {
+      "id": "person-01",
+      "tier": 3,
+      "text": "Reassign the migration review to Nadia Farouk before Friday.",
+      "expect": [
+        {
+          "data_type": "person",
+          "value": "Nadia Farouk"
+        }
+      ]
+    },
+    {
+      "id": "address-01",
+      "tier": 3,
+      "text": "Ship the replacement unit to 1600 Pennsylvania Avenue NW, Washington.",
+      "expect": [
+        {
+          "data_type": "address",
+          "value": "1600 Pennsylvania Avenue NW"
+        }
+      ],
+      "known_gap": "The model returns nothing at all for this one. It is a landmark address, which it appears to read as an organisation rather than a location. Recorded rather than replaced: the failure mode is 'confident silence', which is the worst one for a privacy tool."
+    },
+    {
+      "id": "phone-01",
+      "tier": 3,
+      "text": "Call the on-call engineer at +1 (555) 013-8827 if the deploy stalls.",
+      "expect": [
+        {
+          "data_type": "phone",
+          "value": "+1 (555) 013-8827"
+        }
+      ]
+    },
+    {
+      "id": "address-02",
+      "tier": 3,
+      "text": "Her address is 221B Baker Street, London NW1 6XE.",
+      "expect": [
+        {
+          "data_type": "address",
+          "value": "221B Baker Street, London NW1 6XE"
+        }
+      ]
+    },
+    {
+      "id": "address-03",
+      "tier": 3,
+      "text": "Ship it to 42 Rue de Rivoli, 75001 Paris, France.",
+      "expect": [
+        {
+          "data_type": "address",
+          "value": "42 Rue de Rivoli"
+        }
+      ],
+      "known_gap": "Found, but fragmented into three spans -- `42`, `Rue de Rivoli`, `75001` -- so no single finding carries the address. Task 12 masks on these offsets, so a fragmented span is also a masking hole. Same class as the BIOES splitting `detect/model.py` documents, surviving on a non-English street line."
+    }
+  ]
+}

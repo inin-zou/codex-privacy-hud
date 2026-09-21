@@ -21,7 +21,7 @@ Never show a number that conflates "we detected something" with "something left 
 Disclosed data is gone. Every affordance that looks like undo must be labeled as forward-looking policy. This is a copy rule with teeth — see §9.
 
 **P5 — The tool must survive its own audit.**
-Running Privacy HUD on Privacy HUD produces zero exposures. Any design that requires shipping user content off-machine is rejected on sight.
+Any design that requires shipping user content off-machine is rejected on sight. *(This principle used to open "Running Privacy HUD on Privacy HUD produces zero exposures", which measurement contradicted — 88%, 100% and 100% of budget on three read-only source reviews. The off-machine half is I2 and still holds; the zero-exposure half is now I7's corpus-based form, and `docs/self-audit.md` has the numbers.)*
 
 **P6 — Degrade to text.**
 The terminal is the primary habitat. Every view must have a legible ASCII rendering; the web UI is an enhancement, not a dependency.
