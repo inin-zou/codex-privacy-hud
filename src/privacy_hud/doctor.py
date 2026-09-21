@@ -1535,9 +1535,10 @@ def check_plugin_install() -> Check:
       `hooks/handler.py` in the checkout is not what runs until the plugin is
       re-added — the failure mode that has cost this project the most
       debugging time. It is a warning rather than a failure because file
-      divergence alone does not establish a runtime failure; it just is not the code you are
-      reading. The report names the diverging files so the difference between
-      "my edit is not live" and "a README typo" is visible at a glance.
+      divergence alone does not establish a runtime failure. The installed
+      copy differs from this checkout. The report names the diverging files
+      so the difference between "my edit is not live" and "a README typo"
+      is visible at a glance.
 
     Only the files Codex actually executes are compared (`PLUGIN_FILES` and
     `PLUGIN_TREES`). Comparing the whole tree would flag `.git`, byte-code
@@ -1850,7 +1851,12 @@ def _is_summary_reply(message: dict | None) -> bool:
         summary = json.loads(first["text"])
     except ValueError:
         return False
-    return isinstance(summary, dict) and set(summary) == _SUMMARY_FIELDS
+    return (
+        isinstance(summary, dict)
+        and set(summary) == _SUMMARY_FIELDS
+        and all(type(value) is int and value >= 0
+                for value in summary.values())
+    )
 
 
 def _attach_stderr(exc: Exception, err: str | None) -> None:
@@ -1958,7 +1964,7 @@ def check_mcp_server(timeout: float = MCP_TIMEOUT) -> Check:
             "server started, but the MCP ledger-read probe failed",
             details=["The tools are listed, but a ledger-backed call "
                      "(privacy.get_session_summary) did not return a "
-                     "summary. Codex reports nothing when a tool call fails."],
+                     "summary."],
             fixes=["Reinstall: ./install.sh",
                    "Then: privacy-hud-doctor"])
     return Check("MCP server", OK,

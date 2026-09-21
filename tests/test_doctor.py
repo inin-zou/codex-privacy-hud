@@ -109,6 +109,11 @@ for line in sys.stdin:
                 "text": "SENTINEL-tool-error-payload-7d2e"}}]}}
         elif CALL == "malformed":
             result = {{"content": [{{"type": "text", "text": "[]"}}]}}
+        elif CALL.startswith("value:"):
+            bad = json.loads(CALL[len("value:"):])
+            result = {{"content": [{{"type": "text", "text": json.dumps(
+                {{"percent": bad, "exposed_items": 0, "destinations": 0,
+                  "prevented": 0}})}}]}}
         else:
             result = {{"content": [{{"type": "text", "text": json.dumps(
                 {{"percent": 0, "exposed_items": 0, "destinations": 0,
@@ -1503,6 +1508,19 @@ def test_check_mcp_server_fails_on_malformed_tool_result(monkeypatch,
     monkeypatch.setattr(doctor, "_installed_plugin_root", lambda: tmp_path)
     _write_fake_plugin(tmp_path, tools=list(doctor.MCP_TOOLS),
                        call="malformed")
+    check = doctor.check_mcp_server(timeout=30)
+    assert check.status == doctor.FAIL
+    assert "ledger-read probe failed" in check.summary
+
+
+@pytest.mark.parametrize("bad", [None, "0", True, -1, 1.5])
+def test_check_mcp_server_fails_on_a_summary_with_malformed_values(
+        monkeypatch, tmp_path, bad):
+    """The right keys are not enough: a summary whose values are not
+    non-negative integers is not evidence that the ledger was read."""
+    monkeypatch.setattr(doctor, "_installed_plugin_root", lambda: tmp_path)
+    _write_fake_plugin(tmp_path, tools=list(doctor.MCP_TOOLS),
+                       call="value:" + json.dumps(bad))
     check = doctor.check_mcp_server(timeout=30)
     assert check.status == doctor.FAIL
     assert "ledger-read probe failed" in check.summary

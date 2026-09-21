@@ -363,8 +363,9 @@ def build_app():
     from privacy_hud import mcp_tools
 
     ledger = _open_ledger()
-    # One lock for the connection: every tool body, including the
-    # `.as_dict()` that materializes its result, and the close at shutdown.
+    # One lock for the connection: every ledger access in a tool, including
+    # the `.as_dict()` that materializes a read's result, and the close at
+    # shutdown.
     # It serializes this process's use of the connection whatever thread the
     # SDK runs a tool on. It does not coordinate with the daemon, which is
     # another process: sqlite arbitrates between processes.
