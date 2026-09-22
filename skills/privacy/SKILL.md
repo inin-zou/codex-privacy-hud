@@ -279,21 +279,27 @@ sh "$ROOT/install.sh" --yes
 (`PLUGIN_ROOT` is set for hooks; in a skill's shell it may not be, so the
 fallback locates the installed copy under Codex's plugin cache and takes
 the newest version.) It takes several minutes; the model download
-dominates. Keep waiting on
-the same process instead of starting a second one. It ends in one of two
-ways, and the user needs to hear which:
+dominates. Keep waiting on the same process instead of starting a second
+one.
 
-- `done. restart codex …`: tell the user to restart Codex. This session is
-  still the official binary; the patched build, the status-line item and
-  the `PATH` change apply to the next one.
-- `no patched build published for codex <ver> yet`: everything else
-  installed. Say that the status-line item needs a build for their Codex
-  version, and that the fallback pane (`privacy-hud-ambient --watch`)
-  works meanwhile. A restart is still needed for the daemon's hooks.
+Privacy HUD 0.7.8 writes snapshot version 2. Already-published patched
+Codex builds have version-1 readers and reject those snapshots. Successful
+installation and matching Codex versions do not establish snapshot
+compatibility. This change does not publish replacement binaries.
 
-If it fails before either line, print its last lines verbatim and stop; do
-not retry with different flags, and do not edit `~/.codex/config.toml` or
-the rc file by hand.
+- `done. restart codex …`: tell the user to restart Codex to load the
+  installed plugin and PATH changes. Do not promise a native Privacy item
+  unless the installed patched build is verified to contain the
+  snapshot-v2 reader. Until then, use `privacy-hud-ambient --watch` in a
+  separate terminal pane.
+- `no patched build published for codex <ver> yet`: report that no patched
+  build was installed for that version. This warning can precede the
+  final `done` line; that line does not cancel it. Use the fallback pane.
+  A restart is still needed for the daemon's hooks.
+
+If the installer exits unsuccessfully, print its last lines verbatim and
+stop; do not retry with different flags, and do not edit
+`~/.codex/config.toml` or the rc file by hand.
 
 ## What NOT to do
 

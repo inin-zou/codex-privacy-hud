@@ -1921,7 +1921,12 @@ def _is_count(value) -> bool:
 
 
 def _is_finite(value) -> bool:
-    return type(value) in (int, float) and math.isfinite(value)
+    if type(value) not in (int, float):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def _is_summary(summary) -> bool:

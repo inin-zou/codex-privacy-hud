@@ -442,5 +442,8 @@ fi
 # Already written after every step that changed anything; this final call
 # only matters when nothing did.
 write_manifest
-log "done. restart codex to pick up the patched build and the privacy status item"
-log "      (then /statusline toggles the item; \$privacy shows the session audit)"
+log "done. restart codex to load the installed plugin and PATH changes"
+log "      the native Privacy item requires a snapshot-v2-compatible patched Codex build"
+log "      matching Codex versions and successful installation do not establish snapshot compatibility"
+log "      until compatibility is verified, use: $SHARE/venv/bin/privacy-hud-ambient --watch"
+log "      \$privacy shows the session audit"
