@@ -667,11 +667,25 @@ def test_get_exposure_detail_json_is_byte_identical(led):
     assert _json(mcp_tools.get_exposure_detail(led, SESSION, 1)) == JSON_DETAIL
 
 
-def test_get_exposure_detail_needs_a_session_row(led):
-    """With no session row the session is unrecorded, and an unrecorded
-    session has no event detail (#54 phase 1). It used to return the row
-    with `budget_cap` omitted."""
-    led.conn.execute("DELETE FROM sessions WHERE session_id=?", (SESSION,))
+def test_get_exposure_detail_needs_a_session_row(led, tmp_path):
+    """Historical orphaned evidence must not produce session event detail."""
+    assert not led.conn.in_transaction
+    assert led.conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+
+    # Deliberately construct historical corruption on a fixture-only
+    # connection. Production ledger connections keep FK enforcement.
+    raw = sqlite3.connect(tmp_path / "l.db", isolation_level=None)
+    try:
+        raw.execute("PRAGMA foreign_keys=OFF")
+        assert raw.execute("PRAGMA foreign_keys").fetchone()[0] == 0
+        raw.execute("DELETE FROM sessions WHERE session_id=?", (SESSION,))
+    finally:
+        raw.close()
+
+    assert led.conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    assert led.conn.execute(
+        "SELECT 1 FROM events WHERE session_id=? AND id=1",
+        (SESSION,)).fetchone() is not None
     with pytest.raises(LookupError):
         mcp_tools.get_exposure_detail(led, SESSION, 1)
 
@@ -802,7 +816,7 @@ def test_session_end_hook_output_receipt_is_byte_identical(tmp_path):
     for i, spec in enumerate(_ROWS):
         state.ledger.record(SESSION, **spec)
         state.ledger.conn.execute(
-            "UPDATE events SET ts=? WHERE session_id=? AND turn_id=?",
+            "UPDATE events_legacy_v1 SET ts=? WHERE session_id=? AND turn_id=?",
             (TS + i * 60, SESSION, spec["turn_id"]))
 
     out = dispatch(state, {"hook_event_name": "SessionEnd",

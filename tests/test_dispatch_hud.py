@@ -151,7 +151,7 @@ def test_a_file_read_records_the_path_as_the_source(state):
           tool_input={"command": "cat .env"},
           tool_response="OPENAI_API_KEY=sk-proj-Ab3xY9zQw1Er5Ty7Ui0OpAs2Df4Gh6Jk8Lm")
     row = state.ledger.conn.execute(
-        "SELECT source, source_kind FROM events").fetchone()
+        "SELECT source, source_kind FROM events_legacy_v1").fetchone()
     assert (row["source"], row["source_kind"]) == (".env", "path")
 
 
@@ -161,7 +161,7 @@ def test_a_command_with_no_readable_path_records_its_program_name(state):
           tool_input={"command": "env"},
           tool_response="OPENAI_API_KEY=sk-proj-Ab3xY9zQw1Er5Ty7Ui0OpAs2Df4Gh6Jk8Lm")
     row = state.ledger.conn.execute(
-        "SELECT source, source_kind FROM events").fetchone()
+        "SELECT source, source_kind FROM events_legacy_v1").fetchone()
     assert (row["source"], row["source_kind"]) == ("env", "command")
 
 
@@ -174,7 +174,7 @@ def test_a_payload_with_no_origin_keeps_the_tool_name(state):
     _hook(state, "PostToolUse", tool_name="WebFetch",
           tool_response="OPENAI_API_KEY=sk-proj-Ab3xY9zQw1Er5Ty7Ui0OpAs2Df4Gh6Jk8Lm")
     row = state.ledger.conn.execute(
-        "SELECT source, source_kind FROM events").fetchone()
+        "SELECT source, source_kind FROM events_legacy_v1").fetchone()
     assert (row["source"], row["source_kind"]) == ("WebFetch", None)
 
 
@@ -190,7 +190,7 @@ def test_a_local_read_of_a_path_reaches_the_ledger(state):
                   tool_input={"command": "cat .env"})
     assert "$privacy read on" in reply.get("systemMessage", "")
     row = state.ledger.conn.execute(
-        "SELECT kind, source, source_kind FROM events").fetchone()
+        "SELECT kind, source, source_kind FROM events_legacy_v1").fetchone()
     assert row is not None, "a local read now produces a row"
     assert (row["kind"], row["source"], row["source_kind"]) == \
         ("local_access", ".env", "path")
@@ -204,7 +204,7 @@ def test_a_local_command_with_no_path_still_returns_early(state, command):
     assert _hook(state, "PreToolUse", tool_name="Bash",
                  tool_input={"command": command}) == {}
     assert state.ledger.conn.execute(
-        "SELECT count(*) FROM events").fetchone()[0] == 0
+        "SELECT count(*) FROM events_legacy_v1").fetchone()[0] == 0
 
 
 def test_a_non_shell_tool_carrying_a_path_is_not_read_guarded(state, tmp_path):
@@ -232,4 +232,4 @@ def test_a_non_shell_tool_carrying_a_path_is_not_read_guarded(state, tmp_path):
                   tool_input=tool_input)
     assert reply == {}, "allowed, unexamined -- no deny, no notice"
     assert state.ledger.conn.execute(
-        "SELECT count(*) FROM events").fetchone()[0] == 0
+        "SELECT count(*) FROM events_legacy_v1").fetchone()[0] == 0

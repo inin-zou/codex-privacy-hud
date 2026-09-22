@@ -53,109 +53,45 @@ import os
 import sqlite3
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Literal
 
+from . import ledger_schema
 from .budget import contribution, percent
 from .matrix.loader import Matrix
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS sessions (
-  session_id   TEXT PRIMARY KEY,
-  started_at   INTEGER NOT NULL,
-  ended_at     INTEGER,
-  cwd          TEXT,
-  model        TEXT,
-  budget_score REAL NOT NULL DEFAULT 0,
-  budget_cap   REAL NOT NULL DEFAULT 120
-);
-
--- Legacy schema; CLAUDE.md §4 governs #54's approved, not-yet-implemented rebuild.
-CREATE TABLE IF NOT EXISTS events (       -- legacy UPDATEs: count increments; value_hash NULL at session end
-  id            INTEGER PRIMARY KEY,
-  session_id    TEXT NOT NULL REFERENCES sessions,
-  turn_id       TEXT,
-  ts            INTEGER NOT NULL,
-  kind          TEXT NOT NULL,            -- exposed|prevented|local_access|detected|retention
-  data_type     TEXT NOT NULL,            -- email|credential|person|hostname|path|...
-  source        TEXT NOT NULL,            -- support.log | user prompt | tool input
-  source_kind   TEXT,                     -- path|command; NULL when source is a bare label
-  destination   TEXT NOT NULL,            -- model_context|subagent:<id>|mcp:<server>|net:<host>
-  boundary      TEXT NOT NULL,            -- B0..B4
-  count         INTEGER NOT NULL DEFAULT 1,
-  value_hash    BLOB,                     -- salted, session-scoped; NULL after SessionEnd
-  masked_example TEXT,                    -- 'jo•••@acme.com'; NULL for credentials
-  budget_delta  REAL NOT NULL DEFAULT 0,
-  protection    TEXT,                     -- none|masked|minimized|blocked
-  tool_name     TEXT,
-  UNIQUE(session_id, value_hash, destination)
-);
-
-CREATE TABLE IF NOT EXISTS flows (        -- multi-hop chains for the L3 flow line
-  id         INTEGER PRIMARY KEY,
-  session_id TEXT NOT NULL,
-  value_hash BLOB NOT NULL,
-  hop_index  INTEGER NOT NULL,
-  node       TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS policy (
-  id         INTEGER PRIMARY KEY,
-  scope      TEXT NOT NULL,               -- session:<id>
-  rule_type  TEXT NOT NULL,               -- mask|block_path|block_command
-  selector   TEXT NOT NULL,               -- data_type / destination / origin (#40)
-  created_at INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS coverage (     -- append-only; who was watching, when
-  id          INTEGER PRIMARY KEY,
-  session_id  TEXT NOT NULL,            -- '' when the gap is not attributable
-  ts          INTEGER NOT NULL,
-  observer    TEXT NOT NULL,            -- opaque per-Ledger-instance id
-  reason      TEXT NOT NULL,            -- session_start|attached|unobserved_hooks
-  UNIQUE(session_id, observer)          -- one row per observer per session
-);
-
-CREATE TABLE IF NOT EXISTS scan_gaps (   -- append-only; one row per observed scan gap
-  id          INTEGER PRIMARY KEY,
-  session_id  TEXT NOT NULL,
-  ts          INTEGER NOT NULL,
-  boundary    TEXT NOT NULL,            -- B0..B4
-  reason      TEXT NOT NULL             -- oversize|unavailable|busy|timeout
-);
-
--- `coverage()` counts this table per session on every HUD publish, under
--- `State.lock`. Without the index that is a full scan over every session's
--- history the ledger has ever accumulated, on the hook path.
-CREATE INDEX IF NOT EXISTS scan_gaps_session ON scan_gaps(session_id);
-
-CREATE TABLE IF NOT EXISTS policy_tokens (  -- one-shot consent, §8
-  token      TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL,
-  tool_name  TEXT NOT NULL,
-  args_hash  BLOB NOT NULL,
-  mode       TEXT NOT NULL,               -- allow_once|minimize
-  expires_at INTEGER NOT NULL
-);
-"""
-
-#: Columns added to `events` after the first release, as (name, decl). The
-#: schema is applied with CREATE TABLE IF NOT EXISTS, which does nothing to a
-#: database that already exists, so a column added to SCHEMA alone would be
-#: missing on every existing install and every later INSERT would raise. This
-#: is the ledger's first migration; keep it additive and idempotent, which is
-#: all `ALTER TABLE ... ADD COLUMN` of a nullable column can be.
-_ADDED_COLUMNS = (("source_kind", "TEXT"),)
+#: The legacy schema; see `ledger_schema` for all three generations.
+SCHEMA = ledger_schema.LEGACY_SCHEMA
 
 
-def _migrate(conn) -> None:
-    existing = {row["name"] for row in conn.execute("PRAGMA table_info(events)")}
-    for name, decl in _ADDED_COLUMNS:
-        if name not in existing:
-            conn.execute(f"ALTER TABLE events ADD COLUMN {name} {decl}")
+def open_connection(path: Path, *, initialize: bool,
+                    check_same_thread: bool) -> sqlite3.Connection:
+    """One ledger connection, configured the same way everywhere.
+
+    Autocommit (`isolation_level=None`) with explicit transactions, row
+    access by name, foreign keys enforced, a one-second busy wait and full
+    synchronous writes. Only the initializing daemon connection sets WAL,
+    which persists in the file. `initialize=False` opens an existing file
+    read-write and fails on a missing one rather than creating it; no
+    connection-level setting here changes the file.
+    """
+    if initialize:
+        conn = sqlite3.connect(path, isolation_level=None,
+                               check_same_thread=check_same_thread)
+    else:
+        conn = sqlite3.connect(
+            f"{Path(path).resolve().as_uri()}?mode=rw", uri=True,
+            isolation_level=None, check_same_thread=check_same_thread)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=1000")
+    conn.execute("PRAGMA synchronous=FULL")
+    if initialize:
+        conn.execute("PRAGMA journal_mode=WAL")
+    return conn
 
 
 #: `coverage.reason` values. Three, and the list is closed on purpose: each one
@@ -326,12 +262,9 @@ UNRECORDED_ACCOUNTING_NOTE = (
     "counts are unavailable.")
 
 
-class UnsupportedAccounting(RuntimeError):
-    """A session or schema the legacy readers cannot describe honestly.
-
-    Raised rather than answered: a version-2 session read through a legacy
-    projection would be mislabelled, and an unknown `events` layout would be
-    read by guesswork."""
+#: Re-exported: raised for a schema or session the running code cannot
+#: describe or write honestly (see `ledger_schema.UnsupportedAccounting`).
+UnsupportedAccounting = ledger_schema.UnsupportedAccounting
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -556,7 +489,7 @@ class Ledger:
 
         `initialize=False` is the reader's open (MCP, the local UI, ambient,
         the skill). It opens an existing database read-write, without
-        `SCHEMA`, `_migrate()`, a journal-mode change or a chmod, and fails
+        `SCHEMA`, a journal-mode change or a chmod, and fails
         on a missing file rather than creating one. It permits the existing
         policy writes; it is not a read-only connection. Only the daemon
         initializes, so a reader never changes the structure of the ledger
@@ -564,26 +497,31 @@ class Ledger:
         """
         self.matrix = matrix
         self.observer = observer or uuid.uuid4().hex[:16]
-        if not initialize:
-            self.conn = sqlite3.connect(
-                f"{Path(path).resolve().as_uri()}?mode=rw", uri=True,
-                isolation_level=None, check_same_thread=check_same_thread)
-            self.conn.row_factory = sqlite3.Row
-            return
-        self.conn = sqlite3.connect(path, isolation_level=None,
+        #: Depth of the write transaction this instance owns; 0 when none.
+        self._write_depth = 0
+        #: Test-only hook called after each migration statement executes.
+        #: Not settable from any configuration, environment or tool input.
+        self._migration_failpoint: Callable[[str], None] | None = None
+        self.conn = open_connection(path, initialize=initialize,
                                     check_same_thread=check_same_thread)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        # After #54's rebuild, `events` is the new accounting table. The
-        # pre-#54 `SCHEMA` and `_migrate()` describe the legacy table, and
-        # applying them would create or alter the wrong one.
-        if not self._table_exists("events_legacy_v1"):
-            self.conn.executescript(SCHEMA)
-            # A failure here propagates: the daemon must not come up against
-            # a schema it could not migrate, because it would then write rows
-            # whose origin is silently lost. I6 covers what the hooks do when
-            # no daemon answers (open on ingress, closed on egress).
-            _migrate(self.conn)
+        if not initialize:
+            return
+        # A failure here propagates: the daemon must not come up against a
+        # schema it cannot describe. I6 covers what the hooks do when no
+        # daemon answers (open on ingress, closed on egress).
+        version = ledger_schema.validate_schema(self.conn)
+        if version == ledger_schema.ACTIVATED_VERSION:
+            raise UnsupportedAccounting(
+                "this ledger uses activated accounting; this version of "
+                "Privacy HUD cannot write it")
+        if version == 0:
+            # A new file gets the legacy schema; an existing legacy ledger
+            # gains only a table it lacks. No column is added to an existing
+            # table: a historical `events` without `source_kind` keeps its
+            # layout, and the legacy writer omits the column.
+            with self._write_transaction():
+                for statement in ledger_schema.legacy_statements():
+                    self.conn.execute(statement)
         Path(path).chmod(0o600)
 
     def _table_exists(self, name: str) -> bool:
@@ -611,6 +549,62 @@ class Ledger:
             self.conn.execute("ROLLBACK")
             raise
         self.conn.execute("COMMIT")
+
+    @contextmanager
+    def _write_transaction(self) -> Iterator[None]:
+        """A `BEGIN IMMEDIATE` write transaction this instance owns.
+
+        Joins a write transaction this instance already owns. Refuses to
+        run inside a read transaction rather than silently promoting it.
+        Ends only the transaction it began: commit on success, rollback on
+        any exception.
+        """
+        if self._write_depth:
+            self._write_depth += 1
+            try:
+                yield
+            finally:
+                self._write_depth -= 1
+            return
+        if self.conn.in_transaction:
+            raise RuntimeError("a read transaction is already open")
+        self.conn.execute("BEGIN IMMEDIATE")
+        self._write_depth = 1
+        try:
+            yield
+        except BaseException:
+            self._write_depth = 0
+            self.conn.execute("ROLLBACK")
+            raise
+        self._write_depth = 0
+        self.conn.execute("COMMIT")
+
+    def session_exists(self, session_id: str) -> bool:
+        return self.conn.execute(
+            "SELECT 1 FROM sessions WHERE session_id=?",
+            (session_id,)).fetchone() is not None
+
+    def prepare_session_boundary(self, session_id: str) -> None:
+        """Run #54's structural rebuild, if it has not run, for the genuine
+        start of the absent session `session_id` (CLAUDE.md §4).
+
+        Requires a write transaction the caller owns, and an absent session:
+        the caller creates the session in the same transaction, so the
+        rebuild and the session that triggered it commit together or not at
+        all. Each statement is executed individually; nothing here commits.
+        A prepared ledger is left alone.
+        """
+        if not self._write_depth:
+            raise RuntimeError("the session boundary needs a write transaction")
+        if self.session_exists(session_id):
+            raise RuntimeError("the session boundary needs an absent session")
+        if ledger_schema.validate_schema(self.conn) != 0:
+            return
+        for statement in ledger_schema.migration_statements():
+            self.conn.execute(statement)
+            if self._migration_failpoint is not None:
+                self._migration_failpoint(statement)
+        ledger_schema.validate_schema(self.conn)
 
     def _legacy_events_table(self) -> Literal["events", "events_legacy_v1"]:
         """Where this ledger's legacy rows are, decided now.
@@ -680,16 +674,24 @@ class Ledger:
         `session_start` recorded first cannot be downgraded to `attached` by a
         later lazy call from the same daemon, and that is correct — that daemon
         really did watch from the start.
+
+        Both writes are one write transaction, joining the caller's when it
+        owns one (the session boundary, which may run #54's rebuild first).
+        A new session is legacy-accounted: the prepared schema's column
+        defaults say so.
         """
-        self.conn.execute(
-            "INSERT OR IGNORE INTO sessions(session_id,started_at,cwd,model,budget_cap)"
-            " VALUES(?,?,?,?,?)",
-            (session_id, int(time.time()), cwd, model, self.matrix.budget_cap))
-        self.conn.execute(
-            "INSERT OR IGNORE INTO coverage(session_id,ts,observer,reason)"
-            " VALUES(?,?,?,?)",
-            (session_id, int(time.time()), self.observer,
-             COVERAGE_SESSION_START if observed_start else COVERAGE_ATTACHED))
+        with self._write_transaction():
+            self.conn.execute(
+                "INSERT OR IGNORE INTO sessions(session_id,started_at,cwd,"
+                "model,budget_cap) VALUES(?,?,?,?,?)",
+                (session_id, int(time.time()), cwd, model,
+                 self.matrix.budget_cap))
+            self.conn.execute(
+                "INSERT OR IGNORE INTO coverage(session_id,ts,observer,reason)"
+                " VALUES(?,?,?,?)",
+                (session_id, int(time.time()), self.observer,
+                 COVERAGE_SESSION_START if observed_start
+                 else COVERAGE_ATTACHED))
 
     def note_unobserved_hooks(self, ts: int) -> None:
         """Record that hook events at around `ts` reached no daemon at all.
@@ -836,33 +838,86 @@ class Ledger:
     def record(self, session_id: str, *, turn_id, kind, data_type, source,
                destination, value_hash, masked_example, tool_name,
                protection, source_kind: str | None = None) -> float:
+        """Record one legacy event; see `_record_legacy`.
+
+        Refuses a session under any other accounting: a later accounting
+        writer records observations, not legacy rows.
+        """
+        with self._write_transaction():
+            row = self.conn.execute(
+                "SELECT * FROM sessions WHERE session_id=?",
+                (session_id,)).fetchone()
+            if row is not None and "accounting_version" in row.keys() \
+                    and row["accounting_version"] != 1:
+                raise UnsupportedAccounting(
+                    "legacy records require a legacy-accounted session")
+            return self._record_legacy(
+                session_id, turn_id=turn_id, kind=kind, data_type=data_type,
+                source=source, destination=destination,
+                value_hash=value_hash, masked_example=masked_example,
+                tool_name=tool_name, protection=protection,
+                source_kind=source_kind)
+
+    def _record_legacy(self, session_id: str, *, turn_id, kind, data_type,
+                       source, destination, value_hash, masked_example,
+                       tool_name, protection,
+                       source_kind: str | None = None) -> float:
+        """Write legacy evidence inside the caller's write transaction.
+
+        Open sessions retain legacy arithmetic and dedupe. Ended sessions
+        append evidence with a null value hash and zero contribution;
+        their stored scores remain frozen. Historical rows are unchanged.
+        Omit source_kind when the legacy table lacks that column.
+        """
         # I2: unmapped destinations must raise (UnknownKey), never silently
         # score zero — propagate rather than catch.
         boundary = self.matrix.boundary_for(destination)
+        table = self._legacy_events_table()
+
+        # The caller owns BEGIN IMMEDIATE: end-state inspection, insertion,
+        # and any charge are serialized with end_session.
+        session = self.conn.execute(
+            "SELECT ended_at FROM sessions WHERE session_id=?",
+            (session_id,)).fetchone()
+        ended = session is not None and session["ended_at"] is not None
+        if ended:
+            # Late evidence must not establish a new matching namespace.
+            # SQL equality with NULL intentionally finds no dedupe match.
+            value_hash = None
 
         existing = self.conn.execute(
-            "SELECT id FROM events WHERE session_id=? AND value_hash=? AND destination=?",
+            f"SELECT id FROM {table} WHERE session_id=? AND value_hash=?"
+            " AND destination=?",
             (session_id, value_hash, destination)).fetchone()
         if existing is not None:
-            self.conn.execute("UPDATE events SET count=count+1 WHERE id=?",
-                               (existing["id"],))
+            self.conn.execute(
+                f"UPDATE {table} SET count=count+1 WHERE id=?",
+                (existing["id"],))
             return 0.0
 
-        # I3: only `exposed` events move the budget.
+        # Only exposed events in an open session can add a legacy charge.
         delta = (contribution(self.matrix, data_type, 1, destination)
-                 if kind == "exposed" else 0.0)
+                 if kind == "exposed" and not ended else 0.0)
 
+        values = {
+            "session_id": session_id, "turn_id": turn_id,
+            "ts": int(time.time()), "kind": kind, "data_type": data_type,
+            "source": source, "source_kind": source_kind,
+            "destination": destination, "boundary": boundary,
+            "value_hash": value_hash, "masked_example": masked_example,
+            "budget_delta": delta, "protection": protection,
+            "tool_name": tool_name,
+        }
+        present = self._columns(table)
+        names = [name for name in values if name in present]
         self.conn.execute(
-            "INSERT INTO events(session_id,turn_id,ts,kind,data_type,source,"
-            "source_kind,destination,boundary,value_hash,masked_example,"
-            "budget_delta,protection,tool_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (session_id, turn_id, int(time.time()), kind, data_type, source,
-             source_kind, destination, boundary, value_hash, masked_example,
-             delta, protection, tool_name))
+            f"INSERT INTO {table}({','.join(names)})"
+            f" VALUES({','.join('?' * len(names))})",
+            tuple(values[name] for name in names))
         if delta:
             self.conn.execute(
-                "UPDATE sessions SET budget_score=budget_score+? WHERE session_id=?",
-                (delta, session_id))
+                "UPDATE sessions SET budget_score=budget_score+?"
+                " WHERE session_id=?", (delta, session_id))
         return delta
 
     def summary(self, session_id: str) -> SessionSummary:
@@ -953,12 +1008,16 @@ class Ledger:
             first_seen=public.ts, budget_cap=cap)
 
     def end_session(self, session_id: str) -> None:
-        self.conn.execute(
-            "UPDATE sessions SET ended_at=? WHERE session_id=?",
-            (int(time.time()), session_id))
-        self.conn.execute(
-            "UPDATE events SET value_hash=NULL WHERE session_id=?",
-            (session_id,))
+        """End the session and null its legacy value hashes, in one write
+        transaction. An ended session keeps its first end time."""
+        with self._write_transaction():
+            self.conn.execute(
+                "UPDATE sessions SET ended_at=? WHERE session_id=?"
+                " AND ended_at IS NULL", (int(time.time()), session_id))
+            table = self._legacy_events_table()
+            self.conn.execute(
+                f"UPDATE {table} SET value_hash=NULL WHERE session_id=?",
+                (session_id,))
 
     # -- policy and one-shot consent tokens (SCHEMA's last two tables) -----
     #

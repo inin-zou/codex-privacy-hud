@@ -515,10 +515,11 @@ def test_policy_tokens_hold_no_arguments(led):
     assert not cols & banned
 
 
-def test_an_older_ledger_gains_the_source_kind_column(tmp_path):
-    """The schema is applied with CREATE TABLE IF NOT EXISTS, which does not
-    add columns to a database that already exists. Without the migration,
-    every insert against a pre-existing ledger raises OperationalError."""
+def test_an_older_ledger_keeps_its_layout_and_still_records(tmp_path):
+    """#54 Phase 2: an existing legacy table keeps its columns. It used to
+    gain `source_kind` through an additive migration; historical layouts are
+    now preserved byte-exact, readers project the missing column as NULL,
+    and the legacy writer omits it."""
     import sqlite3
 
     from privacy_hud.ledger import Ledger
@@ -551,11 +552,13 @@ def test_an_older_ledger_gains_the_source_kind_column(tmp_path):
 
     led = Ledger(path, load_matrix())
     columns = {r["name"] for r in led.conn.execute("PRAGMA table_info(events)")}
-    assert "source_kind" in columns
-    # The row written before the migration keeps NULL: nothing knows where
-    # it came from, and a guess would be worse than an absence.
-    assert led.conn.execute(
-        "SELECT source_kind FROM events WHERE id=1").fetchone()[0] is None
+    assert "source_kind" not in columns
+    assert led.list_events("s1", "exposed")[0].source_kind is None
+    led.record("s1", turn_id="t2", kind="exposed", data_type="email",
+               source="b.log", destination="mcp_tool", value_hash=b"\x02",
+               masked_example=None, tool_name="Read", protection=None,
+               source_kind="path")
+    assert len(led.list_events("s1", "exposed")) == 2
     led.conn.close()
 
 

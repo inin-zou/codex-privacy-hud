@@ -465,3 +465,43 @@ def test_existing_reader_refreshes_legacy_route(legacy):
     assert reader._legacy_events_table() == "events_legacy_v1"
     assert reader.summary("old1").legacy_permitted_crossing_rows == 2
     reader.conn.close()
+
+
+@pytest.mark.parametrize("prepared", [False, True])
+def test_a_late_legacy_record_is_kept_without_a_charge(legacy, prepared):
+    """After SessionEnd a late finding is still written, with a NULL hash
+    and zero contribution; the ended session's score and history stay as
+    they were, on both schema generations."""
+    if prepared:
+        _boundary(legacy)
+    led = Ledger(legacy, M)
+    led.start_session("late", cwd="/r", model="m")
+    first = led.record("late", turn_id="t", kind="exposed", data_type="email",
+                       source="a", destination="model_context",
+                       value_hash=b"\x55" * 16, masked_example=None,
+                       tool_name="Read", protection=None)
+    assert first > 0
+    table = led._legacy_events_table()
+    history = led.conn.execute(
+        f"SELECT id, count, budget_delta FROM {table} WHERE session_id='late'"
+    ).fetchall()
+    led.end_session("late")
+    ended = tuple(led.conn.execute(
+        "SELECT * FROM sessions WHERE session_id='late'").fetchone())
+    for _ in range(2):
+        assert led.record("late", turn_id="t", kind="exposed",
+                          data_type="email", source="a",
+                          destination="model_context",
+                          value_hash=b"\x55" * 16, masked_example=None,
+                          tool_name="Read", protection=None) == 0.0
+    rows = led.conn.execute(
+        f"SELECT id, count, budget_delta, value_hash FROM {table}"
+        " WHERE session_id='late' ORDER BY id").fetchall()
+    assert [(r[0], r[1], r[2]) for r in rows[:len(history)]] == \
+        [tuple(h) for h in history]
+    late = rows[len(history):]
+    assert len(late) == 2
+    assert all(r[3] is None and r[2] == 0.0 for r in late)
+    assert tuple(led.conn.execute(
+        "SELECT * FROM sessions WHERE session_id='late'").fetchone()) == ended
+    led.conn.close()

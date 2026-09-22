@@ -937,9 +937,10 @@ class Engine:
             are applied here, from `self.salt`, never during the scan. So a
             caller that re-resolves the session's Engine between the two
             phases (which `dispatch` does, so a `SessionEnd` landing
-            mid-scan is handled by the documented "new salt after
-            SessionEnd" rule) gets exactly the salt it would have gotten had
-            the two phases run back to back.
+            mid-scan gets the temporary post-end engine, whose findings are
+            recorded with a NULL hash and no charge) gets exactly the
+            result it would have gotten had the two phases run back to
+            back.
         """
         if scan is None:
             scan = self.scan(obs)

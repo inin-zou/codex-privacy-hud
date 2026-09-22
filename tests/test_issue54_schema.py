@@ -73,6 +73,9 @@ def test_observations_require_a_version_two_session(conn):
 
 
 def test_new_history_and_profiles_are_immutable(conn):
+    # Row triggers fire per row, so every table below holds one.
+    conn.execute("INSERT INTO scan_gaps(session_id,ts,boundary,reason)"
+                 " VALUES('s1',1,'B3','timeout')")
     for sql in ("UPDATE scoring_profiles SET budget_cap=1",
                 "DELETE FROM scoring_profiles",
                 "UPDATE observations SET ts=2",
