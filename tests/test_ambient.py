@@ -27,7 +27,8 @@ from privacy_hud import ambient, mcp_tools
 from privacy_hud import hud_snapshot as hs
 from privacy_hud.ledger import Ledger
 from privacy_hud.matrix.loader import load_matrix
-from privacy_hud.render import hud_line
+from privacy_hud import render
+from legacy_fakes import legacy_line, legacy_summary
 
 M = load_matrix()
 
@@ -118,9 +119,8 @@ def _publish_snapshot(data_dir, session_id):
     summary = led.summary(session_id)
     coverage = led.coverage(session_id)
     led.conn.close()
-    hs.HudPublisher(data_dir).publish(
-        session_id, percent=summary.legacy_percent, blocked=summary.legacy_prevented_rows,
-        unverified=not coverage.verified)
+    hs.HudPublisher(data_dir).publish(session_id, summary=summary,
+                                      unverified=not coverage.verified)
     return summary
 
 
@@ -154,7 +154,7 @@ def test_once_prints_exactly_what_render_would_produce(data_dir, capsys):
     assert ambient.main(["--once"]) == 0
 
     out = capsys.readouterr().out
-    assert out == hud_line(summary.legacy_percent, 80, summary.legacy_prevented_rows) + "\n"
+    assert out == legacy_line(summary.legacy_percent, 80, summary.legacy_prevented_rows) + "\n"
 
 
 def test_no_flags_behaves_as_once(data_dir, capsys):
@@ -163,16 +163,18 @@ def test_no_flags_behaves_as_once(data_dir, capsys):
     assert ambient.main([]) == 0
 
     out = capsys.readouterr().out
-    assert out == hud_line(summary.legacy_percent, 80, summary.legacy_prevented_rows) + "\n"
+    assert out == legacy_line(summary.legacy_percent, 80, summary.legacy_prevented_rows) + "\n"
 
 
-def test_prevented_count_is_the_blocked_input(data_dir, capsys):
+def test_prevented_count_is_the_legacy_prevented_rows(data_dir, capsys):
     _seed(data_dir, exposures=1, prevented=2)
 
     ambient.main(["--once"])
 
-    # design.md §4's "Active block" state: `⚠ N blocked · ...`.
-    assert "⚠ 2 blocked" in capsys.readouterr().out
+    # Rows, not calls or confirmed interventions (#54 phase 1).
+    out = capsys.readouterr().out
+    assert "· 2 prevented rows" in out
+    assert "blocked" not in out
 
 
 def test_clean_session_renders_zero_percent(data_dir, capsys):
@@ -230,7 +232,7 @@ def test_falls_back_to_the_most_recently_started_session_with_no_daemon(
     ambient.main(["--once"])
 
     out = capsys.readouterr().out
-    assert out == hud_line(newer.legacy_percent, 80, newer.legacy_prevented_rows) + "\n"
+    assert out == legacy_line(newer.legacy_percent, 80, newer.legacy_prevented_rows) + "\n"
 
 
 def test_session_id_override_is_honored(data_dir, capsys):
@@ -240,7 +242,7 @@ def test_session_id_override_is_honored(data_dir, capsys):
     ambient.main(["--session-id", "older", "--once"])
 
     out = capsys.readouterr().out
-    assert out == hud_line(older.legacy_percent, 80, older.legacy_prevented_rows) + "\n"
+    assert out == legacy_line(older.legacy_percent, 80, older.legacy_prevented_rows) + "\n"
     # And it is genuinely a different line than the default resolution.
     assert older.legacy_percent != 0
 
@@ -262,8 +264,8 @@ def test_the_daemons_live_session_beats_the_most_recently_started_one(
     ambient.main(["--once"])
 
     out = capsys.readouterr().out
-    assert out == hud_line(older.legacy_percent, 80, older.legacy_prevented_rows) + "\n"
-    assert out != hud_line(newer.legacy_percent, 80, newer.legacy_prevented_rows) + "\n"
+    assert out == legacy_line(older.legacy_percent, 80, older.legacy_prevented_rows) + "\n"
+    assert out != legacy_line(newer.legacy_percent, 80, newer.legacy_prevented_rows) + "\n"
 
 
 def test_the_pane_and_the_audit_name_the_same_session(data_dir, capsys,
@@ -291,7 +293,7 @@ def test_an_explicit_pin_never_asks_the_daemon(data_dir, capsys, daemon_says):
     ambient.main(["--session-id", "older", "--once"])
 
     out = capsys.readouterr().out
-    assert out == hud_line(older.legacy_percent, 80, older.legacy_prevented_rows) + "\n"
+    assert out == legacy_line(older.legacy_percent, 80, older.legacy_prevented_rows) + "\n"
     assert asked == []
 
 
@@ -403,19 +405,19 @@ def test_line_never_exceeds_the_terminal_width(data_dir, monkeypatch, capsys,
 
     line = capsys.readouterr().out.rstrip("\n")
     assert len(line) <= columns
-    assert line == hud_line(summary.legacy_percent, columns, summary.legacy_prevented_rows)
+    assert line == legacy_line(summary.legacy_percent, columns, summary.legacy_prevented_rows)
 
 
-def test_narrow_terminal_degrades_to_the_dot_form(data_dir, monkeypatch,
-                                                  capsys):
+def test_narrow_terminal_keeps_the_legacy_qualifier(data_dir, monkeypatch,
+                                                    capsys):
     _seed(data_dir, exposures=3)
-    monkeypatch.setenv("COLUMNS", "20")
+    monkeypatch.setenv("COLUMNS", "12")
 
     ambient.main(["--once"])
 
     line = capsys.readouterr().out.rstrip("\n")
-    assert line.startswith("⬤")
-    assert len(line) <= 20
+    assert line.startswith("legacy ")
+    assert len(line) <= 12
 
 
 # --------------------------------------------------------------------- #
@@ -447,7 +449,7 @@ def test_watch_redraws_in_place_and_exits_zero_on_ctrl_c(data_dir, monkeypatch,
     assert ambient.main(["--watch"]) == 0
 
     out = capsys.readouterr().out
-    line = hud_line(summary.legacy_percent, 80, summary.legacy_prevented_rows)
+    line = legacy_line(summary.legacy_percent, 80, summary.legacy_prevented_rows)
     # Three frames, each preceded by carriage-return + erase-to-end-of-line, so
     # the pane holds one line instead of scrolling a log.
     assert out == ("\r\x1b[K" + line) * 3 + "\n"
@@ -493,7 +495,7 @@ def test_watch_honors_the_session_id_override(data_dir, monkeypatch, capsys):
     ambient.main(["--watch", "--session-id", "older"])
 
     out = capsys.readouterr().out
-    assert out == "\r\x1b[K" + hud_line(older.legacy_percent, 80,
+    assert out == "\r\x1b[K" + legacy_line(older.legacy_percent, 80,
                                         older.legacy_prevented_rows) + "\n"
 
 
@@ -559,7 +561,7 @@ def test_watch_does_not_hop_between_sessions_between_redraws(
 
     ambient.main(["--watch"])
 
-    line = hud_line(first.legacy_percent, 80, first.legacy_prevented_rows)
+    line = legacy_line(first.legacy_percent, 80, first.legacy_prevented_rows)
     assert capsys.readouterr().out == ("\r\x1b[K" + line) * 3 + "\n"
 
 
@@ -648,7 +650,7 @@ def test_a_session_observed_late_is_marked_unverified(data_dir, capsys):
 
     out = capsys.readouterr().out
     assert "⚠unverified" in out
-    assert out == hud_line(0, 80, 0, unverified=True) + "\n"
+    assert out == legacy_line(0, 80, 0, unverified=True) + "\n"
 
 
 def test_the_newest_session_is_unverified_when_hooks_were_dropped_after_it(
@@ -689,7 +691,8 @@ def test_a_ledger_holding_only_a_recorded_gap_still_says_something(
     assert ambient.main(["--once"]) == 0
 
     out = capsys.readouterr().out
-    assert out == hud_line(0, 80, 0, unverified=True) + "\n"
+    assert out == render.unattributed_gap_line(80) + "\n"
+    assert "%" in out and "0%" not in out
 
 
 def test_a_ledger_with_no_sessions_and_no_gap_still_renders_nothing(
@@ -739,37 +742,39 @@ def test_unverified_copy_is_still_free_of_forbidden_words(data_dir, capsys):
 # --------------------------------------------------------------------- #
 
 def test_line_is_hud_line_of_the_snapshot(data_dir, monkeypatch):
-    hs.HudPublisher(data_dir).publish("s1", percent=28, blocked=2, unverified=False)
+    hs.HudPublisher(data_dir).publish("s1", summary=legacy_summary(28, 2), unverified=False)
     monkeypatch.setattr(ambient, "_resolve_session_id", lambda: "s1")
-    assert ambient.safe_line(width=80) == hud_line(28, 80, 2)
+    assert ambient.safe_line(width=80) == legacy_line(28, 80, 2)
 
 
 def test_unverified_flag_reaches_the_line(data_dir, monkeypatch):
-    hs.HudPublisher(data_dir).publish("s1", percent=0, blocked=0, unverified=True)
+    hs.HudPublisher(data_dir).publish("s1", summary=legacy_summary(0, 0), unverified=True)
     monkeypatch.setattr(ambient, "_resolve_session_id", lambda: "s1")
-    assert ambient.safe_line(width=80) == hud_line(0, 80, 0, unverified=True)
+    assert ambient.safe_line(width=80) == legacy_line(0, 80, 0, unverified=True)
 
 
 def test_hidden_snapshot_renders_nothing(data_dir, monkeypatch, no_hud_line):
     pub = hs.HudPublisher(data_dir)
-    pub.publish("s1", percent=28, blocked=0, unverified=False)
+    pub.publish("s1", summary=legacy_summary(28, 0), unverified=False)
     pub.set_hidden("s1", True)
     monkeypatch.setattr(ambient, "_resolve_session_id", lambda: "s1")
     assert ambient.safe_line(width=80) is None
 
 
 def test_stale_snapshot_renders_nothing(data_dir, monkeypatch, no_hud_line):
-    hs.HudPublisher(data_dir).publish("s1", percent=28, blocked=0, unverified=False)
+    hs.HudPublisher(data_dir).publish("s1", summary=legacy_summary(28, 0), unverified=False)
     p = hs.snapshot_path(data_dir, "s1")
     doc = json.loads(p.read_text()); doc["updated_at"] -= 60; p.write_text(json.dumps(doc))
     monkeypatch.setattr(ambient, "_resolve_session_id", lambda: "s1")
     assert ambient.safe_line(width=80) is None
 
 
-def test_no_session_but_daemon_reports_gaps_renders_unverified_zero(data_dir, monkeypatch):
+def test_no_session_but_daemon_reports_gaps_renders_a_nonnumeric_warning(
+        data_dir, monkeypatch):
     hs.HudPublisher(data_dir).mark_daemon(unattributed_gaps=True)
     monkeypatch.setattr(ambient, "_resolve_session_id", lambda: None)
-    assert ambient.safe_line(width=80) == hud_line(0, 80, 0, unverified=True)
+    assert ambient.safe_line(width=80) == \
+        "Privacy —% · unattributed hook gaps"
 
 
 def test_no_session_and_no_gaps_renders_nothing(data_dir, monkeypatch, no_hud_line):
@@ -781,6 +786,6 @@ def test_no_session_and_no_gaps_renders_nothing(data_dir, monkeypatch, no_hud_li
 def test_ambient_never_opens_sqlite(data_dir, monkeypatch):
     import sqlite3
     monkeypatch.setattr(sqlite3, "connect", lambda *a, **k: (_ for _ in ()).throw(AssertionError("sqlite opened")))
-    hs.HudPublisher(data_dir).publish("s1", percent=1, blocked=0, unverified=False)
+    hs.HudPublisher(data_dir).publish("s1", summary=legacy_summary(1, 0), unverified=False)
     monkeypatch.setattr(ambient, "_resolve_session_id", lambda: "s1")
-    assert ambient.safe_line(width=80) == hud_line(1, 80, 0)
+    assert ambient.safe_line(width=80) == legacy_line(1, 80, 0)

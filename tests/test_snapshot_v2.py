@@ -188,7 +188,8 @@ def test_legacy_width_ladder_never_cuts_the_qualifier(data_dir, width,
 
 @pytest.mark.parametrize("width,expected", [
     (120, "Privacy legacy 28% · 2 prevented rows ⚠unverified"),
-    (49, "Privacy legacy 28% ⚠unverified"),
+    (49, "Privacy legacy 28% · 2 prevented rows ⚠unverified"),
+    (48, "Privacy legacy 28% ⚠unverified"),
     (30, "Privacy legacy 28% ⚠unverified"),
     (29, "legacy 28% ⚠unverified"),
     (22, "legacy 28% ⚠unverified"),

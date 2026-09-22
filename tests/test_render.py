@@ -12,7 +12,8 @@ from privacy_hud.ledger import (LEGACY_SCORE_LABEL, LegacyExposureRow,
                                 LegacySessionSummary, SessionCoverage)
 from privacy_hud.matrix.loader import UnknownKey
 from privacy_hud.mcp_tools import ResolvedSession
-from privacy_hud.render import hud_line, audit, detail, receipt, hud_core
+from legacy_fakes import legacy_line
+from privacy_hud.render import audit, detail, receipt, hud_core
 
 import pytest
 
@@ -42,32 +43,32 @@ EMPTY_SUMMARY = LegacySessionSummary(
     score_label=LEGACY_SCORE_LABEL)
 
 
-def test_hud_bar_has_ten_cells_and_percent():
-    line = hud_line(28, width=80)
-    assert line.count("█") + line.count("░") == 10
-    assert "28%" in line
+def test_hud_names_its_accounting_and_draws_no_bar():
+    # #54 phase 1: a legacy percentage is always labelled, and the line no
+    # longer carries hud_core's bar.
+    line = legacy_line(28, width=80)
+    assert line == "Privacy legacy 28%"
+    assert "█" not in line and "░" not in line
 
 
 def test_hud_degrades_under_narrow_terminals():
-    assert len(hud_line(28, width=30)) <= 30
-    assert "28%" in hud_line(28, width=20)
+    assert len(legacy_line(28, width=30)) <= 30
+    assert "28%" in legacy_line(28, width=20)
 
 
 def test_hud_never_exceeds_given_width_across_the_ladder():
     # design.md §4 ladder: >=52, 40-51, 28-39, <28.
     for width in (80, 52, 51, 40, 39, 28, 27, 12, 4, 1):
-        assert len(hud_line(63, width=width)) <= width
+        assert len(legacy_line(63, width=width)) <= width
 
 
 def test_hud_blocked_prefix_does_not_break_the_width_budget():
     for width in (80, 45, 30, 15):
-        assert len(hud_line(28, width=width, blocked=999)) <= width
+        assert len(legacy_line(28, width, 999)) <= width
 
 
-def test_hud_clean_session_renders_zero_percent():
-    line = hud_line(0, width=80)
-    assert "0%" in line
-    assert line.count("█") == 0
+def test_hud_recorded_empty_session_renders_a_legacy_zero():
+    assert legacy_line(0, width=80) == "Privacy legacy 0%"
 
 
 def test_detail_always_carries_the_irreversibility_notice():
@@ -121,7 +122,7 @@ def test_detail_golden_for_a_command_origin_row():
 
 
 def test_no_view_contains_forbidden_copy():
-    views = [hud_line(28, 80), audit(SUMMARY, [ROW], "Exposed"),
+    views = [legacy_line(28, 80), audit(SUMMARY, [ROW], "Exposed"),
              detail(ROW), receipt("s1", SUMMARY, [ROW], 41)]
     for v in views:
         for word in BANNED:
@@ -191,21 +192,19 @@ COMPLETE = SessionCoverage(recorded=True, observers=1, attached=False,
 
 
 def test_hud_unverified_is_off_by_default():
-    """The parameter is keyword-only with a False default so no existing call
-    site — and no golden pinned against one — moves a byte."""
-    assert hud_line(28, 80) == hud_line(28, 80, 0)
-    assert "unverified" not in hud_line(28, 80)
+    assert legacy_line(28, 80) == legacy_line(28, 80, 0)
+    assert "unverified" not in legacy_line(28, 80)
 
 
 def test_hud_unverified_marker_is_designs_exact_wording():
     # design.md §4's state table, not a paraphrase.
-    assert hud_line(28, 80, unverified=True) == \
-        "PRIVACY  Disclosure ███░░░░░░░ 28% ⚠unverified ›"
+    assert legacy_line(28, 80, unverified=True) == \
+        "Privacy legacy 28% ⚠unverified"
 
 
 def test_hud_unverified_zero_percent_is_distinguishable_from_a_clean_zero():
-    clean = hud_line(0, 80)
-    unknown = hud_line(0, 80, unverified=True)
+    clean = legacy_line(0, 80)
+    unknown = legacy_line(0, 80, unverified=True)
     assert clean != unknown
     assert "unverified" in unknown and "unverified" not in clean
 
@@ -214,22 +213,23 @@ def test_hud_unverified_survives_every_rung_of_the_ladder():
     """The marker may never be the thing that gets dropped to make the line
     fit: a narrower line that still says "unverified" beats a wider one that
     silently claims a number it cannot back."""
-    for width in (80, 52, 51, 40, 39, 28, 27, 12, 4, 1):
-        line = hud_line(28, width, unverified=True)
+    for width in (80, 52, 51, 40, 39, 28, 27, 12, 8, 7, 4, 1):
+        line = legacy_line(28, width, unverified=True)
         assert len(line) <= width
-        assert "⚠" in line, (width, line)
+        # Nothing at all when no candidate fits: never a bare number.
+        assert line == "" or "⚠" in line, (width, line)
 
 
 def test_hud_unverified_never_exceeds_width_with_a_block_prefix_too():
     for width in (80, 52, 45, 39, 30, 15, 4, 1):
-        assert len(hud_line(28, width, blocked=999, unverified=True)) <= width
+        assert len(legacy_line(28, width, 999, unverified=True)) <= width
 
 
-def test_hud_unverified_replaces_the_band_dot_below_28_columns():
-    # Appending the marker would put it first in line for truncation, and what
-    # truncation would leave is a clean-looking number.
-    assert hud_line(28, 27, unverified=True) == "⚠ 28%"
-    assert hud_line(28, 27) == "⬤ 28%"
+def test_hud_unverified_leads_with_the_marker_when_narrow():
+    # A marker appended after the number would be the first thing a narrow
+    # candidate drops, leaving a clean-looking number.
+    assert legacy_line(28, 12, unverified=True) == "⚠ legacy 28%"
+    assert legacy_line(28, 12) == "legacy 28%"
 
 
 def test_audit_banner_appears_only_when_coverage_says_it_should():
@@ -279,7 +279,7 @@ def test_unverified_copy_never_implies_the_lost_events_can_be_recovered():
     forbidden = ("recover", "restore", "retriev", "replay", "undo", "re-scan",
                  "rescan", "will be recorded", "try again")
     views = [
-        hud_line(28, 80, unverified=True),
+        legacy_line(28, 80, unverified=True),
         audit(EMPTY_SUMMARY, [], "All events", coverage=INCOMPLETE),
         audit(SUMMARY, [ROW], "Exposed", coverage=INCOMPLETE),
         receipt("s1", SUMMARY, [ROW], 41, coverage=INCOMPLETE),
@@ -452,10 +452,9 @@ def test_hud_core_matches_golden_for_every_case():
         assert hud_core(g["percent"]) == g["core"], g
 
 
-def test_hud_core_is_the_segment_hud_line_embeds():
+def test_hud_core_is_no_longer_drawn_by_the_hud_line():
     for pct in (0, 28, 63, 100):
-        assert hud_core(pct) in hud_line(pct, 80)
-        assert hud_core(pct) in hud_line(pct, 45)      # mid rung too
+        assert hud_core(pct) not in legacy_line(pct, 80)
 
 
 def test_hud_core_rejects_out_of_band_percent():

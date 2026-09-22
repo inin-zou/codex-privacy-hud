@@ -49,7 +49,7 @@ reader can check.
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -66,6 +66,7 @@ from .ledger import (
 from .matrix.loader import load_matrix
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .hud_snapshot import Snapshot
     # Type-only, and deliberately so: `audit()` reads three attributes off a
     # `ResolvedSession` and needs none of `mcp_tools`' behaviour. A runtime
     # import would give this module — which is meant to be a pure function of
@@ -274,91 +275,92 @@ def hud_core(percent: int) -> str:
     return f"{_bar(pct, 10)} {pct:>2}%"
 
 
-def hud_line(percent: int, width: int, blocked: int = 0, *,
-             unverified: bool = False) -> str:
-    """The ambient L1 HUD line (design.md §4).
+def _rows_phrase(n: int) -> str:
+    """`N prevented rows`: a legacy row count, never a count of calls."""
+    return f"{n} prevented row{'' if n == 1 else 's'}"
 
-    Width-degradation ladder: >=52, 40-51, 28-39, <28 columns. Never exceeds
-    `width` — a hard invariant, enforced below by falling back to a narrower
-    bucket's format (and, as a last resort, truncating) if the natural format
-    for the given bucket doesn't fit, which can happen when `blocked` is a
-    large number of digits.
 
-    **`unverified` closes design.md §4's "Engine degraded" gap.** Until it
-    existed, this function's three integers gave `0%` two irreconcilable
-    meanings — "nothing sensitive was disclosed" and "I have no idea what was
-    disclosed" — and for a privacy tool those must be distinguishable. It is
-    keyword-only with a False default so every existing three-positional call
-    site, and every golden string pinned against one, is byte-for-byte
-    unchanged; a caller opts in by knowing something this function cannot see
-    (`Ledger.coverage`). design.md §4's state table owns the copy: the suffix is
-    `⚠unverified`, spelled exactly that way, not paraphrased here.
+def _hud_candidates(reading: "Snapshot") -> tuple[str, ...]:
+    """Every complete HUD line for `reading`, widest first.
 
-    The remaining state, "Disabled" (render nothing), is still not reachable
-    through this signature and deliberately so: it is the absence of a line, not
-    a line, so the caller must decide not to call `hud_line` at all —
-    `ambient._line_for()` returning `None` is that decision. Do not conflate the
-    two. "Disabled" means there is nothing to report on; `unverified` means
-    there is something to report on and the report has a hole in it.
-
-    **The marker survives the whole ladder, including truncation.** Below 28
-    columns the word does not fit, so the warning glyph *replaces* the band dot
-    rather than being appended after the percentage. That looks like a downgrade
-    and is the opposite: a marker appended to `⬤ 28%` is the first thing a
-    truncating `[:width]` would cut, and what it would leave behind is a
-    clean-looking number — precisely the failure this parameter exists to
-    prevent. Losing the band colour that the dot carries is the cheaper loss,
-    because a percentage we cannot vouch for must not be the last thing
-    standing.
+    Each candidate is whole: a percentage is never separated from the word
+    that qualifies it, and an unavailable reading never shows a number, a
+    bar or a band dot.
     """
-    pct = int(percent)
-    _check_band(pct)  # fail loud on an out-of-range percent; never swallow
-    prefix = f"⚠ {blocked} blocked · " if blocked else ""
-    # design.md §4's state table, character for character:
-    #   normal      `... ███░░░░░░░ 28%  ›`   (two spaces before the chevron)
-    #   unverified  `... ███░░░░░░░ 28% ⚠unverified ›`
-    # The two-space gap is what the marker occupies, so the unverified line is
-    # not the normal line plus something — it is the normal line with the gap
-    # spent. That is why this is one string and not a suffix appended to it.
-    full_tail = " ⚠unverified ›" if unverified else "  ›"
-    tail = " ⚠unverified ›" if unverified else " ›"
-
-    def full():
-        return f"PRIVACY  {prefix}Disclosure {hud_core(pct)}{full_tail}"
-
-    def mid():
-        return f"PRIVACY {prefix}{hud_core(pct)}{tail}"
-
-    def compact():
-        bar = _bar(pct, 5)
-        short_prefix = f"⚠{blocked} " if blocked else ""
-        return f"PRIV {short_prefix}{bar} {pct:>2}%{tail}"
-
-    def dot():
-        # The glyph, not a suffix — see the docstring's truncation argument.
-        return f"{'⚠' if unverified else _DOT} {pct:>2}%"
-
-    ladder: tuple[Callable[[], str], ...]
-    if width >= 52:
-        ladder = (full, mid, compact, dot)
-    elif width >= 40:
-        ladder = (mid, compact, dot)
-    elif width >= 28:
-        ladder = (compact, dot)
+    if reading.accounting_version == 0:
+        return ("Privacy —% · No session on record",
+                "Privacy —% · no record",
+                "—% · no record",
+                "⚠ —%")
+    if reading.accounting_version == 1:
+        pct = int(reading.percent or 0)
+        _check_band(pct)
+        rows = reading.legacy_prevented_rows or 0
+        count = f" · {_rows_phrase(rows)}" if rows else ""
+        if reading.unverified:
+            return (f"Privacy legacy {pct}%{count} ⚠unverified",
+                    f"Privacy legacy {pct}% ⚠unverified",
+                    f"legacy {pct}% ⚠unverified",
+                    f"⚠ legacy {pct}%",
+                    "⚠ legacy")
+        return (f"Privacy legacy {pct}%{count}",
+                f"Privacy legacy {pct}%",
+                f"legacy {pct}%",
+                "legacy")
+    # Accounting 2 is reserved for new accounting and read only so a reader
+    # already deployed can draw it; no phase 1 writer publishes it.
+    parts = []
+    if reading.percent is None:
+        parts.append("Privacy —%")
+        parts.append(f"{reading.unresolved_actions} unresolved")
     else:
-        ladder = (dot,)
+        pct = int(reading.percent)
+        _check_band(pct)
+        parts.append(f"Privacy {pct}%")
+    parts.append(f"{reading.denials_issued} denials issued")
+    line = " · ".join(parts)
+    return (line + " ⚠unverified" if reading.unverified else line,)
 
-    for fn in ladder:
-        line = fn()
+
+def hud_line(reading: "Snapshot", width: int) -> str:
+    """The ambient L1 HUD line (design.md §4) for one snapshot reading.
+
+    Takes the whole reading, not a percentage: whether a number may be drawn
+    at all, and what it is called, depend on the accounting variant (#54
+    phase 1). A legacy reading draws `Privacy legacy 28% · 2 prevented
+    rows`; an unrecorded one draws `Privacy —% · No session on record` and
+    no number. Hidden draws nothing. Freshness and validity are the
+    reader's job (`hud_snapshot.read_snapshot`).
+
+    The line is the first candidate that fits `width` in full, and nothing
+    when none does: a percentage is never cut away from its qualifier, and
+    `⚠unverified` is never truncated off a number it qualifies.
+    `hud_core`'s numeric bar is not drawn here.
+    """
+    if reading.hidden:
+        return ""
+    for line in _hud_candidates(reading):
         if len(line) <= width:
             return line
+    return ""
 
-    # Last resort: even `dot()` didn't fit (pathologically narrow width).
-    # Never exceed the given width regardless. Truncating from the right is
-    # safe for the unverified state only because `dot()` puts the warning
-    # glyph FIRST — see the docstring; do not "tidy" that into a suffix.
-    line = dot()
-    return line[:max(width, 0)]
+
+#: The line for a pane with no resolved session while the daemon marker
+#: reports hook events no daemon recorded. Not "No session on record":
+#: failing to resolve an id does not establish that there is none.
+_UNATTRIBUTED_CANDIDATES = (
+    "Privacy —% · unattributed hook gaps",
+    "Privacy —% ⚠unverified",
+    "⚠ —%",
+)
+
+
+def unattributed_gap_line(width: int) -> str:
+    """The nonnumeric warning for unattributed hook gaps, or `""`."""
+    for line in _UNATTRIBUTED_CANDIDATES:
+        if len(line) <= width:
+            return line
+    return ""
 
 
 #: Legacy row chips, by stored `kind` alone. `protection` does not override

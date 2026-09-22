@@ -2,17 +2,36 @@
 """Contract A (spec §4.1): the HUD snapshot file, its one writer and its
 Python reader.
 
-`$PLUGIN_DATA/hud/<session_id>.json` carries six fields and no strings:
+`$PLUGIN_DATA/hud/<session_id>.json` carries ten fields and no strings:
 
-    {"v": 1, "percent": 28, "blocked": 2, "unverified": false,
-     "hidden": false, "updated_at": 1757900000.0}
+    {"v": 2, "accounting_version": 1, "percent": 28,
+     "confirmed_points": null, "denials_issued": null,
+     "legacy_prevented_rows": 2, "unresolved_actions": null,
+     "unverified": false, "hidden": false, "updated_at": 1757900000.0}
+
+**Version 2 (#54 phase 1).** `accounting_version` says which accounting the
+numbers are, and every quantity is nullable, so no reading is invented:
+
+- 0, unrecorded: every quantity null, `unverified` true.
+- 1, legacy: `percent` and `legacy_prevented_rows` are numbers; the other
+  three are null. A legacy percentage is the legacy permitted-crossing
+  score, and `legacy_prevented_rows` counts rows, not denied calls.
+- 2, reserved for new accounting: finite nonnegative `confirmed_points`,
+  integer `denials_issued` and `unresolved_actions`, null legacy count. A
+  numeric percentage requires `unresolved_actions == 0` and `unverified`
+  false. No phase 1 writer publishes it.
+
+A version 1 file (`percent`, `blocked`, ...) is still read, as explicitly
+legacy: `blocked` becomes `legacy_prevented_rows`, never a denial count.
+Counts above `MAX_COUNT` (2^53 - 1, the largest integer both JSON readers
+represent exactly) are malformed.
 
 Two readers exist: `ambient.py` (this package) and the Codex status-line patch
 (`privacy_status.rs`). Both apply the same rules, which live here as
 constants so the Rust port can cite one source: a file older than
 `STALE_AFTER` seconds is treated as absent, any schema version other than
-`SNAPSHOT_VERSION` is treated as absent, and every malformed byte is treated
-as absent. "Absent" renders nothing. A frozen daemon must never leave a
+`SNAPSHOT_VERSION` or the legacy version 1 is treated as absent, and every
+malformed byte is treated as absent. "Absent" renders nothing. A frozen daemon must never leave a
 frozen number on screen, and a number that cannot be vouched for is never
 drawn.
 
@@ -58,14 +77,26 @@ Stdlib only.
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeGuard
+from typing import TYPE_CHECKING, Literal, TypeGuard
 
-SNAPSHOT_VERSION = 1
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .ledger import SessionSummary
+
+SNAPSHOT_VERSION = 2
+#: The legacy snapshot version, still read and normalized to accounting 1.
+LEGACY_SNAPSHOT_VERSION = 1
+#: `_daemon.json`'s own version. Separate from `SNAPSHOT_VERSION`: the
+#: marker's contract did not change when the snapshot's did.
+DAEMON_MARKER_VERSION = 1
+#: The largest count either reader accepts: 2^53 - 1, which JSON readers in
+#: both languages represent exactly.
+MAX_COUNT = 2**53 - 1
 #: A snapshot older than this many seconds is treated as absent.
 STALE_AFTER = 30.0
 #: How often the daemon re-stamps a live session's snapshot (`heartbeat`).
@@ -94,13 +125,32 @@ def snapshot_path(data_dir, session_id: str) -> Path:
     return hud_dir(data_dir) / f"{session_id}.json"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class Snapshot:
-    percent: int
-    blocked: int
+    """One validated snapshot, normalized to version 2's fields."""
+
+    accounting_version: Literal[0, 1, 2]
+    percent: int | None
+    confirmed_points: float | None
+    denials_issued: int | None
+    legacy_prevented_rows: int | None
+    unresolved_actions: int | None
     unverified: bool
     hidden: bool
     updated_at: float
+
+    def doc(self, *, hidden: bool, updated_at: float) -> dict:
+        """This reading as a version 2 document, with `hidden` and
+        `updated_at` replaced and every reading field kept."""
+        return {"v": SNAPSHOT_VERSION,
+                "accounting_version": self.accounting_version,
+                "percent": self.percent,
+                "confirmed_points": self.confirmed_points,
+                "denials_issued": self.denials_issued,
+                "legacy_prevented_rows": self.legacy_prevented_rows,
+                "unresolved_actions": self.unresolved_actions,
+                "unverified": self.unverified,
+                "hidden": hidden, "updated_at": updated_at}
 
 
 class HudPublisher:
@@ -143,28 +193,48 @@ class HudPublisher:
         snap = read_snapshot(self.data_dir, session_id, ignore_staleness=True)
         return bool(snap.hidden) if snap else False
 
-    def publish(self, session_id: str, *, percent: int, blocked: int,
+    def publish(self, session_id: str, *, summary: SessionSummary,
                 unverified: bool) -> None:
-        percent = int(percent)
-        if not 0 <= percent <= 100:
-            raise ValueError("percent outside 0..100")
-        doc = {"v": SNAPSHOT_VERSION, "percent": percent,
-               "blocked": max(0, int(blocked)), "unverified": bool(unverified),
+        """Write `summary` as a version 2 snapshot.
+
+        A legacy summary publishes accounting 1 with its percentage and
+        prevented-row count; an unrecorded summary publishes accounting 0
+        with every quantity null and `unverified` true. No quantity is
+        converted or defaulted: the document is validated before it is
+        written, and an invalid one raises rather than reaching a reader.
+        """
+        fields: dict[str, int | bool | None]
+        if summary.accounting_version == 1:
+            fields = {"accounting_version": 1,
+                      "percent": summary.legacy_percent,
+                      "legacy_prevented_rows": summary.legacy_prevented_rows,
+                      "unverified": bool(unverified)}
+        else:
+            fields = {"accounting_version": 0, "percent": None,
+                      "legacy_prevented_rows": None, "unverified": True}
+        doc = {"v": SNAPSHOT_VERSION,
+               "accounting_version": fields["accounting_version"],
+               "percent": fields["percent"],
+               "confirmed_points": None, "denials_issued": None,
+               "legacy_prevented_rows": fields["legacy_prevented_rows"],
+               "unresolved_actions": None,
+               "unverified": fields["unverified"],
                "hidden": self._current_hidden(session_id),
                "updated_at": time.time()}
+        if _parse(doc) is None:
+            raise ValueError("snapshot does not satisfy contract A")
         self._write(snapshot_path(self.data_dir, session_id), doc)
 
     def set_hidden(self, session_id: str, hidden: bool) -> None:
-        """Contract B. Flips `hidden`, refreshes `updated_at`, changes nothing
-        else. On a session with no snapshot yet, writes a zero one so the
-        preference is not lost."""
+        """Contract B. Flips `hidden`, refreshes `updated_at`, keeps every
+        reading field. A missing or malformed snapshot is left alone: a
+        reading cannot be built from its absence, and the status call then
+        reports `absent`."""
         snap = read_snapshot(self.data_dir, session_id, ignore_staleness=True)
-        doc = {"v": SNAPSHOT_VERSION,
-               "percent": snap.percent if snap else 0,
-               "blocked": snap.blocked if snap else 0,
-               "unverified": snap.unverified if snap else False,
-               "hidden": bool(hidden), "updated_at": time.time()}
-        self._write(snapshot_path(self.data_dir, session_id), doc)
+        if snap is None:
+            return
+        self._write(snapshot_path(self.data_dir, session_id),
+                    snap.doc(hidden=bool(hidden), updated_at=time.time()))
 
     def retire(self, session_id: str) -> None:
         try:
@@ -215,11 +285,9 @@ class HudPublisher:
                                  ignore_staleness=True)
             if snap is None:
                 continue
-            doc = {"v": SNAPSHOT_VERSION, "percent": snap.percent,
-                   "blocked": snap.blocked, "unverified": snap.unverified,
-                   "hidden": snap.hidden, "updated_at": time.time()}
             try:
-                self._write(path, doc)
+                self._write(path, snap.doc(hidden=snap.hidden,
+                                           updated_at=time.time()))
             except OSError:
                 continue
         gaps = self._unattributed_gaps
@@ -234,7 +302,7 @@ class HudPublisher:
     def mark_daemon(self, *, unattributed_gaps: bool) -> None:
         gaps = bool(unattributed_gaps)
         self._write(hud_dir(self.data_dir) / _DAEMON_MARKER,
-                    {"v": SNAPSHOT_VERSION,
+                    {"v": DAEMON_MARKER_VERSION,
                      "unattributed_gaps": gaps,
                      "updated_at": time.time()})
         # Only after the write succeeded: remembering a bit we failed to
@@ -246,14 +314,19 @@ class HudPublisher:
 # -- reading -----------------------------------------------------------------
 
 def _load(path: Path) -> dict | None:
+    """The file's JSON object, or `None`. Version checks belong to the
+    specific reader: the snapshot and the marker have different ones.
+    Non-finite numbers (`NaN`, `Infinity`) are refused at parse time."""
     try:
         with open(path, "rb") as fh:
-            doc = json.load(fh)
+            doc = json.load(fh, parse_constant=_refuse_constant)
     except (OSError, ValueError):
         return None
-    if not isinstance(doc, dict) or doc.get("v") != SNAPSHOT_VERSION:
-        return None
-    return doc
+    return doc if isinstance(doc, dict) else None
+
+
+def _refuse_constant(name: str):
+    raise ValueError(f"non-finite number {name}")
 
 
 def _is_int(v) -> bool:
@@ -261,7 +334,89 @@ def _is_int(v) -> bool:
 
 
 def _is_num(v) -> TypeGuard[int | float]:
-    return isinstance(v, (int, float)) and not isinstance(v, bool)
+    return (isinstance(v, (int, float)) and not isinstance(v, bool)
+            and math.isfinite(v))
+
+
+def _is_count(v) -> bool:
+    return _is_int(v) and 0 <= v <= MAX_COUNT
+
+
+def _is_percent(v) -> bool:
+    return _is_int(v) and 0 <= v <= 100
+
+
+_V2_KEYS = frozenset({
+    "v", "accounting_version", "percent", "confirmed_points",
+    "denials_issued", "legacy_prevented_rows", "unresolved_actions",
+    "unverified", "hidden", "updated_at"})
+_V1_KEYS = frozenset({"v", "percent", "blocked", "unverified", "hidden",
+                      "updated_at"})
+
+
+def _parse(doc) -> Snapshot | None:
+    """Validate one snapshot document, version 2 or legacy version 1, and
+    normalize it. `None` for any violation: extra or missing fields, a
+    boolean used as a number, a non-finite or out-of-range number, or a
+    cross-field combination the accounting variant does not allow."""
+    if not isinstance(doc, dict):
+        return None
+    v = doc.get("v")
+    if not _is_int(v):
+        return None
+    if v == LEGACY_SNAPSHOT_VERSION:
+        if set(doc) != _V1_KEYS:
+            return None
+        percent, blocked = doc["percent"], doc["blocked"]
+        unverified, hidden = doc["unverified"], doc["hidden"]
+        updated_at = doc["updated_at"]
+        if not (_is_percent(percent) and _is_count(blocked)
+                and isinstance(unverified, bool)
+                and isinstance(hidden, bool) and _is_num(updated_at)
+                and updated_at >= 0):
+            return None
+        return Snapshot(accounting_version=1, percent=percent,
+                        confirmed_points=None, denials_issued=None,
+                        legacy_prevented_rows=blocked,
+                        unresolved_actions=None, unverified=unverified,
+                        hidden=hidden, updated_at=float(updated_at))
+    if v != SNAPSHOT_VERSION or set(doc) != _V2_KEYS:
+        return None
+    version = doc["accounting_version"]
+    percent = doc["percent"]
+    points = doc["confirmed_points"]
+    denials = doc["denials_issued"]
+    rows = doc["legacy_prevented_rows"]
+    unresolved = doc["unresolved_actions"]
+    unverified, hidden = doc["unverified"], doc["hidden"]
+    updated_at = doc["updated_at"]
+    if not (isinstance(unverified, bool) and isinstance(hidden, bool)
+            and _is_num(updated_at) and updated_at >= 0):
+        return None
+    if not _is_int(version):
+        return None
+    if version == 0:
+        ok = (percent is None and points is None and denials is None
+              and rows is None and unresolved is None and unverified)
+    elif version == 1:
+        ok = (_is_percent(percent) and _is_count(rows) and points is None
+              and denials is None and unresolved is None)
+    elif version == 2:
+        ok = (rows is None and _is_num(points) and points >= 0
+              and _is_count(denials) and _is_count(unresolved)
+              and (percent is None
+                   or (_is_percent(percent) and unresolved == 0
+                       and not unverified)))
+    else:
+        ok = False
+    if not ok:
+        return None
+    return Snapshot(accounting_version=version, percent=percent,
+                    confirmed_points=(None if points is None
+                                      else float(points)),
+                    denials_issued=denials, legacy_prevented_rows=rows,
+                    unresolved_actions=unresolved, unverified=unverified,
+                    hidden=hidden, updated_at=float(updated_at))
 
 
 def read_snapshot(data_dir, session_id: str, *, now: float | None = None,
@@ -275,23 +430,13 @@ def read_snapshot(data_dir, session_id: str, *, now: float | None = None,
         path = snapshot_path(data_dir, session_id)
     except ValueError:
         return None
-    doc = _load(path)
-    if doc is None:
-        return None
-    try:
-        percent, blocked = doc["percent"], doc["blocked"]
-        unverified, hidden, updated_at = doc["unverified"], doc["hidden"], doc["updated_at"]
-    except KeyError:
-        return None
-    if not (_is_int(percent) and 0 <= percent <= 100 and _is_int(blocked)
-            and blocked >= 0 and isinstance(unverified, bool)
-            and isinstance(hidden, bool) and _is_num(updated_at)):
+    snap = _parse(_load(path))
+    if snap is None:
         return None
     now = time.time() if now is None else now
-    if not ignore_staleness and now - float(updated_at) > STALE_AFTER:
+    if not ignore_staleness and now - snap.updated_at > STALE_AFTER:
         return None
-    return Snapshot(percent=percent, blocked=blocked, unverified=unverified,
-                    hidden=hidden, updated_at=float(updated_at))
+    return snap
 
 
 def read_daemon_marker(data_dir, *, now: float | None = None,
@@ -301,7 +446,7 @@ def read_daemon_marker(data_dir, *, now: float | None = None,
     to carry the bit forward across a publisher that did not write it — and
     never for a reader, for whom a stale marker means a dead daemon."""
     doc = _load(hud_dir(data_dir) / _DAEMON_MARKER)
-    if doc is None:
+    if doc is None or doc.get("v") != DAEMON_MARKER_VERSION:
         return None
     gaps, updated_at = doc.get("unattributed_gaps"), doc.get("updated_at")
     if not (isinstance(gaps, bool) and _is_num(updated_at)):

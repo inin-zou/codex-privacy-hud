@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from legacy_fakes import legacy_summary
 
 from privacy_hud import hud_snapshot as hs
 from privacy_hud.ledger import Ledger
@@ -442,7 +443,7 @@ def test_every_note_obeys_the_copy_rules(two_sessions, tmp_path, monkeypatch):
 def test_hud_status_absent_then_shown_then_hidden(tmp_path):
     assert hud_status(tmp_path, "s1") == {
         "session_id": "s1", "present": False, "hidden": None, "state": "absent"}
-    hs.HudPublisher(tmp_path).publish("s1", percent=3, blocked=0, unverified=False)
+    hs.HudPublisher(tmp_path).publish("s1", summary=legacy_summary(3, 0), unverified=False)
     assert hud_status(tmp_path, "s1") == {
         "session_id": "s1", "present": True, "hidden": False, "state": "shown"}
     hs.HudPublisher(tmp_path).set_hidden("s1", True)
@@ -455,12 +456,11 @@ def test_hud_status_stale_snapshot(tmp_path):
     False` -- but it is a different diagnosis from having no file at all:
     the daemon that writes it is gone or wedged, so the session is not being
     recorded either. `state` is what carries that distinction."""
-    hs.HudPublisher(tmp_path).publish("s1", percent=3, blocked=0, unverified=False)
+    hs.HudPublisher(tmp_path).publish("s1", summary=legacy_summary(3, 0), unverified=False)
     # Rewrite the file's updated_at to 60 s in the past
     snap = hs.read_snapshot(tmp_path, "s1", ignore_staleness=True)
-    stale_doc = {"v": hs.SNAPSHOT_VERSION, "percent": snap.percent,
-                 "blocked": snap.blocked, "unverified": snap.unverified,
-                 "hidden": snap.hidden, "updated_at": snap.updated_at - 60.0}
+    stale_doc = snap.doc(hidden=snap.hidden,
+                         updated_at=snap.updated_at - 60.0)
     path = hs.snapshot_path(tmp_path, "s1")
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     import os
@@ -474,7 +474,7 @@ def test_hud_status_stale_snapshot(tmp_path):
 
 
 def test_hud_set_hidden_round_trip(tmp_path):
-    hs.HudPublisher(tmp_path).publish("s1", percent=3, blocked=0, unverified=False)
+    hs.HudPublisher(tmp_path).publish("s1", summary=legacy_summary(3, 0), unverified=False)
     off = hud_set_hidden(tmp_path, "s1", True)
     assert off["hidden"] is True and off["state"] == "hidden"
     assert hs.read_snapshot(tmp_path, "s1").hidden is True

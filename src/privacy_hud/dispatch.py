@@ -118,7 +118,7 @@ from .detect.secrets import SecretDetector
 from .detect.shell import extract_destinations
 from .engine import Engine, Observation
 from .hud_snapshot import HudPublisher
-from .ledger import Ledger, LegacySessionSummary
+from .ledger import Ledger
 from .mask import new_salt
 from .matrix.loader import Matrix, load_matrix
 from .origin import OriginKind, extract_origin
@@ -681,14 +681,12 @@ def _publish_hud(state: State, session_id: str) -> None:
     file could not be written — but it is swallowed *loudly*, at DEBUG,
     because a status item that silently stops updating with no way to find
     out why is how a display bug becomes a "the tool is broken" report.
-    I3: `percent` is the ledger's, verbatim."""
+    I3: the summary is the ledger's, verbatim; the publisher maps a legacy
+    summary to accounting 1 and an unrecorded one to accounting 0."""
     try:
         summary = state.ledger.summary(session_id)
-        if not isinstance(summary, LegacySessionSummary):
-            return
         coverage = state.ledger.coverage(session_id)
-        state.hud.publish(session_id, percent=summary.legacy_percent,
-                          blocked=summary.legacy_prevented_rows,
+        state.hud.publish(session_id, summary=summary,
                           unverified=not coverage.verified)
     except Exception as exc:
         _log.debug("hud publish failed: %s", type(exc).__name__)

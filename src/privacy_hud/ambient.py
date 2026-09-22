@@ -122,6 +122,7 @@ import time
 from .hud_snapshot import read_daemon_marker, read_snapshot
 from .local_ui_server import resolve_data_dir
 from .matrix.loader import Matrix, load_matrix
+from . import render
 from .render import hud_line
 
 #: Default redraw interval for `--watch`, in seconds.
@@ -314,15 +315,16 @@ def _line_for(session_id: str | None, width: int, *,
         # No session resolved. A daemon that recorded hook events it could
         # not attribute says so in `_daemon.json`; that is the one case a
         # session-less pane must not stay silent about (see ledger.py's
-        # docstring for the incident). Anything else is "Disabled".
+        # docstring for the incident). It draws a nonnumeric warning, never
+        # a 0%: there is no reading. Anything else is "Disabled".
         if read_daemon_marker(data_dir) is True:
-            return hud_line(0, width, 0, unverified=True)
+            return render.unattributed_gap_line(width) or None
         return None
     snap = read_snapshot(data_dir, session_id)
     if snap is None or snap.hidden:
         return None
-    # I3: `percent` is the ledger's number, carried verbatim by the daemon.
-    return hud_line(snap.percent, width, snap.blocked, unverified=snap.unverified)
+    # I3: the reading is the ledger's, carried verbatim by the daemon.
+    return hud_line(snap, width) or None
 
 
 def safe_line(pin: _SessionPin | None = None,

@@ -1,14 +1,80 @@
 {
-  "$comment": "Contract A (spec §4.1). Session snapshot the daemon writes to $PLUGIN_DATA/hud/<session_id>.json. No string fields, by design (I1).",
+  "$comment": "Contract A (spec §4.1), snapshot version 2 (#54 phase 1). Session snapshot the daemon writes to $PLUGIN_DATA/hud/<session_id>.json. No string fields, by design (I1). Cross-field rules per accounting_version are in hud_snapshot._parse and privacy_status.rs parse_v2: 0 has every quantity null and unverified true; 1 has numeric percent and legacy_prevented_rows and the other three null; 2 has a null legacy count, and a numeric percent only with unresolved_actions 0 and unverified false. Readers also accept the legacy version 1 document {v, percent, blocked, unverified, hidden, updated_at} as accounting 1.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["v", "percent", "blocked", "unverified", "hidden", "updated_at"],
+  "required": [
+    "v",
+    "accounting_version",
+    "percent",
+    "confirmed_points",
+    "denials_issued",
+    "legacy_prevented_rows",
+    "unresolved_actions",
+    "unverified",
+    "hidden",
+    "updated_at"
+  ],
   "properties": {
-    "v": {"type": "integer", "const": 1},
-    "percent": {"type": "integer", "minimum": 0, "maximum": 100},
-    "blocked": {"type": "integer", "minimum": 0},
-    "unverified": {"type": "boolean"},
-    "hidden": {"type": "boolean"},
-    "updated_at": {"type": "number", "minimum": 0}
+    "v": {
+      "type": "integer",
+      "const": 2
+    },
+    "accounting_version": {
+      "type": "integer",
+      "enum": [
+        0,
+        1,
+        2
+      ]
+    },
+    "percent": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 100
+    },
+    "confirmed_points": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "denials_issued": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "legacy_prevented_rows": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "unresolved_actions": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "unverified": {
+      "type": "boolean"
+    },
+    "hidden": {
+      "type": "boolean"
+    },
+    "updated_at": {
+      "type": "number",
+      "minimum": 0
+    }
   }
 }

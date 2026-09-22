@@ -13,7 +13,7 @@ pseudo-terminal:
 
     boot the TUI -> read the thread id off its own status line
                  -> HudPublisher.publish(that id, ...)
-                 -> assert `Privacy ███░░░░░░░ 28% ⚠2` appears
+                 -> assert `Privacy legacy 28% · 2 prevented rows` appears
                  -> HudPublisher.set_hidden(that id, True)
                  -> assert the line repaints without the item
 
@@ -47,6 +47,7 @@ from pathlib import Path
 import pytest
 
 from privacy_hud.hud_snapshot import HudPublisher
+from legacy_fakes import legacy_summary
 
 #: A patched `codex` binary -- `scripts/build-patched-codex.sh 0.154.0`.
 CODEX_BIN = os.environ.get("PRIVACY_HUD_CODEX_BIN", "")
@@ -72,8 +73,9 @@ ANSI = re.compile(
 UUID = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 )
-#: What the patch renders for percent=28, blocked=2, unverified=False.
-EXPECTED = "Privacy ███░░░░░░░ 28% ⚠2"
+#: What a snapshot-v2-compatible patched build renders for a legacy reading
+#: of 28% with 2 prevented rows, verified.
+EXPECTED = "Privacy legacy 28% · 2 prevented rows"
 
 
 def _skip_reason() -> str | None:
@@ -325,7 +327,7 @@ def test_patched_status_line_follows_the_snapshot(codex_tui):
     #    READ_INTERVAL.
     publisher = HudPublisher(data_dir)
     tui.clear()
-    publisher.publish(thread_id, percent=28, blocked=2, unverified=False)
+    publisher.publish(thread_id, summary=legacy_summary(28, 2), unverified=False)
     shown = tui.read_until(lambda t: EXPECTED in t, ITEM_TIMEOUT)
     assert shown is not None, (
         f"{EXPECTED!r} never appeared for thread {thread_id}. Either the item "
@@ -349,7 +351,7 @@ def test_patched_status_line_follows_the_snapshot(codex_tui):
     publisher.set_hidden(thread_id, True)
     tui.drain(SETTLE)  # flush the last frame that could still show the item
     tui.clear()
-    publisher.publish(thread_id, percent=29, blocked=2, unverified=False)
+    publisher.publish(thread_id, summary=legacy_summary(29, 2), unverified=False)
     tui._write(b"x")
     tui.drain(1.0)
     tui._write(b"\x7f")  # backspace: leave the composer as we found it
@@ -368,7 +370,7 @@ def test_patched_status_line_follows_the_snapshot(codex_tui):
     #    touched nothing but the flag.
     publisher.set_hidden(thread_id, False)
     tui.clear()
-    back = tui.read_until(lambda t: "Privacy ███░░░░░░░ 29% ⚠2" in t, ITEM_TIMEOUT)
+    back = tui.read_until(lambda t: "Privacy legacy 29% · 2 prevented rows" in t, ITEM_TIMEOUT)
     assert back is not None, (
         f"the item did not return after `hidden` was cleared{_tail(tui)}"
     )

@@ -45,6 +45,8 @@ from privacy_hud.dispatch import dispatch, new_state
 from privacy_hud.ledger import Ledger
 from privacy_hud.matrix.loader import load_matrix
 
+from legacy_fakes import legacy_line
+
 M = load_matrix()
 
 SESSION = "sess-golden"
@@ -496,74 +498,75 @@ def test_receipt_over_raw_ledger_rows_is_byte_identical(led):
 
 # --------------------------------------------------------------------- #
 # render.hud_line -- the L1 width ladder (design.md §4)
+#
+# Rebaselined by #54 phase 1. The line now takes a snapshot reading and
+# draws a labelled legacy percentage with no bar: the first whole candidate
+# that fits, and nothing when none does. The old ladder (bar, `›`, band dot,
+# right-truncation) is gone with the numeric-only reading it drew.
 # --------------------------------------------------------------------- #
 
 HUD_LADDER = {
-    80: "PRIVACY  Disclosure ███░░░░░░░ 28%  ›",
-    52: "PRIVACY  Disclosure ███░░░░░░░ 28%  ›",
-    51: "PRIVACY ███░░░░░░░ 28% ›",
-    40: "PRIVACY ███░░░░░░░ 28% ›",
-    39: "PRIV ███░░ 28% ›",
-    28: "PRIV ███░░ 28% ›",
-    27: "⬤ 28%",
-    12: "⬤ 28%",
-    4: "⬤ 28",
-    1: "⬤",
+    80: 'Privacy legacy 28%',
+    52: 'Privacy legacy 28%',
+    51: 'Privacy legacy 28%',
+    40: 'Privacy legacy 28%',
+    39: 'Privacy legacy 28%',
+    28: 'Privacy legacy 28%',
+    27: 'Privacy legacy 28%',
+    18: 'Privacy legacy 28%',
+    12: 'legacy 28%',
+    10: 'legacy 28%',
+    6: 'legacy',
+    4: '',
+    1: '',
 }
 
-HUD_BLOCKED = {
-    80: "PRIVACY  ⚠ 17 blocked · Disclosure ██████░░░░ 63%  ›",
-    45: "PRIVACY ⚠ 17 blocked · ██████░░░░ 63% ›",
-    30: "PRIV ⚠17 █████ 63% ›",
-    15: "⬤ 63%",
+HUD_ROWS = {
+    80: 'Privacy legacy 63% · 17 prevented rows',
+    52: 'Privacy legacy 63% · 17 prevented rows',
+    51: 'Privacy legacy 63% · 17 prevented rows',
+    40: 'Privacy legacy 63% · 17 prevented rows',
+    39: 'Privacy legacy 63% · 17 prevented rows',
+    28: 'Privacy legacy 63%',
+    27: 'Privacy legacy 63%',
+    18: 'Privacy legacy 63%',
+    12: 'legacy 63%',
+    10: 'legacy 63%',
+    6: 'legacy',
+    4: '',
+    1: '',
+}
+
+HUD_UNVERIFIED = {
+    80: 'Privacy legacy 28% ⚠unverified',
+    52: 'Privacy legacy 28% ⚠unverified',
+    51: 'Privacy legacy 28% ⚠unverified',
+    40: 'Privacy legacy 28% ⚠unverified',
+    39: 'Privacy legacy 28% ⚠unverified',
+    28: 'legacy 28% ⚠unverified',
+    27: 'legacy 28% ⚠unverified',
+    18: '⚠ legacy 28%',
+    12: '⚠ legacy 28%',
+    10: '⚠ legacy',
+    6: '',
+    4: '',
+    1: '',
 }
 
 
 @pytest.mark.parametrize("width,golden", sorted(HUD_LADDER.items()))
 def test_hud_line_ladder_is_byte_identical(width, golden):
-    assert render.hud_line(28, width) == golden
+    assert legacy_line(28, width) == golden
 
 
-@pytest.mark.parametrize("width,golden", sorted(HUD_BLOCKED.items()))
-def test_hud_line_blocked_prefix_is_byte_identical(width, golden):
-    assert render.hud_line(63, width, blocked=17) == golden
-
-
-#: design.md §4's "Engine degraded" row, down the same ladder. These are NEW
-#: goldens, not moved ones: `unverified` is keyword-only and defaults False, so
-#: `HUD_LADDER` and `HUD_BLOCKED` above are byte-for-byte what they were.
-#:
-#: The two rungs worth reading closely are the last ones. At 28-39 columns the
-#: marker still spells out the word and the line lands exactly on 28. Below
-#: that, the warning glyph REPLACES the band dot instead of following the
-#: percentage — because a marker appended after `28%` is the first thing
-#: `[:width]` truncation removes, and what truncation would leave is a
-#: clean-looking number, which is the precise failure this state exists to
-#: prevent.
-HUD_UNVERIFIED = {
-    80: "PRIVACY  Disclosure ███░░░░░░░ 28% ⚠unverified ›",
-    52: "PRIVACY  Disclosure ███░░░░░░░ 28% ⚠unverified ›",
-    51: "PRIVACY ███░░░░░░░ 28% ⚠unverified ›",
-    40: "PRIVACY ███░░░░░░░ 28% ⚠unverified ›",
-    39: "PRIV ███░░ 28% ⚠unverified ›",
-    28: "PRIV ███░░ 28% ⚠unverified ›",
-    27: "⚠ 28%",
-    12: "⚠ 28%",
-    4: "⚠ 28",
-    1: "⚠",
-}
+@pytest.mark.parametrize("width,golden", sorted(HUD_ROWS.items()))
+def test_hud_line_prevented_rows_are_byte_identical(width, golden):
+    assert legacy_line(63, width, 17) == golden
 
 
 @pytest.mark.parametrize("width,golden", sorted(HUD_UNVERIFIED.items()))
 def test_hud_line_unverified_ladder_is_byte_identical(width, golden):
-    assert render.hud_line(28, width, unverified=True) == golden
-
-
-@pytest.mark.parametrize("width", sorted(HUD_LADDER))
-def test_hud_line_default_ladder_did_not_move(width):
-    """The compatibility half of the change, stated as a test rather than a
-    comment: opting in is the only way to see the new state."""
-    assert render.hud_line(28, width) == HUD_LADDER[width]
+    assert legacy_line(28, width, unverified=True) == golden
 
 
 # --------------------------------------------------------------------- #
