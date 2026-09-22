@@ -1,0 +1,612 @@
+{
+ "$comment": "Snapshot-to-text golden shared by render.hud_line and the patched Codex reader (privacy_status.rs). An empty expected string means nothing is rendered. Every malformed entry renders nothing.",
+ "now": 1010.0,
+ "width": 120,
+ "max_count": 9007199254740991,
+ "cases": {
+  "unrecorded_null": {
+   "snapshot": {
+    "v": 2,
+    "accounting_version": 0,
+    "percent": null,
+    "confirmed_points": null,
+    "denials_issued": null,
+    "legacy_prevented_rows": null,
+    "unresolved_actions": null,
+    "unverified": true,
+    "hidden": false,
+    "updated_at": 1000.0
+   },
+   "expected": "Privacy —% · No session on record"
+  },
+  "legacy": {
+   "snapshot": {
+    "v": 2,
+    "accounting_version": 1,
+    "percent": 28,
+    "confirmed_points": null,
+    "denials_issued": null,
+    "legacy_prevented_rows": 2,
+    "unresolved_actions": null,
+    "unverified": false,
+    "hidden": false,
+    "updated_at": 1000.0
+   },
+   "expected": "Privacy legacy 28% · 2 prevented rows"
+  },
+  "legacy_v1_snapshot": {
+   "snapshot": {
+    "v": 1,
+    "percent": 28,
+    "blocked": 2,
+    "unverified": false,
+    "hidden": false,
+    "updated_at": 1000.0
+   },
+   "expected": "Privacy legacy 28% · 2 prevented rows"
+  },
+  "legacy_zero": {
+   "snapshot": {
+    "v": 2,
+    "accounting_version": 1,
+    "percent": 0,
+    "confirmed_points": null,
+    "denials_issued": null,
+    "legacy_prevented_rows": 0,
+    "unresolved_actions": null,
+    "unverified": false,
+    "hidden": false,
+    "updated_at": 1000.0
+   },
+   "expected": "Privacy legacy 0%"
+  },
+  "legacy_one_prevented_row": {
+   "snapshot": {
+    "v": 2,
+    "accounting_version": 1,
+    "percent": 28,
+    "confirmed_points": null,
+    "denials_issued": null,
+    "legacy_prevented_rows": 1,
+    "unresolved_actions": null,
+    "unverified": false,
+    "hidden": false,
+    "updated_at": 1000.0
+   },
+   "expected": "Privacy legacy 28% · 1 prevented row"
+  },
+  "legacy_unverified": {
+   "snapshot": {
+    "v": 2,
+    "accounting_version": 1,
+    "percent": 28,
+    "confirmed_points": null,
+    "denials_issued": null,
+    "legacy_prevented_rows": 2,
+    "unresolved_actions": null,
+    "unverified": true,
+    "hidden": false,
+    "updated_at": 1000.0
+   },
+   "expected": "Privacy legacy 28% · 2 prevented rows ⚠unverified"
+  },
+  "hidden": {
+   "snapshot": {
+    "v": 2,
+    "accounting_version": 1,
+    "percent": 28,
+    "confirmed_points": null,
+    "denials_issued": null,
+    "legacy_prevented_rows": 2,
+    "unresolved_actions": null,
+    "unverified": false,
+    "hidden": true,
+    "updated_at": 1000.0
+   },
+   "expected": ""
+  },
+  "hidden_unrecorded": {
+   "snapshot": {
+    "v": 2,
+    "accounting_version": 0,
+    "percent": null,
+    "confirmed_points": null,
+    "denials_issued": null,
+    "legacy_prevented_rows": null,
+    "unresolved_actions": null,
+    "unverified": true,
+    "hidden": true,
+    "updated_at": 1000.0
+   },
+   "expected": ""
+  },
+  "malformed": {
+   "text": "{",
+   "expected": ""
+  },
+  "stale": {
+   "snapshot": {
+    "v": 2,
+    "accounting_version": 1,
+    "percent": 28,
+    "confirmed_points": null,
+    "denials_issued": null,
+    "legacy_prevented_rows": 2,
+    "unresolved_actions": null,
+    "unverified": false,
+    "hidden": false,
+    "updated_at": 979.0
+   },
+   "expected": ""
+  },
+  "fresh_at_exactly_30": {
+   "snapshot": {
+    "v": 2,
+    "accounting_version": 1,
+    "percent": 28,
+    "confirmed_points": null,
+    "denials_issued": null,
+    "legacy_prevented_rows": 2,
+    "unresolved_actions": null,
+    "unverified": false,
+    "hidden": false,
+    "updated_at": 980.0
+   },
+   "expected": "Privacy legacy 28% · 2 prevented rows"
+  },
+  "accounting_v2_null": {
+   "snapshot": {
+    "v": 2,
+    "accounting_version": 2,
+    "percent": null,
+    "confirmed_points": 33.6,
+    "denials_issued": 2,
+    "legacy_prevented_rows": null,
+    "unresolved_actions": 3,
+    "unverified": false,
+    "hidden": false,
+    "updated_at": 1000.0
+   },
+   "expected": "Privacy —% · 3 unresolved · 2 denials issued"
+  },
+  "accounting_v2_null_unverified": {
+   "snapshot": {
+    "v": 2,
+    "accounting_version": 2,
+    "percent": null,
+    "confirmed_points": 33.6,
+    "denials_issued": 2,
+    "legacy_prevented_rows": null,
+    "unresolved_actions": 3,
+    "unverified": true,
+    "hidden": false,
+    "updated_at": 1000.0
+   },
+   "expected": "Privacy —% · 3 unresolved · 2 denials issued ⚠unverified"
+  },
+  "accounting_v2_available": {
+   "snapshot": {
+    "v": 2,
+    "accounting_version": 2,
+    "percent": 28,
+    "confirmed_points": 33.6,
+    "denials_issued": 2,
+    "legacy_prevented_rows": null,
+    "unresolved_actions": 0,
+    "unverified": false,
+    "hidden": false,
+    "updated_at": 1000.0
+   },
+   "expected": "Privacy 28% · 2 denials issued"
+  }
+ },
+ "malformed": [
+  {
+   "v": 2,
+   "accounting_version": 1,
+   "percent": 28,
+   "confirmed_points": null,
+   "denials_issued": null,
+   "unresolved_actions": null,
+   "unverified": false,
+   "hidden": false,
+   "updated_at": 1000.0
+  },
+  {
+   "v": 2,
+   "accounting_version": 1,
+   "percent": 28,
+   "confirmed_points": null,
+   "denials_issued": null,
+   "legacy_prevented_rows": 2,
+   "unresolved_actions": null,
+   "unverified": false,
+   "hidden": false,
+   "updated_at": 1000.0,
+   "extra": 1
+  },
+  {
+   "v": 3,
+   "accounting_version": 1,
+   "percent": 28,
+   "confirmed_points": null,
+   "denials_issued": null,
+   "legacy_prevented_rows": 2,
+   "unresolved_actions": null,
+   "unverified": false,
+   "hidden": false,
+   "updated_at": 1000.0
+  },
+  {
+   "v": 2,
+   "accounting_version": 3,
+   "percent": 28,
+   "confirmed_points": null,
+   "denials_issued": null,
+   "legacy_prevented_rows": 2,
+   "unresolved_actions": null,
+   "unverified": false,
+   "hidden": false,
+   "updated_at": 1000.0
+  },
+  {
+   "v": 2,
+   "accounting_version": true,
+   "percent": 28,
+   "confirmed_points": null,
+   "denials_issued": null,
+   "legacy_prevented_rows": 2,
+   "unresolved_actions": null,
+   "unverified": false,
+   "hidden": false,
+   "updated_at": 1000.0
+  },
+  {
+   "v": 2,
+   "accounting_version": 1,
+   "percent": 101,
+   "confirmed_points": null,
+   "denials_issued": null,
+   "legacy_prevented_rows": 2,
+   "unresolved_actions": null,
+   "unverified": false,
+   "hidden": false,
+   "updated_at": 1000.0
+  },
+  {
+   "v": 2,
+   "accounting_version": 1,
+   "percent": -1,
+   "confirmed_points": null,
+   "denials_issued": null,
+   "legacy_prevented_rows": 2,
+   "unresolved_actions": null,
+   "unverified": false,
+   "hidden": false,
+   "updated_at": 1000.0
+  },
+  {
+   "v": 2,
+   "accounting_version": 1,
+   "percent": 28.5,
+   "confirmed_points": null,
+   "denials_issued": null,
+   "legacy_prevented_rows": 2,
+   "unresolved_actions": null,
+   "unverified": false,
+   "hidden": false,
+   "updated_at": 1000.0
+  },
+  {
+   "v": 2,
+   "accounting_version": 1,
+   "percent": true,
+   "confirmed_points": null,
+   "denials_issued": null,
+   "legacy_prevented_rows": 2,
+   "unresolved_actions": null,
+   "unverified": false,
+   "hidden": false,
+   "updated_at": 1000.0
+  },
+  {
+   "v": 2,
+   "accounting_version": 1,
+   "percent": null,
+   "confirmed_points": null,
+   "denials_issued": null,
+   "legacy_prevented_rows": 2,
+   "unresolved_actions": null,
+   "unverified": false,
+   "hidden": false,
+   "updated_at": 1000.0
+  },
+  {
+   "v": 2,
+   "accounting_version": 1,
+   "percent": 28,
+   "confirmed_points": null,
+   "denials_issued": null,
+   "legacy_prevented_rows": null,
+   "unresolved_actions": null,
+   "unverified": false,
+   "hidden": false,
+   "updated_at": 1000.0
+  },
+  {
+   "v": 2,
+   "accounting_version": 1,
+   "percent": 28,
+   "confirmed_points": null,
+   "denials_issued": null,
+   "legacy_prevented_rows": -1,
+   "unresolved_actions": null,
+   "unverified": false,
+   "hidden": false,
+   "updated_at": 1000.0
+  },
+  {
+   "v": 2,
+   "accounting_version": 1,
+   "percent": 28,
+   "confirmed_points": null,
+   "denials_issued": null,
+   "legacy_prevented_rows": 9007199254740992,
+   "unresolved_actions": null,
+   "unverified": false,
+   "hidden": false,
+   "updated_at": 1000.0
+  },
+  {
+   "v": 2,
+   "accounting_version": 1,
+   "percent": 28,
+   "confirmed_points": null,
+   "denials_issued": null,
+   "legacy_prevented_rows": false,
+   "unresolved_actions": null,
+   "unverified": false,
+   "hidden": false,
+   "updated_at": 1000.0
+  },
+  {
+   "v": 2,
+   "accounting_version": 1,
+   "percent": 28,
+   "confirmed_points": 0,
+   "denials_issued": null,
+   "legacy_prevented_rows": 2,
+   "unresolved_actions": null,
+   "unverified": false,
+   "hidden": false,
+   "updated_at": 1000.0
+  },
+  {
+   "v": 2,
+   "accounting_version": 1,
+   "percent": 28,
+   "confirmed_points": null,
+   "denials_issued": 0,
+   "legacy_prevented_rows": 2,
+   "unresolved_actions": null,
+   "unverified": false,
+   "hidden": false,
+   "updated_at": 1000.0
+  },
+  {
+   "v": 2,
+   "accounting_version": 1,
+   "percent": 28,
+   "confirmed_points": null,
+   "denials_issued": null,
+   "legacy_prevented_rows": 2,
+   "unresolved_actions": 0,
+   "unverified": false,
+   "hidden": false,
+   "updated_at": 1000.0
+  },
+  {
+   "v": 2,
+   "accounting_version": 1,
+   "percent": 28,
+   "confirmed_points": null,
+   "denials_issued": null,
+   "legacy_prevented_rows": 2,
+   "unresolved_actions": null,
+   "unverified": 0,
+   "hidden": false,
+   "updated_at": 1000.0
+  },
+  {
+   "v": 2,
+   "accounting_version": 1,
+   "percent": 28,
+   "confirmed_points": null,
+   "denials_issued": null,
+   "legacy_prevented_rows": 2,
+   "unresolved_actions": null,
+   "unverified": false,
+   "hidden": "no",
+   "updated_at": 1000.0
+  },
+  {
+   "v": 2,
+   "accounting_version": 1,
+   "percent": 28,
+   "confirmed_points": null,
+   "denials_issued": null,
+   "legacy_prevented_rows": 2,
+   "unresolved_actions": null,
+   "unverified": false,
+   "hidden": false,
+   "updated_at": "now"
+  },
+  {
+   "v": 2,
+   "accounting_version": 1,
+   "percent": 28,
+   "confirmed_points": null,
+   "denials_issued": null,
+   "legacy_prevented_rows": 2,
+   "unresolved_actions": null,
+   "unverified": false,
+   "hidden": false,
+   "updated_at": true
+  },
+  {
+   "v": 2,
+   "accounting_version": 0,
+   "percent": 0,
+   "confirmed_points": null,
+   "denials_issued": null,
+   "legacy_prevented_rows": null,
+   "unresolved_actions": null,
+   "unverified": true,
+   "hidden": false,
+   "updated_at": 1000.0
+  },
+  {
+   "v": 2,
+   "accounting_version": 0,
+   "percent": null,
+   "confirmed_points": null,
+   "denials_issued": null,
+   "legacy_prevented_rows": 0,
+   "unresolved_actions": null,
+   "unverified": true,
+   "hidden": false,
+   "updated_at": 1000.0
+  },
+  {
+   "v": 2,
+   "accounting_version": 0,
+   "percent": null,
+   "confirmed_points": 0,
+   "denials_issued": null,
+   "legacy_prevented_rows": null,
+   "unresolved_actions": null,
+   "unverified": true,
+   "hidden": false,
+   "updated_at": 1000.0
+  },
+  {
+   "v": 2,
+   "accounting_version": 0,
+   "percent": null,
+   "confirmed_points": null,
+   "denials_issued": null,
+   "legacy_prevented_rows": null,
+   "unresolved_actions": null,
+   "unverified": false,
+   "hidden": false,
+   "updated_at": 1000.0
+  },
+  {
+   "v": 2,
+   "accounting_version": 2,
+   "percent": null,
+   "confirmed_points": 33.6,
+   "denials_issued": 2,
+   "legacy_prevented_rows": 0,
+   "unresolved_actions": 3,
+   "unverified": false,
+   "hidden": false,
+   "updated_at": 1000.0
+  },
+  {
+   "v": 2,
+   "accounting_version": 2,
+   "percent": null,
+   "confirmed_points": null,
+   "denials_issued": 2,
+   "legacy_prevented_rows": null,
+   "unresolved_actions": 3,
+   "unverified": false,
+   "hidden": false,
+   "updated_at": 1000.0
+  },
+  {
+   "v": 2,
+   "accounting_version": 2,
+   "percent": null,
+   "confirmed_points": -1,
+   "denials_issued": 2,
+   "legacy_prevented_rows": null,
+   "unresolved_actions": 3,
+   "unverified": false,
+   "hidden": false,
+   "updated_at": 1000.0
+  },
+  {
+   "v": 2,
+   "accounting_version": 2,
+   "percent": null,
+   "confirmed_points": 33.6,
+   "denials_issued": null,
+   "legacy_prevented_rows": null,
+   "unresolved_actions": 3,
+   "unverified": false,
+   "hidden": false,
+   "updated_at": 1000.0
+  },
+  {
+   "v": 2,
+   "accounting_version": 2,
+   "percent": null,
+   "confirmed_points": 33.6,
+   "denials_issued": 2,
+   "legacy_prevented_rows": null,
+   "unresolved_actions": null,
+   "unverified": false,
+   "hidden": false,
+   "updated_at": 1000.0
+  },
+  {
+   "v": 2,
+   "accounting_version": 2,
+   "percent": 28,
+   "confirmed_points": 33.6,
+   "denials_issued": 2,
+   "legacy_prevented_rows": null,
+   "unresolved_actions": 3,
+   "unverified": false,
+   "hidden": false,
+   "updated_at": 1000.0
+  },
+  {
+   "v": 2,
+   "accounting_version": 2,
+   "percent": 28,
+   "confirmed_points": 33.6,
+   "denials_issued": 2,
+   "legacy_prevented_rows": null,
+   "unresolved_actions": 0,
+   "unverified": true,
+   "hidden": false,
+   "updated_at": 1000.0
+  },
+  {
+   "v": 1,
+   "percent": 28,
+   "blocked": -1,
+   "unverified": false,
+   "hidden": false,
+   "updated_at": 1000.0
+  },
+  {
+   "v": 1,
+   "percent": 28,
+   "blocked": 2,
+   "unverified": false,
+   "hidden": false,
+   "updated_at": 1000.0,
+   "extra": 1
+  },
+  []
+ ],
+ "malformed_text": [
+  "{\"v\":2,\"accounting_version\":1,\"percent\":28,\"confirmed_points\":null,\"denials_issued\":null,\"legacy_prevented_rows\":2,\"unresolved_actions\":null,\"unverified\":false,\"hidden\":false,\"updated_at\":Infinity}",
+  "{\"v\":2,\"accounting_version\":2,\"percent\":null,\"confirmed_points\":NaN,\"denials_issued\":2,\"legacy_prevented_rows\":null,\"unresolved_actions\":3,\"unverified\":false,\"hidden\":false,\"updated_at\":1000.0}",
+  ""
+ ]
+}
