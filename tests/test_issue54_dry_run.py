@@ -120,3 +120,17 @@ def test_rehearsal_refuses_an_already_prepared_source(tmp_path):
     proc = _run(source, _work(tmp_path))
     assert proc.returncode != 0
     assert PLANTED not in proc.stdout + proc.stderr
+
+
+def test_rehearsal_handles_a_ledger_without_newer_legacy_tables(tmp_path):
+    """A real ledger from before `scan_gaps` existed: the daemon's startup
+    adds the table before any boundary, and the rehearsal checks against
+    that state."""
+    source, led = _source(tmp_path)
+    led.conn.close()
+    raw = sqlite3.connect(source)
+    raw.execute("DROP TABLE scan_gaps")
+    raw.close()
+    proc = _run(source, _work(tmp_path))
+    assert proc.returncode == 0, proc.stderr
+    assert PLANTED not in proc.stdout + proc.stderr

@@ -155,6 +155,11 @@ def phase2(source: Path, work: Path) -> None:
     matrix = load_matrix()
     copy = work / "copy.db"
     _copy(source, copy)
+    # The daemon's own startup step, committed before any boundary: a
+    # legacy ledger from an older release gains the legacy tables it lacks
+    # (for example `scan_gaps`). The rebuild is checked against that state,
+    # which is also what every crash copy returns to.
+    Ledger(copy, matrix).conn.close()
 
     raw = _raw(copy)
     try:
@@ -266,7 +271,7 @@ def phase2(source: Path, work: Path) -> None:
         try:
             _check(raw.execute("PRAGMA user_version").fetchone()[0] == 0,
                    "crash-marker")
-            _check(_tables(raw) == [t for t in tables], "crash-tables")
+            _check(_tables(raw) == tables, "crash-tables")
             _check(_cells(raw, "events") == before["events"], "crash-cells")
         finally:
             raw.close()
