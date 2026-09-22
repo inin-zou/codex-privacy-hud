@@ -208,7 +208,10 @@ def test_phase3_rehearsal_passes_from_legacy_source(tmp_path):
 
 def test_phase3_rehearsal_passes_from_prepared_source(tmp_path):
     source = _prepared_source(tmp_path)
-    before, schema = _bytes(source), _schema_of(source)
+    # Read the schema first: a read-only open of a WAL database may create
+    # an empty WAL file, which is the reader's doing, not the rehearsal's.
+    schema = _schema_of(source)
+    before = _bytes(source)
     proc = _run(source, _work(tmp_path), 3)
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == PASS3
