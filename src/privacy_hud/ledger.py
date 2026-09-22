@@ -64,7 +64,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   budget_cap   REAL NOT NULL DEFAULT 120
 );
 
-CREATE TABLE IF NOT EXISTS events (       -- append-only; never UPDATE except count
+-- Legacy schema; CLAUDE.md §4 governs #54's approved, not-yet-implemented rebuild.
+CREATE TABLE IF NOT EXISTS events (       -- legacy UPDATEs: count increments; value_hash NULL at session end
   id            INTEGER PRIMARY KEY,
   session_id    TEXT NOT NULL REFERENCES sessions,
   turn_id       TEXT,
