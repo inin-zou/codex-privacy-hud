@@ -153,6 +153,21 @@ def format_repair_command(bundle_root: Path, data_dir: Path) -> str:
     ])
 
 
+def format_ambient_command(bundle_root: Path, data_dir: Path) -> str:
+    """The bundled ambient launcher, shell-quoted, for another terminal.
+
+    The bootstrap rather than a console script: it re-execs into the
+    selected interpreter itself, so `python3` here is only the thing that
+    reads the bootstrap, and the pane ends up running the same bundle
+    everything else does. Same quoting rule as the repair command — a
+    real installed path with a space in it is one argument.
+    """
+    return shlex.join([
+        "python3", str(Path(bundle_root) / "scripts" / "runtime.py"),
+        "--plugin-data", str(data_dir), "ambient", "--watch",
+    ])
+
+
 def resolve_installed_bundle(release: str) -> Path:
     """The single installed plugin bundle for `release`, from Codex's own
     plugin cache.

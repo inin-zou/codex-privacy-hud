@@ -140,3 +140,62 @@ AUDIT_RUNTIME_MISMATCH = (
     "viewed.\n"
     "Monitoring is unverified, and policy changes are unavailable."
 )
+
+#: Doctor's runtime-alignment failure. The daemon release is printed only
+#: when it came back inside a validated protocol reply; anything else is
+#: `unknown`, because a release string from an unvalidated peer is a
+#: string that peer chose (I1).
+DOCTOR_RUNTIME_MISMATCH = (
+    "[FAIL] Runtime alignment\n"
+    "The selected plugin and Privacy HUD runtime do not match.\n"
+    "Plugin: {plugin_release}\n"
+    "Daemon: {daemon_release_or_unknown}\n"
+    "Monitoring is unverified. Policy changes are unavailable.\n"
+    "Run this command in another terminal:\n"
+    "  {repair_command}"
+)
+
+#: What doctor prints when the daemon release could not be established
+#: from validated protocol data.
+UNKNOWN_DAEMON_RELEASE = "unknown"
+
+#: Doctor's runtime-source success. Provenance, not a distribution
+#: version: the question is which tree the running code was read from.
+DOCTOR_RUNTIME_SOURCE_OK = (
+    "[ OK ] Runtime source\n"
+    "Privacy HUD {release} is loaded from the selected plugin bundle."
+)
+
+#: Appended to the line above only where an older distribution was
+#: actually found in the dependency environment. Never asserted blind:
+#: saying an absent package is being bypassed is a claim about a machine
+#: nobody looked at.
+DOCTOR_OLD_DISTRIBUTION_UNUSED = (
+    "The older privacy-hud distribution in the dependency environment is "
+    "not used."
+)
+
+#: Doctor's runtime-alignment success, after a matching hello and nothing
+#: less. Alignment is one fact; detector availability and storage validity
+#: are separate checks and this sentence does not speak for them.
+DOCTOR_RUNTIME_ALIGNMENT_OK = (
+    "[ OK ] Runtime alignment\n"
+    "The daemon matches the selected build and activation epoch."
+)
+
+#: The native Codex status item is drawn by the installed binary, which
+#: this plugin neither ships nor replaces. A matching Codex version does
+#: not establish that its reader understands snapshot v2 (§A).
+DOCTOR_NATIVE_UNVERIFIED = (
+    "[WARN] Native HUD compatibility\n"
+    "The installed Codex binary has not been verified as a snapshot-v2 "
+    "reader.\n"
+    "A matching Codex version is not proof of snapshot compatibility.\n"
+    "Run the bundled ambient command in another terminal:\n"
+    "  {ambient_command}"
+)
+
+#: The ambient pane at a width that cannot hold the line above. Still not
+#: a number: an unverified runtime has no reading to show, and a narrow
+#: pane is not a reason to invent one.
+AMBIENT_NARROW_FALLBACK = "Privacy unverified"

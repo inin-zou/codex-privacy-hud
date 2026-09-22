@@ -2082,6 +2082,49 @@ def check_mcp_server(timeout: float = MCP_TIMEOUT) -> Check:
 
 
 # --------------------------------------------------------------------- #
+# runtime source, alignment, and the native reader (#66 Pair 7)
+# --------------------------------------------------------------------- #
+
+def _first_party_origin() -> Path:
+    """The directory the running `privacy_hud` package was imported from.
+
+    A separate function so tests can substitute it, for the same reason
+    `_module_version` is one: in-process, the real answer is always this
+    checkout, and a test asserting that would prove nothing about a
+    machine with an installed bundle.
+    """
+    import privacy_hud
+
+    return Path(privacy_hud.__file__).resolve().parent
+
+
+def _installed_distribution() -> tuple[str, Path] | None:
+    """An installed `privacy-hud` distribution in the dependency
+    environment, as `(version, location)`, or `None`.
+
+    Substituted in tests. Nothing is claimed about a distribution that was
+    not found: saying an absent package is being bypassed would be a
+    statement about a machine nobody looked at.
+    """
+    return None
+
+
+def check_runtime_source() -> Check:
+    """Scaffolding (#66 Pair 7)."""
+    return Check("Runtime source", SKIP, "")
+
+
+def check_runtime_alignment(timeout: float = DAEMON_TIMEOUT) -> Check:
+    """Scaffolding (#66 Pair 7)."""
+    return Check("Runtime alignment", SKIP, "")
+
+
+def check_native_reader() -> Check:
+    """Scaffolding (#66 Pair 7)."""
+    return Check("Native HUD compatibility", SKIP, "")
+
+
+# --------------------------------------------------------------------- #
 # report
 # --------------------------------------------------------------------- #
 

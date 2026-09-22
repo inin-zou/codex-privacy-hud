@@ -335,7 +335,8 @@ def _line_for(session_id: str | None, width: int, *,
 
 
 def safe_line(pin: _SessionPin | None = None,
-              width: int | None = None) -> str | None:
+              width: int | None = None, *,
+              activation=None) -> str | None:
     """`_line_for()` with the failure guarantee attached.
 
     The broad `except Exception` is the point, not an oversight: this process
