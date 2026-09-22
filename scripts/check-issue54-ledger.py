@@ -407,6 +407,30 @@ def phase2(source: Path, work: Path) -> None:
                 target.unlink()
 
 
+def phase3(source: Path, work: Path) -> None:
+    raise NotImplementedError
+
+
+def _check_prepared_copy(
+    source: Path, work: Path,
+) -> Path:
+    raise NotImplementedError
+
+
+def _check_synthetic_v2(path: Path) -> None:
+    raise NotImplementedError
+
+
+def _check_v2_crash_atomicity(
+    baseline: Path, work: Path,
+) -> None:
+    raise NotImplementedError
+
+
+def _run_child(args: list[str]) -> subprocess.CompletedProcess[str]:
+    raise NotImplementedError
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=True)
     parser.add_argument("--source", required=True, type=Path)
