@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
+from .accounting import DataType, DestinationKind, ScoringProfile, _scaffold
 from .matrix.loader import Matrix
 
 
@@ -39,3 +40,21 @@ class Budget:
 
     def percent(self, cap: float) -> int:
         return percent(self.score, cap)
+
+
+def group_score(
+    profile: ScoringProfile,
+    data_type: DataType,
+    destination_kind: DestinationKind,
+    n: int,
+) -> float:
+    _scaffold()
+
+
+def next_disclosure_delta(
+    profile: ScoringProfile,
+    data_type: DataType,
+    destination_kind: DestinationKind,
+    n: int,
+) -> float:
+    _scaffold()
