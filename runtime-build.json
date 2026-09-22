@@ -1,0 +1,18 @@
+{
+  "build_id": "2788566291b56507709c53452e540e5c2d8dcd533f072ec89a5a7d1ca7755317",
+  "format": 1,
+  "protocol": 2,
+  "readable_schemas": [
+    0,
+    5401
+  ],
+  "release": "0.8.0",
+  "snapshot_versions": [
+    2
+  ],
+  "storage_generation": 1,
+  "writable_schemas": [
+    0,
+    5401
+  ]
+}
