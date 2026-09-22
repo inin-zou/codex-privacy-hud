@@ -6,7 +6,7 @@ index 64562d1..752aa78 100644
  //! - Usage limits (primary, secondary)
  //! - Session info (thread title, thread ID, tokens used)
  //! - Application version
-+//! - Privacy disclosure reading from the Codex Privacy HUD plugin
++//! - Session accounting from the Codex Privacy HUD plugin
  
  use ratatui::buffer::Buffer;
  use ratatui::layout::Rect;
@@ -15,7 +15,7 @@ index 64562d1..752aa78 100644
      /// Latest checklist task progress from `update_plan` (if available).
      TaskProgress,
 +
-+    /// Disclosure reading from the Codex Privacy HUD plugin (omitted when it is not running).
++    /// Session accounting from the Codex Privacy HUD plugin (omitted without a displayable snapshot).
 +    Privacy,
  }
  

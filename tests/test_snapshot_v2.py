@@ -101,6 +101,26 @@ def test_the_daemon_marker_stays_version_one(data_dir):
 
 # -- the reader -------------------------------------------------------------
 
+@pytest.mark.parametrize("name,field", [
+    ("legacy_v1_snapshot", "updated_at"),
+    ("legacy", "updated_at"),
+    ("accounting_v2_null", "confirmed_points"),
+])
+@pytest.mark.parametrize("sign", [-1, 1])
+def test_oversized_integer_is_absent_and_not_rewritten(data_dir, name,
+                                                      field, sign):
+    doc = {**GOLDEN["cases"][name]["snapshot"], field: sign * 10**400}
+    path = _write(data_dir, doc)
+    before = path.read_bytes()
+
+    assert read_snapshot(data_dir, SID, now=1010.0,
+                         ignore_staleness=True) is None
+
+    publisher = HudPublisher(data_dir)
+    publisher.set_hidden(SID, True)
+    publisher.heartbeat([SID])
+    assert path.read_bytes() == before
+
 def test_a_v1_snapshot_reads_as_legacy(data_dir):
     _write(data_dir, {"v": 1, "percent": 28, "blocked": 2,
                       "unverified": False, "hidden": False,

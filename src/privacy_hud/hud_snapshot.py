@@ -334,8 +334,12 @@ def _is_int(v) -> bool:
 
 
 def _is_num(v) -> TypeGuard[int | float]:
-    return (isinstance(v, (int, float)) and not isinstance(v, bool)
-            and math.isfinite(v))
+    if not isinstance(v, (int, float)) or isinstance(v, bool):
+        return False
+    try:
+        return math.isfinite(v)
+    except OverflowError:
+        return False
 
 
 def _is_count(v) -> bool:
