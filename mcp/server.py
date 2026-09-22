@@ -255,6 +255,12 @@ def _ledger_path() -> Path:
     return _data_dir() / "ledger.db"
 
 
+def _read_guard_status() -> dict:
+    """The read guard's setting, from `settings.json` in `$PLUGIN_DATA`."""
+    from privacy_hud import mcp_tools as tools
+    return tools.read_guard_status(_ledger_path().parent)
+
+
 def _open_ledger() -> "Ledger":
     """The server's one ledger connection, with thread affinity off.
 
@@ -542,7 +548,7 @@ def build_app():
         issue denials for recognized matching reads. It does not confirm host
         enforcement. This tool does not change the setting.
         """
-        return mcp_tools.read_guard_status(_ledger_path().parent)
+        return _read_guard_status()
 
     return app
 

@@ -121,3 +121,22 @@ UNKNOWN_HOLDER = (
     "preserved.\n"
     "Close other Privacy HUD processes and retry the repair command."
 )
+
+#: A policy mutation whose reply never came back. The request reached the
+#: daemon; what happened to it there is not knowable from here, so this
+#: says exactly that and offers no action -- 0.8.0 has no surface that
+#: lists a session's saved rules for a user to check against (§D's
+#: action-free alternative, adopted).
+POLICY_OUTCOME_UNKNOWN = (
+    "Privacy HUD could not confirm whether the policy rule was saved. "
+    "The request was not retried."
+)
+
+#: Shown above history when the runtime does not match. History is still
+#: readable -- it is a record, not a claim about now -- and the two
+#: sentences say which parts of the product are not working.
+AUDIT_RUNTIME_MISMATCH = (
+    "Privacy HUD runtime mismatch. Historical records may still be "
+    "viewed.\n"
+    "Monitoring is unverified, and policy changes are unavailable."
+)
