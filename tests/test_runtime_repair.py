@@ -22,6 +22,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import textwrap
 import time
 from pathlib import Path
@@ -56,14 +57,21 @@ STARTUP = 90.0
 
 class Install:
     """One throwaway installation: a bundle, an interpreter and a data
-    directory, with everything the test needs to reach them."""
+    directory, with everything the test needs to reach them.
 
-    def __init__(self, root: Path) -> None:
-        self.root = root
-        self.bundle = make_bundle(root / "bundle")
-        self.data = root / "data"
+    Its own short root under `$TMPDIR`, not `tmp_path`: repair starts a
+    real daemon, and a unix socket path is capped at about 104 bytes. A
+    pytest temporary directory already spends most of that on the test's
+    own name, which is the same reason every other socket test in this
+    suite takes a `tempfile.mkdtemp(prefix="ph...")`.
+    """
+
+    def __init__(self) -> None:
+        self.root = Path(tempfile.mkdtemp(prefix="phr")).resolve()
+        self.bundle = make_bundle(self.root / "b")
+        self.data = self.root / "d"
         self.data.mkdir(parents=True, exist_ok=True)
-        self.python = make_venv(root / "venv")
+        self.python = make_venv(self.root / "v")
 
     def bootstrap(self, *args, timeout: float = 120.0):
         return subprocess.run(
@@ -82,12 +90,13 @@ def _clean_env() -> dict:
 
 
 @pytest.fixture
-def install(tmp_path):
-    inst = Install(tmp_path / "install")
+def install():
+    inst = Install()
     try:
         yield inst
     finally:
         stop_runtime(inst.data)
+        shutil.rmtree(inst.root, ignore_errors=True)
 
 
 def seed_ledger(data_dir: Path) -> Path:
@@ -565,7 +574,14 @@ def _fake_home(tmp_path: Path) -> tuple[Path, dict, Path]:
     (home / ".codex" / "config.toml").write_text('model = "gpt-5.4"\n',
                                                  encoding="utf-8")
     (home / ".zshrc").write_text("# user rc\n", encoding="utf-8")
-    env = {"HOME": str(home), "PATH": f"{officialbin}:/usr/bin:/bin:/usr/sbin",
+    # The interpreter running the suite is on PATH because `install.sh`
+    # builds an installer-owned environment with the newest suitable
+    # `python3` it can find, and the platform `/usr/bin/python3` is 3.9 on
+    # macOS. A host with no python >= 3.11 cannot be repaired at all, which
+    # the installer says rather than works around.
+    env = {"HOME": str(home),
+           "PATH": f"{officialbin}:{Path(sys.executable).parent}"
+                   ":/usr/bin:/bin:/usr/sbin",
            "SHELL": "/bin/zsh", "PRIVACY_HUD_FAKE": "1",
            "PRIVACY_HUD_TARGET": "aarch64-apple-darwin"}
     return home, env, officialbin
@@ -704,13 +720,17 @@ def test_uninstall_stops_owned_runtime_before_environment_removal(tmp_path,
 
 
 def _alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+    """Is `pid` a running process?
+
+    `os.kill(pid, 0)` is not the question: repair spawns the daemon from
+    this process, so once it exits it is a zombie until something reaps
+    it, and signalling a zombie succeeds. The process state is the fact
+    that matters, and `Z` is not alive.
+    """
+    completed = subprocess.run(["ps", "-o", "state=", "-p", str(pid)],
+                               capture_output=True, text=True, timeout=30)
+    state = completed.stdout.strip()
+    return bool(state) and not state.startswith("Z")
 
 
 # --------------------------------------------------------------------- #

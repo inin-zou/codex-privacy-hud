@@ -72,3 +72,52 @@ STARTING_EGRESS = (
 POLICY_PREFLIGHT_REFUSAL = (
     "Privacy HUD runtime mismatch. No policy rule was saved."
 )
+
+#: Explicit repair, after the selected daemon answered a handshake and not
+#: before. The second line has a fresh-installation variant below: there
+#: were no records to preserve, and saying there were would be a claim
+#: about a ledger nobody wrote.
+REPAIR_SUCCESS = (
+    "Privacy HUD {release} is running from the selected plugin bundle.\n"
+    "Existing ledger records were preserved.\n"
+    "Restart Codex to reload its hooks and MCP server.\n"
+    "Monitoring gaps and lost in-memory detection state cannot be "
+    "reconstructed."
+)
+REPAIR_SUCCESS_FRESH = (
+    "Privacy HUD {release} is running from the selected plugin bundle.\n"
+    "The active ledger location is configured.\n"
+    "Restart Codex to reload its hooks and MCP server.\n"
+    "Monitoring gaps and lost in-memory detection state cannot be "
+    "reconstructed."
+)
+
+#: Printed separately from success, always. A daemon that matches the
+#: selected build says nothing about whether the deep-scan detector
+#: loaded, and a user who reads one sentence as the other has been told
+#: their session is covered when it is not (I3/§5).
+MODEL_DEGRADED = (
+    "Deep-scan detection is unavailable. Runtime alignment does not "
+    "establish detector availability."
+)
+
+#: A ledger this build cannot write. Preserved and refused, never
+#: repaired: there is no downgrade migration and no automatic rewrite of
+#: history (CLAUDE.md §4).
+LEDGER_UNSUPPORTED = (
+    "Privacy HUD cannot safely use this ledger.\n"
+    "Its schema is unsupported or does not match its recorded version.\n"
+    "Existing files were preserved. No automatic ledger repair was "
+    "attempted."
+)
+
+#: Something may still hold the old ledger, or the question could not be
+#: asked at all. Both are the same answer to the user: the transition did
+#: not happen and nothing was moved.
+UNKNOWN_HOLDER = (
+    "Privacy HUD could not verify that all legacy ledger users have "
+    "stopped.\n"
+    "The storage transition was not completed. Existing files were "
+    "preserved.\n"
+    "Close other Privacy HUD processes and retry the repair command."
+)

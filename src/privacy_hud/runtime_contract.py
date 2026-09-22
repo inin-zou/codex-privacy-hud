@@ -304,32 +304,45 @@ def load_identity(bundle_root: Path) -> RuntimeIdentity:
         snapshot_versions=snapshots)
 
 
-def read_receipt(data_dir: Path) -> JSONObject:
-    """The receipt's JSON object, read only if this user owns it and nobody
-    else can write it. Raises `RuntimeRefusal("setup_missing")` otherwise.
+def _receipt_bytes(data_dir: Path) -> tuple[str, bytes]:
+    """`("absent"|"unreadable"|"ok", raw)` for the receipt in `data_dir`.
 
-    `fstat` on the open descriptor, and `O_NOFOLLOW`: the check has to
-    describe the bytes actually read, because this file names a program a
-    hook will execute.
+    The three answers are kept apart here, once, so that every caller
+    above can decide what each one means rather than inheriting one
+    flattened "missing" (#66 Pair 5). `fstat` on the open descriptor and
+    `O_NOFOLLOW`: the check has to describe the bytes actually read,
+    because this file names a program a hook will execute.
     """
     path = Path(data_dir) / RECEIPT_NAME
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(path, flags)
+    except FileNotFoundError:
+        return "absent", b""
     except OSError:
-        raise RuntimeRefusal("setup_missing") from None
+        return "unreadable", b""
     try:
         info = os.fstat(fd)
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
                 or info.st_mode & 0o022
                 or info.st_size > _MAX_RECEIPT_BYTES):
-            raise RuntimeRefusal("setup_missing")
+            return "unreadable", b""
         with os.fdopen(fd, "rb", closefd=False) as handle:
             raw = handle.read(_MAX_RECEIPT_BYTES + 1)
     except OSError:
-        raise RuntimeRefusal("setup_missing") from None
+        return "unreadable", b""
     finally:
         os.close(fd)
+    return "ok", raw
+
+
+def read_receipt(data_dir: Path) -> JSONObject:
+    """The receipt's JSON object, read only if this user owns it and nobody
+    else can write it. Raises `RuntimeRefusal("setup_missing")` otherwise.
+    """
+    state, raw = _receipt_bytes(data_dir)
+    if state != "ok":
+        raise RuntimeRefusal("setup_missing")
     try:
         receipt = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
@@ -380,6 +393,17 @@ def _valid_receipt_v2(receipt: JSONObject) -> bool:
 ReceiptState = Literal["absent", "unreadable", "malformed", "v1", "v2"]
 
 
+def _valid_receipt_v1(receipt: JSONObject) -> bool:
+    """The historical receipt, checked only as far as repair uses it: a
+    version and an absolute interpreter path. Its `pythonpath` is
+    deliberately not consulted — receipt v1 never selects application
+    code (#66)."""
+    if not is_int(receipt.get("v")) or receipt["v"] != LEGACY_RECEIPT_VERSION:
+        return False
+    python = receipt.get("python")
+    return isinstance(python, str) and os.path.isabs(python)
+
+
 def classify_receipt(data_dir: Path) -> ReceiptState:
     """Name the receipt's state in `data_dir` without deciding anything.
 
@@ -388,11 +412,24 @@ def classify_receipt(data_dir: Path) -> ReceiptState:
       a symlink, another user's, one others can write, too large, or
       undecodable.
     * `malformed` — readable, but not a receipt: not a JSON object, no
-      recognized `v`, or a version-2 body that fails its own validation.
+      recognized `v`, or a body that fails its own version's validation.
     * `v1` — a well-formed historical receipt. Repair input only.
     * `v2` — a well-formed current receipt.
     """
-    return "absent"
+    state, raw = _receipt_bytes(data_dir)
+    if state != "ok":
+        return "absent" if state == "absent" else "unreadable"
+    try:
+        receipt = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return "malformed"
+    if not isinstance(receipt, dict):
+        return "malformed"
+    if _valid_receipt_v2(receipt):
+        return "v2"
+    if _valid_receipt_v1(receipt):
+        return "v1"
+    return "malformed"
 
 
 def load_activation(data_dir: Path) -> Activation:

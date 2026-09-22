@@ -51,6 +51,7 @@ from .runtime_contract import (
     Activation,
     RuntimeIdentity,
     RuntimeRefusal,
+    classify_receipt,
     is_build_id,
     is_epoch,
     load_activation,
@@ -64,15 +65,27 @@ from .runtime_contract import (
 #: lock, which this file deliberately mirrors).
 WRITER_LOCK_NAME = "runtime-writer.lock"
 
-#: What `_recorded_selection` returns for a data directory with no usable
-#: receipt. A distinct object rather than `None` so "unreadable" and
-#: "absent" are the same *comparable* value and neither is confused with a
-#: real selection.
+#: What `_recorded_selection` returns when there is no v2 selection. Four
+#: distinct values, not one: "there is no receipt", "there is a historical
+#: one", "there is one nobody can read" and "there is one that is not a
+#: receipt" are four different facts about a data directory, and the
+#: interim #66 review is explicit that collapsing them is how an
+#: unreadable receipt becomes permission to activate. None of these can
+#: ever equal a real selection — a `build_id` is 64 hex characters and an
+#: epoch is 32.
 _NO_SELECTION = ("", "")
+_LEGACY_SELECTION = ("v1", "v1")
+_UNUSABLE_SELECTION = ("?", "?")
+
+#: The selections a lease may be granted against without matching: there
+#: is nothing selected to contradict. An unreadable or malformed receipt
+#: is deliberately not among them.
+_GRANTABLE = (_NO_SELECTION, _LEGACY_SELECTION)
 
 
 def _recorded_selection(data_dir: Path) -> tuple[str, str]:
-    """`(build_id, epoch)` from the receipt in `data_dir`, or `_NO_SELECTION`.
+    """`(build_id, epoch)` from the receipt in `data_dir`, or one of the
+    sentinels above.
 
     Deliberately cheap: it reads the receipt's two identity fields and does
     not recompute the bundle digest. `load_activation` is the call that
@@ -80,20 +93,26 @@ def _recorded_selection(data_dir: Path) -> tuple[str, str]:
     to notice that the selection changed, and it runs on every write
     transaction.
 
-    Anything it cannot read as a v2 selection — no receipt, a receipt this
-    user no longer owns or others can write, malformed JSON, receipt v1 —
-    is `_NO_SELECTION`. That is conservative in the direction that matters:
-    a lease acquired against a real selection stops being current the
-    moment that selection becomes unreadable.
+    Every non-v2 state gets its own value, so a lease acquired while the
+    receipt was absent stops being current the moment one appears, and one
+    acquired against a real selection stops being current the moment that
+    selection becomes unreadable.
     """
+    state = classify_receipt(data_dir)
+    if state == "absent":
+        return _NO_SELECTION
+    if state == "v1":
+        return _LEGACY_SELECTION
+    if state != "v2":
+        return _UNUSABLE_SELECTION
     try:
         receipt = read_receipt(data_dir)
     except RuntimeRefusal:
-        return _NO_SELECTION
+        return _UNUSABLE_SELECTION
     build = receipt.get("selected_build_id")
     epoch = receipt.get("activation_epoch")
     if not is_build_id(build) or not is_epoch(epoch):
-        return _NO_SELECTION
+        return _UNUSABLE_SELECTION
     return (str(build), str(epoch))
 
 
@@ -223,10 +242,18 @@ def acquire_writer(data_dir: Path, *, activation: Activation) -> WriterLease:
 
 def _check_selection(selection: tuple[str, str],
                      activation: Activation) -> None:
-    """Refuse an activation the recorded selection contradicts. A data
-    directory with no selection at all contradicts nothing."""
-    if selection == _NO_SELECTION:
+    """Refuse an activation the recorded selection contradicts.
+
+    A data directory with no selection at all, and one whose receipt is
+    still the historical version, contradict nothing: neither names a
+    build. A receipt that exists but cannot be read as one is different —
+    it is not evidence of anything, and least of all evidence that this
+    activation may take ownership.
+    """
+    if selection in _GRANTABLE:
         return
+    if selection == _UNUSABLE_SELECTION:
+        raise RuntimeRefusal("runtime_mismatch")
     if selection != (activation.identity.build_id, activation.epoch):
         raise RuntimeRefusal("runtime_mismatch")
 

@@ -118,7 +118,11 @@ def test_download_override_is_command_scoped():
         assert f"{name}=0" in prefix
     assert "HF_HUB_DISABLE_TELEMETRY=1" in prefix
     install = (REPO / "install.sh").read_text(encoding="utf-8")
-    assert f'{prefix} "$SHARE/venv/bin/python" - <<\'PY\'' in install
+    # One copy of the recipe since #66: `download_model` is the single
+    # place the weights are fetched, called by the fresh install and by
+    # `--repair-runtime` with the interpreter each of them selected.
+    assert f'{prefix} "$1" - <<\'WEIGHTS\'' in install
+    assert install.count(prefix) == 1
     by_hand = (REPO / "docs" / "installing-by-hand.md").read_text(
         encoding="utf-8")
     assert f'{prefix} python3 -c "' in by_hand

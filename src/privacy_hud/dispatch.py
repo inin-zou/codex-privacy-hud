@@ -111,7 +111,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import codex
+from . import codex, runtime_storage
 from .detect.model import ModelDetector
 from .detect.paths import PathDetector
 from .detect.secrets import SecretDetector
@@ -221,9 +221,12 @@ def new_state(data_dir, *, writer_lease: WriterLease) -> State:
     data_dir = Path(data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
     matrix = load_matrix()
-    ledger = Ledger(codex.ledger_path(data_dir), matrix,
-                    writer_lease=writer_lease)
-    _allow_cross_thread_access(ledger, codex.ledger_path(data_dir))
+    # The writer opens the active store once the historical pathname is
+    # fenced, and the historical pathname until then (#66). The two never
+    # both exist: `prepare_storage` retires one as it publishes the other.
+    path = runtime_storage.resolved_ledger_path(data_dir)
+    ledger = Ledger(path, matrix, writer_lease=writer_lease)
+    _allow_cross_thread_access(ledger, path)
     _record_unobserved_hooks(ledger, data_dir)
     detectors = [PathDetector(), SecretDetector(), ModelDetector()]
     hud = HudPublisher(data_dir)

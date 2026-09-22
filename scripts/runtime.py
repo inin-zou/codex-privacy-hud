@@ -4,6 +4,8 @@
 
     runtime.py --plugin-data DIR probe
     runtime.py --plugin-data DIR doctor [--load-model]
+    runtime.py --plugin-data DIR setup --python ABSOLUTE_PYTHON
+                                       [--allow-degraded]
     runtime.py --plugin-data DIR daemon
     runtime.py --plugin-data DIR ambient [existing ambient arguments]
     runtime.py --plugin-data DIR ui [SESSION_ID]
@@ -32,7 +34,11 @@ The re-exec marker only prevents a loop. A process that carries it but is
 not the selected, isolated interpreter is refused, never trusted.
 
 `repair --print-command` needs no receipt and imports nothing beyond the
-standard library, so it works in exactly the states that need it. Refusals
+standard library, so it works in exactly the states that need it. `setup`
+and `repair --stop-runtime` also run before any selection exists — they
+are how one comes to exist, and how an uninstall stops the one that does
+— so they import this bundle's code by path rather than through a
+receipt, and verify its origin immediately afterwards. Refusals
 print fixed text (copied from `privacy_hud.runtime_messages`, pinned by
 `tests/test_runtime_messages.py`) and no traceback. For `mcp`, nothing is
 ever written to stdout: stdout is the JSON-RPC channel.
@@ -132,8 +138,16 @@ def _parser() -> argparse.ArgumentParser:
     ambient.add_argument("ambient_args", nargs=argparse.REMAINDER)
     ui = sub.add_parser("ui")
     ui.add_argument("session_id", nargs="?")
+    setup = sub.add_parser("setup")
+    setup.add_argument("--python", required=True, metavar="ABSOLUTE_PYTHON")
+    setup.add_argument("--allow-degraded", action="store_true")
     repair = sub.add_parser("repair")
-    repair.add_argument("--print-command", action="store_true", required=True)
+    # Exactly one, and required: `repair` on its own would be an
+    # ambiguous verb for an operation that either prints a command or
+    # stops a running runtime.
+    mode = repair.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--print-command", action="store_true")
+    mode.add_argument("--stop-runtime", action="store_true")
     sub.add_parser("mcp")
     return parser
 
@@ -158,6 +172,32 @@ def _refuse(command: str, data_dir: Path) -> int:
 # --------------------------------------------------------------------- #
 # selection
 # --------------------------------------------------------------------- #
+
+def _enter_bundle(data_dir: Path):
+    """Import this bundle's package before any selection exists.
+
+    `setup` and `repair --stop-runtime` run in exactly the states where
+    there is no receipt to verify against, so the guarantee available
+    here is the weaker one: the code comes from *this file's own bundle*,
+    checked with `verify_import_origins` the moment it is imported, with
+    every inherited path removed first. Offline is forced before anything
+    optional can be imported (I2).
+    """
+    src = str(BUNDLE_ROOT / "src")
+    sys.path[:] = [src] + [p for p in sys.path if p != src]
+    for name in STRIPPED_ENV:
+        os.environ.pop(name, None)
+    os.environ["PLUGIN_DATA"] = str(data_dir)
+    os.environ.update(OFFLINE_ENV)
+    try:
+        contract = importlib.import_module("privacy_hud.runtime_contract")
+        contract.verify_import_origins(BUNDLE_ROOT)
+        module = importlib.import_module("privacy_hud.runtime_repair")
+        contract.verify_import_origins(BUNDLE_ROOT)
+    except Exception:
+        raise _Refused() from None
+    return module
+
 
 def _standalone_contract():
     """`runtime_contract.py` from this bundle, loaded by path and without
@@ -343,10 +383,27 @@ def main(argv=None) -> int:
         return int(exc.code or 0)
     data_dir = Path(os.path.abspath(os.path.expanduser(args.plugin_data)))
 
-    if args.command == "repair":
+    if args.command == "repair" and args.print_command:
         print(REPAIR_COMMAND_OUTPUT.format(
             repair_command=format_repair_command(BUNDLE_ROOT, data_dir)))
         return 0
+
+    if args.command in ("setup", "repair"):
+        # Both run before a selection exists (`setup` creates one;
+        # `repair --stop-runtime` is what an uninstall calls to stop the
+        # runtime it owns before deleting the environment that runs it).
+        try:
+            repair_module = _enter_bundle(data_dir)
+        except _Refused:
+            return _refuse(args.command, data_dir)
+        if args.command == "repair":
+            return 0 if repair_module.stop_selected_runtime(data_dir) else 1
+        argv_repair = ["--bundle-root", str(BUNDLE_ROOT),
+                       "--plugin-data", str(data_dir),
+                       "--python", args.python]
+        if args.allow_degraded:
+            argv_repair.append("--allow-degraded")
+        return repair_module.main(argv_repair)
 
     forged_or_reexecuted = os.environ.pop(REEXEC_MARKER, None) is not None
     try:

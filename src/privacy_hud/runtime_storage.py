@@ -53,9 +53,12 @@ import json
 import os
 import re
 import secrets
+import shutil
 import socket
 import sqlite3
 import stat
+import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -95,6 +98,11 @@ _TRANSITION_ID = re.compile(r"[0-9a-f]{32}")
 #: listener answers from the kernel's backlog instantly; a dead one's
 #: leftover socket file refuses instantly.
 _PROBE_TIMEOUT = 0.25
+
+#: Ceiling on one open-file inspection. `lsof` over a handful of explicit
+#: pathnames answers in well under a second; the ceiling is for a wedged
+#: filesystem, and expiring it is a refusal rather than an empty answer.
+_INSPECT_TIMEOUT = 30.0
 
 #: SQLite's sidecars, in the order they are retired. The database first:
 #: a crash after it moves leaves the old path free and the sidecars
@@ -151,6 +159,20 @@ def retired_dir(data_dir, transition_id: str) -> Path:
 
 def journal_path(data_dir) -> Path:
     return Path(data_dir) / JOURNAL_NAME
+
+
+def resolved_ledger_path(data_dir) -> Path:
+    """The database this generation opens: the active store once the
+    historical pathname is fenced, and the historical pathname until then.
+
+    Two answers rather than one, because an installation that has not yet
+    been repaired still has its ledger where it always was, and inventing
+    an empty `ledger/active.db` beside it would be inventing a ledger
+    nobody wrote. After repair there is exactly one database and the old
+    pathname is a directory, so the question stops being ambiguous.
+    """
+    root = Path(data_dir)
+    return active_path(root) if is_fenced(root) else legacy_path(root)
 
 
 def is_fenced(data_dir) -> bool:
@@ -403,19 +425,24 @@ def _transition_id(journal: JSONObject | None) -> str:
 def _quiescent(root: Path) -> bool:
     """Whether anything is visibly still able to hold the old ledger.
 
-    Two signals, both about a *Privacy HUD* process, because those are the
-    holders this release knows how to recognize: something answering on the
-    daemon socket, and a daemon marker young enough to mean a live
-    publisher. Anything at the socket path that is not a socket, or that
-    cannot be classified, counts as a holder — "I could not tell" is not
-    "nobody".
+    Three signals. The first is the one that matters, and it is about
+    files rather than about processes: `open_holders` asks the operating
+    system who has the database or a sidecar open, unknown processes
+    included, and refuses outright when it cannot ask. The other two are
+    about a *Privacy HUD* process specifically — something answering on
+    the daemon socket, and a daemon marker young enough to mean a live
+    publisher — and they catch a daemon that is starting but has not
+    opened the ledger yet. Anything at the socket path that is not a
+    socket, or that cannot be classified, counts as a holder: "I could not
+    tell" is not "nobody".
 
-    What this cannot see is an arbitrary process that merely has the
-    database open: SQLite exposes no such question, and answering it needs
-    process inspection, which explicit repair owns. So this is a floor, not
-    a proof, and the copy the caller shows says only that quiescence could
-    not be verified.
+    This is called before the backup, before retirement and before the
+    fence, so it is also the recheck that stands between a holder
+    appearing and a file moving underneath it.
     """
+    holders = {pid for pid in open_holders(root) if pid != os.getpid()}
+    if holders:
+        return False
     sock = codex.socket_path(root)
     try:
         info = os.stat(sock)
@@ -444,20 +471,143 @@ def _inspector():
     """The way this host can be asked who has a file open, or `None`.
 
     `None` is not "nobody": it is "this host cannot answer", which
-    `open_holders` turns into a refusal (#66 Pair 5).
+    `open_holders` turns into a refusal (#66 Pair 5). Two answers exist:
+    `/proc` on Linux, which needs no subprocess, and `lsof` everywhere
+    else. Neither is guessed at — each is checked for before it is used.
     """
+    if sys.platform.startswith("linux") and Path("/proc/self/fd").is_dir():
+        return _proc_holders
+    lsof = shutil.which("lsof")
+    if lsof:
+        return lambda paths: _lsof_holders(lsof, paths)
     return None
+
+
+def holder_paths(data_dir) -> list[Path]:
+    """Every file a ledger user could be holding, in every place this
+    layout puts one.
+
+    The retired copies are included on purpose: a transition that was
+    interrupted after a rename left its files under `legacy-retired/`, and
+    a process that had the database open before the rename is holding
+    *that* file now. File identity has to be followed across retirement or
+    the recheck before publication asks about the wrong inode.
+    """
+    root = Path(data_dir)
+    bases = [legacy_path(root), active_path(root)]
+    retired_root = root / RETIRED_DIR_NAME
+    try:
+        entries = sorted(retired_root.iterdir())
+    except OSError:
+        entries = []
+    for entry in entries:
+        if entry.is_dir() and not entry.is_symlink():
+            bases.append(entry / LEGACY_NAME)
+            bases.append(entry / STAGED_DB_NAME)
+    found = []
+    for base in bases:
+        for suffix in _SIDECARS:
+            path = Path(str(base) + suffix)
+            if path.is_file() and not path.is_symlink():
+                found.append(path)
+    return found
 
 
 def open_holders(data_dir) -> frozenset[int]:
     """Every process with the ledger database or one of its sidecars open.
 
-    Unknown processes included: what matters is the descriptor, not whether
-    the holder is recognizable as a Privacy HUD process. Raises
-    `RuntimeRefusal("holder_unknown")` when the question cannot be answered
-    at all — missing inspection capability fails closed.
+    Unknown processes included: what matters is the descriptor, not
+    whether the holder is recognizable as a Privacy HUD process. An idle
+    reader in a process with no socket, no marker and no name this release
+    knows still holds the file, and a transition performed underneath it
+    would be a transition performed on a database somebody is using.
+
+    Raises `RuntimeRefusal("holder_unknown")` when the question cannot be
+    answered at all: a host with no way to inspect open files fails
+    closed, because "I could not ask" is not "nobody".
     """
-    return frozenset()
+    paths = holder_paths(data_dir)
+    if not paths:
+        return frozenset()
+    inspect = _inspector()
+    if inspect is None:
+        raise RuntimeRefusal("holder_unknown")
+    return inspect(paths)
+
+
+def _lsof_holders(lsof: str, paths: list[Path]) -> frozenset[int]:
+    """`lsof` over exactly these pathnames. It matches by device and inode
+    rather than by name, which is what makes it an answer about files and
+    not about strings."""
+    try:
+        completed = subprocess.run(
+            [lsof, "-n", "-P", "-F", "pn", "--", *[str(p) for p in paths]],
+            capture_output=True, text=True, timeout=_INSPECT_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        raise RuntimeRefusal("holder_unknown") from None
+    # 0: holders found. 1: none found, which lsof also reports for a path
+    # it could not examine -- so an error line is a refusal, not an empty
+    # answer.
+    if completed.returncode not in (0, 1):
+        raise RuntimeRefusal("holder_unknown")
+    if "status error" in completed.stderr or "no pwd entry" in completed.stderr:
+        raise RuntimeRefusal("holder_unknown")
+    holders = set()
+    for line in completed.stdout.splitlines():
+        if line.startswith("p"):
+            try:
+                holders.add(int(line[1:]))
+            except ValueError:
+                raise RuntimeRefusal("holder_unknown") from None
+    return frozenset(holders)
+
+
+def _proc_holders(paths: list[Path]) -> frozenset[int]:
+    """`/proc/<pid>/fd` for every process this user owns, matched on
+    `(st_dev, st_ino)`.
+
+    Another user's processes are skipped rather than refused: this is a
+    single-user layout, the files are 0600, and refusing because `root`
+    has processes would refuse on every machine. A process of *this*
+    user whose descriptors cannot be listed is a refusal — that is the
+    incomplete visibility the question is about.
+    """
+    targets = set()
+    for path in paths:
+        try:
+            info = path.stat()
+        except OSError:
+            continue
+        targets.add((info.st_dev, info.st_ino))
+    if not targets:
+        return frozenset()
+    uid = os.getuid()
+    holders = set()
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        raise RuntimeRefusal("holder_unknown") from None
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        try:
+            if os.stat(f"/proc/{pid}").st_uid != uid:
+                continue
+            descriptors = os.listdir(f"/proc/{pid}/fd")
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except OSError:
+            raise RuntimeRefusal("holder_unknown") from None
+        for fd in descriptors:
+            try:
+                info = os.stat(f"/proc/{pid}/fd/{fd}")
+            except OSError:
+                continue
+            if (info.st_dev, info.st_ino) in targets:
+                holders.add(pid)
+                break
+    return frozenset(holders)
 
 
 def _stage_backup(source: Path, staged: Path) -> None:
@@ -570,6 +720,20 @@ def _publish_active(staged: Path, active: Path) -> None:
 # --------------------------------------------------------------------- #
 # durability
 # --------------------------------------------------------------------- #
+
+def record_stage(data_dir, transition_id: str, stage: str,
+                 preserved: bool) -> None:
+    """Publish one of the stages beyond `FINAL_STORAGE_STAGE`.
+
+    `snapshots_retired`, `receipt_published` and `ready` are reached by
+    `runtime_repair`, which owns publishers, receipts and the daemon that
+    answered. The journal is still this module's, so the writing of it
+    stays here and the vocabulary cannot drift.
+    """
+    if stage not in STAGES:
+        raise RuntimeRefusal("transition_incomplete")
+    _record(Path(data_dir).resolve(), transition_id, stage, preserved)
+
 
 def _record(root: Path, transition_id: str, stage: str,
             preserved: bool) -> None:
