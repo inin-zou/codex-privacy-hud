@@ -153,6 +153,14 @@ def test_audit_block_prints_the_table(env):
     assert "Email ×1        support.log  model_context  [EXPOSED]" in out
 
 
+def test_audit_block_without_basis_labels_supplied_id(env):
+    """No basis carried over: the table names the session it was given,
+    without inventing how that session was chosen."""
+    out = _run(_block("audit"), env, SESSION_ID="s1", BASIS="", ALSO_ACTIVE="")
+    assert "Session s1" in out
+    assert "Most recently started session" not in out
+
+
 def test_detail_block_prints_one_row(env):
     with sqlite3.connect(Path(env["PLUGIN_DATA"]) / "ledger.db") as conn:
         (event_id,) = conn.execute(

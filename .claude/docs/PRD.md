@@ -161,7 +161,7 @@ Real-time interruption happens only via hook `systemMessage` when a call is bloc
 
 ```text
 Privacy Audit
-Current session · 41 min
+Session session_123
 
   28%          4              2               17
   disclosure   exposed items  destinations    prevented

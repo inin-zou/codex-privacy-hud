@@ -210,14 +210,10 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _session_id(self, query: dict) -> str | None:
-        """The session a request is about: the one it names, or the one the
-        caller is in.
-
-        The default goes through `mcp_tools.resolve_audit_session` — the same
-        resolution `$privacy` uses — so a page opened with no query string and
-        the ASCII audit printed beside it cannot describe two different
-        sessions. That was the whole bug: two surfaces guessing "most recently
-        started" agree with each other and disagree with the user.
+        """The session explicitly named by the request, or selected by
+        resolve_audit_session. Sharing a resolver does not guarantee
+        separately timed requests select the same session. The skill pins its
+        selected ID in the browser URL.
 
         In practice the skill always puts `session_id` in the URL it prints
         and `ui/app.js` carries it on every later request, so this default is
@@ -330,7 +326,8 @@ class _Handler(BaseHTTPRequestHandler):
             # owns the approved strings -- see `render.empty_message`.
             self._send_json(200, {
                 "rows": [r.as_dict() for r in rows],
-                "text": render_audit(summary, rows, tab, coverage=coverage),
+                "text": render_audit(summary, rows, tab, coverage=coverage,
+                                     session_id=sid),
                 "empty_message": render_empty_message(tab, coverage),
                 "coverage_banner": render_coverage_banner(coverage),
             })

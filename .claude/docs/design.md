@@ -144,7 +144,7 @@ the user's attention.
 
 ```text
 Privacy Audit
-Current session · 41 min
+Session session_123
 
 ┌───────────┐ ┌─────────────────────┐ ┌────────────────┐ ┌───────────┐
 │    28%    │ │          4          │ │       2        │ │     17    │
@@ -161,7 +161,7 @@ Repository path ×4    tool input       GitHub MCP       [EXPOSED]
 Internal hostname ×3  terminal output  model context    [MASKED]
 ```
 
-**Header subtitle.** `Current session` in the mockup above, but it is a claim, not a label, and it is written from how the session was actually resolved (`mcp_tools.ResolvedSession.basis` → `render._subtitle`):
+**Header subtitle.** The browser and its ASCII view show `Session <full ID>`. Before resolution they show `Session ID unknown`; a successful resolution with no session shows `No session on record`. The skill's terminal audit retains the resolution-specific subtitles below.
 
 | Resolution | Subtitle |
 |---|---|

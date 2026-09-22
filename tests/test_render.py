@@ -374,14 +374,34 @@ def test_every_basis_gets_its_own_subtitle():
     assert len(set(subtitles)) == len(subtitles)
 
 
-def test_no_resolution_renders_exactly_what_it_always_did():
-    """The compatibility rule `coverage=` already follows, stated as a test:
-    opting in is the only way to see the new strings, so no existing caller
-    and no existing golden moved."""
+def test_no_resolution_renders_session_id_unknown():
+    """An omitted resolution must not imply knowledge of the caller's session."""
     for tab in ("Exposed", "Prevented", "All events"):
         assert audit(SUMMARY, [ROW], tab, resolved=None) == \
             audit(SUMMARY, [ROW], tab)
-        assert _subtitle_of(audit(SUMMARY, [ROW], tab)) == "Current session"
+        assert _subtitle_of(audit(SUMMARY, [ROW], tab)) == "Session ID unknown"
+
+
+def test_audit_session_id_labels_without_resolution_claim():
+    """A supplied ID labels the selected session, whatever the coverage, and
+    makes no claim about how it was selected."""
+    covered = SessionCoverage(recorded=True, observers=1, attached=False,
+                              unobserved_hooks=False)
+    for coverage in (None, covered):
+        out = audit(SUMMARY, [ROW], "Exposed", coverage=coverage,
+                    session_id="abc-123")
+        assert _subtitle_of(out) == "Session abc-123"
+    assert _subtitle_of(audit(SUMMARY, [ROW], "Exposed",
+                              session_id="")) == "Session ID unknown"
+
+
+def test_unknown_resolution_basis_does_not_claim_current():
+    odd = ResolvedSession("s9", "some-future-basis", ())
+    assert _subtitle_of(audit(SUMMARY, [ROW], "Exposed",
+                              resolved=odd)) == "Session ID unknown"
+    blank = ResolvedSession("", "explicit", ())
+    assert _subtitle_of(audit(SUMMARY, [ROW], "Exposed",
+                              resolved=blank)) == "Session ID unknown"
 
 
 def test_the_subtitle_is_not_the_coverage_channel():

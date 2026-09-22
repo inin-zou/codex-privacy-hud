@@ -115,7 +115,7 @@
       sessionId = s.session_id;
     }
     if (!sessionId) {
-      $("subtitle").textContent = "No session found.";
+      $("subtitle").textContent = "No session on record";
       return;
     }
 
@@ -360,7 +360,7 @@
   }
 
   function render() {
-    $("subtitle").textContent = "Current session";
+    $("subtitle").textContent = sessionId ? `Session ${sessionId}` : "Session ID unknown";
     renderTiles();
     renderTabs();
     renderTable();

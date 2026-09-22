@@ -443,10 +443,7 @@ def _coverage_banner(coverage: SessionCoverage) -> str:
             "  Figures below are not a full account of this session.")
 
 
-#: What the audit header says when the caller did not say which session this
-#: is. Matches design.md §5's mockup ("Current session · 41 min", minus the
-#: duration this function has no channel for) and is what every call site
-#: rendered before `resolved=` existed.
+#: Used only when the skill's resolution names one live session.
 _SUBTITLE_CURRENT = "Current session"
 
 #: Subtitle per `mcp_tools.ResolvedSession.basis`, for the bases whose copy
@@ -458,7 +455,8 @@ _SUBTITLE_BY_BASIS = {
 }
 
 
-def _subtitle(resolved: "ResolvedSession | None") -> str:
+def _subtitle(resolved: "ResolvedSession | None", *,
+              session_id: str | None = None) -> str:
     """The audit header's second line: which session this table is about.
 
     **Why this cannot be the constant it used to be.** "Current session" is a
@@ -475,32 +473,34 @@ def _subtitle(resolved: "ResolvedSession | None") -> str:
     resolution was uncertain, and a header that goes on asserting certainty
     directly contradicts the line above it.
 
-    `None` — the caller did not resolve, or had no reason to — keeps the
-    previous constant, the same compatibility rule `coverage=None` follows.
-    That is not a claim this function is making on its own behalf; it is the
-    string every existing call site already renders, and changing it would
-    rewrite goldens for callers that did not opt in.
+    A supplied `session_id` labels the selected session without a
+    resolution claim. With neither an ID nor a resolution, the subtitle is
+    `Session ID unknown`.
 
     I5: every branch names a session and stops. Nothing here suggests anything
     can be taken back. I1: an id, which `ResolvedSession` already establishes
     is metadata, not content.
     """
+    if session_id:
+        return f"Session {session_id}"
     if resolved is None:
-        return _SUBTITLE_CURRENT
+        return "Session ID unknown"
     if resolved.basis == "explicit":
-        return f"Session {resolved.session_id}"
+        return (f"Session {resolved.session_id}" if resolved.session_id
+                else "Session ID unknown")
     if resolved.basis == "active":
         # `certain` is False here only when other sessions were active in the
         # same moment; the daemon's ranking still stands, it just cannot be
         # called "current" without qualification.
         return (_SUBTITLE_CURRENT if resolved.certain
                 else "Most recently active session")
-    return _SUBTITLE_BY_BASIS.get(resolved.basis, _SUBTITLE_CURRENT)
+    return _SUBTITLE_BY_BASIS.get(resolved.basis, "Session ID unknown")
 
 
 def audit(summary: SessionSummary, rows: Sequence[ExposureRow], tab: str, *,
           coverage: SessionCoverage | None = None,
-          resolved: "ResolvedSession | None" = None) -> str:
+          resolved: "ResolvedSession | None" = None,
+          session_id: str | None = None) -> str:
     """The L2 session audit (design.md §5).
 
     `rows` is whatever the caller has already selected for `tab` — this
@@ -549,8 +549,8 @@ def audit(summary: SessionSummary, rows: Sequence[ExposureRow], tab: str, *,
     resolved by falling back to the ledger's most-recently-*started* row —
     which is precisely the case where `$privacy` prints a note above this table
     saying it could not be sure. See `_subtitle` for the copy and the argument.
-    `None` keeps the old constant, on the same compatibility rule as
-    `coverage=None`: opting in is the only way to see the new strings.
+    Without `resolved`, a supplied `session_id` renders `Session <id>`;
+    otherwise the subtitle is `Session ID unknown`.
     """
     exposed_n = summary.exposed_items
     prevented_n = summary.prevented
@@ -564,7 +564,7 @@ def audit(summary: SessionSummary, rows: Sequence[ExposureRow], tab: str, *,
     else:
         ordered.sort(key=lambda r: r.ts)
 
-    lines = ["Privacy Audit", _subtitle(resolved), ""]
+    lines = ["Privacy Audit", _subtitle(resolved, session_id=session_id), ""]
     lines.append(_tiles_block(summary))
     lines.append("")
     lines.append(_tab_bar(exposed_n, prevented_n, all_n, tab))
