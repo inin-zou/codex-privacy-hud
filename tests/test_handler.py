@@ -53,6 +53,9 @@ def _fake_interpreter(tmp_path, *, sleep: float = 20.0) -> tuple[Path, Path]:
     ~7 s to load its model before it binds, and the hook has 5 s to answer
     Codex.
     """
+    # Written to a temporary name and renamed into place: the shell creates
+    # the redirect target before the block runs, so a test polling for the
+    # file could otherwise read it half-written.
     marker = tmp_path / "spawned.txt"
     script = tmp_path / "fake-python3"
     script.write_text(
@@ -63,7 +66,7 @@ def _fake_interpreter(tmp_path, *, sleep: float = 20.0) -> tuple[Path, Path]:
         '; echo "HF_HOME=$HF_HOME"'
         '; env | grep -E "OFFLINE|TELEMETRY|DO_NOT_TRACK|UPDATE_CHECK|SAFETENSORS"'
         '; echo "cwd=$(pwd)"'
-        f'; }} > "{marker}"\n'
+        f'; }} > "{marker}.tmp" && mv "{marker}.tmp" "{marker}"\n'
         f"exec sleep {sleep}\n"
     )
     script.chmod(0o755)
@@ -247,7 +250,11 @@ def test_a_spawn_attempt_is_recorded_so_the_next_hook_does_not_repeat_it(
         run(INGRESS, {"PLUGIN_DATA": str(tmp_path)})
         latch = json.loads((tmp_path / "daemon.spawn-attempt").read_text())
         assert latch["pid"] > 0
-        marker.unlink(missing_ok=True)
+        deadline = time.monotonic() + 5.0
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert marker.exists(), "first daemon did not publish its marker"
+        marker.unlink()
 
         run(INGRESS, {"PLUGIN_DATA": str(tmp_path)})
         time.sleep(0.3)
