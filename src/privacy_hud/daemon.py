@@ -841,7 +841,8 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
                  linger_grace: float = LINGER_GRACE,
                  session_stale_after: float = SESSION_STALE_AFTER,
                  drain_timeout: float = DRAIN_TIMEOUT,
-                 heartbeat_interval: float = HEARTBEAT_INTERVAL):
+                 heartbeat_interval: float = HEARTBEAT_INTERVAL,
+                 activation: Activation | None = None):
         """Raises `AlreadyRunning` if another daemon owns `socket_path`, and
         `OSError` for a real startup failure. Either way nothing is left
         behind: the startup lock is released on every failing path, and a
@@ -857,7 +858,10 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
         rather than the whole rule: with a live session it is the only thing
         that can end the daemon, and with none, `linger_grace` gets there
         first.
+
+        `activation` is the selected runtime this daemon serves (#66).
         """
+        self.activation = activation
         self.socket_path = Path(socket_path)
         self.socket_path.parent.mkdir(parents=True, exist_ok=True)
         self.lock_path = self.socket_path.with_name(
@@ -1398,7 +1402,7 @@ def main(argv: list[str] | None = None, *,
             return EXIT_FAILURE
     socket_path = _default_socket_path(data_dir)
     try:
-        daemon = Daemon(socket_path, data_dir)
+        daemon = Daemon(socket_path, data_dir, activation=activation)
     except AlreadyRunning as exc:
         print(f"privacy-hud daemon: {exc}", file=sys.stderr)
         return EXIT_ALREADY_RUNNING
