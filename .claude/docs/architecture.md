@@ -271,7 +271,9 @@ CREATE TABLE sessions (
   budget_cap   REAL NOT NULL DEFAULT 120
 );
 
-CREATE TABLE events (                     -- append-only; never UPDATE except count
+-- Legacy schema; #54's replacement is approved but not implemented here.
+-- CLAUDE.md §4 governs the scoped atomic rebuild and preservation of history.
+CREATE TABLE events (                     -- legacy UPDATEs: count increments; value_hash NULL at session end
   id            INTEGER PRIMARY KEY,
   session_id    TEXT NOT NULL REFERENCES sessions,
   turn_id       TEXT,

@@ -26,7 +26,7 @@
 - **I7 — The tool survives its own audit.** Zero exposures when run on this repo.
 - **Hook client is stdlib-only.** `hooks/handler.py` imports nothing beyond `json`, `socket`, `sys`, `os`.
 - **Budget math is pure.** No I/O in `budget.py`.
-- **The ledger is append-only.** The only permitted `UPDATE` is incrementing `count` and nulling `value_hash` at session end.
+- **Historical append-only rule:** this plan permitted only incrementing `count` and nulling `value_hash` at session end. The current authority is `.claude/CLAUDE.md` §4, including its exception scoped to #54's migration. That migration is approved, not implemented by this historical plan.
 - **No constants in logic.** Severity weights, destination multipliers, event classification, and policy defaults come from the matrix layer. A literal weight or multiplier outside `matrix/tables.toml` is a defect.
 - **Bands:** `0–33` green, `34–66` amber, `67–100` red. **Budget cap default:** `120`.
 - **Commit messages carry no attribution trailers** (see `CLAUDE.md` §1; a `commit-msg` hook enforces it).
