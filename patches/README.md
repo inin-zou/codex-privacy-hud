@@ -1,10 +1,18 @@
 # Codex patch
 
-Privacy HUD 0.7.9 retains snapshot version 2 and legacy accounting. Updated readers accept version 1 as explicitly legacy and accept version 2 with nullable accounting fields. Older patched Codex readers reject version 2 and show no Privacy item. A matching Codex version alone does not establish snapshot compatibility. Use a snapshot-v2-compatible patched build, or run privacy-hud-ambient --watch in a separate terminal pane.
+Privacy HUD 0.8.0 retains snapshot version 2. Production sessions still use legacy accounting. Snapshot-v2 readers accept version 1 as explicitly legacy and version 2 with nullable accounting fields. Older snapshot-v1-only readers reject version 2 and show no Privacy item. Matching Codex version numbers do not establish snapshot compatibility.
 
-Updating the plugin does not update an installed patched binary. The daemon rebuilds the ledger at a genuine new-session boundary; the installer does not migrate it. After the rebuild, do not run a pre-0.7.9 daemon against this ledger. Reinstall a compatible version; no downgrade migration is provided.
+The snapshot-v2 patched Codex builds for 0.154.0, 0.155.0, and 0.155.1 were re-released on 2026-09-22. An earlier installation of one of those versions may still contain the older reader. Updating the plugin does not replace that binary. No additional patched-Codex release is required for Privacy HUD 0.8.0.
 
-The already-published builds use snapshot-v1 readers. No snapshot-v2 release has been run for this change. After merge, publish compatible builds with `release-codex.yml` via `workflow_dispatch` for each supported Codex version; source compatibility does not update installed binaries.
+The native Privacy item displays accounting snapshots; it does not verify runtime alignment. Before repair, an old daemon may continue refreshing a legacy reading. Use doctor to check alignment. The bundled ambient launcher reports runtime failure instead of displaying a percentage.
+
+Privacy HUD loads its Python code from the selected plugin bundle. The recorded Python environment supplies dependencies. Run `$privacy repair` to obtain the exact recovery command for another terminal. Explicit installation may download dependencies and model weights; runtime checks and offline repair do not.
+
+Repair preserves recorded ledger values and moves the active store to `$PLUGIN_DATA/ledger/active.db`. `$PLUGIN_DATA/ledger.db` becomes a directory that fences the historical pathname. Do not replace it with a file or symlink. Repair does not perform the accounting rebuild; the compatible daemon retains the genuine new-session migration boundary. Unsupported or altered schemas are preserved and refused. No downgrade migration is provided.
+
+Runtime mismatches produce an unverified warning on ingress and a denial for outbound calls the hook cannot verify. These are plugin decisions, not confirmation of host enforcement. Monitoring gaps and lost in-memory detection state cannot be reconstructed.
+
+Privacy HUD 0.7.1 does not alter the schema of a valid prepared generation-5401 ledger during initialization: `events` already contains `source_kind`. It can nevertheless open the historical ledger pathname without participating in the selected runtime's handshake or writer lease. On a prepared ledger, historical session and coverage writes can succeed even though legacy event recording fails against the new `events` layout. On a generation-0 ledger, historical event writes remain possible, and initialization adds `source_kind` only when that column is absent. Explicit repair therefore quiesces legacy users, preserves the ledger at `$PLUGIN_DATA/ledger/active.db`, and replaces `$PLUGIN_DATA/ledger.db` with a directory fence that prevents subsequent historical-path opens. The fence does not revoke already-open connections or protect against same-user code deliberately opening the active pathname.
 
 `privacy-status-line.patch` adds one status-line item, `privacy`, to Codex's
 TUI. It is applied to the upstream tag named in `scripts/build-patched-codex.sh`

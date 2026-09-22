@@ -2,11 +2,19 @@
 
 The [one-command installer](../README.md#install) runs the steps below itself. Read this page to see or control each one — installing the plugin, recording the interpreter, or running only the fallback pane without a patched Codex build.
 
-Privacy HUD 0.7.9 retains snapshot version 2 and legacy accounting. Updated readers accept version 1 as explicitly legacy and accept version 2 with nullable accounting fields. Older patched Codex readers reject version 2 and show no Privacy item. A matching Codex version alone does not establish snapshot compatibility. Use a snapshot-v2-compatible patched build, or run privacy-hud-ambient --watch in a separate terminal pane.
+Privacy HUD 0.8.0 retains snapshot version 2. Production sessions still use legacy accounting. Snapshot-v2 readers accept version 1 as explicitly legacy and version 2 with nullable accounting fields. Older snapshot-v1-only readers reject version 2 and show no Privacy item. Matching Codex version numbers do not establish snapshot compatibility.
 
-Updating the plugin does not update an installed patched binary. The daemon rebuilds the ledger at a genuine new-session boundary; the installer does not migrate it. After the rebuild, do not run a pre-0.7.9 daemon against this ledger. Reinstall a compatible version; no downgrade migration is provided.
+The snapshot-v2 patched Codex builds for 0.154.0, 0.155.0, and 0.155.1 were re-released on 2026-09-22. An earlier installation of one of those versions may still contain the older reader. Updating the plugin does not replace that binary. No additional patched-Codex release is required for Privacy HUD 0.8.0.
 
-The already-published snapshot-v1 builds do not support 0.7.8 snapshots. Updated release artifacts have not been published as part of this change.
+The native Privacy item displays accounting snapshots; it does not verify runtime alignment. Before repair, an old daemon may continue refreshing a legacy reading. Use doctor to check alignment. The bundled ambient launcher reports runtime failure instead of displaying a percentage.
+
+Privacy HUD loads its Python code from the selected plugin bundle. The recorded Python environment supplies dependencies. Run `$privacy repair` to obtain the exact recovery command for another terminal. Explicit installation may download dependencies and model weights; runtime checks and offline repair do not.
+
+Repair preserves recorded ledger values and moves the active store to `$PLUGIN_DATA/ledger/active.db`. `$PLUGIN_DATA/ledger.db` becomes a directory that fences the historical pathname. Do not replace it with a file or symlink. Repair does not perform the accounting rebuild; the compatible daemon retains the genuine new-session migration boundary. Unsupported or altered schemas are preserved and refused. No downgrade migration is provided.
+
+Runtime mismatches produce an unverified warning on ingress and a denial for outbound calls the hook cannot verify. These are plugin decisions, not confirmation of host enforcement. Monitoring gaps and lost in-memory detection state cannot be reconstructed.
+
+Privacy HUD 0.7.1 does not alter the schema of a valid prepared generation-5401 ledger during initialization: `events` already contains `source_kind`. It can nevertheless open the historical ledger pathname without participating in the selected runtime's handshake or writer lease. On a prepared ledger, historical session and coverage writes can succeed even though legacy event recording fails against the new `events` layout. On a generation-0 ledger, historical event writes remain possible, and initialization adds `source_kind` only when that column is absent. Explicit repair therefore quiesces legacy users, preserves the ledger at `$PLUGIN_DATA/ledger/active.db`, and replaces `$PLUGIN_DATA/ledger.db` with a directory fence that prevents subsequent historical-path opens. The fence does not revoke already-open connections or protect against same-user code deliberately opening the active pathname.
 
 ## Prerequisites
 
@@ -56,11 +64,22 @@ codex plugin add codex-privacy-hud@codex-privacy-hud --json
 
 The plugin manifest is `.codex-plugin/plugin.json` and the marketplace manifest is `.agents/plugins/marketplace.json`, the two paths Codex looks at first. (Codex also accepts the Claude Code layout, `.claude-plugin/`, as a fallback; this project used it until 2026-09-15. An earlier note here said Codex rejected `.codex-plugin/`: that was Codex 0.145 given a `.codex-plugin/plugin.json` with no marketplace manifest beside it, and the error was about the missing marketplace file. With both files in place, Codex 0.154 installs this layout; see `.claude/docs/architecture.md` §7.)
 
+**How every command below is run (0.8.0).** Privacy HUD loads its Python code from the selected plugin bundle, so each command goes through that bundle's own bootstrap rather than through a console script on your `PATH` or a `PYTHONPATH=src` import. Set these two once for the shell you are working in:
+
+```sh
+# Set these to the exact installed bundle and its data directory.
+PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/plugin'
+PRIVACY_HUD_DATA='/absolute/path/to/plugin/data'
+```
+
+`install.sh` also writes wrappers under `~/.local/share/codex-privacy-hud/bin/` that do exactly this with those two values already filled in, which is why the installed setup needs no environment variable at all. A developer checkout is a bundle like any other: point `PRIVACY_HUD_BUNDLE` at the checkout explicitly and give it an isolated `PRIVACY_HUD_DATA`, so a scratch run cannot reach the data directory Codex assigns.
+
 **2. Run the setup step once — from the environment that has `transformers` and `torch`.** This is the whole of the daemon's configuration. It records which Python interpreter the daemon must run in, into the plugin-data directory Codex assigns, and after that Codex's hooks start the daemon themselves.
 
 ```bash
 source .venv/bin/activate            # the env from Prerequisites, whatever it is
-privacy-hud-setup                    # or: PYTHONPATH=src python3 -m privacy_hud.runtime
+python3 "$PRIVACY_HUD_BUNDLE/scripts/runtime.py" \
+  --plugin-data "$PRIVACY_HUD_DATA" setup --python "$(command -v python3)"
 ```
 
 ```text
@@ -74,7 +93,7 @@ privacy-hud setup
   recorded       ~/.codex/plugins/data/codex-privacy-hud-codex-privacy-hud/runtime.json
 ```
 
-**Why an interpreter has to be recorded at all, and why from that shell.** Codex runs `hooks/handler.py` through its `#!/usr/bin/env python3` shebang against Codex's own minimal `PATH` — typically a *system* Python with no `transformers` in it. A daemon started from that interpreter would come up, bind its socket, answer every health check, and detect no names or addresses at all, with nothing anywhere saying so. So the interpreter is recorded once from a process that demonstrably has the stack, and `privacy-hud-setup` **refuses to record one that cannot import `transformers` and `torch`** rather than pinning a blind daemon. (`--allow-degraded` records it anyway if tiers 0–2 are what you want; it says so in the output and in `privacy-hud-doctor`.)
+**Why an interpreter has to be recorded at all, and why from that shell.** Codex runs `hooks/handler.py` through its `#!/usr/bin/env python3` shebang against Codex's own minimal `PATH` — typically a *system* Python with no `transformers` in it. A daemon started from that interpreter would come up, bind its socket, answer every health check, and detect no names or addresses at all, with nothing anywhere saying so. So the interpreter is recorded once from a process that demonstrably has the stack, and `setup` **refuses to record one that cannot import `transformers` and `torch`** rather than pinning a blind daemon. (`--allow-degraded` records it anyway if tiers 0–2 are what you want; it says so in the output and in `privacy-hud-doctor`.)
 
 You do not need to know what `PLUGIN_DATA` is, find it, or export it: setup reads the directory Codex assigned from Codex's own state, and the hook that later starts the daemon passes it its own value — so the daemon and the hooks cannot end up pointed at different directories, which used to be this project's most expensive misconfiguration. (`--plugin-data DIR` overrides it for a scratch setup.)
 
@@ -85,8 +104,8 @@ You do not need to know what `PLUGIN_DATA` is, find it, or export it: setup read
 **Starting one by hand still works** and is the way to have a daemon up *before* the session — worth it if you want the ambient HUD in step 3 to have something to read immediately, or you are debugging:
 
 ```bash
-export PLUGIN_DATA=~/.codex/plugins/data/codex-privacy-hud-codex-privacy-hud
-PYTHONPATH=src python3 -m privacy_hud.daemon &
+python3 "$PRIVACY_HUD_BUNDLE/scripts/runtime.py" \
+  --plugin-data "$PRIVACY_HUD_DATA" daemon &
 ```
 
 Start Codex within five minutes of it: a hand-started daemon that no session ever connects to is indistinguishable from one whose last session ended, and it exits on the same grace.
@@ -98,8 +117,8 @@ To turn auto-start off entirely (a sandboxed box where the spawn cannot succeed 
 **Check the whole setup in one shot — `privacy-hud-doctor`.** Every moving part above fails *silently*, and they all look identical from the outside: nothing happens. A setup step that was never run, so no hook will start a daemon. A recorded interpreter that has since been deleted along with its virtualenv. A `PLUGIN_DATA` a hand-started daemon and the hook client disagree on. Model weights that were never downloaded, so tier 3 reports `available = False` and person/address detection quietly stops. A `transformers` older than 5.16, or a `transformers` with no torch beside it. A stale copy of the plugin in Codex's cache, because Codex installs a *copy* and your edited `hooks/handler.py` is not what runs. One command tells you which of those it is:
 
 ```bash
-export PLUGIN_DATA=~/.codex/plugins/data/codex-privacy-hud-codex-privacy-hud
-privacy-hud-doctor            # or: PYTHONPATH=src python3 -m privacy_hud.doctor
+python3 "$PRIVACY_HUD_BUNDLE/scripts/runtime.py" \
+  --plugin-data "$PRIVACY_HUD_DATA" doctor
 ```
 
 ```text
@@ -122,7 +141,7 @@ The daemon check is a real round trip, not a look at the socket file — a unix 
 
 `Daemon` reporting `[WARN] not running` between sessions is the correct state of a healthy setup, not a fault — the daemon exits once your last session ends, and the next hook starts it. It is a `[FAIL]` only when there is no pin, because then nothing will.
 
-Note that the doctor and the daemon need not be the same interpreter any more. Run `privacy-hud-doctor` from anywhere; where its own `transformers` view differs from the daemon's, the report says so rather than passing one off as the other.
+Note that the doctor and the daemon need not be the same interpreter any more. Run the bundled `doctor` from anywhere; where its own `transformers` view differs from the daemon's, the report says so rather than passing one off as the other.
 
 Starting with version 0.7.5, the MCP check validates the five-tool list and calls `privacy.get_session_summary` with the synthetic session ID `__privacy_hud_doctor_probe__`. It requires a valid summary response; tool discovery alone is insufficient. In 0.7.8 the MCP reader opens an existing ledger without initialization or migration. The probe adds no session, policy, event or coverage rows and normally returns the unrecorded variant with `percent=null`. A successful read confirms that the MCP ledger-read path responds; it does not establish that monitoring is working.
 
@@ -133,15 +152,15 @@ It reads the ledger read-only and never creates it, and it reports counts, versi
 **3. Optional — start the fallback Level 1 HUD in a second terminal pane.** If `install.sh` (or the forwarder) found a snapshot-v2-compatible patched Codex build matching your version, the `privacy` item already lives in Codex's own status line and you can skip this step. Otherwise this is the fallback: a separate process, not a Codex status item, that reads `$PLUGIN_DATA/hud/<session_id>.json` — the same snapshot file (contract A) the patched binary itself reads — and redraws one line in place, so give it its own pane or split beside the pane running Codex. It only moves while a daemon is up and has written that file: with no daemon running, or before the file exists, the HUD shows nothing. Codex's first tool call starts the daemon — but if you want the pane live before that, start the daemon by hand as shown in step 2. It never reports 0% for a session that is simply unmonitored.
 
 ```bash
-export PLUGIN_DATA=~/.codex/plugins/data/codex-privacy-hud-codex-privacy-hud
-PYTHONPATH=src python3 -m privacy_hud.ambient --watch
+python3 "$PRIVACY_HUD_BUNDLE/scripts/runtime.py" \
+  --plugin-data "$PRIVACY_HUD_DATA" ambient --watch
 ```
 
 ```text
 Privacy legacy 30%
 ```
 
-`--watch` redraws every 2 seconds; `--watch N` sets the interval. With no flags (or `--once`) it prints a single line and exits, which is what you want from a shell prompt or another status bar. `--session-id <id>` pins the pane to one session and skips resolution entirely. Without it, *which* session the line is about is resolved the same way `$privacy` resolves it — by asking the daemon — but only about once every 30 seconds, not on every redraw: see known limit 8 for both halves of that trade. If the package is installed, the same entry point is available as `privacy-hud-ambient`.
+`--watch` redraws every 2 seconds; `--watch N` sets the interval. With no flags (or `--once`) it prints a single line and exits, which is what you want from a shell prompt or another status bar. `--session-id <id>` pins the pane to one session and skips resolution entirely. Without it, *which* session the line is about is resolved the same way `$privacy` resolves it — by asking the daemon — but only about once every 30 seconds, not on every redraw: see known limit 8 for both halves of that trade. The installer writes the same command as `~/.local/share/codex-privacy-hud/bin/privacy-hud-ambient`.
 
 `--once` checks what the snapshot reader can display. A line is not proof that the whole stack is live. Silence can mean a missing, malformed, stale, or hidden snapshot, unresolved session selection, or insufficient width; it does not establish an empty ledger. Use `privacy-hud-doctor` to investigate runtime availability.
 

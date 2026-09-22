@@ -11,180 +11,131 @@ UI so the same data is also browsable — the ASCII table is the one that
 always works; the browser UI is an enhancement, never a dependency
 (design.md P6).
 
-This skill reads the ledger directly; it does not call the MCP server. The MCP worker-thread failure in 0.7.4 and earlier does not affect this audit path.
+This skill reads the ledger through the plugin bundle's own launcher; it does not call the MCP server, and it never opens the ledger file itself. The MCP worker-thread failure in 0.7.4 and earlier does not affect this audit path.
 
 Both surfaces are built from the exact same functions:
 `privacy_hud.mcp_tools.get_session_summary` / `list_exposures` for the
-data, and `privacy_hud.render.audit` for the ASCII table's wording — do
-not hand-write a summary of the numbers instead of running the commands
-below; the whole point of routing through these functions is that the
+data, and `privacy_hud.render.audit` for the ASCII table's wording,
+reached through `runtime_commands` — do not hand-write a summary of the
+numbers instead of running the commands below; the whole point of routing through these functions is that the
 `exposed`/`prevented`/`local_access` distinction (design.md P2) and the
 copy rules (design.md §9) are enforced in one place, not re-derived by
 whichever agent happens to invoke this skill.
 
+## The one command everything runs through
+
+Privacy HUD loads its Python code from the plugin bundle Codex installed,
+and every command below goes through that bundle's bootstrap. Do not
+import `privacy_hud` yourself, do not open the ledger, and do not pick a
+bundle by listing Codex's plugin cache and taking the newest directory:
+the bundle is **this skill file's own installation** — the directory two
+levels above `skills/privacy/SKILL.md` — and nothing else.
+
+`PLUGIN_ROOT` is that directory and Codex sets it. If it is not set in
+the shell you get, take it from the absolute path of this file, two
+directories up. Never from `cwd`, and never by sorting cache directories.
+
+```bash
+BUNDLE="${PLUGIN_ROOT:?the installed plugin bundle: two directories above this skill file}"
+HUD=(python3 "$BUNDLE/scripts/runtime.py" --plugin-data "${PLUGIN_DATA:?}")
+```
+
+Run `"${HUD[@]}" <subcommand>` for everything that follows. If a command
+fails, print what it printed and stop; do not fall back to opening the
+ledger by hand. The ledger's location is not a fixed pathname any more —
+after a runtime repair `$PLUGIN_DATA/ledger.db` is a *directory* that
+exists to stop exactly that — and the bootstrap is what resolves it.
+
 ## Steps
 
-**1. Resolve the ledger and the session.**
+**0. `$privacy repair`.**
 
-The ledger lives at `$PLUGIN_DATA/ledger.db` (same path the daemon writes
-to). Run this as written, substituting the id the user typed after
-`$privacy` (design.md §2's `$privacy <id>` deep link) for the empty string
-argument — leave it empty if they did not give one:
+Handle this branch before anything below.
+
+`$privacy repair` prints the recovery command for another terminal.
+Invoke the bundled launcher with `repair --print-command` and reproduce
+its output verbatim. This branch does not start installation, stop
+processes, or request an enforcement bypass. If hook execution prevents
+the launcher from running, construct the same shell-quoted command from
+this skill's exact bundle location and the resolved plugin-data
+directory. Do not select another cached version.
 
 ```bash
-python3 - "" <<'PY'
-import os, sys
-sys.path.insert(0, os.path.join(os.environ.get("PLUGIN_ROOT", "."), "src"))
-
-from privacy_hud.ledger import Ledger
-from privacy_hud.matrix.loader import load_matrix
-from privacy_hud import mcp_tools
-
-data_dir = os.environ["PLUGIN_DATA"]
-explicit = (sys.argv[1] if len(sys.argv) > 1 else "").strip()
-path = os.path.join(data_dir, "ledger.db")
-if os.path.exists(path):
-    ledger = Ledger(path, load_matrix(), initialize=False)
-    resolved = mcp_tools.resolve_audit_session(
-        ledger, data_dir, explicit=explicit or None)
-else:
-    # The daemon creates the ledger; a reader never does.
-    resolved = mcp_tools.ResolvedSession(
-        explicit or None, "explicit" if explicit else "none")
-print(f"session_id: {resolved.session_id or ''}")
-print(f"basis: {resolved.basis}")
-print(f"also_active: {','.join(resolved.also_active)}")
-if resolved.note:
-    print(f"note: {resolved.note}")
-PY
+BUNDLE="${PLUGIN_ROOT:?}"
+python3 "$BUNDLE/scripts/runtime.py" --plugin-data "${PLUGIN_DATA:?}" \
+  repair --print-command
 ```
 
-Use `session_id` for every later step. Carry `basis` and `also_active`
-into step 2 to preserve its resolution-specific subtitle. Resolve once; do
-not re-run this script per step. The browser labels the selected session by
-its full ID.
+**1. Print the audit.**
 
-**If a `note:` line is printed, print it to the user verbatim, above the
-audit table.** It is there because the resolution was not certain, and the
-copy is already written to design.md §9's rules — see
-`mcp_tools.ResolvedSession.note`.
+One command resolves the session, reads the ledger read-only, and renders
+the Level 2 table (design.md §5). Substitute the id the user typed after
+`$privacy` (design.md §2's `$privacy <id>` deep link); omit it if they
+did not give one.
 
-Do not replace this with `SELECT session_id FROM sessions ORDER BY
-started_at DESC LIMIT 1`, which is what this skill used to do. That is the
-most recently *started* session, so a user with two Codex windows open who
-runs `$privacy` in the first one is shown the second one's audit, silently
-— confirmed against a real ledger, where the most recently started and the
-most recently active session were two different sessions. Nor is
-`MAX(events.ts)` the fix: a session that has disclosed nothing has no
-event rows at all, so ordering by event time skips the cleanest possible
-session and serves an older one's numbers in its place. The daemon is the
-only process that knows which session is live, because it sees every hook
-including the ones that record nothing, and asking it works because
-**running `$privacy` itself fires hooks** — this skill runs bash, which is
-a `PreToolUse` in the session you are in, so that session is the most
-recently active one by construction rather than by guess.
+```bash
+BUNDLE="${PLUGIN_ROOT:?}"
+python3 "$BUNDLE/scripts/runtime.py" --plugin-data "${PLUGIN_DATA:?}" \
+  audit ${SESSION_ID:+"$SESSION_ID"}
+```
+
+It prints, in order:
+
+- a runtime banner, **only** when the daemon does not match this plugin.
+  Print it verbatim above the table. It says monitoring is unverified and
+  policy changes are unavailable; it does **not** say the records below
+  are wrong.
+- the ASCII table, which is `render.audit()`'s output. Print it verbatim,
+  irreversibility notice included.
+- one JSON line: `session_id`, `basis`, `also_active`, `runtime_mismatch`.
+  That is the resolution, made **once**. Carry `session_id` into every
+  later step rather than resolving again — two separately timed
+  resolutions can name two different sessions, which is how one machine
+  ended up showing two at once.
 
 `basis` says how the id was reached — `explicit`, `active` (the daemon
-named it), `started_at` (fallback, daemon unreachable or no live session),
-`none` (the ledger holds no session yet). Never describe a `started_at`
-resolution as "your current session"; the `note:` line already says what
-it is, and so does the table's own header once `basis` reaches step 2.
+named it), `started_at` (fallback, daemon unreachable or no live
+session), `none` (the ledger holds no session yet). Never describe a
+`started_at` resolution as "your current session"; the table's own header
+already says what it is.
 
-If `session_id` comes back empty (`basis: none`), stop here: print the
-`note:` line and nothing else. There is no session to audit, and steps 2
-and 3 would render an empty table for an id that does not exist, which
-reads exactly like a clean session.
-
-**2. Print the ASCII audit.**
-
-Run this with `SESSION_ID`, `BASIS` and `ALSO_ACTIVE` set to the three
-values step 1 printed. It imports `privacy_hud` from the plugin's own
-source tree — adjust `sys.path` if `$PLUGIN_ROOT` is not already
-importable in your shell:
-
-```bash
-python3 - "$SESSION_ID" "$BASIS" "$ALSO_ACTIVE" <<'PY'
-import os, sys
-sys.path.insert(0, os.path.join(os.environ.get("PLUGIN_ROOT", "."), "src"))
-
-from privacy_hud.ledger import Ledger
-from privacy_hud.matrix.loader import load_matrix
-from privacy_hud import mcp_tools, render
-
-argv = sys.argv[1:] + ["", ""]
-session_id = argv[0]
-# Without a basis, label the supplied ID without inferring its origin.
-basis = argv[1].strip() or "explicit"
-resolved = mcp_tools.ResolvedSession(
-    session_id, basis,
-    tuple(s for s in argv[2].split(",") if s))
-
-data_dir = os.environ["PLUGIN_DATA"]
-ledger = Ledger(os.path.join(data_dir, "ledger.db"), load_matrix(),
-                initialize=False)
-
-summary = mcp_tools.get_session_summary(ledger, session_id)
-rows = mcp_tools.list_exposures(ledger, session_id, "Exposed")
-coverage = mcp_tools.get_session_coverage(ledger, session_id)
-print(render.audit(summary, rows, "Exposed",
-                   coverage=coverage, resolved=resolved))
-PY
-```
-
-Two keyword arguments, two different questions, and neither substitutes
-for the other.
+If `session_id` is empty (`basis: none`), stop: there is no session to
+audit, and the steps below would render an empty table for an id that
+does not exist, which reads exactly like a clean session.
 
 The summary distinguishes a recorded legacy session from an unrecorded session. A legacy summary retains the existing score and row counts under explicit legacy labels. An unrecorded summary has percent=null and no numeric score or counts. Print the renderer's accounting note with either variant; never substitute zero for unavailable quantities.
 
 Coverage separately reports recorded observation gaps. It does not establish that every event was seen, that a crossing occurred, or that the host applied an intervention.
 
-`resolved` says *whose* session those numbers are. It sets the header's
-second line: `Current session` only when the daemon named a single live
-session, `Session <id>` for `$privacy <id>`, `Most recently active
-session` when two windows were active in the same moment, `Most recently
-started session` for the no-daemon fallback. Passing it is what stops the
-table asserting "Current session" over a row nothing established was
-current — the same claim the `note:` line above it is busy retracting.
+Swap the tab with `--tab Exposed` / `--tab Prevented` / `--tab "All events"`
+to show a different one.
 
-Swap the tab argument (`"Exposed"` / `"Prevented"` / `"All events"`) to
-show a different one — `render.audit` and `mcp_tools.list_exposures` both
-already take `tab` as a plain argument, so there is no reason to
-re-implement tab switching here.
+**2. Show one event's detail.**
 
-If the user asked for one specific flow (`$privacy <id>`, design.md §2's
-L3 deep link), show that instead:
+If the user asked for one specific flow (design.md §2's L3 deep link),
+show that instead. `EVENT_ID` is the `id` field on any row the table
+above and the web UI both key off of.
 
 ```bash
-python3 - "$SESSION_ID" "$EVENT_ID" <<'PY'
-import os, sys
-sys.path.insert(0, os.path.join(os.environ.get("PLUGIN_ROOT", "."), "src"))
-
-from privacy_hud.ledger import Ledger
-from privacy_hud.matrix.loader import load_matrix
-from privacy_hud import mcp_tools, render
-
-session_id, event_id = sys.argv[1], int(sys.argv[2])
-data_dir = os.environ["PLUGIN_DATA"]
-ledger = Ledger(os.path.join(data_dir, "ledger.db"), load_matrix(),
-                initialize=False)
-
-row = mcp_tools.get_exposure_detail(ledger, session_id, event_id)
-print(render.detail(row))
-PY
+BUNDLE="${PLUGIN_ROOT:?}"
+python3 "$BUNDLE/scripts/runtime.py" --plugin-data "${PLUGIN_DATA:?}" \
+  detail "${SESSION_ID:?}" "${EVENT_ID:?}"
 ```
-
-`event_id` is the `id` field on any row `list_exposures` returns — the
-same one the audit table above and the web UI's rows both key off of.
 
 **3. Start the local audit UI and print its URL.**
 
+Hand it the session step 1 resolved, so the pane and the table are about
+the same session.
+
 ```bash
-python3 -m privacy_hud.local_ui_server "$SESSION_ID" &
+BUNDLE="${PLUGIN_ROOT:?}"
+python3 "$BUNDLE/scripts/runtime.py" --plugin-data "${PLUGIN_DATA:?}" \
+  ui ${SESSION_ID:+"$SESSION_ID"} &
 ```
 
 This binds to `127.0.0.1` on an OS-assigned port and prints exactly one
 line — the URL to open, e.g. `http://127.0.0.1:54219/?session_id=...` —
-so the demo works with no browser (the ASCII table from step 2 already
+so the demo works with no browser (the ASCII table from step 1 already
 covers that) and, when a browser is available, the same ledger is also
 browsable with the three tabs, row selection, and the L3 detail view
 (`ui/index.html`, `ui/app.js`). Print that URL to the user verbatim; do
@@ -207,21 +158,13 @@ snapshot at all). stale means a valid snapshot has not been refreshed for more t
 Report `stale` as what it is; it is not the same as "off".
 
 ```bash
-python3 - "$SESSION_ID" on <<'PY'
-import os, sys
-sys.path.insert(0, os.path.join(os.environ.get("PLUGIN_ROOT", "."), "src"))
-
-from privacy_hud import mcp_tools
-
-session_id, arg = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "status")
-data_dir = os.environ["PLUGIN_DATA"]
-
-out = (mcp_tools.hud_status(data_dir, session_id) if arg == "status"
-       else mcp_tools.hud_set_hidden(data_dir, session_id, arg == "off"))
-# shown | hidden | stale (the daemon that writes it is gone) | absent
-print(out["state"])
-PY
+BUNDLE="${PLUGIN_ROOT:?}"
+python3 "$BUNDLE/scripts/runtime.py" --plugin-data "${PLUGIN_DATA:?}" \
+  hud "${SESSION_ID:?}" status
 ```
+
+It prints one JSON object; `state` is the word to report.
+
 
 ### `$privacy read on|off|status`
 
@@ -237,61 +180,58 @@ word is what the setting still says, not what the user asked for. Report
 both, and do not describe the guard as having changed.
 
 ```bash
-python3 - on <<'PY'
-import os, sys
-sys.path.insert(0, os.path.join(os.environ.get("PLUGIN_ROOT", "."), "src"))
-
-from privacy_hud import mcp_tools
-
-arg = sys.argv[1] if len(sys.argv) > 1 else "status"
-data_dir = os.environ["PLUGIN_DATA"]
-
-out = (mcp_tools.read_guard_status(data_dir) if arg == "status"
-       else mcp_tools.read_guard_set(data_dir, arg == "on"))
-print("on" if out["deny_read"] else "off")
-if out.get("error"):          # the write failed; the line above is still true
-    print(out["error"])
-PY
+BUNDLE="${PLUGIN_ROOT:?}"
+python3 "$BUNDLE/scripts/runtime.py" --plugin-data "${PLUGIN_DATA:?}" \
+  read status
 ```
+
+It prints one JSON object: `deny_read` is the setting, and an `error`
+field means the write failed and `deny_read` is what the setting still
+says, not what the user asked for.
+
 
 ### `$privacy setup`
 
 For an install that came from `codex plugin add` alone: the first turn of
 such a session shows `Privacy HUD is installed but not set up`, and
 `$privacy` above finds no daemon. This runs the installer Codex copied in
-beside this skill. It creates the daemon's Python environment, downloads
-the detection model (~2.8 GB, once), fetches the patched Codex build for
-the installed Codex version, and adds the `privacy` item to
-`[tui].status_line`. It is safe to run over an existing install.
+beside this skill — the one in **this bundle**, resolved the same way
+every other command here is, never a cached version chosen by sorting.
 
 The script writes under `~/.local/share/codex-privacy-hud/` and
 `~/.codex/`, appends one `PATH` line to the shell rc file, and needs the
 network for its downloads, so it cannot run inside the workspace sandbox:
 request escalated permissions for exactly this command, with that sentence
-as the justification. Run it as written; if the user said to skip the
-model, replace `--yes` with `--no-model` and nothing else.
+as the justification. Print the command for the user to run in another
+terminal rather than assuming it can run here; if the user said to skip
+the model, replace `--yes` with `--no-model` and nothing else.
 
 ```bash
-ROOT="${PLUGIN_ROOT:-$(ls -d "${CODEX_HOME:-$HOME/.codex}"/plugins/cache/codex-privacy-hud/codex-privacy-hud/*/ | tail -1)}"
-sh "$ROOT/install.sh" --yes
+BUNDLE="${PLUGIN_ROOT:?}"
+printf 'sh %s --yes\n' "$BUNDLE/install.sh"
 ```
 
-(`PLUGIN_ROOT` is set for hooks; in a skill's shell it may not be, so the
-fallback locates the installed copy under Codex's plugin cache and takes
-the newest version.) It takes several minutes; the model download
-dominates. Keep waiting on the same process instead of starting a second
-one.
+It takes several minutes; the model download dominates. Keep waiting on
+the same process instead of starting a second one.
 
-Privacy HUD 0.7.8 writes snapshot version 2. Already-published patched
-Codex builds have version-1 readers and reject those snapshots. Successful
-installation and matching Codex versions do not establish snapshot
-compatibility. This change does not publish replacement binaries.
+`$privacy setup` installs and configures the whole plugin. It is not
+`$privacy repair`, which only prints the command that repairs the runtime
+and never installs or replaces a patched Codex binary. Do not describe
+either as doing the other's job.
+
+Privacy HUD 0.8.0 retains snapshot version 2. The snapshot-v2 patched
+Codex builds for 0.154.0, 0.155.0, and 0.155.1 were re-released on
+2026-09-22; an earlier installation of one of those versions may still
+contain the older reader. Updating the plugin does not replace that
+binary, and matching Codex version numbers do not establish snapshot
+compatibility.
 
 - `done. restart codex …`: tell the user to restart Codex to load the
   installed plugin and PATH changes. Do not promise a native Privacy item
   unless the installed patched build is verified to contain the
-  snapshot-v2 reader. Until then, use `privacy-hud-ambient --watch` in a
-  separate terminal pane.
+  snapshot-v2 reader. Until then, use the bundled ambient launcher in a
+  separate terminal pane:
+  `~/.local/share/codex-privacy-hud/bin/privacy-hud-ambient --watch`.
 - `no patched build published for codex <ver> yet`: report that no patched
   build was installed for that version. This warning can precede the
   final `done` line; that line does not cancel it. Use the fallback pane.

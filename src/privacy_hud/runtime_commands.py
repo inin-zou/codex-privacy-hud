@@ -115,16 +115,25 @@ def open_reader(data_dir: Path) -> Ledger:
 
 
 def runtime_matches(data_dir: Path, *, activation: Activation) -> bool:
-    """Does a daemon matching the selected build answer right now?
+    """Is anything answering that is *not* the selected build?
 
     A hello and nothing else. Used to decide whether to show the mismatch
     banner, never to decide whether history may be read.
+
+    Nothing answering is not a mismatch. The daemon idle-exits five
+    minutes after the last session and the next hook starts it, so "no
+    daemon" is the ordinary state of a healthy installation between
+    sessions — and a banner that said "Privacy HUD runtime mismatch"
+    there would be a false statement of fact in the state users see most
+    often, which is how a warning stops being read. `connect_runtime`
+    separates the two: `runtime_mismatch` means something answered and it
+    was not this build, `request_failed` means nothing answered in time.
     """
     try:
         connect_runtime(data_dir, activation=activation,
                         timeout=ALIGNMENT_TIMEOUT).close()
-    except RuntimeRefusal:
-        return False
+    except RuntimeRefusal as refusal:
+        return refusal.code != "runtime_mismatch"
     return True
 
 

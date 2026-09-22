@@ -2,9 +2,9 @@
 
 **Status:** Draft v0.1 · **Date:** 2026-09-03 · **Companion to:** `PRD.md`, `architecture.md`
 
-**Current contract — #54 Phase 2 (0.7.9).**
+**Current contract — #66 runtime consistency (0.8.0), retaining #54 Phase 2.**
 
-The daemon prepares the new accounting schema at a new-session boundary. Production sessions still use legacy accounting. Migration preserves every stored legacy value and performs no backfill or rescoring. Readers do not migrate the ledger. The new observations, identities, evidence, and disclosure charges are not active. #43, #44, and the related #47 accounting limitations remain unresolved.
+First-party runtime code loads from the selected plugin bundle. Clients establish matching runtime identity before sending hook payloads or policy mutations. The compatible daemon owns ledger writes. Readers open the ledger read-only. Explicit repair preserves stored values and fences the historical ledger pathname; it does not rebuild accounting. The daemon retains the genuine new-session preparation boundary. Production sessions still use legacy accounting. No historical rows are backfilled or rescored. Snapshot version remains 2. The native HUD does not authenticate runtime alignment. #43, #44, and the related #47 accounting limitations remain unresolved.
 
 This document covers product and interaction design: what the user sees, what they can do, and the rules governing how we talk about disclosure. Implementation lives in `architecture.md`.
 

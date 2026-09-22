@@ -409,10 +409,44 @@ def test_issue66_skill_commands_execute(tmp_path):
               if "runtime.py" in block or "$HUD" in block]
     assert blocks, "the skill runs nothing through the bundled launcher"
     for block in blocks:
+        if " ui " in block:
+            # The browser block backgrounds a server that stays up until
+            # it is stopped; it is run, its one line is read, and it is
+            # stopped by process group so nothing outlives the test.
+            _run_browser_block(block, env)
+            continue
         proc = subprocess.run(["bash", "-c", block], capture_output=True,
                               text=True, env=env, timeout=300)
         assert proc.returncode == 0, (block, proc.stdout, proc.stderr)
         assert "Traceback" not in proc.stderr, (block, proc.stderr)
+
+
+def _run_browser_block(block: str, env: dict) -> None:
+    import signal
+    import threading
+
+    proc = subprocess.Popen(["bash", "-c", block], stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, env=env,
+                            start_new_session=True)
+
+    def stop() -> None:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (OSError, ProcessLookupError):
+            pass
+
+    watchdog = threading.Timer(120.0, stop)
+    watchdog.start()
+    try:
+        line = proc.stdout.readline().strip()
+        assert line.startswith("http://127.0.0.1:"), line
+    finally:
+        watchdog.cancel()
+        stop()
+        try:
+            proc.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            proc.kill()
 
 
 def test_issue66_runtime_manifest_is_current():

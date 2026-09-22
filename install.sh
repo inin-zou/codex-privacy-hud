@@ -628,5 +628,5 @@ write_manifest
 log "done. restart codex to load the installed plugin and PATH changes"
 log "      the native Privacy item requires a snapshot-v2-compatible patched Codex build"
 log "      matching Codex versions and successful installation do not establish snapshot compatibility"
-log "      until compatibility is verified, use: $SHARE/venv/bin/privacy-hud-ambient --watch"
+log "      until compatibility is verified, use: $SHARE/bin/privacy-hud-ambient --watch"
 log "      \$privacy shows the session audit"

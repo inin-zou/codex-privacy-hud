@@ -439,7 +439,12 @@ def serve(session_id: str | None = None, *, print_url: bool = True) -> UIServer:
     query = f"?session_id={session_id}" if session_id else ""
     url = f"http://{host}:{port}/{query}"
     if print_url:
-        print(url)
+        # Flushed, not left in the buffer. This process blocks forever
+        # after printing, and Python block-buffers stdout when it is not a
+        # terminal -- so the one line this command exists to emit never
+        # arrived for anything that read it through a pipe, which is how
+        # the `$privacy` skill's step 3 backgrounds it (#66).
+        print(url, flush=True)
     return server
 
 

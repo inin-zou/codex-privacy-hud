@@ -18,7 +18,7 @@ A local-first Codex plugin that records hook observations in a session ledger an
 
 The HUD currently shows a legacy permitted-crossing score. Historical accounting includes permitted crossings and may collapse different outcomes; it does not establish confirmed disclosure. The badge counts legacy prevented rows, not denied calls or confirmed host-enforced interventions. An unrecorded session shows “No session on record” with no percentage or numeric counts.
 
-Version 0.7.9 prepares the new ledger schema at a new-session boundary. Sessions still use legacy accounting. Historical records and stored scores are unchanged; collapsed outcomes are not reconstructed.
+Version 0.8.0 checks runtime alignment and fences the active ledger from historical entry points. The daemon still prepares the accounting schema at a genuine new-session boundary, and production sessions still use legacy accounting. Historical records and stored scores are not backfilled or rescored.
 
 A denial or rewritten input returned by Privacy HUD is not confirmation that the host applied it. Current hooks do not establish that a denied call did not run or that rewritten input reached its intended recipient.
 
@@ -60,11 +60,19 @@ Design-intent illustration. It predates the explicit legacy labels; its bar and 
 
 ## Install
 
-Privacy HUD 0.7.9 retains snapshot version 2 and legacy accounting. Updated readers accept version 1 as explicitly legacy and accept version 2 with nullable accounting fields. Older patched Codex readers reject version 2 and show no Privacy item. A matching Codex version alone does not establish snapshot compatibility. Use a snapshot-v2-compatible patched build, or run privacy-hud-ambient --watch in a separate terminal pane.
+Privacy HUD 0.8.0 retains snapshot version 2. Production sessions still use legacy accounting. Snapshot-v2 readers accept version 1 as explicitly legacy and version 2 with nullable accounting fields. Older snapshot-v1-only readers reject version 2 and show no Privacy item. Matching Codex version numbers do not establish snapshot compatibility.
 
-Updating the plugin does not update an installed patched binary. The daemon rebuilds the ledger at a genuine new-session boundary; the installer does not migrate it. After the rebuild, do not run a pre-0.7.9 daemon against this ledger. Reinstall a compatible version; no downgrade migration is provided.
+The snapshot-v2 patched Codex builds for 0.154.0, 0.155.0, and 0.155.1 were re-released on 2026-09-22. An earlier installation of one of those versions may still contain the older reader. Updating the plugin does not replace that binary. No additional patched-Codex release is required for Privacy HUD 0.8.0.
 
-The already-published snapshot-v1 builds do not support 0.7.8 snapshots. Updated release artifacts have not been published as part of this change.
+The native Privacy item displays accounting snapshots; it does not verify runtime alignment. Before repair, an old daemon may continue refreshing a legacy reading. Use doctor to check alignment. The bundled ambient launcher reports runtime failure instead of displaying a percentage.
+
+Privacy HUD loads its Python code from the selected plugin bundle. The recorded Python environment supplies dependencies. Run `$privacy repair` to obtain the exact recovery command for another terminal. Explicit installation may download dependencies and model weights; runtime checks and offline repair do not.
+
+Repair preserves recorded ledger values and moves the active store to `$PLUGIN_DATA/ledger/active.db`. `$PLUGIN_DATA/ledger.db` becomes a directory that fences the historical pathname. Do not replace it with a file or symlink. Repair does not perform the accounting rebuild; the compatible daemon retains the genuine new-session migration boundary. Unsupported or altered schemas are preserved and refused. No downgrade migration is provided.
+
+Runtime mismatches produce an unverified warning on ingress and a denial for outbound calls the hook cannot verify. These are plugin decisions, not confirmation of host enforcement. Monitoring gaps and lost in-memory detection state cannot be reconstructed.
+
+Privacy HUD 0.7.1 does not alter the schema of a valid prepared generation-5401 ledger during initialization: `events` already contains `source_kind`. It can nevertheless open the historical ledger pathname without participating in the selected runtime's handshake or writer lease. On a prepared ledger, historical session and coverage writes can succeed even though legacy event recording fails against the new `events` layout. On a generation-0 ledger, historical event writes remain possible, and initialization adds `source_kind` only when that column is absent. Explicit repair therefore quiesces legacy users, preserves the ledger at `$PLUGIN_DATA/ledger/active.db`, and replaces `$PLUGIN_DATA/ledger.db` with a directory fence that prevents subsequent historical-path opens. The fence does not revoke already-open connections or protect against same-user code deliberately opening the active pathname.
 
 Verified end-to-end against a real Codex CLI install on 0.145.0 and 0.153.0.
 
@@ -341,7 +349,7 @@ Stated up front, because a privacy tool that overclaims is worse than none:
 | `[tui].status_line` in `~/.codex/config.toml` | The list of status-line items Codex renders. The installer adds `"privacy"` to it. |
 | `install.sh --yes` / `--no-model` / `--release-base-url URL` / `--uninstall` / `--purge` | `--yes` answers the model question with yes, `--no-model` skips the download, `--release-base-url` fetches the patched build from somewhere other than this repository's GitHub releases, `--uninstall` removes what the installer created, `--purge` also removes the ledger and the weights. |
 | `PRIVACY_HUD_NO_SPAWN=1` | Turns daemon auto-start off entirely, for a sandbox where the spawn cannot succeed. |
-| `privacy-hud-ambient --watch [N]` / `--once` / `--session-id <id>` | Runs the fallback pane: redraw every N seconds, print one line and exit, or pin the pane to one session. |
+| `~/.local/share/codex-privacy-hud/bin/privacy-hud-ambient --watch [N]` / `--once` / `--session-id <id>` | Runs the fallback pane: redraw every N seconds, print one line and exit, or pin the pane to one session. |
 
 ## Troubleshooting
 
@@ -349,7 +357,7 @@ Stated up front, because a privacy tool that overclaims is worse than none:
   release for your Codex version. Everything else installed; the status
   item will appear once a build for that version is published (rerun the
   installer then). Until then the fallback pane works:
-  `~/.local/share/codex-privacy-hud/venv/bin/privacy-hud-ambient --watch`
+  `~/.local/share/codex-privacy-hud/bin/privacy-hud-ambient --watch`
   in a second terminal.
 - **The status line shows no `privacy` item after upgrading Codex** — the
   forwarder found no patched build for the new version and ran your official
@@ -366,8 +374,10 @@ Stated up front, because a privacy tool that overclaims is worse than none:
   nothing; add `"privacy"` to `[tui].status_line` yourself, using the line
   it prints.
 - **Doctor shows `FAIL`** — read its fix line; it names the exact command.
-  `privacy-hud-doctor --check-model` goes further and loads the detector
-  for real.
+  the bundled `doctor --load-model` goes further and loads the
+  detector for real. Every command runs through the selected bundle's
+  bootstrap: `python3 "$PRIVACY_HUD_BUNDLE/scripts/runtime.py"
+  --plugin-data "$PRIVACY_HUD_DATA" doctor`.
 - To start over: run the [uninstaller](#uninstall), then install again.
 
 ## Uninstall
