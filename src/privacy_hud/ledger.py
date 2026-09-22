@@ -62,13 +62,15 @@ from typing import Literal
 from . import ledger_schema
 from .budget import contribution, percent
 from .matrix.loader import Matrix
+from .runtime_owner import WriterLease
 
 #: The legacy schema; see `ledger_schema` for all three generations.
 SCHEMA = ledger_schema.LEGACY_SCHEMA
 
 
 def open_connection(path: Path, *, initialize: bool,
-                    check_same_thread: bool) -> sqlite3.Connection:
+                    check_same_thread: bool = True,
+                    read_only: bool = False) -> sqlite3.Connection:
     """One ledger connection, configured the same way everywhere.
 
     Autocommit (`isolation_level=None`) with explicit transactions, row
@@ -471,7 +473,8 @@ class Ledger:
     def __init__(self, path: Path, matrix: Matrix, *,
                  observer: str | None = None,
                  check_same_thread: bool = True,
-                 initialize: bool = True):
+                 initialize: bool = True,
+                 writer_lease: "WriterLease | None" = None):
         """`observer` identifies this `Ledger` instance in the `coverage` table.
 
         One id per instance, defaulted to a fresh random one, because "who was
@@ -497,6 +500,9 @@ class Ledger:
         """
         self.matrix = matrix
         self.observer = observer or uuid.uuid4().hex[:16]
+        #: The lease authorizing this instance to write, or `None` for a
+        #: reader. Pair 3 scaffolding: stored, not yet enforced.
+        self._lease = writer_lease
         #: Depth of the write transaction this instance owns; 0 when none.
         self._write_depth = 0
         #: Test-only hook called after each migration statement executes.

@@ -21,11 +21,28 @@ from privacy_hud import dispatch, engine
 # not.
 sys.path.append(str(Path(__file__).resolve().parent.parent / "mcp"))
 
+import runtime_helpers  # noqa: E402  (after the path setup above)
+
+
+@pytest.fixture(autouse=True)
+def release_writer_leases():
+    """Give back every writer lease `runtime_helpers.writer_lease` handed
+    out (#66 Pair 3).
+
+    A lease is a file descriptor holding an `flock`, and a test that
+    abandons its ledger abandons the descriptor with it. One per test is
+    nothing; a whole suite run's worth is a descriptor limit. Autouse so
+    the accounting is not a thing each test has to remember.
+    """
+    yield
+    runtime_helpers.release_leases()
+
 
 @pytest.fixture
 def state(tmp_path, monkeypatch):
     monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))
-    st = dispatch.new_state(tmp_path)
+    st = dispatch.new_state(
+        tmp_path, writer_lease=runtime_helpers.writer_lease(tmp_path))
     yield st
     st.ledger.conn.close()
 

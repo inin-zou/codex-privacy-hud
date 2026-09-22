@@ -127,3 +127,49 @@ def plant_old_distribution(directory: Path, sentinel: Path) -> None:
     (info / "METADATA").write_text(
         "Metadata-Version: 2.1\nName: privacy-hud\nVersion: 0.7.1\n",
         encoding="utf-8")
+
+
+# --------------------------------------------------------------------- #
+# writer leases (#66 Pair 3)
+# --------------------------------------------------------------------- #
+
+#: Every lease handed out below, so `conftest`'s autouse fixture can give
+#: the file descriptors back even when a test abandons its ledger. A test
+#: root is private to one test, so nothing here contends; the list exists
+#: to bound descriptors across a whole suite run, not to serialize.
+_OPEN_LEASES: list = []
+
+
+def writer_lease(data_dir, *, selected=None):
+    """A real `WriterLease` on a temporary data root.
+
+    Real, not a stand-in: it takes the same `flock` on the same
+    `runtime-writer.lock` that the daemon takes, under the test's own
+    directory. No argument and no environment variable turns the ledger's
+    ownership checks off, so this is how a test becomes a writer.
+    """
+    from privacy_hud.runtime_owner import acquire_writer
+
+    lease = acquire_writer(Path(data_dir), activation=selected or activation())
+    _OPEN_LEASES.append(lease)
+    return lease
+
+
+def writer_ledger(path, matrix, *, data_dir=None, selected=None, **kwargs):
+    """An initializing `Ledger` at `path`, holding a real lease.
+
+    The lease is taken in `data_dir`, defaulting to the database's own
+    directory — which is what `$PLUGIN_DATA` is for a real installation
+    before #66's relocation, and what a test's `tmp_path` is here.
+    """
+    from privacy_hud.ledger import Ledger
+
+    lease = writer_lease(data_dir if data_dir is not None else Path(path).parent,
+                         selected=selected)
+    return Ledger(path, matrix, writer_lease=lease, **kwargs)
+
+
+def release_leases() -> None:
+    """Close every lease `writer_lease` handed out. Idempotent."""
+    while _OPEN_LEASES:
+        _OPEN_LEASES.pop().close()

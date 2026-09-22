@@ -201,7 +201,7 @@ class State:
     live_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
-def new_state(data_dir) -> State:
+def new_state(data_dir, *, writer_lease=None) -> State:
     """Build the daemon's one-time-cost state: Matrix, Ledger (one sqlite
     connection for the daemon's life), and the detector stack (tiers 0-3).
 
