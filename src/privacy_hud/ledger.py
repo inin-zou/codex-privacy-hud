@@ -1,51 +1,21 @@
-"""Append-only disclosure ledger. Metadata only — see architecture.md §5.
+"""Versioned session accounting and legacy ledger access.
 
-The schema is the privacy guarantee: there is no `content`, `prompt`,
-`raw_value`, `snippet`, or `text` column anywhere. A column that does not
-exist cannot leak.
+Production sessions use legacy accounting. Phase 3 also implements an
+inactive version-2 core for isolated synthetic tests and the private-copy
+rehearsal.
 
-Dedupe key is (session_id, value_hash, destination): the same value reaching
-the same destination twice is one disclosure — increment `count`, budget
-delta is 0.0. The same value reaching a NEW destination is a new disclosure.
-This makes replayed hook events idempotent.
+Legacy records retain their stored scores, counts and classifications.
+Version-2 observations, events and disclosures are separate immutable
+records. Only a new chargeable disclosure increases a version-2 score.
 
-Only `kind == "exposed"` rows move the budget. `prevented`, `local_access`,
-`detected` and `retention` rows are recorded but always score 0.0.
+Version-2 identity inputs are hashed before persistence. Labels and
+exemplars use explicit allowlists; the absence of a raw-content column
+alone does not establish that arbitrary metadata is safe.
 
-Append-only: the only permitted UPDATEs are incrementing `count` and, at
-`end_session`, nulling `value_hash` for the session. No deletes, no rewrites.
-
-**The read side is typed.** `summary()` and `list_events()` used to return
-bare dicts, and the three modules downstream of them (`mcp_tools`, `render`,
-`local_ui_server`) agreed on their shape only through string literals. That is
-not a hypothetical risk here: `detect/model.py`'s `LABEL_MAP` shipped with the
-wrong keys (`EMAIL` where the model emits `private_email`), so tier 3 silently
-returned nothing until someone traced a live session by hand. A mistyped key
-is either a `KeyError` at the worst possible moment or, worse, a `.get()`
-returning `None` that renders as an empty cell nobody notices. The dataclasses
-below exist so that failure mode has somewhere to fail loudly instead:
-`LegacySessionSummary`/`UnrecordedSessionSummary`, `LegacyExposureRow` and
-`LegacyEventRow` are the read contract, and the JSON boundary is an explicit
-`as_dict()` rather than an accident of whatever the dict happened to hold.
-
-**Every recorded session is legacy-accounted (#54 phase 1).** The readers
-label its numbers as legacy and route to `events` or, after #54's rebuild,
-`events_legacy_v1`, deciding which inside each read. Readers open without
-initializing (`Ledger(..., initialize=False)`); only the daemon applies the
-schema.
-
-**A ledger that recorded nothing looks exactly like a ledger with nothing to
-record — unless it also records whether it was watching.** That is what the
-`coverage` table is for, and it is the third state this schema previously could
-not express. `summary()` used to answer an unknown session with a well-formed
-zero, and zero events / 0% is also what a genuinely clean session looks like,
-so the product's central number conflated "nothing sensitive was disclosed" with "I
-have no idea what was disclosed". This is not hypothetical: an I7 self-audit
-(CLAUDE.md §3) once read as a clean pass — zero events, budget 0.0/120.0 —
-against a session the daemon had never seen at all, because it cold-started
-after the `codex exec` had already finished. The session count went 8 → 8 and
-nothing in the ledger said so. `coverage` is the row that now says so; see
-`SessionCoverage` for exactly what it can and cannot prove.
+Readers select the session's accounting version inside a read transaction
+and never initialize, migrate or activate a ledger. SessionEnd erases
+matching hashes while retaining opaque identities and accounting joins;
+this is logical erasure, not a secure-deletion guarantee.
 """
 from __future__ import annotations
 
