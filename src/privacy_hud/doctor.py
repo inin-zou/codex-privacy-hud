@@ -119,6 +119,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import socket
 import sqlite3
@@ -568,10 +569,22 @@ def check_ledger() -> Check:
         )
 
     try:
+        # One read transaction, so the table list and the counts describe
+        # the same snapshot. After #54's rebuild the legacy rows live in
+        # `events_legacy_v1` and new rows in `events`; both are counted, or
+        # the historical events would drop out of the total.
+        conn.execute("BEGIN")
+        tables = {row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
         sessions = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
-        events = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        events = sum(
+            conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("events", "events_legacy_v1") if table in tables)
+        if "events" not in tables and "events_legacy_v1" not in tables:
+            raise sqlite3.OperationalError("no events table")
         latest = conn.execute(
             "SELECT MAX(started_at) FROM sessions").fetchone()[0]
+        conn.execute("COMMIT")
     except sqlite3.Error as exc:
         return Check(
             "Ledger", FAIL,
@@ -1740,9 +1753,24 @@ def _stderr_tail(text: str, *, allow_launcher: bool = False) -> str:
 #: synthetic: the probe reads, and must never name a real session.
 MCP_PROBE_SESSION = "__privacy_hud_doctor_probe__"
 
-#: The fields a `privacy.get_session_summary` reply carries.
-_SUMMARY_FIELDS = frozenset({"percent", "exposed_items", "destinations",
-                             "prevented"})
+#: A `privacy.get_session_summary` reply, per accounting variant: the
+#: exact key set and the two copy constants it must carry. Kept as literals
+#: rather than imported, like the rest of this module's expectations: the
+#: doctor checks a server it may not share a package version with.
+_LEGACY_SUMMARY_KEYS = frozenset({
+    "accounting_version", "legacy_score", "legacy_cap", "legacy_percent",
+    "legacy_permitted_crossing_rows", "legacy_boundary_kinds",
+    "legacy_prevented_rows", "score_label", "accounting_note"})
+_UNRECORDED_SUMMARY_KEYS = frozenset({
+    "accounting_version", "percent", "score_label", "accounting_note"})
+_LEGACY_SUMMARY_LABEL = "legacy permitted-crossing score"
+_LEGACY_SUMMARY_NOTE = (
+    "Historical accounting includes permitted crossings and may collapse "
+    "different outcomes. It does not establish confirmed disclosure.")
+_UNRECORDED_SUMMARY_LABEL = "No session on record"
+_UNRECORDED_SUMMARY_NOTE = (
+    "No session record is available in this ledger. The percentage and "
+    "counts are unavailable.")
 
 
 def _mcp_probe(command, cwd, env, timeout) -> tuple[list[str], bool]:
@@ -1885,12 +1913,53 @@ def _is_summary_reply(message: dict | None) -> bool:
         summary = json.loads(first["text"])
     except ValueError:
         return False
-    return (
-        isinstance(summary, dict)
-        and set(summary) == _SUMMARY_FIELDS
-        and all(type(value) is int and value >= 0
-                for value in summary.values())
-    )
+    return _is_summary(summary)
+
+
+def _is_count(value) -> bool:
+    return type(value) is int and value >= 0
+
+
+def _is_finite(value) -> bool:
+    if type(value) not in (int, float):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _is_summary(summary) -> bool:
+    """Exactly one of the two summary variants, with its label and note.
+
+    `accounting_version` must be an actual integer, not a boolean. The old
+    four-integer summary is rejected: it cannot say whether its numbers are
+    legacy or whether the session was recorded at all.
+    """
+    if not isinstance(summary, dict):
+        return False
+    version = summary.get("accounting_version")
+    if type(version) is not int:
+        return False
+    if version == 0:
+        return (set(summary) == _UNRECORDED_SUMMARY_KEYS
+                and summary["percent"] is None
+                and summary["score_label"] == _UNRECORDED_SUMMARY_LABEL
+                and summary["accounting_note"] == _UNRECORDED_SUMMARY_NOTE)
+    if version == 1:
+        return (set(summary) == _LEGACY_SUMMARY_KEYS
+                and _is_finite(summary["legacy_score"])
+                and summary["legacy_score"] >= 0
+                and _is_finite(summary["legacy_cap"])
+                and summary["legacy_cap"] > 0
+                and _is_count(summary["legacy_percent"])
+                and summary["legacy_percent"] <= 100
+                and _is_count(summary["legacy_permitted_crossing_rows"])
+                and _is_count(summary["legacy_boundary_kinds"])
+                and _is_count(summary["legacy_prevented_rows"])
+                and summary["score_label"] == _LEGACY_SUMMARY_LABEL
+                and summary["accounting_note"] == _LEGACY_SUMMARY_NOTE)
+    return False
 
 
 def _attach_stderr(

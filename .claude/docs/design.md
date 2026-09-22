@@ -2,6 +2,10 @@
 
 **Status:** Draft v0.1 · **Date:** 2026-09-03 · **Companion to:** `PRD.md`, `architecture.md`
 
+**Current contract — #54 Phase 1 (0.7.8).**
+
+Phase 1 of #54 prepares readers and labels existing accounting. Recorded sessions still use the legacy writer, deduplication, and score arithmetic. Their displayed number is a legacy permitted-crossing score, not a confirmed-disclosure percentage. An unrecorded session has no percentage or numeric counts. The new observation, evidence, recipient, and distinct-disclosure accounting has not been activated. #43, #44, and the related #47 accounting limitations remain unresolved.
+
 This document covers product and interaction design: what the user sees, what they can do, and the rules governing how we talk about disclosure. Implementation lives in `architecture.md`.
 
 ---
@@ -9,7 +13,7 @@ This document covers product and interaction design: what the user sees, what th
 ## 1. Design principles
 
 **P1 — Ambient by default, deep on demand.**
-A privacy tool that interrupts constantly gets disabled within a day. Level 1 is a glance; Levels 2–3 are opt-in. The only unprompted interruption is a *block*, because a block already stopped the agent.
+A privacy tool that interrupts constantly gets disabled within a day. Level 1 is a glance; Levels 2–3 are opt-in. Intervention messages describe a denial issued or rewritten input returned; they do not confirm host application.
 
 **P2 — Honest accounting beats alarming.**
 Never show a number that conflates "we detected something" with "something left the machine." A scanner that screams about every email in every file is noise. The product's credibility rests on the `detected` / `exposed` / `prevented` distinction being visible everywhere.
@@ -49,7 +53,7 @@ Each level answers exactly one question. A view that answers two questions is a 
 
 ## 3. Visual language
 
-Terminal-native, dark-first. The mockup's aesthetic is the spec.
+Terminal-native, dark-first. The hand-drawn mockup records design intent; the current copy and display contract below supersede its historical labels.
 
 | Token | Value | Use |
 |---|---|---|
@@ -59,66 +63,68 @@ Terminal-native, dark-first. The mockup's aesthetic is the spec.
 | `text` | `#c9d4e0` | primary copy |
 | `muted` | `#5c6b7f` | labels, column headers, metadata |
 | `accent` | `#22d3ee` | interactive, links, section markers, `›` |
-| `safe` | `#4ade80` | green band, prevented |
+| `safe` | `#4ade80` | legacy score band only; never proof of safety |
 | `warn` | `#fbbf24` | amber band, masked, irreversibility notice |
 | `danger` | `#f87171` | red band, exposed |
 
 **Typography:** monospace throughout (`ui-monospace, SF Mono, Menlo, monospace`). Column alignment is the layout system — no proportional fonts anywhere, including the web UI. Section labels are `UPPERCASE` + `muted` + letterspaced.
 
-**Status chips** are outlined, not filled: `EXPOSED` (danger), `MASKED` (warn), `PREVENTED` (safe), `LOCAL` (muted). Outlines keep the table scannable when many rows share a status.
+**Status chips** identify stored legacy classifications with neutral styling: `LEGACY PERMITTED`, `LEGACY PREVENTED ROW`, `LEGACY LOCAL ACCESS`, `LEGACY DETECTED`, `LEGACY RETENTION`, or `LEGACY UNKNOWN`. They do not establish delivery or host enforcement.
 
-**Bands** (§5.3 of the PRD): 0–33 `safe`, 34–66 `warn`, 67–100 `danger`. The bar is 10 cells; a filled cell is `█`, empty is `░`.
+**Bands** remain an existing legacy-score presentation primitive: 0–33 `safe`, 34–66 `warn`, 67–100 `danger`. The current HUD is bar-free. Unavailable quantities have no numeric band or bar.
 
 ---
 
 ## 4. Level 1 — Ambient HUD
 
 ```text
-PRIVACY  Disclosure ███░░░░░░░ 28%  ›
+Privacy legacy 28% · 2 prevented rows
 ```
 
-**Composition:** label · metric name · 10-cell bar · percentage · affordance chevron. The bar and percentage are colored by band; everything else is `muted`.
+`hud_line(reading, width)` selects the first complete candidate that fits. It never slices text. Hidden readings render nothing; readers filter absent, malformed, and stale snapshots.
 
-**States**
-
-| State | Render |
+| State | Full-width text |
 |---|---|
-| Clean session | `PRIVACY  Disclosure ░░░░░░░░░░  0%  ›` |
-| Normal | `PRIVACY  Disclosure ███░░░░░░░ 28%  ›` |
-| Red band | bar + `%` in `danger`; `PRIVACY` label also `danger` |
-| Active block | `PRIVACY  ⚠ 1 blocked · Disclosure ███░░░░░░░ 28%  ›` for 30 s, then decays |
-| Engine degraded | `PRIVACY  Disclosure ███░░░░░░░ 28% ⚠unverified ›` |
-| Disabled | render nothing (never a "privacy off" banner that itself nags) |
+| Recorded legacy zero | `Privacy legacy 0%` |
+| Legacy | `Privacy legacy 28% · 2 prevented rows` |
+| Legacy with a coverage gap | `Privacy legacy 28% · 2 prevented rows ⚠unverified` |
+| Explicitly unrecorded | `Privacy —% · No session on record` |
+| No resolved session, daemon-reported gaps | `Privacy —% · unattributed hook gaps` |
 
-**`⚠unverified` is a third state, not a variant of the other two.** "Disabled"
-means there is nothing to report on. "Engine degraded" means there is something
-to report on and the report has a hole in it — which makes it the only state
-that can distinguish `0%` meaning *nothing sensitive was disclosed* from `0%`
-meaning *I have no idea what was disclosed*. For a privacy tool those must
-never render identically, and until this state was wired up they did: an I7
-self-audit passed on a ledger that had never recorded the session being
-audited. The renderer takes it as a flag it cannot infer (`render.hud_line`'s
-`unverified=`); the ledger's `coverage` table is what decides it, from recorded
-evidence only — never from a heuristic guess that a gap probably happened.
+The secondary count is legacy rows, not calls. Use `1 prevented row`; omit zero. Coverage does not establish delivery or host enforcement.
 
-Below 28 columns the word does not fit, so the warning glyph **replaces** the
-band dot: `⚠ 28%`, not `⬤ 28% ⚠`. A marker appended after the percentage is the
-first thing width-truncation removes, and what it leaves behind is a
-clean-looking number — the exact failure the state exists to prevent. The band
-colour is the cheaper thing to lose.
-
-**Width degradation** — the companion renderer is terminal-width aware:
+Width candidates, in order:
 
 ```text
-≥ 52 cols   PRIVACY  Disclosure ███░░░░░░░ 28%  ›
-40–51 cols  PRIVACY ███░░░░░░░ 28% ›
-28–39 cols  PRIV ███░░ 28% ›
-< 28 cols   ⬤ 28%          (dot colored by band)
+Legacy:
+Privacy legacy {P}% · {N} prevented rows
+Privacy legacy {P}%
+legacy {P}%
+legacy
+
+Legacy with incomplete coverage:
+Privacy legacy {P}% · {N} prevented rows ⚠unverified
+Privacy legacy {P}% ⚠unverified
+legacy {P}% ⚠unverified
+⚠ legacy {P}%
+⚠ legacy
+
+Unrecorded:
+Privacy —% · No session on record
+Privacy —% · no record
+—% · no record
+⚠ —%
+
+Unattributed gaps:
+Privacy —% · unattributed hook gaps
+Privacy —% ⚠unverified
+⚠ —%
 ```
 
+Apply singular/zero handling before testing widths. If no candidate fits, render nothing. Reserved accounting-2 readings use their full line only and render nothing when it does not fit; Phase 1 does not publish them. The Rust item returns the full line; Codex owns its final layout.
+
 **Which session the line is about** is resolved by the same function `$privacy`
-uses (`mcp_tools.resolve_audit_session`), so the pane beside a window and the
-audit typed into it can never name different sessions. It is resolved once at
+uses (`mcp_tools.resolve_audit_session`), but separately timed resolutions can select different sessions. It is resolved once at
 startup and roughly every 30 s after, never per redraw: the resolution asks the
 daemon, whose socket is the hook hot path, and a pane that changed which
 session it reported on between two-second frames would be unreadable even if
@@ -126,16 +132,12 @@ every frame were individually correct. `--session-id` pins it outright.
 
 **L1 says nothing about session ambiguity, and that is deliberate.** When
 resolution is uncertain — two windows active in the same moment, or no daemon
-to ask — `$privacy` prints a two-sentence note above a full-width table. This
-line has 52 columns at its widest and 5 at its narrowest; there is no honest
-way to fit a second caveat into that, and `⚠unverified` is not available to
-carry it. That glyph means *this session's record has a known hole*, which is a
+to ask — `$privacy` prints a two-sentence note above a full-width table. The compact candidates omit session-identity caveats, and `⚠unverified` is not available to carry one. That glyph means *this session's record has a known hole*, which is a
 different question from *whose session this is*, and a marker that meant both
 would mean neither — collapsing the three states above back into two. Say
 nothing here and let L2 explain.
 
-**Non-goals for L1:** no counts, no data types, no last-event ticker, no
-session-identity caveat. Every addition here is a tax paid on every frame of
+**Non-goals for L1:** no data types, no last-event ticker, no session-identity caveat. The one secondary count labels legacy prevented rows. Every addition here is a tax paid on every frame of
 the user's attention.
 
 ---
@@ -146,20 +148,17 @@ the user's attention.
 Privacy Audit
 Session session_123
 
-┌───────────┐ ┌─────────────────────┐ ┌────────────────┐ ┌───────────┐
-│    28%    │ │          4          │ │       2        │ │     17    │
-│ of budget │ │ permitted crossings │ │ boundary kinds │ │ prevented │
-└───────────┘ └─────────────────────┘ └────────────────┘ └───────────┘
+28%  legacy permitted-crossing score
+4    legacy permitted-crossing rows
+2    legacy boundary kinds
+17   legacy prevented rows
 
- Exposed 4      Prevented 17      All events 24
- ─────────
+Historical accounting includes permitted crossings and may collapse different outcomes. It does not establish confirmed disclosure.
 
-SENSITIVE DATA        SOURCE           DESTINATION      STATUS
-Customer email ×12    support.log      model context    [EXPOSED]
-Full name ×1          user prompt      model context    [EXPOSED]
-Repository path ×4    tool input       GitHub MCP       [EXPOSED]
-Internal hostname ×3  terminal output  model context    [MASKED]
+Legacy permitted crossings 4 · Legacy prevented rows 17 · All legacy events 24
 ```
+
+This is a compact content example, not a literal rendering of the tile borders.
 
 **Header subtitle.** The browser and its ASCII view show `Session <full ID>`. Before resolution they show `Session ID unknown`; a successful resolution with no session shows `No session on record`. The skill's terminal audit retains the resolution-specific subtitles below.
 
@@ -173,22 +172,22 @@ Internal hostname ×3  terminal output  model context    [MASKED]
 
 Only the first line supports the word "current", and it supports it for a specific reason: running `$privacy` fires a hook in the asking session, so "most recently active" *is* "current" by construction. A header asserting certainty above a note retracting it is the same overclaim §9 forbids anywhere else.
 
-**Summary tiles.** Four, fixed. The field names are `percent`, `exposed_items`, `destinations`, `prevented`; the labels shown are "of budget", "permitted crossings", "boundary kinds", "prevented" (#49 item 9).
+**Summary tiles.** Four, fixed. Legacy wire keys are `legacy_percent`, `legacy_permitted_crossing_rows`, `legacy_boundary_kinds`, and `legacy_prevented_rows`; their labels are the four shown above. The legacy summary also returns `legacy_score`, `legacy_cap`, `score_label`, and `accounting_note`. Accounting 0 returns `percent=null` with no numeric score, cap, or counts; the tiles show unavailable values and the unrecorded accounting note.
 
-`destinations` is the tile people underestimate — it is meant to be the "how far did this spread" number, and that is what would distinguish this from a scanner. **As built it does not reach that** (`docs/known-limits.md` #20): `dispatch.py` normalises every MCP call to `mcp_tool` before the engine sees it, so the count is over boundary categories — a handful at most — and a second MCP server adds nothing to it. Restoring the recipient detail `architecture.md` specifies (`mcp:<server>`, `net:<host>`, `subagent:<id>`) is what would make this paragraph true.
+`legacy_boundary_kinds` is the tile people underestimate — it is meant to be the "how far did this spread" number, and that is what would distinguish this from a scanner. **As built it does not reach that** (`docs/known-limits.md` #20): `dispatch.py` normalises every MCP call to `mcp_tool` before the engine sees it, so the count is over boundary categories — a handful at most — and a second MCP server adds nothing to it. Restoring the recipient detail `architecture.md` specifies (`mcp:<server>`, `net:<host>`, `subagent:<id>`) is what would make this paragraph true.
 
 **Tabs.**
-- `Exposed` — crossed a boundary. Default tab. Sorted by budget contribution descending, not chronologically: the worst thing should be the first row.
-- `Prevented` — blocked, redacted, or minimized. Sorted most-recent-first. This tab is the product's proof of work.
-- `All events` — full timeline including `local_access` and `retention`, chronological. The forensic view.
+- `Legacy permitted crossings` — API argument `Exposed`; stored legacy permitted classifications, ordered by legacy contribution.
+- `Legacy prevented rows` — API argument `Prevented`; stored legacy prevented classifications, most recent first.
+- `All legacy events` — API argument `All events`; all stored legacy rows, chronological. Its count comes from the full list, not the sum of the other tabs.
 
-**Table columns.** `SENSITIVE DATA` (type + count) · `SOURCE` · `DESTINATION` · `STATUS`. Rows aggregate by `(data_type, source, destination)` — one row per *flow*, not per occurrence, which is why counts are `×12`.
+**Table columns.** `SENSITIVE DATA` (type + count) · `SOURCE` · `DESTINATION` · `STATUS`. Legacy deduplication keys on `(session_id, value_hash, destination)`; `×N` is the stored repetition count, not distinct values, calls, or flow hops.
 
 **Row affordances.** Whole row is the click target; hover raises `surface` and shows a left accent rule. Selected row keeps the accent.
 
 **Empty states** (each says what it means, not just "no data"):
-- Exposed, empty: `No sensitive data has crossed a trust boundary this session.`
-- Prevented, empty: `Nothing has been blocked or minimized yet.`
+- Legacy permitted crossings, empty: `No exposure recorded this session.`
+- Legacy prevented rows, empty: `Nothing recorded as blocked or minimized yet.`
 - All events, empty: `No privacy events recorded for this session.` — and, on a verified coverage reading, what the check found. The second sentence used to read `The engine is running.`, which answered the right question — an empty audit is otherwise indistinguishable from a broken plugin — with evidence that cannot answer it, since a ledger is history and cannot vouch for a live process (#49 item 3). Liveness belongs to `privacy-hud-doctor`.
 
 **Scan-gap banner.** A scan gap: an applicable deep scan supplied no accepted result. Over the event rows it is given: `⚠ 2 events had scan gaps — fast-path results only.` That line counts supplied rows carrying the flag; what the session actually counts — per observation, including observations with no event row — reaches the session-record banner below as `2 observations had scan gaps — fast-path results only`. Never silently present partial results as complete.
@@ -229,16 +228,16 @@ No events recorded for this tab. With this session's record incomplete, that is 
 Customer email ×12
 support.log → model context
 
-First seen   12:41:08
-Protection   none
-Example      jo•••@acme.com
+Legacy intervention   no intervention recorded
+Example               jo•••@acme.com
 
-[ Mask detected email in future calls ]
+This legacy source-to-destination association does not establish delivery or a multi-hop flow.
+Policy rules can be saved in the local audit browser opened by $privacy.
 
 Already disclosed data cannot be recalled from this session.
 ```
 
-**Fields.** Title (`type ×count`) · flow line · `First seen` · `Last seen` (when > first) · `Protection` (`none` / `masked` / `minimized`) · `Example` (masked exemplar) · `Budget contribution` (`+9 pts of 120`).
+**Fields.** Stored type and repetition count, source/destination association, timestamps when available, `Legacy intervention`, masked exemplar, and `Legacy contribution`. The accounting note accompanies the detail. Terminal text does not save policy.
 
 **The flow line is the hero.** For multi-hop flows it renders the full chain with each hop's boundary — *designed, never built; no multi-hop chain is assembled today, and a `×N` count is N hits on one dedupe key*:
 
@@ -247,9 +246,9 @@ support.log → main agent → GitHub MCP
    B0            B1            B3
 ```
 
-**Actions.** One always, a second where the row allows it:
-- `Mask detected <type> in future calls` — writes a policy rule to mask this data type going forward. *(Two corrections to what this line used to say. It said "from this source": the rule carries the data type only, and the engine matches type without source — issue #47 item 10. And the label used to be `Protect future occurrences`, which named an outcome the rule cannot guarantee; the rule fires when a later call produces a matching finding, and for every type other than `path` and `credential` matching requires an accepted deep-scan result — #49 item 2.)*
-- On a row whose source names a real origin — a file path or a command, not a bare tool label — `Block values read from {source}` (path) or `` Block values from `{source}` output `` (command). It writes a `block_path` or `block_command` rule keyed to the `Origin` that finding's value was first seen with (#40).
+**Browser actions.** The local browser POSTs rules to `/api/policy`; `privacy.update_policy` is a separate MCP writer. The terminal detail view has no policy buttons.
+- `Save mask rule for detected <type>` — the browser POSTs a `mask` rule to `/api/policy`. The rule selects a data type, not a source. The former label `Protect future occurrences` claimed an outcome that saving a rule cannot guarantee. Matching requires detection; types other than `path` and `credential` require an accepted deep-scan result. Host application is not confirmed.
+- Where a row names a real origin, `Save block rule for values read from {source}` or `Save block rule for values from {source} output` saves `block_path` or `block_command`. Saving succeeds independently of whether a later observation matches or the host applies a denial.
 
 A source rule matches the whole value, normalised: it compares a later outbound value against the origin-tagged value under a salted HMAC of `value.strip().lower()` (`mask.py`), so if the model summarizes, rewrites, or quotes part of what it read, the copy no longer matches and the rule does not catch it (`docs/known-limits.md` #10). This said "only byte-identical values" until #49 item 7, which contradicted the salted hash described in the same sentence: case and surrounding whitespace do not defeat the rule, so the set that matches is wider than a byte comparison, not narrower. Origin extraction is best-effort too (`docs/known-limits.md` #11) — a row with no recognised origin offers no rule at all, rather than one that would not work.
 
@@ -257,7 +256,7 @@ This replaces the earlier `Block this source` (`block_source`), withdrawn in #38
 
 In the red band the detail view also shows a note, not an action: `Want a clean context? Start a new conversation in Codex. What this session already sent to the model stays sent.` A clean context is a new Codex conversation, which the plugin cannot start; an earlier `Start a clean session` action opened a ledger row under an id Codex never sends and was removed (#23).
 
-Every policy action confirms the saved rule and its conditions. For a mask rule selecting email: `Rule saved: mask email, for this session. On later outbound calls this plugin checks, a detected email is masked unless the call is blocked outright. What the call is then allowed to do is decided by the rest of the policy, not by this rule. Matching email requires an accepted deep-scan result. A scan gap means an applicable deep scan supplied no accepted result (known limit 21); on that call this rule has no matching deep-scan finding. Detection can also miss values, and hosted tools never reach this plugin at all.` The confirmation uses `mcp_tools.rule_enforcement_note`: cheap data types receive the cheap-detection clause; origin rules receive the ingress-and-egress clause.
+Every policy action confirms the saved rule and the conditions returned by `mcp_tools.rule_enforcement_note`. Mask rules may return rewritten input for later matching findings; origin rules require detection on ingress and egress. Detection misses, scan gaps, and hosted tools can prevent matching. Host application of a later denial or rewritten input is not confirmed.
 
 **The irreversibility notice is required, permanent, and `warn`-colored.** It never collapses, never becomes a dismissible toast, never gets an "I understand" button that hides it. It is the single most honest element in the product.
 
@@ -265,15 +264,16 @@ Every policy action confirms the saved rule and its conditions. For a mask rule 
 
 ## 7. Interruption design
 
-Only one thing interrupts: a **block**. It arrives via hook `systemMessage`, which is native and always available.
+Intervention copy arrives through hook `systemMessage` and describes what the plugin returned.
 
 ```text
-⚠ PRIVACY HUD blocked a tool call
+PRIVACY HUD issued a tool-call denial
 
   github.create_issue  would send  Customer email ×12
   from support.log to GitHub MCP.
 
-  Run $privacy to review, minimize, or allow once.
+  Host enforcement is not confirmed.
+  Run $privacy to review the ledger.
 ```
 
 **Rules for block copy:** name the tool, name the data type and count, name the source and destination, and give exactly one next step. No severity adjectives ("dangerous", "critical") — the facts are alarming enough and adjectives erode trust when the tool is wrong.
@@ -283,6 +283,8 @@ Only one thing interrupts: a **block**. It arrives via hook `systemMessage`, whi
 ---
 
 ## 8. Consent flow
+
+Historical proposal, not shipped behavior. No surface offers the buttons or token-minting steps below; this section does not authorize user-facing instructions to use them.
 
 Codex `PreToolUse` has no `ask` decision, so consent is a three-beat flow rather than a modal (see `architecture.md` §8 for the token mechanics).
 
@@ -333,31 +335,28 @@ Pseudonyms are stable within the session, so the agent's reasoning survives the 
 
 ## 10. Session privacy receipt
 
-Emitted at `SessionEnd`, rendered in-terminal and saved as Markdown:
+Returned at `SessionEnd` for the host to display:
 
 ```text
 PRIVACY RECEIPT · session_123 · 41 min
 
-Disclosure       28% of budget
-Exposed          4 crossings across 2 boundary kinds
-Prevented        17 events
-Retained         transcript written to ~/.codex/sessions/...
+legacy permitted-crossing score: 28%
+legacy permitted-crossing rows: 4
+legacy boundary kinds: 2
+legacy prevented rows: 17
 
-  Customer email ×12    support.log     → model context
-  Full name ×1          user prompt     → model context
-  Repository path ×4    tool input      → GitHub MCP
-  Internal hostname ×3  terminal output → model context  (masked)
-
-No file contents, prompts, or raw values were stored.
+Historical accounting includes permitted crossings and may collapse different outcomes. It does not establish confirmed disclosure.
+Transcript retention is outside this ledger's account.
+This ledger stores metadata, not file contents, prompts, or raw values.
 ```
 
-The last line is the receipt's real payload. It is the sentence that makes the tool trustworthy, and it is verifiable by inspecting the ledger.
+Duration is omitted when unavailable. Unrecorded receipts show unavailable accounting, omit duration, and do not invent transcript-retention evidence. The receipt does not assert that a rewrite was applied.
 
 ---
 
 ## 11. Accessibility and constraints
 
-- **Never color-only.** Band is conveyed by bar fill and percentage; status by chip text. A monochrome terminal loses nothing but hue.
+- **Never color-only.** Accounting qualifiers, unavailable values, and status labels remain explicit in monochrome. The current HUD has no bar.
 - **No emoji as sole meaning.** `⚠` always accompanies text.
 - **Web UI:** semantic table markup, keyboard row navigation (`↑`/`↓`/`Enter`), visible focus rings in `accent`, respects `prefers-reduced-motion` (no bar animation).
 - **No horizontal scroll** in the terminal rendering; columns truncate with `…` from the middle of paths (`support/.../app.log`) so both ends stay readable.
@@ -368,14 +367,14 @@ The last line is the receipt's real payload. It is the sentence that makes the t
 
 | Component | Levels | Notes |
 |---|---|---|
-| `DisclosureBar` | 1, 2 | 10-cell, banded, width-degrading |
-| `SummaryTile` | 2 | value + label, banded value |
+| `HudReading` | 1 | accounting-aware text, complete width candidates, no bar |
+| `SummaryTile` | 2 | explicit legacy label or neutral unavailable value |
 | `TabBar` | 2 | three tabs with counts |
 | `FlowTable` | 2 | aggregated rows, sortable, selectable |
 | `StatusChip` | 2, 3 | outlined, four variants |
-| `FlowLine` | 3 | multi-hop chain with boundary labels |
+| `FlowLine` | 3 | recorded source/destination association; no reconstructed chain |
 | `MaskedExemplar` | 3 | pre-masked at detection, never raw |
-| `ActionButton` | 3 | bracketed terminal style, max three |
+| `ActionButton` | browser L3 | saves a policy rule; terminal text has no buttons |
 | `IrreversibilityNotice` | 3 | permanent, `warn`, non-dismissible |
 | `BlockNotice` | systemMessage | tool + data + flow + one next step |
 | `Receipt` | SessionEnd | terminal + Markdown |

@@ -42,7 +42,7 @@ def _hook(state, event, **fields):
 def test_session_start_publishes_a_zero_snapshot(state, tmp_path):
     _start(state)
     snap = hs.read_snapshot(tmp_path, SID)
-    assert snap is not None and snap.percent == 0 and snap.blocked == 0
+    assert snap is not None and snap.percent == 0 and snap.legacy_prevented_rows == 0
 
 
 def test_an_observation_republishes_the_ledger_numbers(state, tmp_path):
@@ -51,8 +51,8 @@ def test_an_observation_republishes_the_ledger_numbers(state, tmp_path):
     snap = hs.read_snapshot(tmp_path, SID)
     summary = state.ledger.summary(SID)
     coverage = state.ledger.coverage(SID)
-    assert snap.percent == summary.percent
-    assert snap.blocked == summary.prevented
+    assert snap.percent == summary.legacy_percent
+    assert snap.legacy_prevented_rows == summary.legacy_prevented_rows
     assert snap.unverified == (not coverage.verified)
 
 
@@ -142,7 +142,7 @@ def test_a_session_first_met_without_session_start_gets_a_zero_snapshot(state, t
     with state.lock:
         dispatch._get_or_start_engine(state, SID, cwd="/w", model="m")
     snap = hs.read_snapshot(tmp_path, SID)
-    assert snap is not None and snap.percent == 0 and snap.blocked == 0
+    assert snap is not None and snap.percent == 0 and snap.legacy_prevented_rows == 0
 
 
 def test_a_file_read_records_the_path_as_the_source(state):

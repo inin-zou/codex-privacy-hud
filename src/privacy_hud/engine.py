@@ -457,7 +457,9 @@ class Decision:
     action: str
     reason: str | None = None
     system_message: str | None = None
-    budget_percent: int = 0
+    # Display only: the session's legacy percentage, or None when the ledger
+    # has no record of the session. Never read by a decision.
+    budget_percent: int | None = None
     # Populated only for action="rewrite" (see minimize_tool_input). An
     # unpopulated (None) updated_input on a rewrite decision must NEVER be
     # forwarded to Codex as if it were safe to send unchanged — Task 12
@@ -478,19 +480,25 @@ class Decision:
     degraded: bool = False
 
 
+# The intervention templates say what Privacy HUD returned, never that the
+# host applied it: no current hook reports whether a denial or rewritten
+# input was applied (#54's evidence baseline). "Run $privacy to review the
+# ledger" traces to the skill's audit heredoc.
 BLOCK_TEMPLATE = (
-    "PRIVACY HUD blocked a tool call\n\n"
+    "PRIVACY HUD issued a tool-call denial\n\n"
     "  {tool}  would send  {label}\n"
     "  from {source} to {destination}.\n\n"
-    "  Run $privacy to review."
+    "  Host enforcement is not confirmed.\n"
+    "  Run $privacy to review the ledger."
 )
 
 REWRITE_TEMPLATE = (
-    "PRIVACY HUD masked a tool call\n\n"
+    "PRIVACY HUD returned rewritten input\n\n"
     "  {tool}  would send  {label}\n"
     "  from {source} to {destination}.\n\n"
-    "  Sensitive values were replaced with stable pseudonyms before send. "
-    "Run $privacy to review or adjust policy."
+    "  Privacy HUD returned rewritten input. Application by the host is not "
+    "confirmed.\n"
+    "  Run $privacy to review the ledger."
 )
 
 # A deny that a user's own origin rule caused reads differently from the
@@ -501,24 +509,18 @@ REWRITE_TEMPLATE = (
 # file -- `origin.origin_phrase` owns the wording for both kinds, and the
 # button the user pressed took its label from the same place.
 #
-# It does not end in "Run $privacy to review or adjust policy" like the
-# other two. That would promise an adjustment this call cannot get: an
-# origin deny is decided above, before the consent-token branch, which only
-# runs when the action is still "allow"; and no code path removes a policy
-# row. What is left is what is true -- the rule holds for the rest of this
-# session, and `Ledger.add_policy` scopes it to `session:<id>`, so it does
-# not outlive it.
+# It ends in "Run $privacy to review the ledger", which the audit performs,
+# and never "or adjust policy": an origin deny is decided above, before the
+# consent-token branch, which only runs when the action is still "allow";
+# and no code path removes a policy row. `Ledger.add_policy` scopes the rule
+# to `session:<id>`, so it does not outlive the session.
 #
-# It says "a source rule in force", not "a source rule you wrote". Until
-# this branch the only writer was a human clicking a button in the local
-# audit UI, so "you wrote" was accurate. `privacy.update_policy` is now an
-# exposed MCP tool, which means the model can write one of these rules --
-# and known limit 13 says nothing can remove it. Attributing to the user a
-# rule they may not have written is §5's own defect (copy naming an actor
-# that is no longer traceable to a user surface), and the sentence loses
-# nothing it was carrying: what the reader needs is that a rule denies this
-# call and that it dies with the session, neither of which depends on who
-# wrote it.
+# It says "a source rule saved for this session", not "a source rule you
+# wrote". `privacy.update_policy` is an exposed MCP tool, which means the
+# model can write one of these rules -- and known limit 13 says nothing can
+# remove it. Attributing to the user a rule they may not have written is
+# §5's own defect (copy naming an actor that is no longer traceable to a
+# user surface).
 #
 # It also does not say "allow once does not override it" -- the clause used
 # to, and the fact is still true (the consent-token branch only runs when
@@ -528,22 +530,25 @@ REWRITE_TEMPLATE = (
 # copy when overriding it is a real option; here it is not one at all, so
 # the clause is gone rather than reworded.
 ORIGIN_BLOCK_TEMPLATE = (
-    "PRIVACY HUD blocked a tool call\n\n"
+    "PRIVACY HUD issued a tool-call denial\n\n"
     "  {tool}  would send  {label}\n"
     "  {origin_phrase}.\n\n"
-    "  A source rule in force for this session denies this call.\n"
-    "  The rule ends with the session."
+    "  A source rule saved for this session caused Privacy HUD to issue this "
+    "denial.\n"
+    "  Host enforcement is not confirmed. The rule is scoped to this session.\n"
+    "  Run $privacy to review the ledger."
 )
 
-# The one thing this plugin can say without qualification: the call is
-# stopped before it runs, so there is nothing to recall (I5 is satisfied by
-# the fact, not by careful wording).
+# It used to say the read "did not run, so nothing from it reached the
+# model". That is what the denial asks for, not what the hooks can report:
+# no current hook confirms the host applied it. `$privacy read off` traces
+# to the skill's `read_guard_set()` heredoc.
 READ_BLOCK_TEMPLATE = (
-    "PRIVACY HUD blocked a read\n\n"
+    "PRIVACY HUD issued a read denial\n\n"
     "  {tool}  would read  {path}\n\n"
-    "  Reads of known-sensitive paths are blocked. This one did not run,\n"
-    "  so nothing from it reached the model.\n\n"
-    "  Run `$privacy read off` to allow them again."
+    "  Privacy HUD issued a denial for this read. Host enforcement is not "
+    "confirmed.\n\n"
+    "  Run `$privacy read off` to turn off this read guard."
 )
 
 # Shown once per session, not once per path: this is how the feature is
@@ -554,8 +559,10 @@ READ_BLOCK_TEMPLATE = (
 #: #49 item 4 — the same tense error as writing an `exposed` row before the
 #: host returns its decision, and cheaper to fix here than there.
 READ_NOTICE_TEMPLATE = (
-    "PRIVACY HUD: this call is about to read {path} — a path it can stop\n"
-    "before it reaches the model. Turn that on with `$privacy read on`."
+    "PRIVACY HUD: this call requests a read of {path}, which matches a "
+    "known-sensitive-path rule.\n"
+    "Run `$privacy read on` to enable denial requests for recognized matching "
+    "reads. Host enforcement is not confirmed."
 )
 
 
@@ -1119,7 +1126,9 @@ class Engine:
                 protection=protection,
                 source_kind=obs.origin.kind.value if obs.origin else None)
 
-        pct = self.ledger.summary(obs.session_id).percent
+        # Display only; a decision never reads it.
+        summary = self.ledger.summary(obs.session_id)
+        pct = getattr(summary, "legacy_percent", None)
 
         if action == "deny" and read_block is not None:
             # #36: the read guard's own template -- takes `tool`/`path`, not

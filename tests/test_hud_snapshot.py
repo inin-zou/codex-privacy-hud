@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import pytest
 
 from privacy_hud import hud_snapshot as hs
+from legacy_fakes import legacy_summary
 from test_hud_contract import validate  # same directory; pytest adds it to sys.path
 
 SID = "0199abcd-1111-2222-3333-444455556666"
@@ -34,38 +35,39 @@ def _read(data_dir, sid=SID):
 
 
 def test_publish_writes_a_schema_valid_snapshot(data_dir):
-    hs.HudPublisher(data_dir).publish(SID, percent=28, blocked=2, unverified=False)
+    hs.HudPublisher(data_dir).publish(SID, summary=legacy_summary(28, 2), unverified=False)
     doc = _read(data_dir)
     assert validate(doc) == []
-    assert doc["percent"] == 28 and doc["blocked"] == 2
+    assert doc["percent"] == 28 and doc["legacy_prevented_rows"] == 2
     assert doc["hidden"] is False
     assert abs(doc["updated_at"] - time.time()) < 5
 
 
 def test_publish_creates_hud_dir_0700_and_file_0600(data_dir):
-    hs.HudPublisher(data_dir).publish(SID, percent=0, blocked=0, unverified=True)
+    hs.HudPublisher(data_dir).publish(SID, summary=legacy_summary(0, 0), unverified=True)
     assert stat.S_IMODE(hs.hud_dir(data_dir).stat().st_mode) == 0o700
     assert stat.S_IMODE(hs.snapshot_path(data_dir, SID).stat().st_mode) == 0o600
 
 
 def test_publish_preserves_hidden(data_dir):
     pub = hs.HudPublisher(data_dir)
-    pub.publish(SID, percent=10, blocked=0, unverified=False)
+    pub.publish(SID, summary=legacy_summary(10, 0), unverified=False)
     pub.set_hidden(SID, True)
-    pub.publish(SID, percent=20, blocked=1, unverified=False)
+    pub.publish(SID, summary=legacy_summary(20, 1), unverified=False)
     doc = _read(data_dir)
     assert doc["hidden"] is True and doc["percent"] == 20
 
 
-def test_set_hidden_on_missing_snapshot_creates_a_zero_one(data_dir):
+def test_set_hidden_on_missing_snapshot_writes_nothing(data_dir):
+    """It used to write a zero snapshot. A reading cannot be built from its
+    absence (#54 phase 1): the status call then reports `absent`."""
     hs.HudPublisher(data_dir).set_hidden(SID, True)
-    doc = _read(data_dir)
-    assert validate(doc) == [] and doc["hidden"] is True and doc["percent"] == 0
+    assert not hs.snapshot_path(data_dir, SID).exists()
 
 
 def test_publish_is_atomic_under_a_concurrent_reader(data_dir):
     pub = hs.HudPublisher(data_dir)
-    pub.publish(SID, percent=0, blocked=0, unverified=False)
+    pub.publish(SID, summary=legacy_summary(0, 0), unverified=False)
     stop = threading.Event()
     bad = []
 
@@ -82,7 +84,7 @@ def test_publish_is_atomic_under_a_concurrent_reader(data_dir):
     t = threading.Thread(target=reader)
     t.start()
     for i in range(500):
-        pub.publish(SID, percent=i % 101, blocked=i, unverified=bool(i % 2))
+        pub.publish(SID, summary=legacy_summary(i % 101, i), unverified=bool(i % 2))
     stop.set()
     t.join()
     assert bad == []
@@ -91,7 +93,7 @@ def test_publish_is_atomic_under_a_concurrent_reader(data_dir):
 
 def test_retire_removes_the_file_and_tolerates_absence(data_dir):
     pub = hs.HudPublisher(data_dir)
-    pub.publish(SID, percent=1, blocked=0, unverified=False)
+    pub.publish(SID, summary=legacy_summary(1, 0), unverified=False)
     pub.retire(SID)
     assert not hs.snapshot_path(data_dir, SID).exists()
     pub.retire(SID)  # no raise
@@ -99,8 +101,8 @@ def test_retire_removes_the_file_and_tolerates_absence(data_dir):
 
 def test_sweep_removes_only_old_files(data_dir):
     pub = hs.HudPublisher(data_dir)
-    pub.publish("old", percent=1, blocked=0, unverified=False)
-    pub.publish("new", percent=1, blocked=0, unverified=False)
+    pub.publish("old", summary=legacy_summary(1, 0), unverified=False)
+    pub.publish("new", summary=legacy_summary(1, 0), unverified=False)
     old = hs.snapshot_path(data_dir, "old")
     past = time.time() - 5 * 3600
     os.utime(old, (past, past))
@@ -116,21 +118,25 @@ def test_session_id_cannot_escape_hud_dir(data_dir, sid):
 
 
 def test_read_roundtrip(data_dir):
-    hs.HudPublisher(data_dir).publish(SID, percent=63, blocked=4, unverified=True)
+    hs.HudPublisher(data_dir).publish(SID, summary=legacy_summary(63, 4), unverified=True)
     snap = hs.read_snapshot(data_dir, SID)
-    assert snap == hs.Snapshot(percent=63, blocked=4, unverified=True,
-                               hidden=False, updated_at=snap.updated_at)
+    assert snap == hs.Snapshot(
+        accounting_version=1, percent=63, confirmed_points=None,
+        denials_issued=None, legacy_prevented_rows=4,
+        unresolved_actions=None, unverified=True, hidden=False,
+        updated_at=snap.updated_at)
 
 
 def test_read_returns_hidden_and_lets_caller_decide(data_dir):
     pub = hs.HudPublisher(data_dir)
-    pub.publish(SID, percent=63, blocked=0, unverified=False)
+    pub.publish(SID, summary=legacy_summary(63, 0), unverified=False)
     pub.set_hidden(SID, True)
     assert hs.read_snapshot(data_dir, SID).hidden is True
 
 
 @pytest.mark.parametrize("text", [
     "", "{", "[]", '{"v": 2, "percent": 1, "blocked": 0, "unverified": false, "hidden": false, "updated_at": 1}',
+    '{"v": 3, "percent": 1, "blocked": 0, "unverified": false, "hidden": false, "updated_at": 1}',
     '{"v": 1, "percent": 101, "blocked": 0, "unverified": false, "hidden": false, "updated_at": 1}',
     '{"v": 1, "percent": 1, "blocked": 0, "unverified": false, "hidden": false}',
 ])
@@ -141,7 +147,7 @@ def test_read_returns_none_on_malformed(data_dir, text):
 
 
 def test_read_returns_none_when_stale(data_dir):
-    hs.HudPublisher(data_dir).publish(SID, percent=5, blocked=0, unverified=False)
+    hs.HudPublisher(data_dir).publish(SID, summary=legacy_summary(5, 0), unverified=False)
     assert hs.read_snapshot(data_dir, SID, now=time.time() + 29) is not None
     assert hs.read_snapshot(data_dir, SID, now=time.time() + 31) is None
 
@@ -185,7 +191,7 @@ def _freeze(monkeypatch, when: float) -> None:
 
 def test_heartbeat_refreshes_updated_at_and_nothing_else(data_dir):
     pub = hs.HudPublisher(data_dir)
-    pub.publish(SID, percent=28, blocked=2, unverified=True)
+    pub.publish(SID, summary=legacy_summary(28, 2), unverified=True)
     pub.set_hidden(SID, True)
     before = _read(data_dir)
     old = before["updated_at"] - 25.0
@@ -201,7 +207,7 @@ def test_heartbeat_refreshes_updated_at_and_nothing_else(data_dir):
     assert {k: v for k, v in after.items() if k != "updated_at"} \
         == {k: v for k, v in before.items() if k != "updated_at"}
     assert after["hidden"] is True and after["percent"] == 28
-    assert after["blocked"] == 2 and after["unverified"] is True
+    assert after["legacy_prevented_rows"] == 2 and after["unverified"] is True
 
 
 def test_heartbeat_keeps_a_quiet_session_readable_past_stale_after(
@@ -210,7 +216,7 @@ def test_heartbeat_keeps_a_quiet_session_readable_past_stale_after(
     `STALE_AFTER`, and without a heartbeat both readers stop drawing the
     item even though the daemon is alive and the numbers are still true."""
     pub = hs.HudPublisher(data_dir)
-    pub.publish(SID, percent=7, blocked=0, unverified=False)
+    pub.publish(SID, summary=legacy_summary(7, 0), unverified=False)
     later = time.time() + hs.STALE_AFTER + 1
     assert hs.read_snapshot(data_dir, SID, now=later) is None
     _freeze(monkeypatch, later)
@@ -221,7 +227,7 @@ def test_heartbeat_keeps_a_quiet_session_readable_past_stale_after(
 
 def test_heartbeat_skips_ids_with_no_file(data_dir):
     pub = hs.HudPublisher(data_dir)
-    pub.publish(SID, percent=1, blocked=0, unverified=False)
+    pub.publish(SID, summary=legacy_summary(1, 0), unverified=False)
     pub.heartbeat([SID, "never-started", "../escape", ""])
     assert [p.name for p in hs.hud_dir(data_dir).iterdir()] == [f"{SID}.json"]
 
@@ -260,5 +266,5 @@ def test_heartbeat_interval_leaves_room_for_a_missed_beat():
 
 
 def test_snapshot_never_contains_a_string(data_dir):
-    hs.HudPublisher(data_dir).publish(SID, percent=1, blocked=1, unverified=False)
+    hs.HudPublisher(data_dir).publish(SID, summary=legacy_summary(1, 1), unverified=False)
     assert not any(isinstance(v, str) for v in _read(data_dir).values())

@@ -65,6 +65,18 @@
   .tile .value.safe { color: var(--safe); }
   .tile .value.warn { color: var(--warn); }
   .tile .value.danger { color: var(--danger); }
+  /* An unavailable value is not a reading: no band colour. */
+  .tile .value.unavailable { color: var(--muted); }
+
+  /* Accounting status and note (#54 phase 1): which accounting these
+     numbers are, and what they do not establish. */
+  .accounting-status {
+    color: var(--muted);
+    letter-spacing: 0.06em;
+    font-size: 12px;
+    margin: 0 0 10px 0;
+  }
+  .accounting-note { color: var(--muted); margin: 0 0 20px 0; }
 
   /* Tabs — design.md §5. */
   .tabs {
@@ -123,10 +135,9 @@
     font-size: 11px;
     letter-spacing: 0.03em;
   }
-  .chip.exposed { color: var(--danger); }
-  .chip.masked { color: var(--warn); }
-  .chip.prevented { color: var(--safe); }
-  .chip.local { color: var(--muted); }
+  /* Legacy classifications are historical and neutral: no chip reads as a
+     success or a confirmed outcome. */
+  .chip.legacy { color: var(--muted); }
 
   .empty-state { color: var(--muted); padding: 20px 4px; }
   .degraded-banner { color: var(--warn); margin-bottom: 10px; }
@@ -171,9 +182,11 @@
     padding-top: 12px;
   }
 
+  .detail-empty { color: var(--muted); }
+
   .rule-confirmation {
     margin-top: 10px;
-    color: var(--safe);
+    color: var(--text);
     font-size: 13px;
     min-height: 1.2em;
   }
@@ -220,7 +233,11 @@
   <h1>Privacy Audit</h1>
   <p class="subtitle" id="subtitle">Session ID unknown</p>
 
+  <p class="accounting-status" id="accountingStatus" hidden></p>
+
   <div class="tiles" id="tiles"></div>
+
+  <p class="accounting-note" id="accountingNote" hidden></p>
 
   <div class="tabs" id="tabs" role="tablist"></div>
 
@@ -250,6 +267,7 @@
 
   <div id="detail">
     <button class="close-detail" id="closeDetail" type="button">✕ close</button>
+    <div class="detail-empty" id="detailEmpty" hidden></div>
     <div class="flow-title" id="detailTitle"></div>
     <div class="flow-line" id="detailFlow"></div>
     <div id="detailFields"></div>

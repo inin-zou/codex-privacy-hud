@@ -5,7 +5,7 @@ Every function here takes an already-open `Ledger` (the SAME ledger the
 daemon is writing to — see `mcp/server.py` for how a real MCP process
 opens it against `$PLUGIN_DATA/ledger.db`, `dispatch.new_state`'s same
 path) and returns one of `ledger.py`'s read-contract dataclasses:
-`SessionSummary` or `ExposureRow`. No I/O
+a `SessionSummary` variant or `LegacyExposureRow`. No I/O
 beyond the ledger's own sqlite connection — with exactly one documented
 exception, `resolve_audit_session`, which also asks the local daemon over its
 AF_UNIX socket which session is live right now, because that is the one
@@ -24,7 +24,7 @@ that claim, run against a JSON dump of every function's return value.
 functions used to return bare dicts assembled from a tuple of string keys
 (`_EVENT_FIELDS` + `_project`), which is what made the `privacy.*` tools'
 JSON shape an emergent property of a key list nobody was checking against the
-schema. The shape is now `ExposureRow`/`SessionSummary`, and the two callers
+schema. The shape is now `LegacyExposureRow`/`SessionSummary`, and the two callers
 that put it on a wire — `local_ui_server` (browser JSON) and `mcp/server.py`
 (the MCP transport) — call `.as_dict()` themselves. That call is the contract
 boundary: `ledger._EXPOSURE_JSON_FIELDS` pins the keys and their order, so
@@ -84,19 +84,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .ledger import ExposureRow, SessionCoverage, SessionSummary
+from .ledger import LegacyExposureRow, SessionCoverage, SessionSummary
 from .matrix.loader import HARD_BLOCKED_DATA_TYPES
 from .minimize import mint_token
 
 # The curated event-row projection that used to live here as `_EVENT_FIELDS` +
-# `_project()` is now `ledger.ExposureRow`, and narrowing a ledger row to it is
-# `EventRow.to_exposure()`. The reason for the move: a tuple of string keys and
+# `_project()` is now `ledger.LegacyExposureRow`, and narrowing a ledger row to it is
+# `LegacyEventRow.to_exposure()`. The reason for the move: a tuple of string keys and
 # the rows it filtered were two things that had to agree, with nothing checking
 # that they did — the same shape of bug as `detect/model.py`'s wrong `LABEL_MAP`
 # keys, which silently disabled tier 3 entirely. A type cannot drift from
-# itself: `to_exposure()` can only produce `ExposureRow`'s fields, so
+# itself: `to_exposure()` can only produce `LegacyExposureRow`'s fields, so
 # `value_hash` (a salted BLOB, not JSON at all) and `session_id` are excluded
-# structurally rather than by a maintained list. See `ExposureRow`'s docstring
+# structurally rather than by a maintained list. See `LegacyExposureRow`'s docstring
 # for the I1 argument in full.
 
 # design.md §5: "All events" is the forensic view -- every kind the ledger
@@ -243,6 +243,14 @@ _RULE_CONDITIONS_ORIGIN = (
     "miss values, and hosted tools never reach this plugin at all.")
 
 
+#: The common final sentence of every rule note. A denial or rewritten input
+#: is what Privacy HUD returns to the host; no current hook reports whether
+#: the host applied it (#54's evidence baseline).
+_RULE_HOST_CAVEAT = (
+    "Host application of a denial or rewritten input is not confirmed by "
+    "these hooks.")
+
+
 def rule_enforcement_note(rule_type: str, selector: str) -> str:
     """The conditions clause for one saved rule.
 
@@ -251,10 +259,12 @@ def rule_enforcement_note(rule_type: str, selector: str) -> str:
     asking whether *that* is a cheap data type is a category error.
     """
     if rule_type in ("block_path", "block_command"):
-        return _RULE_CONDITIONS_ORIGIN
-    if selector in CHEAP_DATA_TYPES:
-        return _RULE_CONDITIONS_CHEAP
-    return _RULE_CONDITIONS_DEEP.format(selector=selector)
+        conditions = _RULE_CONDITIONS_ORIGIN
+    elif selector in CHEAP_DATA_TYPES:
+        conditions = _RULE_CONDITIONS_CHEAP
+    else:
+        conditions = _RULE_CONDITIONS_DEEP.format(selector=selector)
+    return conditions + " " + _RULE_HOST_CAVEAT
 
 
 #: How close two sessions' last hook events have to be, in seconds, before
@@ -475,15 +485,10 @@ def resolve_audit_session(ledger, data_dir, *, explicit: str | None = None,
 
 
 def get_session_summary(ledger, session_id: str) -> SessionSummary:
-    """The four L2 tiles (design.md §5): percent, exposed_items,
-    destinations, prevented. `Ledger.summary` already returns exactly
-    this shape and nothing beyond it -- no raw value is reachable from
-    session-level counts in the first place.
-
-    Returned straight through, with no copy. The defensive `dict(...)` this
-    used to make existed because a mutable dict handed to a caller is a dict
-    that caller can quietly rewrite; `SessionSummary` is frozen, so there is
-    nothing left to defend against."""
+    """The session's accounting summary, passed through as the discriminated
+    type `Ledger.summary` returns: `LegacySessionSummary` for a recorded
+    session, `UnrecordedSessionSummary` (no percentage, no counts) for one
+    the ledger has no row for. Frozen, so there is nothing to copy."""
     return ledger.summary(session_id)
 
 
@@ -493,13 +498,12 @@ def get_session_coverage(ledger, session_id: str) -> SessionCoverage:
     Deliberately a SECOND call rather than a field on `get_session_summary`'s
     return value, for the reason `SessionCoverage` gives: the summary's four
     numbers say what happened, and this says whether those numbers are the whole
-    story. Two questions, two answers — and keeping them separate is what let
-    `SessionSummary.as_dict()`'s pinned key order stay pinned.
+    story. Two questions, two answers — and keeping them separate is what
+    keeps each summary variant's key order pinned.
 
-    Every caller that renders a summary should ask this too. A caller that shows
-    `get_session_summary` without it is showing a number that cannot tell "0%
-    because nothing was disclosed" from "0% because nothing was recorded",
-    which is the conflation this function exists to end.
+    Every caller that renders a summary should ask this too. A legacy summary
+    shown without it cannot say whether its numbers are a full account of the
+    session's record.
 
     Metadata only, so no I1 question arises: a boolean, a count, and a short
     phrase from a closed set of literals in `ledger.py`. No session content, no
@@ -508,75 +512,43 @@ def get_session_coverage(ledger, session_id: str) -> SessionCoverage:
     return ledger.coverage(session_id)
 
 
-def list_exposures(ledger, session_id: str, tab: str) -> list[ExposureRow]:
+def list_exposures(ledger, session_id: str,
+                   tab: str) -> list[LegacyExposureRow]:
     """Rows for one of design.md §5's three tabs: `"Exposed"`,
-    `"Prevented"`, or `"All events"`. Each row is an `ExposureRow`, the
-    curated projection whose field list is itself the I1 allow-list --
-    metadata only, plus the ledger's pre-masked `masked_example`, never a
-    raw value.
+    `"Prevented"`, or `"All events"`. The tab arguments select stored legacy
+    classifications; the surfaces label them "Legacy permitted crossings",
+    "Legacy prevented rows" and "All legacy events". Each row is a
+    `LegacyExposureRow`, the curated projection whose field list is itself
+    the I1 allow-list. An unrecorded session has no rows, which is not
+    evidence that no events occurred.
 
-    Does not aggregate by `(data_type, source, destination)` the way
-    design.md's mockup groups rows for display -- `render.audit()` (Task
-    11) already accepts and sorts per-row data exactly like this (see
-    `dispatch.py`'s `_handle_session_end`, which feeds `list_events`'
-    output straight into `render.receipt` with no aggregation step); doing
-    the same aggregation twice, in two different ways, is a bug waiting to
-    happen. If the UI wants grouped rows for display, that groups this
-    function's rows by `(data_type, source, destination)` at render time.
+    Does not aggregate by `(data_type, source, destination)`: every surface
+    renders one row per ledger event, and doing the same aggregation twice,
+    in two different ways, is a bug waiting to happen.
     """
     kinds = _TAB_KINDS.get(tab)
     if kinds is None:
         raise ValueError(f"unknown tab {tab!r}; expected one of {sorted(_TAB_KINDS)}")
 
-    rows: list[ExposureRow] = []
+    rows: list[LegacyExposureRow] = []
     for kind in kinds:
         rows.extend(r.to_exposure() for r in ledger.list_events(session_id, kind))
     return rows
 
 
-def get_exposure_detail(ledger, session_id: str, event_id: int) -> ExposureRow:
-    """The L3 payload for one flow (design.md §6), keyed by the `events`
-    table's own integer `id` -- see this module's docstring for why that
-    selector was chosen over a composite key. Scoped to `session_id`: an
-    id that exists but belongs to a different session is treated as not
-    found, not silently returned, so one session's audit can never read
-    another's row by guessing an id.
+def get_exposure_detail(ledger, session_id: str,
+                        event_id: int) -> LegacyExposureRow:
+    """The L3 payload for one legacy row (design.md §6), keyed by its
+    integer row `id` -- see this module's docstring for why that selector
+    was chosen over a composite key. Delegates to `Ledger.get_event`, which
+    scopes the lookup to both identifiers, routes to whichever table holds
+    legacy rows, and adds `first_seen` and the session's stored
+    `budget_cap`.
 
-    Raises `LookupError` (not `None`/`{}`) when nothing matches -- a
-    detail view for a nonexistent flow is a caller bug worth surfacing,
-    not a value worth rendering as if it were empty.
-
-    `budget_cap` is included (fetched from the session's own row, not
-    hardcoded -- see render.py's `detail()` docstring for why a literal
-    120 would go stale) so `render.detail()`'s optional "+N pts of {cap}"
-    tail can be shown; the field is safely omitted by that function when
-    absent — and, on the wire, omitted from `as_dict()` entirely rather than
-    serialized as `null`, so "no cap known" stays distinguishable from a cap
-    of 0.
-
-    The return type is the same `ExposureRow` `list_exposures` yields, with its
-    L3 fields populated — see that class's docstring for why the detail payload
-    is not a separate type. `render.detail()` and `render.audit()` therefore
-    accept one type, not two.
+    Raises `LookupError` (not `None`/`{}`) when nothing matches, including
+    an id from another session and any id in an unrecorded session.
     """
-    row = ledger.conn.execute(
-        "SELECT id, turn_id, ts, kind, data_type, source, source_kind,"
-        " destination, boundary, count, masked_example, budget_delta,"
-        " protection, tool_name FROM events WHERE session_id=? AND id=?",
-        (session_id, event_id)).fetchone()
-    if row is None:
-        raise LookupError(
-            f"no event {event_id!r} in session {session_id!r}")
-
-    cap_row = ledger.conn.execute(
-        "SELECT budget_cap FROM sessions WHERE session_id=?",
-        (session_id,)).fetchone()
-
-    columns = dict(row)
-    return ExposureRow(
-        **columns,
-        first_seen=columns["ts"],
-        budget_cap=cap_row["budget_cap"] if cap_row is not None else None)
+    return ledger.get_event(session_id, event_id)
 
 
 def apply_policy(ledger, session_id: str, *, rule_type: str, selector: str) -> None:

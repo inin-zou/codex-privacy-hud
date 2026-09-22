@@ -74,7 +74,7 @@ def test_credential_to_external_net_is_denied_and_scores_zero(eng):
                          tool_name="Bash"))
     assert d.action == "deny"
     assert d.budget_percent == 0
-    assert "blocked" in (d.system_message or "").lower()
+    assert "denial" in (d.system_message or "").lower()
 
 
 def test_denied_call_is_recorded_as_prevented_not_exposed(eng):
@@ -83,18 +83,18 @@ def test_denied_call_is_recorded_as_prevented_not_exposed(eng):
                      text=CREDENTIAL_TEXT,
                      tool_name="Bash"))
     s = eng.ledger.summary("s1")
-    assert s.prevented == 1 and s.exposed_items == 0
+    assert s.legacy_prevented_rows == 1 and s.legacy_permitted_crossing_rows == 0
 
 
 def test_clean_text_allows_without_recording(eng):
     d = eng.observe(_obs(text="the build passed"))
     assert d.action == "allow"
-    assert eng.ledger.summary("s1").exposed_items == 0
+    assert eng.ledger.summary("s1").legacy_permitted_crossing_rows == 0
 
 
 def test_local_destination_never_scores(eng):
     eng.observe(_obs(destination="local", direction="ingress"))
-    assert eng.ledger.summary("s1").percent == 0
+    assert eng.ledger.summary("s1").legacy_percent == 0
 
 
 def test_system_message_contains_no_forbidden_copy(eng):
@@ -219,7 +219,7 @@ def test_large_ingress_payload_skips_tier3_and_marks_degraded(eng):
     d = eng.observe(_obs(text=big_text))
     assert d.degraded is True
     # tier 3 (the only detector that would find the email) never ran.
-    assert eng.ledger.summary("s1").exposed_items == 0
+    assert eng.ledger.summary("s1").legacy_permitted_crossing_rows == 0
 
 
 def test_small_pii_shaped_payload_is_not_degraded(eng):
@@ -745,12 +745,12 @@ def test_a_blocked_origin_does_not_deny_a_different_untainted_finding(eng):
 def test_a_denied_call_records_a_prevented_row_worth_zero(eng):
     _read_from(eng, DOTENV)
     eng.ledger.add_policy("s1", rule_type="block_path", selector=".env")
-    before = eng.ledger.summary("s1").percent
+    before = eng.ledger.summary("s1").legacy_percent
     d = eng.observe(_obs(hook_event="PreToolUse", direction="egress",
                          source="tool input", destination="mcp_tool",
                          text=CREDENTIAL_TEXT, tool_name="mcp__slack__post"))
     assert d.action == "deny"
-    assert eng.ledger.summary("s1").percent == before  # I4
+    assert eng.ledger.summary("s1").legacy_percent == before  # I4
     kinds = [r["kind"] for r in eng.ledger.conn.execute(
         "SELECT kind FROM events WHERE destination='mcp_tool'")]
     assert kinds == ["prevented"]
@@ -803,9 +803,9 @@ def test_a_template_is_allowed_with_the_guard_on(eng):
 
 def test_a_denied_read_is_prevented_and_costs_nothing(eng):
     eng.settings = _Settings(deny_read=True)
-    before = eng.ledger.summary("s1").percent
+    before = eng.ledger.summary("s1").legacy_percent
     eng.observe(_read(".env"))
-    assert eng.ledger.summary("s1").percent == before          # I4
+    assert eng.ledger.summary("s1").legacy_percent == before          # I4
     kinds = [r["kind"] for r in eng.ledger.conn.execute("SELECT kind FROM events")]
     assert kinds and set(kinds) == {"prevented"}               # I3
 

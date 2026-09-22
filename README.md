@@ -1,6 +1,8 @@
 # Codex Privacy HUD
 
-![A real Codex 0.154 session running the patched build: one prompt containing a street address, the model's reply, and the Privacy item under the composer already at 5%, beside Codex's own model item](docs/images/banner.png)
+![A historical patched Codex 0.154 session with a legacy accounting reading of 5%](docs/images/banner.png)
+
+Historical screenshot from the snapshot-v1 HUD. Its percentage uses legacy accounting; the image predates the explicit legacy label.
 
 [![CI](https://github.com/inin-zou/codex-privacy-hud/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/inin-zou/codex-privacy-hud/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/inin-zou/codex-privacy-hud)](LICENSE)
@@ -12,7 +14,11 @@ English | [简体中文](README.zh-CN.md)
 
 > **See what your agent knows. Control where it goes.**
 
-A local-first Codex plugin that maintains a live **disclosure ledger** for every Codex session, minimizes sensitive context **before** tool execution, and lets you inspect what it observed crossing each boundary — into model context, out to an MCP tool, out to an external host.
+A local-first Codex plugin that records hook observations in a session ledger and can return denials or rewritten input before tool execution.
+
+The HUD currently shows a legacy permitted-crossing score. Historical accounting includes permitted crossings and may collapse different outcomes; it does not establish confirmed disclosure. The badge counts legacy prevented rows, not denied calls or confirmed host-enforced interventions. An unrecorded session shows “No session on record” with no percentage or numeric counts.
+
+A denial or rewritten input returned by Privacy HUD is not confirmation that the host applied it. Current hooks do not establish that a denied call did not run or that rewritten input reached its intended recipient.
 
 Boundary, not recipient: a second MCP server is not a second destination today, and what a subagent inherited is not recorded at all (limits 19 and 20).
 
@@ -20,10 +26,12 @@ Detection runs locally; the plugin sends no prompt, file, or secret to a remote 
 
 ```text
 Token HUD:    How much context has been consumed?
-Privacy HUD:  How much sensitive context has been disclosed?
+Privacy HUD:  What does this session's legacy accounting record?
 ```
 
 ![The Codex Privacy HUD user journey — from the ambient disclosure bar through the session audit, exposure detail, and minimizing a payload before it reaches an external tool](docs/images/user-journey-mockup.png)
+
+Design-intent illustration. It predates the explicit legacy labels; its bar and intervention imagery are not the current display or evidence contract.
 
 **Before you rely on it:** the start of a session is not monitored while the model loads, hosted tools bypass hooks, and detection is heuristic. The HUD marks a session whose record has a known hole rather than showing it as a clean 0%, but it cannot tell you what it missed. Read the [known limits](#known-limits).
 
@@ -49,6 +57,10 @@ Privacy HUD:  How much sensitive context has been disclosed?
 - 2026-09-05: verified by hand against Codex CLI 0.153.0 that one session reading `src/privacy_hud/budget.py` recorded zero events, budget 0.0/120.0. That run was real; the general claim drawn from it was not.
 
 ## Install
+
+Privacy HUD 0.7.8 writes snapshot version 2. Updated readers accept version 1 as explicitly legacy and accept version 2 with nullable accounting fields. Older patched Codex readers reject version 2 and show no Privacy item. A matching Codex version alone does not establish snapshot compatibility. Use a snapshot-v2-compatible patched build, or run privacy-hud-ambient --watch in a separate terminal pane.
+
+The already-published snapshot-v1 builds do not support 0.7.8 snapshots. Updated release artifacts have not been published as part of this change.
 
 Verified end-to-end against a real Codex CLI install on 0.145.0 and 0.153.0.
 
@@ -139,11 +151,11 @@ you send a message. After your first prompt the item appears under the
 composer next to the usual ones, as in the [screenshot below](#what-you-see):
 
 ```text
-Privacy ░░░░░░░░░░  0% · gpt-5.4 · ~/proj · Context 96% left
+Privacy legacy 0% · gpt-5.4 · ~/proj · Context 96% left
 ```
 
-It is 0% until something sensitive crosses into model context; the number
-moves as files, prompts, and tool arguments do. (On a machine where the
+A recorded legacy session starts at `legacy 0%`; its number follows the
+existing score arithmetic. Zero does not establish that nothing was disclosed. (On a machine where the
 daemon is not yet running, that first prompt also starts it, which takes
 about seven seconds to load the model — the reply to that first hook says
 `Privacy HUD unavailable — disclosure unverified`, the item shows up a
@@ -162,12 +174,12 @@ moment later, and that load window is unmonitored: see
 **Level 1 — Ambient.** One item in Codex's own status line, under the composer:
 
 ```text
-gpt-5.4 · ~/proj · Privacy ███░░░░░░░ 28% ⚠2
+gpt-5.4 · ~/proj · Privacy legacy 28% · 2 prevented rows
 ```
 
-Real output from a live Codex 0.154 session running the patched build (not a mockup): one prompt containing a street address, and the `Privacy` item under the composer already at 5%, beside Codex's own model and directory items:
+Historical screenshot from the snapshot-v1 HUD. Its percentage uses legacy accounting; the image predates the explicit legacy label.
 
-![A Codex session: one prompt containing a street address, the model's reply, and the plugin's `Privacy` item under the composer at 5% disclosure, next to Codex's own model and directory items](docs/images/status-line-patched.png)
+![A historical patched Codex session showing a legacy accounting reading of 5%](docs/images/status-line-patched.png)
 
 Stock Codex has no plugin-owned status item, so this needs a Codex build
 with a small patch (`patches/privacy-status-line.patch`, one added item,
@@ -178,33 +190,22 @@ match. Toggle the item with `/statusline` inside Codex, or hide it for now
 with `$privacy hud off`. Without a matching build, the fallback is a
 companion pane: `privacy-hud-ambient --watch` in a second terminal.
 
-The pane draws the same line in three forms. The ordinary one:
+The companion pane uses the same accounting labels:
 
 ```text
-PRIVACY  Disclosure ███░░░░░░░ 30%  ›
+Privacy legacy 30%
+Privacy legacy 0% ⚠unverified
+Privacy —% · No session on record
+Privacy —% · unattributed hook gaps
 ```
 
-And, when the ledger's account of the session has a known hole, a form that says so instead of reporting a clean number:
+These distinguish legacy accounting, incomplete legacy coverage, an explicitly unrecorded session, and daemon-reported gaps without a resolved session. The pane selects a complete width candidate, retaining `legacy` beside any legacy percentage and a warning for incomplete coverage. If no candidate fits, it renders nothing. Missing, malformed, stale, or hidden snapshots also render nothing.
 
-```text
-PRIVACY  Disclosure ░░░░░░░░░░  0% ⚠unverified ›
-```
+**Level 2 — Session audit** (`$privacy`). Four tiles show `legacy permitted-crossing score`, `legacy permitted-crossing rows`, `legacy boundary kinds`, and `legacy prevented rows`, with the accounting caveat. An unrecorded session shows unavailable quantities.
 
-Below 28 columns the word does not fit and the line becomes `⚠ 0%`, the warning glyph taking the band dot's place, so truncation can never leave a bare percentage behind.
+Tabs: `Legacy permitted crossings` · `Legacy prevented rows` · `All legacy events`. Rows show stored classifications, repetition counts, and recorded source/destination associations; they do not establish delivery or host enforcement.
 
-**Level 2 — Session audit** (`$privacy`). Summary tiles and a tabbed table of every flow:
-
-```text
-SENSITIVE DATA        SOURCE           DESTINATION      STATUS
-Customer email ×12    support.log      model context    [EXPOSED]
-Full name ×1          user prompt      model context    [EXPOSED]
-Repository path ×4    tool input       GitHub MCP       [EXPOSED]
-API credential ×1     .env             none             [PREVENTED]
-```
-
-Tabs: `Exposed` · `Prevented` · `All events`.
-
-**Level 3 — Exposure detail.** One flow, its masked evidence, and forward-looking remedies (`Mask detected <type> in future calls`; on a row that names a real origin, `Block values read from <file>`). Never an undo — already disclosed data cannot be recalled, and a source rule only matches values that leave unchanged.
+**Level 3 — Exposure detail.** One public legacy row, its masked exemplar, and its legacy intervention label. The terminal detail view does not save policy rules. The local audit browser has buttons that POST to `/api/policy`; the MCP `privacy.update_policy` tool is a separate policy-writing surface. Report a rule as saved only after that surface returns success, and include its returned conditions. Host application of a later denial or rewritten input is not confirmed.
 
 **The MCP tools.** Codex also gets five tools the model can call: a session summary, the exposure list, one exposure's detail, the read-guard state, and writing a policy rule. The server registers them as `privacy.<name>`; Codex presents them to the model with underscores, so what you will see in a transcript is `privacy_get_session_summary`, `privacy_list_exposures`, `privacy_get_exposure_detail`, `privacy_read_guard_status` and `privacy_update_policy`. The first four read; the fifth can only tighten, because the engine keeps its one unconditional block — a credential on an outbound call — ahead of every rule you or the model can write: a call carrying a credential is decided by the built-in default, and a mask rule on it is not consulted at all. That holds whatever the rule names, which is the point — a rule written about something innocuous, like a file path, can still land on a call that happens to carry a credential too. A mask rule naming a blocked type outright is refused when written, because it would now decide nothing while looking like protection you applied. Turning the read guard off and hiding the HUD are not among the five at all, because an MCP tool is called by the model, and a switch that loosens protection is not one to hand to the thing being enforced against; those two stay behind `$privacy`, which you type. Allowing a blocked call once is not among them either, but for a different reason: it has no surface at all — not `$privacy`, not the audit UI, not an MCP tool — see [known limit 13](docs/known-limits.md#13-no-policy-rule-can-be-removed-within-the-session-that-wrote-it).
 
@@ -245,7 +246,7 @@ support.log → main agent → GitHub MCP
 
 ### The read guard
 
-Every rule above applies on the way out. One thing can be stopped on the way **in**: a shell command that reads a known-sensitive path — `.env`, `id_rsa`, `deploy/key.pem` — fires `PreToolUse` before it runs, so the call can be denied. The command does not execute, so nothing from that file reaches the model.
+The read guard can issue a denial on `PreToolUse` for a recognized shell read of a known-sensitive path, such as `.env` or `deploy/key.pem`. It checks the command text before execution; current hooks do not confirm that the host enforced the denial.
 
 The shell is the whole of it, because that is how Codex reads a file: it has no native file-read tool, so the model runs `cat`. Any other tool is allowed unexamined — limit 14.
 
@@ -319,10 +320,10 @@ Stated up front, because a privacy tool that overclaims is worse than none:
 14. **Only a shell command whose read the extractor recognises is stopped.** The guard sees one tool — the shell — because that is how Codex reads a file; any other tool is allowed unexamined. Within the shell, `cat .env` is stopped; `wc -l .env`, `source .env`, `cp .env /tmp/x`, `strings id_rsa`, `head -5 .env` and `python -c "open('.env')"` are not — no deny, no notice, no row. Limit 11 holds the mechanism. ([details](docs/known-limits.md#14-only-a-shell-command-whose-read-the-extractor-recognises-is-stopped))
 15. **A template file is never blocked**, even one that really holds a key. Detection still flags it. ([details](docs/known-limits.md#15-a-template-file-is-never-blocked))
 16. **Nothing is blocked until you turn it on.** The default records the read and mentions the guard once per session; it stops nothing. ([details](docs/known-limits.md#16-nothing-is-blocked-until-you-turn-it-on))
-17. **A blocked read can leave a record that says the opposite, in one sequence.** Read with the guard off, turn it on, read again: the ledger dedupes on `(session_id, value_hash, destination)`, so the deny lands as a `count` increment on the earlier row. What stays is one `local_access` row saying the first file was read twice and nothing was blocked. No `prevented` row is written, so the status item's blocked badge stays `0` through a deny that did happen. ([details](docs/known-limits.md#17-a-blocked-read-can-leave-a-record-that-says-the-opposite-in-one-sequence))
-18. **A blocked read's row does not name the file.** It rides on the pattern that matched (`.pem`, `.env`, …), so two different files that match the same pattern dedupe into one row. You can see something was blocked; not which file. The badge counts rows, so two denied reads of two `.pem` files read as `1`. ([details](docs/known-limits.md#18-a-blocked-reads-row-does-not-name-the-file))
+17. **A blocked read can leave a record that says the opposite, in one sequence.** Read with the guard off, turn it on, read again: the ledger dedupes on `(session_id, value_hash, destination)`, so the deny lands as a `count` increment on the earlier row. What stays is one `local_access` row saying the first file was read twice and nothing was blocked. No `prevented` row is written, so `legacy_prevented_rows` remains 0 after the plugin issues the denial. The HUD omits a zero secondary count. This does not establish host enforcement. ([details](docs/known-limits.md#17-a-blocked-read-can-leave-a-record-that-says-the-opposite-in-one-sequence))
+18. **A blocked read's row does not name the file.** It rides on the pattern that matched (`.pem`, `.env`, …), so two different files that match the same pattern dedupe into one row. The row records the plugin's prevented classification, not confirmed host enforcement or a distinct file. Two denied reads matching `.pem` can display `1 prevented row`. ([details](docs/known-limits.md#18-a-blocked-reads-row-does-not-name-the-file))
 19. **What a subagent inherited is not recorded.** The `SubagentStart` observation carries no text, so no detector runs on it and no row results. "Did the subagent inherit the `.env`?" has no answer in the ledger. ([details](docs/known-limits.md#19-what-a-subagent-inherited-is-not-recorded))
-20. **A destination is a boundary category, not a recipient.** Every MCP call is `mcp_tool`; a second MCP server is not a second destination, and adds nothing further to the budget. The `destinations` tile counts categories, not services. ([details](docs/known-limits.md#20-a-destination-is-a-boundary-category-not-a-recipient))
+20. **A destination is a boundary category, not a recipient.** Every MCP call is `mcp_tool`; a second MCP server is not a second destination, and adds nothing further to the budget. The `legacy boundary kinds` tile (`legacy_boundary_kinds`) counts categories, not services. ([details](docs/known-limits.md#20-a-destination-is-a-boundary-category-not-a-recipient))
 21. **On an outbound call, the deep scan is best-effort.** The model is serial, and a missed hook deadline on an outbound call becomes a deny (I6). Egress uses a requested timeout based on the remaining budget and an inclusive completion cutoff; neither guarantees elapsed time. See `engine.TIER3_EGRESS_BUDGET`. Measured: a call under the 1.0 s budget returned at 1.25 s. At most one egress scan worker is admitted at a time. Admission is nonblocking; the worker retains its slot until it exits, including after caller abandonment. A scan gap means an applicable deep scan supplied no accepted result; the call then proceeds on the fast tiers, the same as every outbound call before this existed. A scan gap can omit findings that would otherwise cause blocking or masking. Each observed scan gap is recorded per observation and counted per session, including observations with no event row, so the session stops reading as fully verified — but the audit cannot tell you which calls they were. ([details](docs/known-limits.md#21-on-an-outbound-call-the-deep-scan-is-best-effort))
 
 ## Configuration
@@ -331,7 +332,7 @@ Stated up front, because a privacy tool that overclaims is worse than none:
 |---|---|
 | `/statusline` inside Codex | Ticks or unticks the `privacy` item for good. The choice is saved in `config.toml`. |
 | `$privacy hud on\|off\|status` | Hides or shows the item for now, without touching your config. `status` prints `absent`, `stale`, `hidden`, or `shown`. |
-| `$privacy read on\|off\|status` | Turns the read guard on or off — see [The read guard](#the-read-guard). On, a recognised read of a known-sensitive path is denied before it runs; off (the default), it is recorded. `status` prints `on` or `off`. Saved in `settings.json` under `~/.codex/plugins/data/codex-privacy-hud-…/`, and applies to a running session immediately. |
+| `$privacy read on\|off\|status` | Turns the read guard on or off — see [The read guard](#the-read-guard). On, Privacy HUD issues denial requests for recognised matching reads; off (the default), this guard does not request a denial. Neither setting confirms host enforcement or complete observation. `status` prints `on` or `off`. Saved in `settings.json` under `~/.codex/plugins/data/codex-privacy-hud-…/`, and applies to a running session immediately. |
 | `$privacy setup` | Runs the installer that came with the plugin, for an install made with `codex plugin add` alone. Asks once to run outside the sandbox. |
 | `[tui].status_line` in `~/.codex/config.toml` | The list of status-line items Codex renders. The installer adds `"privacy"` to it. |
 | `install.sh --yes` / `--no-model` / `--release-base-url URL` / `--uninstall` / `--purge` | `--yes` answers the model question with yes, `--no-model` skips the download, `--release-base-url` fetches the patched build from somewhere other than this repository's GitHub releases, `--uninstall` removes what the installer created, `--purge` also removes the ledger and the weights. |

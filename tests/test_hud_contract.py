@@ -27,14 +27,17 @@ MATRIX = Path(__file__).parent / "matrix"
 SCHEMA = json.loads((MATRIX / "hud_snapshot.schema.json").read_text())
 GOLDEN = json.loads((MATRIX / "hud_golden.json").read_text())
 
-VALID = {"v": 1, "percent": 28, "blocked": 2, "unverified": False,
-         "hidden": False, "updated_at": 1757900000.0}
+VALID = {"v": 2, "accounting_version": 1, "percent": 28,
+         "confirmed_points": None, "denials_issued": None,
+         "legacy_prevented_rows": 2, "unresolved_actions": None,
+         "unverified": False, "hidden": False, "updated_at": 1757900000.0}
 
 
 def validate(doc: dict, schema: dict = SCHEMA) -> list[str]:
     """Minimal validator for exactly the subset of JSON Schema the contract
-    uses: object, additionalProperties=false, required, integer/number/boolean,
-    const, minimum, maximum. Returns a list of problems; empty means valid."""
+    uses: object, additionalProperties=false, required, integer/number/boolean
+    (optionally nullable, as a two-element type list), const, enum, minimum,
+    maximum. Returns a list of problems; empty means valid."""
     problems = []
     if not isinstance(doc, dict):
         return ["not an object"]
@@ -50,6 +53,10 @@ def validate(doc: dict, schema: dict = SCHEMA) -> list[str]:
             continue
         val = doc[key]
         t = rule["type"]
+        if isinstance(t, list):
+            if val is None and "null" in t:
+                continue
+            t = next(x for x in t if x != "null")
         if t == "integer" and not (isinstance(val, int) and not isinstance(val, bool)):
             problems.append(f"{key} not integer")
         elif t == "number" and not (isinstance(val, (int, float)) and not isinstance(val, bool)):
@@ -58,6 +65,8 @@ def validate(doc: dict, schema: dict = SCHEMA) -> list[str]:
             problems.append(f"{key} not boolean")
         if "const" in rule and val != rule["const"]:
             problems.append(f"{key} != {rule['const']}")
+        if "enum" in rule and val not in rule["enum"]:
+            problems.append(f"{key} not in {rule['enum']}")
         if "minimum" in rule and isinstance(val, (int, float)) and val < rule["minimum"]:
             problems.append(f"{key} below minimum")
         if "maximum" in rule and isinstance(val, (int, float)) and val > rule["maximum"]:
@@ -70,11 +79,14 @@ def test_schema_accepts_the_canonical_sample():
 
 
 @pytest.mark.parametrize("mutation", [
-    {"v": 2},
+    {"v": 1},
+    {"v": 3},
+    {"accounting_version": 3},
     {"percent": 101},
     {"percent": -1},
     {"percent": 28.5},
-    {"blocked": -1},
+    {"legacy_prevented_rows": -1},
+    {"legacy_prevented_rows": 2**53},
     {"unverified": "no"},
     {"hidden": 0},
     {"updated_at": "now"},
@@ -86,8 +98,10 @@ def test_schema_rejects_each_violation(mutation):
 
 
 def test_schema_has_no_string_typed_field():
-    types = {k: v["type"] for k, v in SCHEMA["properties"].items()}
-    assert "string" not in types.values()
+    types = [t for v in SCHEMA["properties"].values()
+             for t in (v["type"] if isinstance(v["type"], list)
+                       else [v["type"]])]
+    assert "string" not in types
     assert SCHEMA["additionalProperties"] is False
 
 
@@ -151,6 +165,32 @@ def test_rust_snapshot_version_matches_the_python_writer():
     empty the status line silently — there is no error path for it, by
     design (`hud_snapshot.py:13-14`)."""
     assert int(_rust_const("SNAPSHOT_VERSION")) == hud_snapshot.SNAPSHOT_VERSION
+
+
+def test_rust_legacy_version_and_count_ceiling_match_the_python_reader():
+    """The legacy version both readers still accept, and the largest count
+    either accepts. A count one reader clamps and the other rejects would
+    make the two surfaces disagree about the same file."""
+    assert int(_rust_const("LEGACY_SNAPSHOT_VERSION")) == \
+        hud_snapshot.LEGACY_SNAPSHOT_VERSION
+    assert int(_rust_const("MAX_COUNT").replace("_", "")) == \
+        hud_snapshot.MAX_COUNT
+    assert SCHEMA["properties"]["legacy_prevented_rows"]["maximum"] == \
+        hud_snapshot.MAX_COUNT
+
+
+def test_published_snapshots_satisfy_the_schema(tmp_path):
+    from privacy_hud.ledger import Ledger
+    from privacy_hud.matrix.loader import load_matrix
+    led = Ledger(tmp_path / "ledger.db", load_matrix())
+    led.start_session("s1", cwd="/w", model="m")
+    pub = hud_snapshot.HudPublisher(tmp_path)
+    for sid, summary in (("s1", led.summary("s1")),
+                         ("s2", led.summary("missing"))):
+        pub.publish(sid, summary=summary, unverified=False)
+        doc = json.loads(hud_snapshot.snapshot_path(tmp_path, sid).read_text())
+        assert validate(doc) == [], (sid, doc)
+    led.conn.close()
 
 
 def test_rust_stale_after_matches_the_python_reader():

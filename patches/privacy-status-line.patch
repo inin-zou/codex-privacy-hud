@@ -6,7 +6,7 @@ index 64562d1..752aa78 100644
  //! - Usage limits (primary, secondary)
  //! - Session info (thread title, thread ID, tokens used)
  //! - Application version
-+//! - Privacy disclosure reading from the Codex Privacy HUD plugin
++//! - Session accounting from the Codex Privacy HUD plugin
  
  use ratatui::buffer::Buffer;
  use ratatui::layout::Rect;
@@ -15,7 +15,7 @@ index 64562d1..752aa78 100644
      /// Latest checklist task progress from `update_plan` (if available).
      TaskProgress,
 +
-+    /// Disclosure reading from the Codex Privacy HUD plugin (omitted when it is not running).
++    /// Session accounting from the Codex Privacy HUD plugin (omitted without a displayable snapshot).
 +    Privacy,
  }
  
@@ -25,7 +25,7 @@ index 64562d1..752aa78 100644
                  "Latest task progress from update_plan (omitted until available)"
              }
 +            StatusLineItem::Privacy => {
-+                "Privacy disclosure of this session (omitted when the Privacy HUD plugin is not running)"
++                "Privacy HUD accounting for this session; legacy scores are labelled, and unavailable readings have no percentage"
 +            }
          }
      }
@@ -68,7 +68,7 @@ index 93b7ee3..38f9ff7 100644
              StatusSurfacePreviewItem::ModelWithReasoning => "gpt-5.2-codex medium",
              StatusSurfacePreviewItem::Reasoning => "medium",
              StatusSurfacePreviewItem::TaskProgress => "Tasks 0/0",
-+            StatusSurfacePreviewItem::Privacy => "Privacy ███░░░░░░░ 28%",
++            StatusSurfacePreviewItem::Privacy => "Privacy legacy 28%",
          }
      }
  
@@ -186,18 +186,22 @@ index 3d9650d..3da7f5b 100644
  mod resize_reflow_cap;
 diff --git a/codex-rs/tui/src/privacy_status.rs b/codex-rs/tui/src/privacy_status.rs
 new file mode 100644
-index 0000000..91b3828
+index 0000000..cfe7ee6
 --- /dev/null
 +++ b/codex-rs/tui/src/privacy_status.rs
-@@ -0,0 +1,327 @@
+@@ -0,0 +1,546 @@
 +//! `privacy` status-line item: reads the Codex Privacy HUD plugin's snapshot
-+//! file (contract A) and renders `Privacy ███░░░░░░░ 28%`.
++//! file (contract A) and renders `Privacy legacy 28% · 2 prevented rows`.
 +//!
-+//! No subprocess, no network, no config key beyond the item id. Every
-+//! failure — missing file, stale file, malformed JSON, wrong schema version,
-+//! `hidden`, out-of-range percent — renders nothing. The bar rounding is
-+//! Python's `round()` (half to even), pinned by `privacy_status_golden.json`,
-+//! which is a byte copy of the plugin's `tests/matrix/hud_golden.json`.
++//! No subprocess, no network, no config key beyond the item id. Snapshot
++//! version 2 carries an accounting discriminator and nullable quantities;
++//! version 1 is read as explicitly legacy. Every failure — missing file,
++//! stale file, malformed JSON, an unknown version, a field that is missing,
++//! extra, out of range or out of place, `hidden` — renders nothing. The text
++//! is pinned by `privacy_status_reading_golden.json`, a byte copy of the
++//! plugin's `tests/matrix/hud_reading_golden.json`. The numeric bar keeps its
++//! own golden, `privacy_status_golden.json`, a byte copy of
++//! `tests/matrix/hud_golden.json`.
 +
 +use std::path::PathBuf;
 +use std::time::Duration;
@@ -205,7 +209,14 @@ index 0000000..91b3828
 +use std::time::SystemTime;
 +use std::time::UNIX_EPOCH;
 +
-+pub(crate) const SNAPSHOT_VERSION: u64 = 1;
++use serde_json::Map;
++use serde_json::Value;
++
++pub(crate) const SNAPSHOT_VERSION: u64 = 2;
++/// Version 1 snapshots are still read, as legacy accounting.
++pub(crate) const LEGACY_SNAPSHOT_VERSION: u64 = 1;
++/// Mirrors `hud_snapshot.MAX_COUNT`: 2^53 - 1, exact in both readers.
++pub(crate) const MAX_COUNT: u64 = 9_007_199_254_740_991;
 +/// Mirrors `hud_snapshot.STALE_AFTER` in the plugin.
 +pub(crate) const STALE_AFTER_SECS: f64 = 30.0;
 +/// One file read per second at most; the status line repaints far more often.
@@ -213,11 +224,42 @@ index 0000000..91b3828
 +/// `<CODEX_HOME>/plugins/data/<this dir>` is where Codex gives the plugin its `PLUGIN_DATA`.
 +const PLUGIN_DATA_DIRNAME: &str = "codex-privacy-hud-codex-privacy-hud";
 +
-+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-+pub(crate) struct PrivacyReading {
-+    pub percent: u8,
-+    pub blocked: u32,
-+    pub unverified: bool,
++const V1_KEYS: [&str; 6] = ["v", "percent", "blocked", "unverified", "hidden", "updated_at"];
++const V2_KEYS: [&str; 10] = [
++    "v",
++    "accounting_version",
++    "percent",
++    "confirmed_points",
++    "denials_issued",
++    "legacy_prevented_rows",
++    "unresolved_actions",
++    "unverified",
++    "hidden",
++    "updated_at",
++];
++
++/// One validated reading. The variant is the accounting, so a combination
++/// the snapshot contract does not allow cannot reach rendering.
++#[derive(Debug, Clone, Copy, PartialEq)]
++pub(crate) enum PrivacyReading {
++    /// Accounting 0: the ledger has no record of the session. No numbers.
++    Unrecorded,
++    /// Accounting 1: the legacy permitted-crossing score, and a count of
++    /// legacy prevented rows (not denied calls).
++    Legacy {
++        percent: u8,
++        prevented_rows: u64,
++        unverified: bool,
++    },
++    /// Accounting 2, reserved for new accounting. No plugin release writes it
++    /// yet; it is read so a deployed reader can draw it.
++    Evidence {
++        percent: Option<u8>,
++        confirmed_points: f64,
++        denials_issued: u64,
++        unresolved_actions: u64,
++        unverified: bool,
++    },
 +}
 +
 +/// `$PRIVACY_HUD_DATA` (tests, scratch setups) else Codex's plugin-data dir for this plugin.
@@ -232,46 +274,164 @@ index 0000000..91b3828
 +    Some(home.join("plugins").join("data").join(PLUGIN_DATA_DIRNAME))
 +}
 +
++fn has_exactly(obj: &Map<String, Value>, keys: &[&str]) -> bool {
++    obj.len() == keys.len() && keys.iter().all(|key| obj.contains_key(*key))
++}
++
++/// A JSON integer in `0..=MAX_COUNT`. Booleans and fractions are not counts.
++fn count(value: &Value) -> Option<u64> {
++    value.as_u64().filter(|n| *n <= MAX_COUNT)
++}
++
++fn percent(value: &Value) -> Option<u8> {
++    value.as_u64().filter(|n| *n <= 100).map(|n| n as u8)
++}
++
++/// A finite JSON number. Booleans are not numbers.
++fn number(value: &Value) -> Option<f64> {
++    if !value.is_number() {
++        return None;
++    }
++    value.as_f64().filter(|n| n.is_finite())
++}
++
 +/// Contract A to reading. `None` for every failure, including `hidden`.
 +pub(crate) fn parse_snapshot(text: &str, now_unix: f64) -> Option<PrivacyReading> {
-+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
-+    if value.get("v")?.as_u64()? != SNAPSHOT_VERSION || value.get("hidden")?.as_bool()? {
++    let value: Value = serde_json::from_str(text).ok()?;
++    let obj = value.as_object()?;
++    let version = obj.get("v")?.as_u64()?;
++    let reading = match version {
++        LEGACY_SNAPSHOT_VERSION => parse_v1(obj)?,
++        SNAPSHOT_VERSION => parse_v2(obj)?,
++        _ => return None,
++    };
++    let updated_at = number(obj.get("updated_at")?).filter(|t| *t >= 0.0)?;
++    if obj.get("hidden")?.as_bool()? || now_unix - updated_at > STALE_AFTER_SECS {
 +        return None;
 +    }
-+    if now_unix - value.get("updated_at")?.as_f64()? > STALE_AFTER_SECS {
++    Some(reading)
++}
++
++fn parse_v1(obj: &Map<String, Value>) -> Option<PrivacyReading> {
++    if !has_exactly(obj, &V1_KEYS) {
 +        return None;
 +    }
-+    let percent = value.get("percent")?.as_u64()?;
-+    if percent > 100 {
-+        return None;
-+    }
-+    Some(PrivacyReading {
-+        percent: percent as u8,
-+        blocked: value.get("blocked")?.as_u64()?.min(u32::MAX.into()) as u32,
-+        unverified: value.get("unverified")?.as_bool()?,
++    Some(PrivacyReading::Legacy {
++        percent: percent(obj.get("percent")?)?,
++        prevented_rows: count(obj.get("blocked")?)?,
++        unverified: obj.get("unverified")?.as_bool()?,
 +    })
 +}
 +
-+/// `<10-cell bar> <pct right-aligned to 2>%`, byte-identical to the plugin's `render.hud_core`.
-+pub(crate) fn render_core(reading: PrivacyReading) -> String {
++fn parse_v2(obj: &Map<String, Value>) -> Option<PrivacyReading> {
++    if !has_exactly(obj, &V2_KEYS) {
++        return None;
++    }
++    let field = |key: &str| obj.get(key);
++    let unverified = field("unverified")?.as_bool()?;
++    let pct = field("percent")?;
++    let points = field("confirmed_points")?;
++    let denials = field("denials_issued")?;
++    let rows = field("legacy_prevented_rows")?;
++    let unresolved = field("unresolved_actions")?;
++    match field("accounting_version")?.as_u64()? {
++        0 => {
++            let all_null = [pct, points, denials, rows, unresolved]
++                .iter()
++                .all(|value| value.is_null());
++            (all_null && unverified).then_some(PrivacyReading::Unrecorded)
++        }
++        1 => {
++            if !(points.is_null() && denials.is_null() && unresolved.is_null()) {
++                return None;
++            }
++            Some(PrivacyReading::Legacy {
++                percent: percent(pct)?,
++                prevented_rows: count(rows)?,
++                unverified,
++            })
++        }
++        2 => {
++            if !rows.is_null() {
++                return None;
++            }
++            let confirmed_points = number(points).filter(|n| *n >= 0.0)?;
++            let denials_issued = count(denials)?;
++            let unresolved_actions = count(unresolved)?;
++            let percent = if pct.is_null() {
++                None
++            } else if unresolved_actions == 0 && !unverified {
++                Some(percent(pct)?)
++            } else {
++                return None;
++            };
++            Some(PrivacyReading::Evidence {
++                percent,
++                confirmed_points,
++                denials_issued,
++                unresolved_actions,
++                unverified,
++            })
++        }
++        _ => None,
++    }
++}
++
++/// `<10-cell bar> <pct right-aligned to 2>%`, byte-identical to the plugin's
++/// `render.hud_core`. The status line no longer draws it; it is kept, with
++/// its rounding golden, for the plugin's numeric primitive.
++#[cfg(test)]
++pub(crate) fn render_bar_core(percent: u8) -> String {
 +    // Python's round() is half-to-even; 25 gives 2 cells, 35 gives 4 cells.
-+    let percent = reading.percent;
 +    let filled = ((f64::from(percent) / 10.0).round_ties_even() as usize).min(10);
 +    let bar: String = "█".repeat(filled) + &"░".repeat(10 - filled);
 +    format!("{bar} {percent:>2}%")
 +}
 +
-+/// The status-line segment: the shared core, then the two warning markers.
++/// The reading after the word `Privacy`, byte-identical to the widest
++/// candidate of the plugin's `render.hud_line`. A legacy percentage is
++/// always labelled `legacy`; an unavailable reading has no number.
++pub(crate) fn render_core(reading: PrivacyReading) -> String {
++    match reading {
++        PrivacyReading::Unrecorded => "—% · No session on record".to_string(),
++        PrivacyReading::Legacy {
++            percent,
++            prevented_rows,
++            unverified,
++        } => {
++            let mut text = format!("legacy {percent}%");
++            if prevented_rows > 0 {
++                let plural = if prevented_rows == 1 { "" } else { "s" };
++                text.push_str(&format!(" · {prevented_rows} prevented row{plural}"));
++            }
++            if unverified {
++                text.push_str(" ⚠unverified");
++            }
++            text
++        }
++        PrivacyReading::Evidence {
++            percent,
++            denials_issued,
++            unresolved_actions,
++            unverified,
++            ..
++        } => {
++            let mut text = match percent {
++                Some(percent) => format!("{percent}%"),
++                None => format!("—% · {unresolved_actions} unresolved"),
++            };
++            text.push_str(&format!(" · {denials_issued} denials issued"));
++            if unverified {
++                text.push_str(" ⚠unverified");
++            }
++            text
++        }
++    }
++}
++
++/// The status-line segment.
 +pub(crate) fn render_privacy(reading: PrivacyReading) -> String {
-+    let mut text = format!("Privacy {}", render_core(reading));
-+    let blocked = reading.blocked;
-+    if blocked > 0 {
-+        text.push_str(&format!(" ⚠{blocked}"));
-+    }
-+    if reading.unverified {
-+        text.push_str(" ⚠unverified");
-+    }
-+    text
++    format!("Privacy {}", render_core(reading))
 +}
 +
 +/// Throttled reader of the plugin's per-session snapshot file.
@@ -365,58 +525,117 @@ index 0000000..91b3828
 +    use super::*;
 +
 +    const GOLDEN: &str = include_str!("privacy_status_golden.json");
++    const READING_GOLDEN: &str = include_str!("privacy_status_reading_golden.json");
 +
-+    fn reading(percent: u8, blocked: u32, unverified: bool) -> PrivacyReading {
-+        PrivacyReading {
++    fn legacy(percent: u8, prevented_rows: u64, unverified: bool) -> PrivacyReading {
++        PrivacyReading::Legacy {
 +            percent,
-+            blocked,
++            prevented_rows,
 +            unverified,
 +        }
 +    }
 +
-+    fn snap(v: u64, percent: i64, hidden: bool, updated_at: f64) -> String {
++    fn pct(reading: Option<PrivacyReading>) -> Option<u8> {
++        match reading? {
++            PrivacyReading::Legacy { percent, .. } => Some(percent),
++            _ => None,
++        }
++    }
++
++    fn snap(percent: i64, hidden: bool, updated_at: f64) -> String {
 +        format!(
-+            r#"{{"v":{v},"percent":{percent},"blocked":1,"unverified":false,"hidden":{hidden},"updated_at":{updated_at}}}"#
++            r#"{{"v":2,"accounting_version":1,"percent":{percent},"confirmed_points":null,"denials_issued":null,"legacy_prevented_rows":1,"unresolved_actions":null,"unverified":false,"hidden":{hidden},"updated_at":{updated_at}}}"#
 +        )
 +    }
 +
++    fn rendered(text: &str, now: f64) -> String {
++        parse_snapshot(text, now)
++            .map(render_privacy)
++            .unwrap_or_default()
++    }
++
 +    #[test]
-+    fn render_core_matches_every_golden_case() {
-+        let cases: Vec<serde_json::Value> = serde_json::from_str(GOLDEN).unwrap();
++    fn render_bar_core_matches_every_golden_case() {
++        let cases: Vec<Value> = serde_json::from_str(GOLDEN).unwrap();
 +        assert!(cases.len() >= 20);
 +        for case in cases {
 +            let pct = case["percent"].as_u64().unwrap() as u8;
 +            let core = case["core"].as_str().unwrap();
-+            assert_eq!(render_core(reading(pct, 0, false)), core, "percent {pct}");
++            assert_eq!(render_bar_core(pct), core, "percent {pct}");
 +        }
 +    }
 +
 +    #[test]
-+    fn render_privacy_adds_markers_after_the_core() {
-+        let marked = render_privacy(reading(28, 2, true));
-+        assert_eq!(marked, "Privacy ███░░░░░░░ 28% ⚠2 ⚠unverified");
++    fn every_reading_golden_case_renders() {
++        let golden: Value = serde_json::from_str(READING_GOLDEN).unwrap();
++        let now = golden["now"].as_f64().unwrap();
++        let cases = golden["cases"].as_object().unwrap();
++        assert!(cases.len() >= 14);
++        for (name, case) in cases {
++            let text = match case.get("text") {
++                Some(text) => text.as_str().unwrap().to_string(),
++                None => serde_json::to_string(&case["snapshot"]).unwrap(),
++            };
++            let expected = case["expected"].as_str().unwrap();
++            assert_eq!(rendered(&text, now), expected, "case {name}");
++        }
++    }
++
++    #[test]
++    fn every_malformed_golden_entry_renders_nothing() {
++        let golden: Value = serde_json::from_str(READING_GOLDEN).unwrap();
++        for doc in golden["malformed"].as_array().unwrap() {
++            let text = serde_json::to_string(doc).unwrap();
++            assert!(parse_snapshot(&text, 1010.0).is_none(), "{text}");
++        }
++        for text in golden["malformed_text"].as_array().unwrap() {
++            let text = text.as_str().unwrap();
++            assert!(parse_snapshot(text, 1010.0).is_none(), "{text}");
++        }
++    }
++
++    #[test]
++    fn the_count_ceiling_matches_the_golden() {
++        let golden: Value = serde_json::from_str(READING_GOLDEN).unwrap();
++        assert_eq!(golden["max_count"].as_u64(), Some(MAX_COUNT));
++    }
++
++    #[test]
++    fn a_v1_snapshot_is_read_as_legacy() {
++        let v1 = r#"{"v":1,"percent":28,"blocked":2,"unverified":false,"hidden":false,"updated_at":1000.0}"#;
++        assert_eq!(parse_snapshot(v1, 1010.0), Some(legacy(28, 2, false)));
++    }
++
++    #[test]
++    fn render_privacy_labels_legacy_and_counts_rows() {
 +        assert_eq!(
-+            render_privacy(reading(28, 0, false)),
-+            "Privacy ███░░░░░░░ 28%"
++            render_privacy(legacy(28, 2, true)),
++            "Privacy legacy 28% · 2 prevented rows ⚠unverified"
++        );
++        assert_eq!(render_privacy(legacy(28, 0, false)), "Privacy legacy 28%");
++        assert_eq!(
++            render_privacy(PrivacyReading::Unrecorded),
++            "Privacy —% · No session on record"
 +        );
 +    }
 +
 +    #[test]
 +    fn parse_accepts_a_fresh_valid_snapshot() {
-+        let parsed = parse_snapshot(&snap(1, 28, false, 1000.0), 1010.0);
-+        assert_eq!(parsed, Some(reading(28, 1, false)));
++        let parsed = parse_snapshot(&snap(28, false, 1000.0), 1010.0);
++        assert_eq!(parsed, Some(legacy(28, 1, false)));
 +    }
 +
 +    #[test]
 +    fn parse_rejects_every_failure_as_none() {
 +        assert!(parse_snapshot("", 0.0).is_none());
 +        assert!(parse_snapshot("{", 0.0).is_none());
-+        assert!(parse_snapshot(&snap(2, 28, false, 1000.0), 1010.0).is_none()); // version
-+        assert!(parse_snapshot(&snap(1, 101, false, 1000.0), 1010.0).is_none()); // range
-+        assert!(parse_snapshot(&snap(1, -1, false, 1000.0), 1010.0).is_none()); // range
-+        assert!(parse_snapshot(&snap(1, 28, true, 1000.0), 1010.0).is_none()); // hidden
-+        assert!(parse_snapshot(&snap(1, 28, false, 1000.0), 1031.0).is_none()); // stale
-+        assert!(parse_snapshot(&snap(1, 28, false, 1000.0), 1029.0).is_some());
++        assert!(parse_snapshot(&snap(101, false, 1000.0), 1010.0).is_none()); // range
++        assert!(parse_snapshot(&snap(-1, false, 1000.0), 1010.0).is_none()); // range
++        assert!(parse_snapshot(&snap(28, true, 1000.0), 1010.0).is_none()); // hidden
++        assert!(parse_snapshot(&snap(28, false, 1000.0), 1031.0).is_none()); // stale
++        assert!(parse_snapshot(&snap(28, false, 1000.0), 1030.0).is_some());
++        let v3 = snap(28, false, 1000.0).replace(r#""v":2"#, r#""v":3"#);
++        assert!(parse_snapshot(&v3, 1010.0).is_none()); // version
 +    }
 +
 +    #[test]
@@ -454,7 +673,7 @@ index 0000000..91b3828
 +        let mut src = PrivacyStatusSource::with_data_dir(dir.path().to_path_buf());
 +        let start = Instant::now();
 +        assert!(src.current_at(None, start).is_none());
-+        assert_eq!(src.current_at(Some("sid"), start).unwrap().percent, 63);
++        assert_eq!(pct(src.current_at(Some("sid"), start)), Some(63));
 +    }
 +
 +    fn unix_now() -> f64 {
@@ -470,7 +689,7 @@ index 0000000..91b3828
 +        for (name, percent) in files {
 +            let path = hud.join(format!("{name}.json"));
 +            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-+            std::fs::write(path, snap(1, *percent, false, unix_now())).unwrap();
++            std::fs::write(path, snap(*percent, false, unix_now())).unwrap();
 +        }
 +        dir
 +    }
@@ -480,10 +699,10 @@ index 0000000..91b3828
 +        let dir = data_dir_with(&[("sid", 63)]);
 +        let hud = dir.path().join("hud");
 +        let mut src = PrivacyStatusSource::with_data_dir(dir.path().to_path_buf());
-+        assert_eq!(src.current(Some("sid")).unwrap().percent, 63);
-+        std::fs::write(hud.join("sid.json"), snap(1, 64, false, unix_now())).unwrap();
-+        let cached = src.current(Some("sid")).unwrap().percent;
-+        assert_eq!(cached, 63, "cached within READ_INTERVAL");
++        assert_eq!(pct(src.current(Some("sid"))), Some(63));
++        std::fs::write(hud.join("sid.json"), snap(64, false, unix_now())).unwrap();
++        let cached = pct(src.current(Some("sid")));
++        assert_eq!(cached, Some(63), "cached within READ_INTERVAL");
 +    }
 +
 +    #[test]
@@ -492,20 +711,20 @@ index 0000000..91b3828
 +        let hud = dir.path().join("hud");
 +        let mut src = PrivacyStatusSource::with_data_dir(dir.path().to_path_buf());
 +        let start = Instant::now();
-+        assert_eq!(src.current_at(Some("sid"), start).unwrap().percent, 63);
++        assert_eq!(pct(src.current_at(Some("sid"), start)), Some(63));
 +        assert!(!src.is_due(), "a fresh read is not due again yet");
-+        std::fs::write(hud.join("sid.json"), snap(1, 64, false, unix_now())).unwrap();
++        std::fs::write(hud.join("sid.json"), snap(64, false, unix_now())).unwrap();
 +        let later = src.current_at(Some("sid"), start + READ_INTERVAL);
-+        assert_eq!(later.unwrap().percent, 64);
++        assert_eq!(pct(later), Some(64));
 +    }
 +
 +    #[test]
 +    fn source_rereads_immediately_for_a_different_thread() {
 +        let dir = data_dir_with(&[("a", 10), ("b", 20)]);
 +        let mut src = PrivacyStatusSource::with_data_dir(dir.path().to_path_buf());
-+        assert_eq!(src.current(Some("a")).unwrap().percent, 10);
-+        let switched = src.current(Some("b")).unwrap().percent;
-+        assert_eq!(switched, 20, "a thread switch must not reuse the cache");
++        assert_eq!(pct(src.current(Some("a"))), Some(10));
++        let switched = pct(src.current(Some("b")));
++        assert_eq!(switched, Some(20), "a thread switch must not reuse the cache");
 +    }
 +
 +    #[test]
@@ -637,3 +856,621 @@ index 0000000..57983ea
 +    "core": "██████████ 100%"
 +  }
 +]
+diff --git a/codex-rs/tui/src/privacy_status_reading_golden.json b/codex-rs/tui/src/privacy_status_reading_golden.json
+new file mode 100644
+index 0000000..9df0d87
+--- /dev/null
++++ b/codex-rs/tui/src/privacy_status_reading_golden.json
+@@ -0,0 +1,612 @@
++{
++ "$comment": "Snapshot-to-text golden shared by render.hud_line and the patched Codex reader (privacy_status.rs). An empty expected string means nothing is rendered. Every malformed entry renders nothing.",
++ "now": 1010.0,
++ "width": 120,
++ "max_count": 9007199254740991,
++ "cases": {
++  "unrecorded_null": {
++   "snapshot": {
++    "v": 2,
++    "accounting_version": 0,
++    "percent": null,
++    "confirmed_points": null,
++    "denials_issued": null,
++    "legacy_prevented_rows": null,
++    "unresolved_actions": null,
++    "unverified": true,
++    "hidden": false,
++    "updated_at": 1000.0
++   },
++   "expected": "Privacy —% · No session on record"
++  },
++  "legacy": {
++   "snapshot": {
++    "v": 2,
++    "accounting_version": 1,
++    "percent": 28,
++    "confirmed_points": null,
++    "denials_issued": null,
++    "legacy_prevented_rows": 2,
++    "unresolved_actions": null,
++    "unverified": false,
++    "hidden": false,
++    "updated_at": 1000.0
++   },
++   "expected": "Privacy legacy 28% · 2 prevented rows"
++  },
++  "legacy_v1_snapshot": {
++   "snapshot": {
++    "v": 1,
++    "percent": 28,
++    "blocked": 2,
++    "unverified": false,
++    "hidden": false,
++    "updated_at": 1000.0
++   },
++   "expected": "Privacy legacy 28% · 2 prevented rows"
++  },
++  "legacy_zero": {
++   "snapshot": {
++    "v": 2,
++    "accounting_version": 1,
++    "percent": 0,
++    "confirmed_points": null,
++    "denials_issued": null,
++    "legacy_prevented_rows": 0,
++    "unresolved_actions": null,
++    "unverified": false,
++    "hidden": false,
++    "updated_at": 1000.0
++   },
++   "expected": "Privacy legacy 0%"
++  },
++  "legacy_one_prevented_row": {
++   "snapshot": {
++    "v": 2,
++    "accounting_version": 1,
++    "percent": 28,
++    "confirmed_points": null,
++    "denials_issued": null,
++    "legacy_prevented_rows": 1,
++    "unresolved_actions": null,
++    "unverified": false,
++    "hidden": false,
++    "updated_at": 1000.0
++   },
++   "expected": "Privacy legacy 28% · 1 prevented row"
++  },
++  "legacy_unverified": {
++   "snapshot": {
++    "v": 2,
++    "accounting_version": 1,
++    "percent": 28,
++    "confirmed_points": null,
++    "denials_issued": null,
++    "legacy_prevented_rows": 2,
++    "unresolved_actions": null,
++    "unverified": true,
++    "hidden": false,
++    "updated_at": 1000.0
++   },
++   "expected": "Privacy legacy 28% · 2 prevented rows ⚠unverified"
++  },
++  "hidden": {
++   "snapshot": {
++    "v": 2,
++    "accounting_version": 1,
++    "percent": 28,
++    "confirmed_points": null,
++    "denials_issued": null,
++    "legacy_prevented_rows": 2,
++    "unresolved_actions": null,
++    "unverified": false,
++    "hidden": true,
++    "updated_at": 1000.0
++   },
++   "expected": ""
++  },
++  "hidden_unrecorded": {
++   "snapshot": {
++    "v": 2,
++    "accounting_version": 0,
++    "percent": null,
++    "confirmed_points": null,
++    "denials_issued": null,
++    "legacy_prevented_rows": null,
++    "unresolved_actions": null,
++    "unverified": true,
++    "hidden": true,
++    "updated_at": 1000.0
++   },
++   "expected": ""
++  },
++  "malformed": {
++   "text": "{",
++   "expected": ""
++  },
++  "stale": {
++   "snapshot": {
++    "v": 2,
++    "accounting_version": 1,
++    "percent": 28,
++    "confirmed_points": null,
++    "denials_issued": null,
++    "legacy_prevented_rows": 2,
++    "unresolved_actions": null,
++    "unverified": false,
++    "hidden": false,
++    "updated_at": 979.0
++   },
++   "expected": ""
++  },
++  "fresh_at_exactly_30": {
++   "snapshot": {
++    "v": 2,
++    "accounting_version": 1,
++    "percent": 28,
++    "confirmed_points": null,
++    "denials_issued": null,
++    "legacy_prevented_rows": 2,
++    "unresolved_actions": null,
++    "unverified": false,
++    "hidden": false,
++    "updated_at": 980.0
++   },
++   "expected": "Privacy legacy 28% · 2 prevented rows"
++  },
++  "accounting_v2_null": {
++   "snapshot": {
++    "v": 2,
++    "accounting_version": 2,
++    "percent": null,
++    "confirmed_points": 33.6,
++    "denials_issued": 2,
++    "legacy_prevented_rows": null,
++    "unresolved_actions": 3,
++    "unverified": false,
++    "hidden": false,
++    "updated_at": 1000.0
++   },
++   "expected": "Privacy —% · 3 unresolved · 2 denials issued"
++  },
++  "accounting_v2_null_unverified": {
++   "snapshot": {
++    "v": 2,
++    "accounting_version": 2,
++    "percent": null,
++    "confirmed_points": 33.6,
++    "denials_issued": 2,
++    "legacy_prevented_rows": null,
++    "unresolved_actions": 3,
++    "unverified": true,
++    "hidden": false,
++    "updated_at": 1000.0
++   },
++   "expected": "Privacy —% · 3 unresolved · 2 denials issued ⚠unverified"
++  },
++  "accounting_v2_available": {
++   "snapshot": {
++    "v": 2,
++    "accounting_version": 2,
++    "percent": 28,
++    "confirmed_points": 33.6,
++    "denials_issued": 2,
++    "legacy_prevented_rows": null,
++    "unresolved_actions": 0,
++    "unverified": false,
++    "hidden": false,
++    "updated_at": 1000.0
++   },
++   "expected": "Privacy 28% · 2 denials issued"
++  }
++ },
++ "malformed": [
++  {
++   "v": 2,
++   "accounting_version": 1,
++   "percent": 28,
++   "confirmed_points": null,
++   "denials_issued": null,
++   "unresolved_actions": null,
++   "unverified": false,
++   "hidden": false,
++   "updated_at": 1000.0
++  },
++  {
++   "v": 2,
++   "accounting_version": 1,
++   "percent": 28,
++   "confirmed_points": null,
++   "denials_issued": null,
++   "legacy_prevented_rows": 2,
++   "unresolved_actions": null,
++   "unverified": false,
++   "hidden": false,
++   "updated_at": 1000.0,
++   "extra": 1
++  },
++  {
++   "v": 3,
++   "accounting_version": 1,
++   "percent": 28,
++   "confirmed_points": null,
++   "denials_issued": null,
++   "legacy_prevented_rows": 2,
++   "unresolved_actions": null,
++   "unverified": false,
++   "hidden": false,
++   "updated_at": 1000.0
++  },
++  {
++   "v": 2,
++   "accounting_version": 3,
++   "percent": 28,
++   "confirmed_points": null,
++   "denials_issued": null,
++   "legacy_prevented_rows": 2,
++   "unresolved_actions": null,
++   "unverified": false,
++   "hidden": false,
++   "updated_at": 1000.0
++  },
++  {
++   "v": 2,
++   "accounting_version": true,
++   "percent": 28,
++   "confirmed_points": null,
++   "denials_issued": null,
++   "legacy_prevented_rows": 2,
++   "unresolved_actions": null,
++   "unverified": false,
++   "hidden": false,
++   "updated_at": 1000.0
++  },
++  {
++   "v": 2,
++   "accounting_version": 1,
++   "percent": 101,
++   "confirmed_points": null,
++   "denials_issued": null,
++   "legacy_prevented_rows": 2,
++   "unresolved_actions": null,
++   "unverified": false,
++   "hidden": false,
++   "updated_at": 1000.0
++  },
++  {
++   "v": 2,
++   "accounting_version": 1,
++   "percent": -1,
++   "confirmed_points": null,
++   "denials_issued": null,
++   "legacy_prevented_rows": 2,
++   "unresolved_actions": null,
++   "unverified": false,
++   "hidden": false,
++   "updated_at": 1000.0
++  },
++  {
++   "v": 2,
++   "accounting_version": 1,
++   "percent": 28.5,
++   "confirmed_points": null,
++   "denials_issued": null,
++   "legacy_prevented_rows": 2,
++   "unresolved_actions": null,
++   "unverified": false,
++   "hidden": false,
++   "updated_at": 1000.0
++  },
++  {
++   "v": 2,
++   "accounting_version": 1,
++   "percent": true,
++   "confirmed_points": null,
++   "denials_issued": null,
++   "legacy_prevented_rows": 2,
++   "unresolved_actions": null,
++   "unverified": false,
++   "hidden": false,
++   "updated_at": 1000.0
++  },
++  {
++   "v": 2,
++   "accounting_version": 1,
++   "percent": null,
++   "confirmed_points": null,
++   "denials_issued": null,
++   "legacy_prevented_rows": 2,
++   "unresolved_actions": null,
++   "unverified": false,
++   "hidden": false,
++   "updated_at": 1000.0
++  },
++  {
++   "v": 2,
++   "accounting_version": 1,
++   "percent": 28,
++   "confirmed_points": null,
++   "denials_issued": null,
++   "legacy_prevented_rows": null,
++   "unresolved_actions": null,
++   "unverified": false,
++   "hidden": false,
++   "updated_at": 1000.0
++  },
++  {
++   "v": 2,
++   "accounting_version": 1,
++   "percent": 28,
++   "confirmed_points": null,
++   "denials_issued": null,
++   "legacy_prevented_rows": -1,
++   "unresolved_actions": null,
++   "unverified": false,
++   "hidden": false,
++   "updated_at": 1000.0
++  },
++  {
++   "v": 2,
++   "accounting_version": 1,
++   "percent": 28,
++   "confirmed_points": null,
++   "denials_issued": null,
++   "legacy_prevented_rows": 9007199254740992,
++   "unresolved_actions": null,
++   "unverified": false,
++   "hidden": false,
++   "updated_at": 1000.0
++  },
++  {
++   "v": 2,
++   "accounting_version": 1,
++   "percent": 28,
++   "confirmed_points": null,
++   "denials_issued": null,
++   "legacy_prevented_rows": false,
++   "unresolved_actions": null,
++   "unverified": false,
++   "hidden": false,
++   "updated_at": 1000.0
++  },
++  {
++   "v": 2,
++   "accounting_version": 1,
++   "percent": 28,
++   "confirmed_points": 0,
++   "denials_issued": null,
++   "legacy_prevented_rows": 2,
++   "unresolved_actions": null,
++   "unverified": false,
++   "hidden": false,
++   "updated_at": 1000.0
++  },
++  {
++   "v": 2,
++   "accounting_version": 1,
++   "percent": 28,
++   "confirmed_points": null,
++   "denials_issued": 0,
++   "legacy_prevented_rows": 2,
++   "unresolved_actions": null,
++   "unverified": false,
++   "hidden": false,
++   "updated_at": 1000.0
++  },
++  {
++   "v": 2,
++   "accounting_version": 1,
++   "percent": 28,
++   "confirmed_points": null,
++   "denials_issued": null,
++   "legacy_prevented_rows": 2,
++   "unresolved_actions": 0,
++   "unverified": false,
++   "hidden": false,
++   "updated_at": 1000.0
++  },
++  {
++   "v": 2,
++   "accounting_version": 1,
++   "percent": 28,
++   "confirmed_points": null,
++   "denials_issued": null,
++   "legacy_prevented_rows": 2,
++   "unresolved_actions": null,
++   "unverified": 0,
++   "hidden": false,
++   "updated_at": 1000.0
++  },
++  {
++   "v": 2,
++   "accounting_version": 1,
++   "percent": 28,
++   "confirmed_points": null,
++   "denials_issued": null,
++   "legacy_prevented_rows": 2,
++   "unresolved_actions": null,
++   "unverified": false,
++   "hidden": "no",
++   "updated_at": 1000.0
++  },
++  {
++   "v": 2,
++   "accounting_version": 1,
++   "percent": 28,
++   "confirmed_points": null,
++   "denials_issued": null,
++   "legacy_prevented_rows": 2,
++   "unresolved_actions": null,
++   "unverified": false,
++   "hidden": false,
++   "updated_at": "now"
++  },
++  {
++   "v": 2,
++   "accounting_version": 1,
++   "percent": 28,
++   "confirmed_points": null,
++   "denials_issued": null,
++   "legacy_prevented_rows": 2,
++   "unresolved_actions": null,
++   "unverified": false,
++   "hidden": false,
++   "updated_at": true
++  },
++  {
++   "v": 2,
++   "accounting_version": 0,
++   "percent": 0,
++   "confirmed_points": null,
++   "denials_issued": null,
++   "legacy_prevented_rows": null,
++   "unresolved_actions": null,
++   "unverified": true,
++   "hidden": false,
++   "updated_at": 1000.0
++  },
++  {
++   "v": 2,
++   "accounting_version": 0,
++   "percent": null,
++   "confirmed_points": null,
++   "denials_issued": null,
++   "legacy_prevented_rows": 0,
++   "unresolved_actions": null,
++   "unverified": true,
++   "hidden": false,
++   "updated_at": 1000.0
++  },
++  {
++   "v": 2,
++   "accounting_version": 0,
++   "percent": null,
++   "confirmed_points": 0,
++   "denials_issued": null,
++   "legacy_prevented_rows": null,
++   "unresolved_actions": null,
++   "unverified": true,
++   "hidden": false,
++   "updated_at": 1000.0
++  },
++  {
++   "v": 2,
++   "accounting_version": 0,
++   "percent": null,
++   "confirmed_points": null,
++   "denials_issued": null,
++   "legacy_prevented_rows": null,
++   "unresolved_actions": null,
++   "unverified": false,
++   "hidden": false,
++   "updated_at": 1000.0
++  },
++  {
++   "v": 2,
++   "accounting_version": 2,
++   "percent": null,
++   "confirmed_points": 33.6,
++   "denials_issued": 2,
++   "legacy_prevented_rows": 0,
++   "unresolved_actions": 3,
++   "unverified": false,
++   "hidden": false,
++   "updated_at": 1000.0
++  },
++  {
++   "v": 2,
++   "accounting_version": 2,
++   "percent": null,
++   "confirmed_points": null,
++   "denials_issued": 2,
++   "legacy_prevented_rows": null,
++   "unresolved_actions": 3,
++   "unverified": false,
++   "hidden": false,
++   "updated_at": 1000.0
++  },
++  {
++   "v": 2,
++   "accounting_version": 2,
++   "percent": null,
++   "confirmed_points": -1,
++   "denials_issued": 2,
++   "legacy_prevented_rows": null,
++   "unresolved_actions": 3,
++   "unverified": false,
++   "hidden": false,
++   "updated_at": 1000.0
++  },
++  {
++   "v": 2,
++   "accounting_version": 2,
++   "percent": null,
++   "confirmed_points": 33.6,
++   "denials_issued": null,
++   "legacy_prevented_rows": null,
++   "unresolved_actions": 3,
++   "unverified": false,
++   "hidden": false,
++   "updated_at": 1000.0
++  },
++  {
++   "v": 2,
++   "accounting_version": 2,
++   "percent": null,
++   "confirmed_points": 33.6,
++   "denials_issued": 2,
++   "legacy_prevented_rows": null,
++   "unresolved_actions": null,
++   "unverified": false,
++   "hidden": false,
++   "updated_at": 1000.0
++  },
++  {
++   "v": 2,
++   "accounting_version": 2,
++   "percent": 28,
++   "confirmed_points": 33.6,
++   "denials_issued": 2,
++   "legacy_prevented_rows": null,
++   "unresolved_actions": 3,
++   "unverified": false,
++   "hidden": false,
++   "updated_at": 1000.0
++  },
++  {
++   "v": 2,
++   "accounting_version": 2,
++   "percent": 28,
++   "confirmed_points": 33.6,
++   "denials_issued": 2,
++   "legacy_prevented_rows": null,
++   "unresolved_actions": 0,
++   "unverified": true,
++   "hidden": false,
++   "updated_at": 1000.0
++  },
++  {
++   "v": 1,
++   "percent": 28,
++   "blocked": -1,
++   "unverified": false,
++   "hidden": false,
++   "updated_at": 1000.0
++  },
++  {
++   "v": 1,
++   "percent": 28,
++   "blocked": 2,
++   "unverified": false,
++   "hidden": false,
++   "updated_at": 1000.0,
++   "extra": 1
++  },
++  []
++ ],
++ "malformed_text": [
++  "{\"v\":2,\"accounting_version\":1,\"percent\":28,\"confirmed_points\":null,\"denials_issued\":null,\"legacy_prevented_rows\":2,\"unresolved_actions\":null,\"unverified\":false,\"hidden\":false,\"updated_at\":Infinity}",
++  "{\"v\":2,\"accounting_version\":2,\"percent\":null,\"confirmed_points\":NaN,\"denials_issued\":2,\"legacy_prevented_rows\":null,\"unresolved_actions\":3,\"unverified\":false,\"hidden\":false,\"updated_at\":1000.0}",
++  ""
++ ]
++}

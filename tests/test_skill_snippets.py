@@ -110,7 +110,7 @@ def test_the_skill_describes_the_source_rules_that_actually_ship():
         # "read from {}" / "from `{}` output", with the origin left out:
         # the skill describes the shape, a real row fills in the name.
         wording = origin_phrase("{}", kind).split("{}")[0].strip()
-        assert f"Block values {wording}" in text
+        assert f"Save block rule for values {wording}" in text
 
     for rule_type in ("block_path", "block_command"):
         assert rule_type in text
@@ -150,7 +150,8 @@ def test_audit_block_prints_the_table(env):
     assert "Privacy Audit" in out
     # BASIS reached the header: no daemon named the session current.
     assert "Most recently started session" in out
-    assert "Email ×1        support.log  model_context  [EXPOSED]" in out
+    assert "Email ×1        support.log  model_context  [LEGACY PERMITTED]" \
+        in out
 
 
 def test_audit_block_without_basis_labels_supplied_id(env):
@@ -166,7 +167,8 @@ def test_detail_block_prints_one_row(env):
         (event_id,) = conn.execute(
             "SELECT id FROM events WHERE session_id = 's1'").fetchone()
     out = _run(_block("detail"), env, SESSION_ID="s1", EVENT_ID=str(event_id))
-    assert "Email ×1\nsupport.log → model_context" in out
+    assert "Email ×1\nRecorded association       support.log → model_context" \
+        in out
 
 
 def test_hud_block_prints_one_state_word(env):
