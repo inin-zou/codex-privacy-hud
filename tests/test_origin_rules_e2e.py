@@ -251,7 +251,7 @@ def test_resending_the_secret_is_still_denied_by_the_credential_default(state):
         reply["hookSpecificOutput"]["permissionDecisionReason"].lower()
 
 
-def test_protect_future_occurrences_is_still_offered(state, ui):
+def test_policy_endpoint_saves_a_mask_rule(state, ui):
     """The other L3 action is still accepted: the endpoint takes a `mask`
     rule on a data type the engine does not hard-block, and the rule reaches
     the `policy` table.
@@ -280,7 +280,7 @@ def test_protect_future_occurrences_is_still_offered(state, ui):
     assert state.ledger.policy_selectors(SID, "mask") == {"email"}
 
 
-def test_protect_future_occurrences_is_refused_on_a_hard_blocked_type(state, ui):
+def test_policy_endpoint_refuses_a_mask_rule_on_a_hard_blocked_type(state, ui):
     """The button was WEAKENING protection on exactly the exposures it
     matters most on.
 

@@ -165,7 +165,7 @@ def _loosening_attempts(ledger, sid, data_dir, event_id):
                 # merely CO-OCCURS with a credential skipped the block for
                 # the whole call. `path` is what the test payload carries
                 # alongside the credential, and it is what one click of the
-                # audit UI's "Protect future occurrences" on an ordinary path
+                # audit UI's "Mask detected path in future calls" on an ordinary path
                 # exposure writes. Held now by the engine's own precedence,
                 # not by any refusal keyed on the selector.
                 ("mask", "path"),

@@ -119,8 +119,9 @@ def test_the_skill_describes_the_source_rules_that_actually_ship():
     assert "Block this source" not in text
     assert "no rule can name a source" not in text
 
-    # Known limit 10 travels with the claim: the promise is "this value
-    # does not leave unchanged", not "nothing about this file leaves".
+    # Known limit 10: origin rules match the whole value, normalised.
+    # Matching requires detection on ingress and again on egress; saving
+    # a rule does not establish that it will match a later call.
     #
     # This asserted `"byte-identical" in text` until #49 item 7, which is
     # the third test in this repository found enforcing a claim the code

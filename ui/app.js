@@ -347,7 +347,7 @@
         });
         $("ruleConfirmation").textContent = ok
           ? data.message
-          : `Could not apply rule: ${data.error || "unknown error"}`;
+          : `Could not save rule: ${data.error || "unknown error"}`;
       });
     });
 

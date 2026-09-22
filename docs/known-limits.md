@@ -61,7 +61,7 @@ Ever.
 
 ## 10. A source rule matches the whole value, normalised — not a summary of it, and not a byte comparison either.
 
-A model that summarizes, rewrites, or quotes part of what it read defeats it, and that is a likely path rather than an exotic one. The rule's promise is "this value does not leave unchanged", not "nothing about this file leaves".
+A model that summarizes, rewrites, or quotes part of what it read defeats it, and that is a likely path rather than an exotic one. The value must be detected on ingress and again on egress. When either detection depends on the deep scan, a scan gap can prevent this rule from matching (known limit 21). Detection is heuristic and can miss values, and hosted tools never reach this plugin at all.
 
 This said "byte-identical" until #49 item 7, and that was wrong in the other direction. Matching keys on `mask.value_hash`, which is an HMAC of `value.strip().lower()` (`mask.py:21`) — the same hash the taint map is keyed by (`engine.py:448`). So the set that matches is **wider** than byte-identical: two values differing only in case or surrounding whitespace are one value here. Whether that is the right identity is open (#43, #44); what is not open is describing it as a byte comparison.
 
@@ -79,7 +79,7 @@ A daemon replaced mid-session loses it, and source rules stop matching with no e
 
 ## 13. No policy rule can be removed within the session that wrote it.
 
-There is no removal path for any of them: nothing deletes a policy row — no `remove_policy`, no `DELETE FROM policy` anywhere in the code. This is **not new with source rules**; it has always been true of `Protect future occurrences` (a `mask` rule) as well, and was simply never written down. A rule written by mistake is lived with.
+There is no removal path for any of them: nothing deletes a policy row — no `remove_policy`, no `DELETE FROM policy` anywhere in the code. This is **not new with source rules**; it has always been true of `Mask detected <type> in future calls` (a `mask` rule) as well, and was simply never written down. A rule written by mistake is lived with.
 
 For a source rule there is also no way around it in the moment: an "allow once" token does not override one, because an origin deny is decided before the token is consulted and the token path only runs on a call that is otherwise allowed. This is not a workaround you are missing — no surface mints such a token today: not `$privacy`, not the audit UI, not an MCP tool.
 

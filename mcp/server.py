@@ -66,13 +66,14 @@ same path means this process reads the SAME on-disk database the daemon is
 writing to (SQLite WAL mode makes that safe for a second, mostly-reading
 connection); it does not open a second, divergent ledger.
 
-**Enforcement, repeated where a deployer will actually see it:** see
-`mcp_tools.py`'s module docstring. `privacy.update_policy` writes a real,
-durable rule, and `Engine.observe` reads the `policy` table (ahead of its
-own matrix defaults) on every subsequent egress call -- "Block this
-source" / "Protect future occurrences" are genuinely enforced on the
-*next* matching call. This does not apply retroactively: data already
-disclosed before the rule was written stays disclosed (design.md P4).
+**Saving a rule and enforcing it are separate.** `privacy.update_policy`
+writes a session policy rule and returns `saved: true`,
+`enforcement: "conditional"`, and the conditions from
+`mcp_tools.rule_enforcement_note`. A saved rule can match only findings
+produced on later outbound calls this plugin checks. Mask rules also
+yield to an outright block. Origin rules require the value to be detected
+on ingress and again on egress. Detection can miss values, and hosted
+tools never reach this plugin. Data already disclosed stays disclosed.
 """
 from __future__ import annotations
 
@@ -443,19 +444,31 @@ def build_app():
 
     @app.tool(name="privacy.update_policy")
     def update_policy(session_id: str, rule_type: str, selector: str) -> dict:
-        """Write a "Protect future occurrences" (`rule_type="mask"`) rule, or
-        a source rule -- `rule_type="block_path"` or `"block_command"` --
-        that blocks later outbound calls carrying a value from that exact
-        origin (design.md §6, #40). See this file's module docstring:
-        `Engine.observe` enforces any of these starting with the next
-        matching call, not retroactively, and matches the whole value
-        normalised -- an HMAC of `value.strip().lower()`, so not a byte
-        comparison and not a summary of what was read (known limit 10).
-        `rule_type="block_source"` is refused (#38): it named a label, not a
-        source, and `block_path`/`block_command` are the replacement rather
-        than a revival of it. A `mask` rule naming a hard-blocked data type
-        (`credential`) is refused because it is inert: the engine preserves
-        the hard block regardless of matching mask rules."""
+        """Save a session policy rule: `mask` for "Mask detected <type> in future
+        calls", or `block_path` / `block_command` for an origin rule.
+
+        Success reports `saved: true` and `enforcement: "conditional"`.
+        Pass the returned `conditions` to the user. Saving does not establish
+        that a later call will match the rule.
+
+        A mask rule matches detected findings of its selected data type on
+        later outbound calls this plugin checks, unless the call is blocked
+        outright. For types other than `path` and `credential`, matching
+        requires an accepted deep-scan result.
+
+        The value must be detected on ingress and again on egress. When
+        either detection depends on the deep scan, a scan gap can prevent this
+        rule from matching (known limit 21). Detection is heuristic and can
+        miss values, and hosted tools never reach this plugin at all.
+
+        That ingress-and-egress condition applies to origin rules. They match
+        the whole value normalised using `value.strip().lower()`, not a summary
+        of what was read (known limit 10). Data already disclosed stays disclosed.
+
+        `block_source` and `allow_dest` are refused. A `mask` rule selecting
+        `credential` is also refused: an outbound credential finding is
+        already denied, and that deny takes precedence over every mask rule.
+        """
         with tool_access():
             mcp_tools.apply_policy(ledger, session_id, rule_type=rule_type,
                                    selector=selector)

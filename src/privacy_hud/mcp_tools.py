@@ -580,8 +580,8 @@ def get_exposure_detail(ledger, session_id: str, event_id: int) -> ExposureRow:
 
 
 def apply_policy(ledger, session_id: str, *, rule_type: str, selector: str) -> None:
-    """Write a forward-looking policy rule (design.md §6's "Protect future
-    occurrences" action), scoped to this session.
+    """Save a policy rule scoped to this session. The mask action is
+    "Mask detected <type> in future calls" (design.md §6).
 
     `rule_type` must be one of the schema's own documented values
     (ledger.py SCHEMA's `policy.rule_type` comment) -- an unrecognized

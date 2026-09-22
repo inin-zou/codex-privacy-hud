@@ -196,7 +196,7 @@ def test_block_source_is_refused_for_any_selector(led, selector):
     assert led.conn.execute("SELECT count(*) FROM policy").fetchone()[0] == 0
 
 
-def test_protect_future_occurrences_writes_a_mask_rule(led):
+def test_mask_rule_is_saved(led):
     apply_policy(led, "s1", rule_type="mask", selector="email")
     assert led.conn.execute(
         "SELECT count(*) FROM policy WHERE rule_type='mask'").fetchone()[0] == 1

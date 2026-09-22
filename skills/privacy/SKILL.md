@@ -347,16 +347,19 @@ the rc file by hand.
   `render.detail()` prints it as one of two labels (#40):
   `[ Block values read from <path> ]`, which writes a `block_path` rule, or
   ``[ Block values from `<command>` output ]``, a `block_command` rule.
-  Both are enforced per *value*: `Engine.observe()` remembers which origin
-  each value entered the session from and denies a later outbound call
-  carrying one of them. A row with no origin — `source` is a bare tool
+  Both save an origin rule for this session. Report it as saved and pass
+  on the origin conditions: The value must be detected on ingress and
+  again on egress. When either detection depends on the deep scan, a scan
+  gap can prevent this rule from matching (known limit 21). Detection is
+  heuristic and can miss values, and hosted tools never reach this plugin
+  at all. A row with no origin — `source` is a bare tool
   label like `Bash` — offers neither, because no rule could name it, and
   `apply_policy` refuses the withdrawn `block_source` type outright (#38).
 - State the limit whenever you describe a source rule: **it matches the
   whole value, normalised** (known limit 10). A model that summarizes,
-  rewrites, or quotes part of what it read defeats it. The promise is
-  "this value does not leave unchanged", not "nothing about this file
-  leaves". Matching keys on an HMAC of `value.strip().lower()`, so values
+  rewrites, or quotes part of what it read defeats it. Matching the whole normalised value is necessary but does not establish
+  that a saved rule will match a later call; pass on the origin conditions
+  above. Matching keys on an HMAC of `value.strip().lower()`, so values
   differing only in case or surrounding whitespace match too — wider than a
   byte comparison, not narrower, and never describe it as one. Two more
   facts, if the user asks: a source rule is scoped to the
@@ -365,6 +368,6 @@ the rc file by hand.
   "allow once" token does not override one (known limit 13). No surface
   mints that token today — not `$privacy`, not the audit UI, not an MCP
   tool — so this is not a workaround the user has and is missing.
-- None of these rules applies retroactively: data already disclosed before
-  the rule was written stays disclosed (design.md P4) — a rule only changes
-  what happens on the *next* call, not what already happened.
+- Data already disclosed before the rule was saved stays disclosed
+  (design.md P4). Whether a saved rule changes a later outbound call
+  depends on the matching findings and the conditions above.

@@ -257,7 +257,7 @@ This replaces the earlier `Block this source` (`block_source`), withdrawn in #38
 
 In the red band the detail view also shows a note, not an action: `Want a clean context? Start a new conversation in Codex. What this session already sent to the model stays sent.` A clean context is a new Codex conversation, which the plugin cannot start; an earlier `Start a clean session` action opened a ledger row under an id Codex never sends and was removed (#23).
 
-Every action shows a confirmation of what rule it wrote, in plain terms: `Rule added: mask email from support.log. Applies from the next tool call.`
+Every policy action confirms the saved rule and its conditions. For a mask rule selecting email: `Rule saved: mask email, for this session. On later outbound calls this plugin checks, a detected email is masked unless the call is blocked outright. What the call is then allowed to do is decided by the rest of the policy, not by this rule. Matching email requires an accepted deep-scan result. A scan gap means an applicable deep scan supplied no accepted result (known limit 21); on that call this rule has no matching deep-scan finding. Detection can also miss values, and hosted tools never reach this plugin at all.` The confirmation uses `mcp_tools.rule_enforcement_note`: cheap data types receive the cheap-detection clause; origin rules receive the ingress-and-egress clause.
 
 **The irreversibility notice is required, permanent, and `warn`-colored.** It never collapses, never becomes a dismissible toast, never gets an "I understand" button that hides it. It is the single most honest element in the product.
 
@@ -316,7 +316,7 @@ Pseudonyms are stable within the session, so the agent's reasoning survives the 
 | Situation | Copy |
 |---|---|
 | After any exposure | `Already disclosed data cannot be recalled from this session.` |
-| Policy action taken | `Applies from the next tool call.` |
+| Policy rule saved | `Rule saved:` followed by the rule and its conditions from `mcp_tools.rule_enforcement_note`. |
 | Hosted-tool gap | `Hosted tools such as web search do not pass through local hooks and are not covered.` |
 | Scan gap | `Scan gap — fast-path results only.` |
 
