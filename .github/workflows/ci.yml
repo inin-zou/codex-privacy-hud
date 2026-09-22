@@ -89,6 +89,24 @@ jobs:
           tests/test_offline.py tests/test_runtime.py
           tests/test_doctor.py::test_check_model_missing_weights_warns_without_network
 
+  rust-status:
+    # The patched Codex reader, executed (#54 phase 1). tests/test_rust_status.py
+    # takes privacy_status.rs and its two goldens out of the patch and runs
+    # the module's own unit tests in a scratch crate, so the Rust side of the
+    # snapshot contract is run, not only read. It does not build codex-tui;
+    # patch-health.yml checks that the patch applies.
+    name: rust status reader
+    runs-on: ubuntu-latest
+    env:
+      PRIVACY_HUD_RUST_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e ".[test]"
+      - run: cargo --version
+      - run: python -m pytest -q tests/test_rust_status.py
+
   lint:
     # Rule selection lives in pyproject's [tool.ruff], so a local `ruff check .`
     # and this job agree. The version is pinned because a ruff upgrade can add
