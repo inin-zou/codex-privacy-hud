@@ -411,8 +411,8 @@ def test_observation_rejects_invalid_metadata_atomically(led, case):
     if where == "observation":
         obs = replace(obs, **_OBSERVATION_DEFECTS[name])
     else:
-        events.append(event(value_subject("fourth@example.com"),
-                            **_EVENT_DEFECTS[name]))
+        events.append(replace(event(value_subject("fourth@example.com")),
+                              **_EVENT_DEFECTS[name]))
     with pytest.raises(ValueError, match=INVALID_RECORD):
         led.record_observation(obs, events)
     assert snapshot(led.conn) == before
