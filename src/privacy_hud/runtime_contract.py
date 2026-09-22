@@ -373,6 +373,28 @@ def _valid_receipt_v2(receipt: JSONObject) -> bool:
     return True
 
 
+#: What `classify_receipt` can answer. Five states, not two: "there is no
+#: receipt" and "there is one nobody can read" are different facts, and
+#: collapsing them is what would let an unreadable receipt become
+#: permission to activate (#66 Pair 5).
+ReceiptState = Literal["absent", "unreadable", "malformed", "v1", "v2"]
+
+
+def classify_receipt(data_dir: Path) -> ReceiptState:
+    """Name the receipt's state in `data_dir` without deciding anything.
+
+    * `absent` — no file at the receipt's pathname.
+    * `unreadable` — a file exists, but not one this process may trust:
+      a symlink, another user's, one others can write, too large, or
+      undecodable.
+    * `malformed` — readable, but not a receipt: not a JSON object, no
+      recognized `v`, or a version-2 body that fails its own validation.
+    * `v1` — a well-formed historical receipt. Repair input only.
+    * `v2` — a well-formed current receipt.
+    """
+    return "absent"
+
+
 def load_activation(data_dir: Path) -> Activation:
     """The selected runtime, from receipt v2, with the selected bundle's
     identity verified against its files.

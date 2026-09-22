@@ -440,6 +440,26 @@ def _quiescent(root: Path) -> bool:
     return hud_snapshot.read_daemon_marker(root) is None
 
 
+def _inspector():
+    """The way this host can be asked who has a file open, or `None`.
+
+    `None` is not "nobody": it is "this host cannot answer", which
+    `open_holders` turns into a refusal (#66 Pair 5).
+    """
+    return None
+
+
+def open_holders(data_dir) -> frozenset[int]:
+    """Every process with the ledger database or one of its sidecars open.
+
+    Unknown processes included: what matters is the descriptor, not whether
+    the holder is recognizable as a Privacy HUD process. Raises
+    `RuntimeRefusal("holder_unknown")` when the question cannot be answered
+    at all — missing inspection capability fails closed.
+    """
+    return frozenset()
+
+
 def _stage_backup(source: Path, staged: Path) -> None:
     """Copy `source` to `staged` with SQLite's own backup API, then compare
     the two.
