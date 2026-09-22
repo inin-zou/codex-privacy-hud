@@ -359,10 +359,25 @@ def violations_in(path: str, text: str) -> list[Hit]:
     return scan_text(path, _without_allowed_claims(path, text))
 
 
+#: Trees this scan does not read, and the only kind there may be: a
+#: byte-exact archive of code that shipped, vendored unmodified so a test
+#: can run the real thing (`tests/fixtures/runtime_071`, #66 Pair 4).
+#:
+#: It is excluded rather than allowlisted because the allowlist works by
+#: inserting a notice into the file, and a notice would make the copy no
+#: longer the bytes that shipped — which is the whole reason it is here.
+#: Its retracted claims are 0.7.1's, in 0.7.1's own words; they are not
+#: this release's copy, they reach no user, and nothing imports them into
+#: the product. `test_runtime_storage.py` pins the tree to recorded
+#: checksums, so "unmodified" is asserted rather than assumed.
+VENDORED = ("tests/fixtures/runtime_071/",)
+
+
 def tracked_files() -> list[str]:
     listed = subprocess.run(["git", "ls-files", "-z"], cwd=REPO,
                             capture_output=True, check=True).stdout
-    files = [p for p in listed.decode().split("\0") if p]
+    files = [p for p in listed.decode().split("\0")
+             if p and not p.startswith(VENDORED)]
     own = str(SELF.relative_to(REPO))
     if own not in files:
         files.append(own)

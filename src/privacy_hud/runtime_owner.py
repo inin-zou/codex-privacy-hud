@@ -231,6 +231,20 @@ def _check_selection(selection: tuple[str, str],
         raise RuntimeRefusal("runtime_mismatch")
 
 
+def owns_writer(data_dir) -> bool:
+    """Whether *this process* currently holds the writer lease for
+    `data_dir`.
+
+    For the one caller that must verify its own caller's ownership rather
+    than take it: `runtime_storage.prepare_storage` retires and republishes
+    a database, and "the repair operation promised it holds the lease" is
+    not evidence.
+    """
+    with _OWNERS_LOCK:
+        owner = _OWNERS.get(str(Path(data_dir).resolve()))
+        return owner is not None and owner.fd is not None
+
+
 def unselected_activation() -> Activation:
     """The identity of the code running right now, with no selection behind
     it.
