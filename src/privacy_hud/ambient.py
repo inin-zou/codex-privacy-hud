@@ -199,7 +199,7 @@ def _resolve_session_id() -> str | None:
         from .ledger import Ledger
         ledger = None
         try:
-            ledger = Ledger(path, _matrix())
+            ledger = Ledger(path, _matrix(), initialize=False)
             return mcp_tools.resolve_audit_session(ledger, path.parent).session_id
         finally:
             if ledger is not None:

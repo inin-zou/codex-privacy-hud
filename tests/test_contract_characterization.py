@@ -128,79 +128,151 @@ def _audit(ledger, session_id, tab):
 
 # --------------------------------------------------------------------- #
 # render.audit -- the L2 session audit (design.md §5)
+#
+# Rebaselined on purpose by #54 phase 1, which changed what these views
+# say, not how the chain carries it: every number is now labelled legacy,
+# an unrecorded session has none, and intervention labels say what Privacy
+# HUD returned rather than what the host applied. The numbers themselves
+# did not move.
 # --------------------------------------------------------------------- #
 
 AUDIT_EXPOSED = (
-    "Privacy Audit\n"
-    "Session ID unknown\n"
-    "\n"
-    "┌───────────┐ ┌─────────────────────┐ ┌────────────────┐ ┌───────────┐\n"
-    "│     6%    │ │          2          │ │       2        │ │     1     │\n"
-    "│ of budget │ │ permitted crossings │ │ boundary kinds │ │ prevented │\n"
-    "└───────────┘ └─────────────────────┘ └────────────────┘ └───────────┘\n"
-    "\n"
-    " Exposed 2      Prevented 1      All events 3\n"
-    " ─────────                                   \n"
-    "\n"
-    "SENSITIVE DATA  SOURCE                    DESTINATION    STATUS   \n"
-    "Email ×1        support/log...on/app.log  model_context  [EXPOSED]\n"
-    "Path ×1         terminal output           subagent       [MASKED] "
+    'Privacy Audit\n'
+    'Session ID unknown\n'
+    '\n'
+    '┌─────────────────────────────────┐ ┌────────────────────────────────┐\n'
+    '│                6%               │ │               2                │\n'
+    '│ legacy permitted-crossing score │ │ legacy permitted-crossing rows │\n'
+    '└─────────────────────────────────┘ └────────────────────────────────┘\n'
+    '┌───────────────────────┐ ┌───────────────────────┐\n'
+    '│           2           │ │           1           │\n'
+    '│ legacy boundary kinds │ │ legacy prevented rows │\n'
+    '└───────────────────────┘ └───────────────────────┘\n'
+    'Historical accounting includes permitted crossings and may collapse different outcomes.\n'
+    'It does not establish confirmed disclosure.\n'
+    '\n'
+    ' Legacy permitted crossings 2      Legacy prevented rows 1      All legacy events —\n'
+    ' ────────────────────────────                                                      \n'
+    '\n'
+    'SENSITIVE DATA  SOURCE                    DESTINATION    STATUS            \n'
+    'Email ×1        support/log...on/app.log  model_context  [LEGACY PERMITTED]\n'
+    'Path ×1         terminal output           subagent       [LEGACY PERMITTED]'
 )
 
 AUDIT_PREVENTED = (
-    "Privacy Audit\n"
-    "Session ID unknown\n"
-    "\n"
-    "┌───────────┐ ┌─────────────────────┐ ┌────────────────┐ ┌───────────┐\n"
-    "│     6%    │ │          2          │ │       2        │ │     1     │\n"
-    "│ of budget │ │ permitted crossings │ │ boundary kinds │ │ prevented │\n"
-    "└───────────┘ └─────────────────────┘ └────────────────┘ └───────────┘\n"
-    "\n"
-    " Exposed 2      Prevented 1      All events 3\n"
-    "                ───────────                  \n"
-    "\n"
-    "SENSITIVE DATA  SOURCE  DESTINATION   STATUS     \n"
-    "Credential ×1   .env    external_net  [PREVENTED]"
+    'Privacy Audit\n'
+    'Session ID unknown\n'
+    '\n'
+    '┌─────────────────────────────────┐ ┌────────────────────────────────┐\n'
+    '│                6%               │ │               2                │\n'
+    '│ legacy permitted-crossing score │ │ legacy permitted-crossing rows │\n'
+    '└─────────────────────────────────┘ └────────────────────────────────┘\n'
+    '┌───────────────────────┐ ┌───────────────────────┐\n'
+    '│           2           │ │           1           │\n'
+    '│ legacy boundary kinds │ │ legacy prevented rows │\n'
+    '└───────────────────────┘ └───────────────────────┘\n'
+    'Historical accounting includes permitted crossings and may collapse different outcomes.\n'
+    'It does not establish confirmed disclosure.\n'
+    '\n'
+    ' Legacy permitted crossings 2      Legacy prevented rows 1      All legacy events —\n'
+    '                                   ───────────────────────                         \n'
+    '\n'
+    'SENSITIVE DATA  SOURCE  DESTINATION   STATUS                \n'
+    'Credential ×1   .env    external_net  [LEGACY PREVENTED ROW]'
 )
 
 AUDIT_ALL = (
-    "Privacy Audit\n"
-    "Session ID unknown\n"
-    "\n"
-    "┌───────────┐ ┌─────────────────────┐ ┌────────────────┐ ┌───────────┐\n"
-    "│     6%    │ │          2          │ │       2        │ │     1     │\n"
-    "│ of budget │ │ permitted crossings │ │ boundary kinds │ │ prevented │\n"
-    "└───────────┘ └─────────────────────┘ └────────────────┘ └───────────┘\n"
-    "\n"
-    " Exposed 2      Prevented 1      All events 4\n"
-    "                                 ────────────\n"
-    "\n"
-    "SENSITIVE DATA  SOURCE                    DESTINATION    STATUS     \n"
-    "Email ×1        support/log...on/app.log  model_context  [EXPOSED]  \n"
-    "Path ×1         terminal output           subagent       [MASKED]   \n"
-    "Credential ×1   .env                      external_net   [PREVENTED]\n"
-    "Hostname ×1     shell                     local          [LOCAL]    "
+    'Privacy Audit\n'
+    'Session ID unknown\n'
+    '\n'
+    '┌─────────────────────────────────┐ ┌────────────────────────────────┐\n'
+    '│                6%               │ │               2                │\n'
+    '│ legacy permitted-crossing score │ │ legacy permitted-crossing rows │\n'
+    '└─────────────────────────────────┘ └────────────────────────────────┘\n'
+    '┌───────────────────────┐ ┌───────────────────────┐\n'
+    '│           2           │ │           1           │\n'
+    '│ legacy boundary kinds │ │ legacy prevented rows │\n'
+    '└───────────────────────┘ └───────────────────────┘\n'
+    'Historical accounting includes permitted crossings and may collapse different outcomes.\n'
+    'It does not establish confirmed disclosure.\n'
+    '\n'
+    ' Legacy permitted crossings 2      Legacy prevented rows 1      All legacy events 4\n'
+    '                                                                ───────────────────\n'
+    '\n'
+    'SENSITIVE DATA  SOURCE                    DESTINATION    STATUS                \n'
+    'Email ×1        support/log...on/app.log  model_context  [LEGACY PERMITTED]    \n'
+    'Path ×1         terminal output           subagent       [LEGACY PERMITTED]    \n'
+    'Credential ×1   .env                      external_net   [LEGACY PREVENTED ROW]\n'
+    'Hostname ×1     shell                     local          [LEGACY LOCAL ACCESS] '
 )
 
-_EMPTY_TILES = (
-    "Privacy Audit\n"
-    "Session ID unknown\n"
-    "\n"
-    "┌───────────┐ ┌─────────────────────┐ ┌────────────────┐ ┌───────────┐\n"
-    "│     0%    │ │          0          │ │       0        │ │     0     │\n"
-    "│ of budget │ │ permitted crossings │ │ boundary kinds │ │ prevented │\n"
-    "└───────────┘ └─────────────────────┘ └────────────────┘ └───────────┘\n"
-    "\n"
-    " Exposed 0      Prevented 0      All events 0\n"
+_AUDIT_EMPTY_EXPOSED = (
+    'Privacy Audit\n'
+    'Session ID unknown\n'
+    '\n'
+    '┌─────────────────────────────────┐ ┌────────────────────────────────┐\n'
+    '│                0%               │ │               0                │\n'
+    '│ legacy permitted-crossing score │ │ legacy permitted-crossing rows │\n'
+    '└─────────────────────────────────┘ └────────────────────────────────┘\n'
+    '┌───────────────────────┐ ┌───────────────────────┐\n'
+    '│           0           │ │           0           │\n'
+    '│ legacy boundary kinds │ │ legacy prevented rows │\n'
+    '└───────────────────────┘ └───────────────────────┘\n'
+    'Historical accounting includes permitted crossings and may collapse different outcomes.\n'
+    'It does not establish confirmed disclosure.\n'
+    '\n'
+    ' Legacy permitted crossings 0      Legacy prevented rows 0      All legacy events —\n'
+    ' ────────────────────────────                                                      \n'
+    '\n'
+    'No exposure recorded this session.'
+)
+
+_AUDIT_EMPTY_PREVENTED = (
+    'Privacy Audit\n'
+    'Session ID unknown\n'
+    '\n'
+    '┌─────────────────────────────────┐ ┌────────────────────────────────┐\n'
+    '│                0%               │ │               0                │\n'
+    '│ legacy permitted-crossing score │ │ legacy permitted-crossing rows │\n'
+    '└─────────────────────────────────┘ └────────────────────────────────┘\n'
+    '┌───────────────────────┐ ┌───────────────────────┐\n'
+    '│           0           │ │           0           │\n'
+    '│ legacy boundary kinds │ │ legacy prevented rows │\n'
+    '└───────────────────────┘ └───────────────────────┘\n'
+    'Historical accounting includes permitted crossings and may collapse different outcomes.\n'
+    'It does not establish confirmed disclosure.\n'
+    '\n'
+    ' Legacy permitted crossings 0      Legacy prevented rows 0      All legacy events —\n'
+    '                                   ───────────────────────                         \n'
+    '\n'
+    'Nothing recorded as blocked or minimized yet.'
+)
+
+_AUDIT_EMPTY_ALL = (
+    'Privacy Audit\n'
+    'Session ID unknown\n'
+    '\n'
+    '┌─────────────────────────────────┐ ┌────────────────────────────────┐\n'
+    '│                0%               │ │               0                │\n'
+    '│ legacy permitted-crossing score │ │ legacy permitted-crossing rows │\n'
+    '└─────────────────────────────────┘ └────────────────────────────────┘\n'
+    '┌───────────────────────┐ ┌───────────────────────┐\n'
+    '│           0           │ │           0           │\n'
+    '│ legacy boundary kinds │ │ legacy prevented rows │\n'
+    '└───────────────────────┘ └───────────────────────┘\n'
+    'Historical accounting includes permitted crossings and may collapse different outcomes.\n'
+    'It does not establish confirmed disclosure.\n'
+    '\n'
+    ' Legacy permitted crossings 0      Legacy prevented rows 0      All legacy events 0\n'
+    '                                                                ───────────────────\n'
+    '\n'
+    'No privacy events recorded for this session.'
 )
 
 AUDIT_EMPTY = {
-    "Exposed": _EMPTY_TILES + " ─────────                                   \n"
-               "\nNo exposure recorded this session.",
-    "Prevented": _EMPTY_TILES + "                ───────────                  \n"
-                 "\nNothing recorded as blocked or minimized yet.",
-    "All events": _EMPTY_TILES + "                                 ────────────\n"
-                  "\nNo privacy events recorded for this session.",
+    "Exposed": _AUDIT_EMPTY_EXPOSED,
+    "Prevented": _AUDIT_EMPTY_PREVENTED,
+    "All events": _AUDIT_EMPTY_ALL,
 }
 
 
@@ -237,23 +309,27 @@ def test_audit_empty_session_is_byte_identical(led, tab):
 #: distinction these two goldens draw is still the fix; it is now drawn
 #: between two things the record can actually support.
 AUDIT_UNVERIFIED = (
-    "Privacy Audit\n"
-    "Session ID unknown\n"
-    "\n"
-    "┌───────────┐ ┌─────────────────────┐ ┌────────────────┐ ┌───────────┐\n"
-    "│     0%    │ │          0          │ │       0        │ │     0     │\n"
-    "│ of budget │ │ permitted crossings │ │ boundary kinds │ │ prevented │\n"
-    "└───────────┘ └─────────────────────┘ └────────────────┘ └───────────┘\n"
-    "\n"
-    " Exposed 0      Prevented 0      All events 0\n"
-    "                                 ────────────\n"
-    "\n"
-    "⚠ Session record incomplete — observation began after this session was "
-    "already under way.\n"
-    "  Figures below are not a full account of this session.\n"
-    "\n"
-    "No events recorded for this tab. With this session's record incomplete, "
-    "that is not evidence that none occurred."
+    'Privacy Audit\n'
+    'Session ID unknown\n'
+    '\n'
+    '┌─────────────────────────────────┐ ┌────────────────────────────────┐\n'
+    '│                0%               │ │               0                │\n'
+    '│ legacy permitted-crossing score │ │ legacy permitted-crossing rows │\n'
+    '└─────────────────────────────────┘ └────────────────────────────────┘\n'
+    '┌───────────────────────┐ ┌───────────────────────┐\n'
+    '│           0           │ │           0           │\n'
+    '│ legacy boundary kinds │ │ legacy prevented rows │\n'
+    '└───────────────────────┘ └───────────────────────┘\n'
+    'Historical accounting includes permitted crossings and may collapse different outcomes.\n'
+    'It does not establish confirmed disclosure.\n'
+    '\n'
+    ' Legacy permitted crossings 0      Legacy prevented rows 0      All legacy events 0\n'
+    '                                                                ───────────────────\n'
+    '\n'
+    '⚠ Session record incomplete — observation began after this session was already under way.\n'
+    '  Figures below are not a full account of this session.\n'
+    '\n'
+    "No events recorded for this tab. With this session's record incomplete, that is not evidence that none occurred."
 )
 
 
@@ -286,31 +362,39 @@ def test_audit_for_a_watched_session_did_not_move(led):
 # --------------------------------------------------------------------- #
 
 DETAIL_EMAIL = (
-    "Email ×1\n"
-    "support/logs/production/app.log → model_context\n"
-    "\n"
-    "First seen   {t}\n"
-    "Protection   none\n"
-    "Example      jo•••@acme.com\n"
-    "Budget       +6 pts of 120\n"
-    "\n"
-    "[ Mask detected email in future calls ]\n"
-    "\n"
-    "Already disclosed data cannot be recalled from this session."
+    'Email ×1\n'
+    'Recorded association       support/logs/production/app.log → model_context\n'
+    'This legacy source-to-destination association does not establish delivery or a multi-hop flow.\n'
+    '\n'
+    'First seen                 {t}\n'
+    'Legacy intervention        no intervention recorded\n'
+    'Example                    jo•••@acme.com\n'
+    'Legacy score contribution  +6 legacy pts of 120\n'
+    '\n'
+    'Historical accounting includes permitted crossings and may collapse different outcomes.\n'
+    'It does not establish confirmed disclosure.\n'
+    '\n'
+    'Policy rules can be saved in the local audit browser opened by $privacy.\n'
+    '\n'
+    'Already disclosed data cannot be recalled from this session.'
 )
 
 DETAIL_MASKED_PATH = (
-    "Path ×1\n"
-    "terminal output → subagent\n"
-    "\n"
-    "First seen   {t}\n"
-    "Protection   masked\n"
-    "Example      /Users/•••/app.log\n"
-    "Budget       +0.6 pts of 120\n"
-    "\n"
-    "[ Mask detected path in future calls ]\n"
-    "\n"
-    "Already disclosed data cannot be recalled from this session."
+    'Path ×1\n'
+    'Recorded association       terminal output → subagent\n'
+    'This legacy source-to-destination association does not establish delivery or a multi-hop flow.\n'
+    '\n'
+    'First seen                 {t}\n'
+    'Legacy intervention        rewrite recorded; host application unconfirmed\n'
+    'Example                    /Users/•••/app.log\n'
+    'Legacy score contribution  +0.6 legacy pts of 120\n'
+    '\n'
+    'Historical accounting includes permitted crossings and may collapse different outcomes.\n'
+    'It does not establish confirmed disclosure.\n'
+    '\n'
+    'Policy rules can be saved in the local audit browser opened by $privacy.\n'
+    '\n'
+    'Already disclosed data cannot be recalled from this session.'
 )
 
 #: A credential carries no exemplar at all, so the Example line is absent --
@@ -321,17 +405,20 @@ DETAIL_MASKED_PATH = (
 #: (#40): a row naming a real origin gets a second action line, after the
 #: mask action, offering to block that exact origin.
 DETAIL_CREDENTIAL = (
-    "Credential ×1\n"
-    ".env → external_net\n"
-    "\n"
-    "First seen   {t}\n"
-    "Protection   blocked\n"
-    "Budget       +0 pts of 120\n"
-    "\n"
-    "[ Mask detected credential in future calls ]\n"
-    "[ Block values read from .env ]\n"
-    "\n"
-    "Already disclosed data cannot be recalled from this session."
+    'Credential ×1\n'
+    'Recorded association       .env → external_net\n'
+    'This legacy source-to-destination association does not establish delivery or a multi-hop flow.\n'
+    '\n'
+    'First seen                 {t}\n'
+    'Legacy intervention        denial recorded; host enforcement unconfirmed\n'
+    'Legacy score contribution  +0 legacy pts of 120\n'
+    '\n'
+    'Historical accounting includes permitted crossings and may collapse different outcomes.\n'
+    'It does not establish confirmed disclosure.\n'
+    '\n'
+    'Policy rules can be saved in the local audit browser opened by $privacy.\n'
+    '\n'
+    'Already disclosed data cannot be recalled from this session.'
 )
 
 
@@ -351,29 +438,35 @@ def test_detail_is_byte_identical(led, index, golden):
 # --------------------------------------------------------------------- #
 
 RECEIPT = (
-    "PRIVACY RECEIPT · sess-golden · 41 min\n"
-    "\n"
-    "Disclosure       6% of budget\n"
-    "Exposed          2 crossings across 2 boundary kinds\n"
-    "Prevented        1 events\n"
-    "Retained         session transcript, persisted by Codex outside this ledger.\n"
-    "\n"
-    "  Email ×1              support/l.../app.log→ model_context\n"
-    "  Path ×1               terminal output   → subagent  (masked)\n"
-    "\n"
-    "No file contents, prompts, or raw values were stored."
+    'PRIVACY RECEIPT · sess-golden · 41 min\n'
+    '\n'
+    'legacy permitted-crossing score: 6% (6.6 pts of 120)\n'
+    'legacy permitted-crossing rows: 2\n'
+    'legacy boundary kinds: 2\n'
+    'legacy prevented rows: 1\n'
+    'Historical accounting includes permitted crossings and may collapse different outcomes.\n'
+    'It does not establish confirmed disclosure.\n'
+    "Transcript retention is outside this ledger's account.\n"
+    '\n'
+    '  Email ×1              support/l.../app.log→ model_context\n'
+    '  Path ×1               terminal output   → subagent\n'
+    '\n'
+    'This ledger stores metadata, not file contents, prompts, or raw values.'
 )
 
 RECEIPT_EMPTY = (
-    "PRIVACY RECEIPT · sess-empty · 0 min\n"
-    "\n"
-    "Disclosure       0% of budget\n"
-    "Exposed          0 crossings across 0 boundary kinds\n"
-    "Prevented        0 events\n"
-    "Retained         session transcript, persisted by Codex outside this ledger.\n"
-    "\n"
-    "\n"
-    "No file contents, prompts, or raw values were stored."
+    'PRIVACY RECEIPT · sess-empty · 0 min\n'
+    '\n'
+    'legacy permitted-crossing score: 0% (0 pts of 120)\n'
+    'legacy permitted-crossing rows: 0\n'
+    'legacy boundary kinds: 0\n'
+    'legacy prevented rows: 0\n'
+    'Historical accounting includes permitted crossings and may collapse different outcomes.\n'
+    'It does not establish confirmed disclosure.\n'
+    "Transcript retention is outside this ledger's account.\n"
+    '\n'
+    '\n'
+    'This ledger stores metadata, not file contents, prompts, or raw values.'
 )
 
 
@@ -477,11 +570,20 @@ def test_hud_line_default_ladder_did_not_move(width):
 # The MCP / JSON contract -- the `privacy.*` tools are public.
 # --------------------------------------------------------------------- #
 
-JSON_SUMMARY = {"percent": 6, "exposed_items": 2, "destinations": 2,
-                "prevented": 1}
+#: A recorded session's summary is the legacy variant (#54 phase 1): the
+#: stored numbers under legacy names, with the label and note that travel
+#: with them. The old four keys are gone rather than aliased.
+JSON_SUMMARY = {
+    "accounting_version": 1, "legacy_score": 6.6, "legacy_cap": 120.0,
+    "legacy_percent": 6, "legacy_permitted_crossing_rows": 2,
+    "legacy_boundary_kinds": 2, "legacy_prevented_rows": 1,
+    "score_label": "legacy permitted-crossing score",
+    "accounting_note": ("Historical accounting includes permitted crossings "
+                        "and may collapse different outcomes. It does not "
+                        "establish confirmed disclosure."),
+}
 
-#: `/api/summary` = the four tiles PLUS the coverage reading, appended after
-#: them so the pinned tile order `ui/app.js` reads is untouched.
+#: `/api/summary` = the summary PLUS the coverage reading, appended after it.
 #:
 #: This golden MOVED, on purpose, and the reason is the point of the change: the
 #: four tiles alone serialize a session that was never observed and a genuinely
@@ -508,25 +610,25 @@ JSON_UI_SUMMARY = dict(JSON_SUMMARY, coverage={
 })
 
 JSON_ROWS = [
-    {"id": 1, "turn_id": "t1", "ts": TS, "kind": "exposed",
+    {"accounting_version": 1, "id": 1, "turn_id": "t1", "ts": TS, "kind": "exposed",
      "data_type": "email", "source": "support/logs/production/app.log",
      "source_kind": None,
      "destination": "model_context", "boundary": "B1", "count": 1,
      "masked_example": "jo•••@acme.com", "budget_delta": 6.0,
      "protection": None, "tool_name": "Read"},
-    {"id": 2, "turn_id": "t2", "ts": TS + 60, "kind": "exposed",
+    {"accounting_version": 1, "id": 2, "turn_id": "t2", "ts": TS + 60, "kind": "exposed",
      "data_type": "path", "source": "terminal output",
      "source_kind": None,
      "destination": "subagent", "boundary": "B2", "count": 1,
      "masked_example": "/Users/•••/app.log", "budget_delta": 0.6,
      "protection": "masked", "tool_name": "Task"},
-    {"id": 3, "turn_id": "t3", "ts": TS + 120, "kind": "prevented",
+    {"accounting_version": 1, "id": 3, "turn_id": "t3", "ts": TS + 120, "kind": "prevented",
      "data_type": "credential", "source": ".env",
      "source_kind": "path",
      "destination": "external_net", "boundary": "B4", "count": 1,
      "masked_example": None, "budget_delta": 0.0,
      "protection": "blocked", "tool_name": "Bash"},
-    {"id": 4, "turn_id": "t4", "ts": TS + 180, "kind": "local_access",
+    {"accounting_version": 1, "id": 4, "turn_id": "t4", "ts": TS + 180, "kind": "local_access",
      "data_type": "hostname", "source": "shell",
      "source_kind": None, "destination": "local",
      "boundary": "B0", "count": 1, "masked_example": "db•••.internal",
@@ -562,13 +664,13 @@ def test_get_exposure_detail_json_is_byte_identical(led):
     assert _json(mcp_tools.get_exposure_detail(led, SESSION, 1)) == JSON_DETAIL
 
 
-def test_get_exposure_detail_omits_budget_cap_with_no_session_row(led):
-    """`budget_cap` is *absent*, not None, when the session row is missing --
-    `render.detail()` keys the optional "of {cap}" tail off exactly that."""
+def test_get_exposure_detail_needs_a_session_row(led):
+    """With no session row the session is unrecorded, and an unrecorded
+    session has no event detail (#54 phase 1). It used to return the row
+    with `budget_cap` omitted."""
     led.conn.execute("DELETE FROM sessions WHERE session_id=?", (SESSION,))
-    payload = _json(mcp_tools.get_exposure_detail(led, SESSION, 1))
-    assert "budget_cap" not in payload
-    assert payload == dict(JSON_ROWS[0], first_seen=TS)
+    with pytest.raises(LookupError):
+        mcp_tools.get_exposure_detail(led, SESSION, 1)
 
 
 def test_every_mcp_payload_survives_a_real_json_dumps(led):
@@ -634,9 +736,7 @@ def test_ui_offers_no_clean_session_endpoint(ui, tmp_path):
 def test_ui_summary_endpoint_json_is_byte_identical(ui):
     payload = _get(ui, f"/api/summary?session_id={SESSION}")
     assert payload == JSON_UI_SUMMARY
-    # Key ORDER: the four tiles first, in the order `ui/app.js` reads them,
-    # with `coverage` appended. An older client keeps working precisely because
-    # nothing ahead of it moved.
+    # Key ORDER: the summary variant's keys first, with `coverage` appended.
     assert list(payload) == list(JSON_SUMMARY) + ["coverage"]
 
 

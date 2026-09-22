@@ -50,7 +50,7 @@ def _start(st, session_id="s1"):
 def test_session_start_creates_session(tmp_path):
     st = new_state(tmp_path)
     _start(st)
-    assert st.ledger.summary("s1").percent == 0
+    assert st.ledger.summary("s1").legacy_percent == 0
 
 
 def test_session_start_returns_empty_hook_output(tmp_path):
@@ -82,7 +82,7 @@ def test_pretooluse_bash_local_command_is_allowed(tmp_path):
         "hook_event_name": "PreToolUse", "session_id": "s1", "turn_id": "t1",
         "tool_name": "Bash", "tool_input": {"command": "ls -la"}})
     assert out == {}
-    assert st.ledger.summary("s1").exposed_items == 0
+    assert st.ledger.summary("s1").legacy_permitted_crossing_rows == 0
 
 
 def test_pretooluse_mcp_tool_classifies_as_mcp_destination(tmp_path):
@@ -117,7 +117,7 @@ def test_posttooluse_records_an_exposure(tmp_path):
     _start(st)
     dispatch(st, {"hook_event_name": "PostToolUse", "session_id": "s1",
                   "tool_name": "Read", "tool_response": f"key={CREDENTIAL}"})
-    assert st.ledger.summary("s1").exposed_items >= 1
+    assert st.ledger.summary("s1").legacy_permitted_crossing_rows >= 1
 
 
 def test_userpromptsubmit_is_ingress_to_model_context(tmp_path):
@@ -127,7 +127,7 @@ def test_userpromptsubmit_is_ingress_to_model_context(tmp_path):
                         "session_id": "s1",
                         "prompt": f"here is my key {CREDENTIAL}"})
     assert "deny" not in json.dumps(out)
-    assert st.ledger.summary("s1").exposed_items >= 1
+    assert st.ledger.summary("s1").legacy_permitted_crossing_rows >= 1
 
 
 def test_subagentstart_propagates_without_denying(tmp_path):
@@ -561,9 +561,9 @@ def test_concurrent_calls_for_the_same_session_do_not_corrupt_the_ledger(running
     # actually lost under concurrency, which is the property being tested.
     conn = daemon.state.ledger.conn
     summary = daemon.state.ledger.summary("sockc")
-    assert summary.exposed_items >= 20
+    assert summary.legacy_permitted_crossing_rows >= 20
 
-    # I4, and the reason a row count alone is not enough. `exposed_items`
+    # I4, and the reason a row count alone is not enough. The row count
     # only counts INSERTs; the budget moves through a separate
     # read-modify-write (`UPDATE sessions SET budget_score=budget_score+?`
     # in Ledger.record). A lost update there — two threads reading the same
@@ -854,7 +854,7 @@ def test_a_session_ending_mid_scan_does_not_reuse_the_discarded_salt(tmp_path):
     assert st.salts["race"] != original_salt
     assert st.engines["race"].salt == st.salts["race"]
     # And nothing was silently dropped: the observation was still recorded.
-    assert st.ledger.summary("race").exposed_items >= 1
+    assert st.ledger.summary("race").legacy_permitted_crossing_rows >= 1
 
 
 # --------------------------------------------------------------------- #

@@ -42,14 +42,60 @@
 (function () {
   "use strict";
 
+  // API tab arguments, and what the page calls them. The arguments select
+  // stored legacy classifications (#54 phase 1); the labels say so.
   const TABS = ["Exposed", "Prevented", "All events"];
+  const TAB_LABELS = {
+    "Exposed": "Legacy permitted crossings",
+    "Prevented": "Legacy prevented rows",
+    "All events": "All legacy events",
+  };
+
+  // The unrecorded state's copy, the same strings render.py and ledger.py
+  // hold. Kept here because the page must render that state without a
+  // server answer when no session resolves; tests/test_browser_legacy_js.py
+  // pins each one.
+  const UNRECORDED_STATUS = "NO SESSION RECORD";
+  const UNRECORDED_NOTE = "No session record is available in this ledger. The percentage and counts are unavailable.";
+  const UNRECORDED_EMPTY = "No events can be shown for an unrecorded session. This is not evidence that none occurred.";
+  const UNRECORDED_DETAIL = "No event detail is available for an unrecorded session.";
+  const UNRECORDED_TILES = [
+    ["—%", "percentage unavailable"],
+    ["—", "permitted-crossing rows unavailable"],
+    ["—", "boundary kinds unavailable"],
+    ["—", "prevented rows unavailable"],
+  ];
+  const UNAVAILABLE = "—";
+
+  // Legacy row chips, by stored kind alone (render._LEGACY_CHIPS).
+  const LEGACY_CHIPS = {
+    exposed: "LEGACY PERMITTED",
+    prevented: "LEGACY PREVENTED ROW",
+    local_access: "LEGACY LOCAL ACCESS",
+    detected: "LEGACY DETECTED",
+    retention: "LEGACY RETENTION",
+  };
+
+  // Stored `protection` values as shown (render._PROTECTION_DISPLAY). A
+  // denial or rewrite is what Privacy HUD returned, not what the host
+  // applied.
+  const PROTECTION_DISPLAY = {
+    blocked: "denial recorded; host enforcement unconfirmed",
+    masked: "rewrite recorded; host application unconfirmed",
+    minimized: "rewrite recorded; host application unconfirmed",
+    none: "no intervention recorded",
+  };
+  const ASSOCIATION_NOTE = "This legacy source-to-destination association does not establish delivery or a multi-hop flow.";
 
   const params = new URLSearchParams(location.search);
   let sessionId = params.get("session_id") || null;
   let activeTab = "Exposed";
-  let tabData = {};      // tab name -> {rows, text}
+  let tabData = {};      // tab name -> {rows, text, ...} or null when unavailable
   let summary = null;
-  let copy = { empty_messages: {}, acronyms: {} };
+  // "legacy" | "unrecorded" | "unavailable". A failed request is
+  // "unavailable", never "unrecorded": failing to ask is not an answer.
+  let mode = "unavailable";
+  let copy = { acronyms: {} };
   let selectedIndex = -1;
 
   const $ = (id) => document.getElementById(id);
@@ -66,13 +112,11 @@
   }
 
   function statusChip(row) {
-    if (row.protection === "masked" || row.protection === "minimized") {
-      return { text: "MASKED", cls: "masked" };
-    }
-    if (row.kind === "exposed") return { text: "EXPOSED", cls: "exposed" };
-    if (row.kind === "prevented") return { text: "PREVENTED", cls: "prevented" };
-    if (row.kind === "local_access") return { text: "LOCAL", cls: "local" };
-    return { text: (row.kind || "unknown").toUpperCase(), cls: "" };
+    return { text: LEGACY_CHIPS[row.kind] || "LEGACY UNKNOWN", cls: "legacy" };
+  }
+
+  function protectionDisplay(protection) {
+    return PROTECTION_DISPLAY[protection || "none"] || "legacy intervention not recognized";
   }
 
   function band(pct) {
@@ -91,6 +135,11 @@
       copyRows.sort((a, b) => (a.ts || 0) - (b.ts || 0));
     }
     return copyRows;
+  }
+
+  function tabRows(tab) {
+    const data = tabData[tab];
+    return data && Array.isArray(data.rows) ? data.rows : null;
   }
 
   // -- data fetching ---------------------------------------------------
@@ -115,17 +164,32 @@
       sessionId = s.session_id;
     }
     if (!sessionId) {
+      // The server resolved and found no session: render the unrecorded
+      // view here, without asking for a summary of an invented ID.
+      mode = "unrecorded";
+      summary = null;
+      tabData = {};
       $("subtitle").textContent = "No session on record";
+      renderTiles();
+      renderTabs();
+      renderTable();
       return;
     }
 
     copy = await fetchJSON("/api/copy");
     summary = await fetchJSON(`/api/summary?session_id=${encodeURIComponent(sessionId)}`);
+    mode = summary && summary.accounting_version === 1 ? "legacy"
+      : summary && summary.accounting_version === 0 ? "unrecorded"
+      : "unavailable";
 
     for (const tab of TABS) {
-      tabData[tab] = await fetchJSON(
-        `/api/exposures?session_id=${encodeURIComponent(sessionId)}&tab=${encodeURIComponent(tab)}`
-      );
+      try {
+        tabData[tab] = await fetchJSON(
+          `/api/exposures?session_id=${encodeURIComponent(sessionId)}&tab=${encodeURIComponent(tab)}`
+        );
+      } catch (e) {
+        tabData[tab] = null;
+      }
     }
 
     render();
@@ -134,33 +198,50 @@
   // -- rendering ---------------------------------------------------------
 
   function renderTiles() {
-    const pct = summary.percent || 0;
-    const tiles = [
-      // Labels name what the number is, not what it evokes (#49 item 9).
-      // `percent` is score/cap — an assigned budget occupancy, not a
-      // probability of leakage and not a fraction of data disclosed.
-      // `destinations` is a DISTINCT over normalised boundary kinds, so it
-      // counts categories and never services (known limit 20). "exposed" is
-      // written before the host returns its decision, so it means permitted,
-      // not delivered.
-      [`${pct}%`, "of budget", band(pct)],
-      [String(summary.exposed_items || 0), "permitted crossings", null],
-      [String(summary.destinations || 0), "boundary kinds", null],
-      [String(summary.prevented || 0), "prevented", null],
-    ];
+    const note = $("accountingNote");
+    const status = $("accountingStatus");
+    let tiles = [];
+    if (mode === "legacy") {
+      // The stored numbers under legacy labels (#54). The score counts
+      // permitted crossings and its rows may collapse different outcomes,
+      // so none of these is a confirmed-disclosure figure.
+      const pct = summary.legacy_percent;
+      tiles = [
+        [`${pct}%`, "legacy permitted-crossing score", band(pct)],
+        [String(summary.legacy_permitted_crossing_rows), "legacy permitted-crossing rows", null],
+        [String(summary.legacy_boundary_kinds), "legacy boundary kinds", null],
+        [String(summary.legacy_prevented_rows), "legacy prevented rows", null],
+      ];
+      note.textContent = summary.accounting_note || "";
+      note.hidden = !summary.accounting_note;
+      status.textContent = "";
+      status.hidden = true;
+    } else if (mode === "unrecorded") {
+      tiles = UNRECORDED_TILES.map(([value, label]) => [value, label, "unavailable"]);
+      note.textContent = (summary && summary.accounting_note) || UNRECORDED_NOTE;
+      note.hidden = false;
+      status.textContent = UNRECORDED_STATUS;
+      status.hidden = false;
+    } else {
+      note.textContent = "";
+      note.hidden = true;
+      status.textContent = "";
+      status.hidden = true;
+    }
     $("tiles").innerHTML = tiles.map(([value, label, cls]) => `
       <div class="tile">
-        <div class="value${cls ? " " + cls : ""}">${value}</div>
-        <div class="label">${label}</div>
+        <div class="value${cls ? " " + cls : ""}">${escapeHTML(value)}</div>
+        <div class="label">${escapeHTML(label)}</div>
       </div>
     `).join("");
   }
 
   function renderTabs() {
     $("tabs").innerHTML = TABS.map((tab) => {
-      const n = (tabData[tab] && tabData[tab].rows) ? tabData[tab].rows.length : 0;
+      const rows = mode === "legacy" ? tabRows(tab) : null;
+      const n = rows ? rows.length : UNAVAILABLE;
       const active = tab === activeTab ? " active" : "";
-      return `<button class="tab${active}" role="tab" data-tab="${tab}">${tab} ${n}</button>`;
+      return `<button class="tab${active}" role="tab" data-tab="${tab}">${TAB_LABELS[tab]} ${n}</button>`;
     }).join("");
     $("tabs").querySelectorAll(".tab").forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -172,8 +253,9 @@
   }
 
   function renderTable() {
-    const data = tabData[activeTab] || { rows: [], text: "" };
-    const rows = sortRows(activeTab, data.rows);
+    const data = tabData[activeTab] || null;
+    const rows = mode === "legacy" && tabRows(activeTab)
+      ? sortRows(activeTab, tabRows(activeTab)) : [];
     const tbody = $("rows");
     const emptyEl = $("empty");
 
@@ -184,21 +266,20 @@
     // unconditionally it is noise, and noise is how a warning gets trained
     // away.
     const coverageEl = $("coverage");
-    coverageEl.textContent = data.coverage_banner || "";
-    coverageEl.hidden = !data.coverage_banner;
+    const banner = data && data.coverage_banner;
+    coverageEl.textContent = banner || "";
+    coverageEl.hidden = !banner;
 
     // The server decides which empty line applies, because it is the side
-    // that holds this session's coverage reading. This used to index
-    // `copy.empty_messages[activeTab]` — a session-independent dict fetched
-    // once — so the reassuring line ("No sensitive data has crossed a trust
-    // boundary this session") was shown on sessions whose record was known to
-    // be incomplete, with the coverage reading sitting unread in `summary`.
-    // See render.empty_message. No fallback to a second source: "No events to
-    // show." is the neutral last resort, not another claim.
+    // that holds this session's coverage and accounting. See
+    // render.empty_message. With no session resolved there is no server
+    // answer, and the unrecorded line is the page's own.
     if (rows.length === 0) {
       tbody.innerHTML = "";
       emptyEl.hidden = false;
-      emptyEl.textContent = data.empty_message || "No events to show.";
+      emptyEl.textContent = mode === "unrecorded"
+        ? (data && data.empty_message) || UNRECORDED_EMPTY
+        : (data && data.empty_message) || "No events to show.";
     } else {
       emptyEl.hidden = true;
       tbody.innerHTML = rows.map((r, i) => {
@@ -218,7 +299,7 @@
       });
     }
 
-    $("ascii").textContent = data.text || "";
+    $("ascii").textContent = (data && data.text) || "";
   }
 
   function truncateMiddle(s, maxLen) {
@@ -240,7 +321,7 @@
   }
 
   function onRowKeydown(e) {
-    const rows = tabData[activeTab].rows;
+    const rows = tabRows(activeTab) || [];
     if (e.key === "ArrowDown") {
       e.preventDefault();
       selectedIndex = Math.min(selectedIndex + 1, rows.length - 1);
@@ -266,7 +347,7 @@
     const el = document.querySelector(`.row[data-index="${index}"]`);
     if (el) el.classList.add("selected");
 
-    const rows = sortRows(activeTab, tabData[activeTab].rows);
+    const rows = sortRows(activeTab, tabRows(activeTab) || []);
     const row = rows[index];
     if (!row) return;
 
@@ -279,59 +360,74 @@
 
   function renderDetail(row) {
     $("detail").style.display = "block";
+    // Clear whatever an earlier row left: fields, actions and the last
+    // rule confirmation never carry over.
+    $("ruleConfirmation").textContent = "";
+    const emptyEl = $("detailEmpty");
+    if (!row) {
+      $("detailTitle").textContent = "";
+      $("detailFlow").textContent = "";
+      $("detailFields").innerHTML = "";
+      $("detailActions").innerHTML = "";
+      emptyEl.textContent = UNRECORDED_DETAIL;
+      emptyEl.hidden = false;
+      return;
+    }
+    emptyEl.textContent = "";
+    emptyEl.hidden = true;
     $("detailTitle").textContent = title(row);
-    $("detailFlow").textContent = `${row.source || ""} → ${row.destination || ""}`;
+    $("detailFlow").textContent = ASSOCIATION_NOTE;
 
-    const fields = [];
+    const fields = [
+      ["Recorded association", `${row.source || ""} → ${row.destination || ""}`],
+    ];
     if (row.first_seen != null) {
       fields.push(["First seen", formatTime(row.first_seen)]);
     }
-    fields.push(["Protection", row.protection || "none"]);
+    fields.push(["Legacy intervention", protectionDisplay(row.protection)]);
     if (row.masked_example) {
       fields.push(["Example", row.masked_example]);
     }
     if (row.budget_delta != null) {
-      let contrib = `+${row.budget_delta} pts`;
+      let contrib = `+${row.budget_delta} legacy pts`;
       if (row.budget_cap) contrib += ` of ${row.budget_cap}`;
-      fields.push(["Budget", contrib]);
+      fields.push(["Legacy score contribution", contrib]);
     }
+    const note = summary && summary.accounting_note;
     $("detailFields").innerHTML = fields.map(([label, value]) => `
       <div class="field-row">
         <span class="field-label">${escapeHTML(label)}</span>
         <span>${escapeHTML(String(value))}</span>
       </div>
-    `).join("");
+    `).join("") + (note ? `<p class="accounting-note">${escapeHTML(note)}</p>` : "");
 
-    // "Protect future occurrences" promised an outcome the rule cannot
-    // guarantee — it fires when a later call produces a matching finding,
-    // and for every type outside `path` and `credential` matching requires
-    // an accepted deep-scan result (#49 item 2). The label now says what the rule does; the server's
-    // confirmation says what it depends on.
+    // Each button saves a rule through /api/policy → apply_policy →
+    // Ledger.add_policy, and says so. Whether a later call matches it, and
+    // whether the host applies what Privacy HUD returns, is in the server's
+    // confirmation, shown only after the response.
     const actions = [
-      { text: `Mask detected ${row.data_type} in future calls`,
+      { text: `Save mask rule for detected ${row.data_type}`,
         rule_type: "mask", selector: row.data_type },
     ];
     // A source-level rule is offered only when the row names a real origin
     // (#40): source_kind is null when `source` is a bare tool label.
     if (row.source_kind === "path") {
-      actions.push({ text: `Block values read from ${row.source}`,
+      actions.push({ text: `Save block rule for values read from ${row.source}`,
                      rule_type: "block_path", selector: row.source });
     } else if (row.source_kind === "command") {
-      actions.push({ text: `Block values from \`${row.source}\` output`,
+      actions.push({ text: `Save block rule for values from \`${row.source}\` output`,
                      rule_type: "block_command", selector: row.source });
     }
-    const pct = summary.percent || 0;
+    const pct = mode === "legacy" ? summary.legacy_percent : null;
     const actionsEl = $("detailActions");
-    // `escapeHTML` because an action's text now carries `row.source`, which
-    // since #40 is a real file path or command rather than one of a few
-    // fixed labels -- so a file named `<img src=x onerror=...>.env` would
-    // otherwise run script in this page. Every other row-derived string here
-    // is escaped the same way; this one was safe only while `source` was a
-    // label. It matters more here than in a normal page: script in this tab
-    // can reach the network, which the daemon itself never does (I2).
+    // `escapeHTML` because an action's text carries `row.source`, a real
+    // file path or command since #40 -- so a file named
+    // `<img src=x onerror=...>.env` would otherwise run script in this page,
+    // and script in this tab can reach the network, which the daemon itself
+    // never does (I2).
     actionsEl.innerHTML = actions.map((a, i) =>
-      `<button class="action" data-i="${i}">[ ${escapeHTML(a.text)} ]</button>`
-    ).join("") + (band(pct) === "danger"
+      `<button class="action" data-i="${i}">${escapeHTML(a.text)}</button>`
+    ).join("") + (pct != null && band(pct) === "danger"
       // Not an action: a clean context is a new Codex conversation, which
       // nothing on this page can start (#23).
       ? `<p class="clean-context-note">Want a clean context? Start a new conversation in Codex. What this session already sent to the model stays sent.</p>`
@@ -350,8 +446,6 @@
           : `Could not save rule: ${data.error || "unknown error"}`;
       });
     });
-
-    $("ruleConfirmation").textContent = "";
   }
 
   function formatTime(ts) {
@@ -364,6 +458,11 @@
     renderTiles();
     renderTabs();
     renderTable();
+    // An unrecorded session has no row to show: an open detail panel is
+    // replaced by the empty-detail line, never left on a stale row.
+    if (mode === "unrecorded" && $("detail").style.display === "block") {
+      renderDetail(null);
+    }
   }
 
   $("closeDetail").addEventListener("click", () => {

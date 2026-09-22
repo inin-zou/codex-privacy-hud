@@ -6,8 +6,9 @@ from pathlib import Path
 
 import pytest
 from privacy_hud.matrix.loader import load_matrix
-from privacy_hud.ledger import (SCHEMA, EventRow, ExposureRow, Ledger,
-                                SessionCoverage, SessionSummary)
+from privacy_hud.ledger import (SCHEMA, Ledger, LegacyEventRow,
+                                LegacyExposureRow, LegacySessionSummary,
+                                SessionCoverage, UnrecordedSessionSummary)
 from privacy_hud.mcp_tools import _POLICY_RULE_TYPES
 
 REPO = Path(__file__).resolve().parents[1]
@@ -42,7 +43,7 @@ def test_same_value_same_destination_does_not_double_count(led):
 def test_replaying_the_same_event_is_idempotent(led):
     for _ in range(100):
         _rec(led)
-    assert led.summary("s1").exposed_items == 1
+    assert led.summary("s1").legacy_permitted_crossing_rows == 1
 
 
 def test_new_destination_does_count(led):
@@ -55,13 +56,13 @@ def test_prevented_events_add_zero_budget(led):
     delta = _rec(led, kind="prevented", data_type="credential",
                  destination="external_net", protection="blocked")
     assert delta == 0.0
-    assert led.summary("s1").prevented == 1
+    assert led.summary("s1").legacy_prevented_rows == 1
 
 
 def test_summary_counts_distinct_destinations(led):
     _rec(led)
     _rec(led, value_hash=b"\x02" * 16, destination="mcp_tool")
-    assert led.summary("s1").destinations == 2
+    assert led.summary("s1").legacy_boundary_kinds == 2
 
 
 def test_end_session_nulls_value_hashes(led):
@@ -92,7 +93,7 @@ def test_the_documented_policy_rule_types_are_the_ones_that_exist(source):
 
 
 # --------------------------------------------------------------------- #
-# The read contract itself (see ledger.py's `SessionSummary`/`EventRow`).
+# The read contract itself (see ledger.py's summary variants/`LegacyEventRow`).
 # --------------------------------------------------------------------- #
 
 def test_summary_is_frozen(led):
@@ -100,7 +101,7 @@ def test_summary_is_frozen(led):
     path for disclosure, so there is no write path here either."""
     s = led.summary("s1")
     with pytest.raises(dataclasses.FrozenInstanceError):
-        s.percent = 99
+        s.legacy_percent = 99
 
 
 def test_event_rows_are_frozen(led):
@@ -144,13 +145,14 @@ def test_no_read_contract_field_can_hold_raw_content(led):
     be a violation even though it would never be a column."""
     banned = {"content", "prompt", "raw_value", "snippet", "text", "value",
               "body", "payload"}
-    for cls in (SessionSummary, ExposureRow, EventRow):
+    for cls in (LegacySessionSummary, UnrecordedSessionSummary,
+                LegacyExposureRow, LegacyEventRow):
         names = {f.name for f in dataclasses.fields(cls)}
         assert not names & banned, f"{cls.__name__} has a raw-content field"
 
 
 def test_as_dict_never_serializes_the_salted_hash(led):
-    """`EventRow` inherits `as_dict()` unchanged, and that is deliberate:
+    """`LegacyEventRow` inherits `as_dict()` unchanged, and that is deliberate:
     `value_hash` is not in `_EXPOSURE_JSON_FIELDS`, so no JSON boundary can
     emit it even when handed a full ledger row."""
     _rec(led)
@@ -179,9 +181,9 @@ def test_a_session_started_normally_is_verified(led):
 
 
 def test_a_session_the_ledger_never_saw_is_not_a_clean_session(led):
-    """The whole point. `summary()` answers an unknown id with a well-formed
-    zero; `coverage()` must not."""
-    assert led.summary("never-happened").percent == 0
+    """The whole point. Neither `summary()` nor `coverage()` may answer an
+    unknown id as if it were clean: the summary has no percentage at all."""
+    assert led.summary("never-happened").percent is None
     cov = led.coverage("never-happened")
     assert not cov.verified
     assert not cov.recorded

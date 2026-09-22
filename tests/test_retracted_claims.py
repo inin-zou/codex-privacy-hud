@@ -171,10 +171,6 @@ ALLOWED: list[Allowed] = [
             '    like protection was applied when nothing was. `block_source` is refused',
             'protection was applied',
             'Describes the rejected false success (allow_dest / inert mask), not an enforcement claim.'),
-    Allowed('src/privacy_hud/render.py',
-            '    # Names the action, not an outcome. "Protect future occurrences"',
-            'Protect future occurrences',
-            'Explains why the retracted label was replaced.'),
     Allowed('tests/test_mcp.py',
             '    row decided nothing while `{"applied": True}` said otherwise. That is',
             '"applied": True',
@@ -199,10 +195,6 @@ ALLOWED: list[Allowed] = [
             '    assert "now enforced, not merely recorded" not in text',
             'now enforced, not merely recorded',
             'Quotes the withdrawn instruction, or asserts it is absent.'),
-    Allowed('ui/app.js',
-            '    // "Protect future occurrences" promised an outcome the rule cannot',
-            'Protect future occurrences',
-            'Explains why the retracted label was replaced.'),
 ]
 
 _SELF_EXEMPT_NAMES = {"RETRACTED", "LEGACY_NOTICE", "ALLOWED"}
@@ -545,10 +537,10 @@ def test_policy_tool_registered_description_is_conditional(mcp_app):
     description = tool.description or ""
     assert violations_in("mcp/server.py#update_policy",
                          description) == []
-    assert "saved: true" in description
-    assert 'enforcement: "conditional"' in description
-    assert "must be detected on ingress and again on egress" in description
-    assert "hosted tools never reach this plugin" in description
+    assert "saved=true" in description
+    assert 'enforcement="conditional"' in description
+    assert "require detection on ingress and again on egress" in description
+    assert "hosted tools bypass these hooks" in description
 
 
 @pytest.mark.parametrize("rule_type,selector", [

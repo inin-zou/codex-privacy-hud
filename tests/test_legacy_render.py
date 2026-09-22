@@ -44,6 +44,12 @@ def _rows(led, tab):
     return mcp_tools.list_exposures(led, "s1", tab)
 
 
+def _flat(text: str) -> str:
+    """A terminal view with its line breaks folded: a long note is broken
+    between sentences to fit 100 columns."""
+    return " ".join(text.split())
+
+
 # -- audit ------------------------------------------------------------------
 
 def test_legacy_tiles_carry_the_legacy_labels_and_note(led):
@@ -55,7 +61,7 @@ def test_legacy_tiles_carry_the_legacy_labels_and_note(led):
                   "legacy boundary kinds",
                   "legacy prevented rows"):
         assert label in text
-    assert LEGACY_NOTE in text
+    assert LEGACY_NOTE in _flat(text)
     assert "of budget" not in text
 
 
@@ -126,7 +132,7 @@ def test_detail_labels_legacy_interventions(led, protection, shown):
     assert "Legacy score contribution" in text
     assert ("This legacy source-to-destination association does not "
             "establish delivery or a multi-hop flow.") in text
-    assert LEGACY_NOTE in text
+    assert LEGACY_NOTE in _flat(text)
     assert "Protection" not in text
 
 
@@ -176,7 +182,7 @@ def test_legacy_receipt_lines(led):
     assert "legacy boundary kinds: 1" in text
     assert "legacy prevented rows: 0" in text
     assert "Transcript retention is outside this ledger's account." in text
-    assert LEGACY_NOTE in text
+    assert LEGACY_NOTE in _flat(text)
     assert "(masked)" not in text
     assert text.endswith("This ledger stores metadata, not file contents, "
                          "prompts, or raw values.")

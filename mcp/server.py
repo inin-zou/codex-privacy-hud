@@ -276,10 +276,16 @@ def _open_ledger() -> "Ledger":
     serializes every use and the close under one lock, which is the
     condition `Ledger` states for turning affinity off. With affinity on,
     every ledger-backed tool failed with `sqlite3.ProgrammingError` (0.7.4
-    and earlier)."""
+    and earlier).
+
+    A reader's open (`initialize=False`): the server never applies the
+    schema or migrates, so it cannot change the structure of the ledger the
+    daemon writes, and a missing ledger fails to open instead of being
+    created empty."""
     from privacy_hud.ledger import Ledger
     from privacy_hud.matrix.loader import load_matrix
-    return Ledger(_ledger_path(), load_matrix(), check_same_thread=False)
+    return Ledger(_ledger_path(), load_matrix(), check_same_thread=False,
+                  initialize=False)
 
 
 #: The tools the model may call, sorted. A tool belongs here only if calling
@@ -363,10 +369,24 @@ def build_app():
 
     from privacy_hud import mcp_tools
 
-    ledger = _open_ledger()
+    # The connection is opened with a reader's open, which cannot create a
+    # missing ledger. The daemon creates it on the first SessionStart, and
+    # Codex can start this server before that: so it is opened now when the
+    # file exists, and otherwise on the first tool call that needs it. A
+    # call made before any ledger exists fails with `LEDGER_ERROR` rather
+    # than reporting an empty session.
+    opened: list = []
+
+    def ledger():
+        if not opened:
+            opened.append(_open_ledger())
+        return opened[0]
+
+    if _ledger_path().exists():
+        ledger()
     # One lock for the connection: every ledger access in a tool, including
-    # the `.as_dict()` that materializes a read's result, and the close at
-    # shutdown.
+    # the `.as_dict()` that materializes a read's result, the lazy open, and
+    # the close at shutdown.
     # It serializes this process's use of the connection whatever thread the
     # SDK runs a tool on. It does not coordinate with the daemon, which is
     # another process: sqlite arbitrates between processes.
@@ -386,7 +406,8 @@ def build_app():
 
     def close_ledger() -> None:
         with lock:
-            ledger.conn.close()
+            if opened:
+                opened[0].conn.close()
 
     @contextlib.asynccontextmanager
     async def lifespan(_app):
@@ -399,7 +420,7 @@ def build_app():
     app = MCPServer("privacy-hud", lifespan=lifespan)
 
     # The three read tools below end in `.as_dict()`. `mcp_tools` returns
-    # `ledger.py`'s `SessionSummary`/`ExposureRow` dataclasses, and this is the
+    # `ledger.py`'s summary variants and `LegacyExposureRow`, and this is the
     # wire boundary: `ledger._EXPOSURE_JSON_FIELDS` pins which keys an MCP
     # client sees and in what order, so the read tools' published
     # shape is a decision recorded in one place rather than whatever a
@@ -408,69 +429,94 @@ def build_app():
 
     @app.tool(name="privacy.get_session_summary")
     def get_session_summary(session_id: str) -> dict:
-        """The four L2 tile numbers (design.md §5), under the field names
-        `percent`, `exposed_items`, `destinations` and `prevented`.
+        """Read the selected session's accounting summary.
 
-        What each one IS, since the model reads this to decide what they
-        mean (#49 item 9, and the field names are the wire contract, so they
-        do not move even though the labels shown to a human did):
-        `percent` is score over cap -- an assigned budget occupancy, not a
-        probability of leakage and not a fraction of data disclosed.
-        `exposed_items` counts crossings the plugin permitted, written
-        before the host returns its own decision, so permitted and not
-        delivered. `destinations` is a DISTINCT over normalised boundary
-        kinds, so it counts categories -- a handful at most -- and never
-        services or recipients (known limit 20). `prevented` contributes
-        exactly zero to the budget (I4).
+        accounting_version=1 returns legacy_score, legacy_cap, legacy_percent,
+        legacy_permitted_crossing_rows, legacy_boundary_kinds,
+        legacy_prevented_rows, score_label, and accounting_note.
+        legacy_percent is the existing score divided by its stored cap,
+        rounded and capped at 100. It is not a probability or a fraction of
+        data disclosed. Row counts are not call counts, and boundary kinds are
+        not concrete recipients. Historical accounting includes permitted
+        crossings and may collapse different outcomes. It does not establish
+        confirmed disclosure.
+
+        accounting_version=0 returns percent=null, score_label="No session on
+        record", and accounting_note. No numeric score, cap, or counts are
+        available for that session.
+
+        Report score_label and accounting_note with the result. Do not replace
+        null with zero. The old percent, exposed_items, destinations, and
+        prevented fields are not returned for legacy summaries.
         """
         with tool_access():
-            return mcp_tools.get_session_summary(ledger, session_id).as_dict()
+            return mcp_tools.get_session_summary(
+                ledger(), session_id).as_dict()
 
     @app.tool(name="privacy.list_exposures")
     def list_exposures(session_id: str, tab: str) -> list[dict]:
-        """Rows for one of the L2 tabs: "Exposed", "Prevented", or
-        "All events" (design.md §5)."""
+        """Read public legacy event rows for the selected session. Accepted tab
+        values are "Exposed", "Prevented", and "All events"; they select
+        stored legacy classifications.
+
+        Each returned row has accounting_version=1. "Exposed" selects legacy
+        permitted-crossing rows, not confirmed deliveries. "Prevented" selects
+        legacy prevented rows, not confirmed host-enforced interventions.
+        count is the stored legacy repetition count, not a distinct-value or
+        call count. Different outcomes may have collapsed into one row.
+
+        An unrecorded session returns an empty list. That is not evidence that
+        no events occurred. Raw values and identity hashes are not returned.
+        """
         with tool_access():
             return [r.as_dict()
-                    for r in mcp_tools.list_exposures(ledger, session_id, tab)]
+                    for r in mcp_tools.list_exposures(ledger(), session_id,
+                                                      tab)]
 
     @app.tool(name="privacy.get_exposure_detail")
     def get_exposure_detail(session_id: str, event_id: int) -> dict:
-        """The L3 detail payload for one flow, keyed by its `events` row
-        id (design.md §6)."""
+        """Read one public legacy event row by session_id and event_id. The
+        lookup is scoped to both identifiers and returns accounting_version=1.
+
+        The stored classification, intervention label, repetition count, and
+        budget contribution retain legacy meanings. They do not establish
+        delivery, host enforcement, or a multi-hop flow. first_seen and
+        budget_cap are included when available.
+
+        An unknown event or an event outside the selected session is an error.
+        An unrecorded session has no event detail. This tool reads metadata;
+        it does not save a policy rule.
+        """
         with tool_access():
             return mcp_tools.get_exposure_detail(
-                ledger, session_id, event_id).as_dict()
+                ledger(), session_id, event_id).as_dict()
 
     @app.tool(name="privacy.update_policy")
     def update_policy(session_id: str, rule_type: str, selector: str) -> dict:
-        """Save a session policy rule: `mask` for "Mask detected <type> in future
-        calls", or `block_path` / `block_command` for an origin rule.
+        """Save a policy rule for the selected session: mask selects a data type;
+        block_path and block_command select a recorded origin.
 
-        Success reports `saved: true` and `enforcement: "conditional"`.
-        Pass the returned `conditions` to the user. Saving does not establish
-        that a later call will match the rule.
+        Success returns saved=true and enforcement="conditional". Report the
+        returned conditions to the user. Saving a rule does not establish that
+        a later call will match it or that the host will apply a denial or
+        rewritten input.
 
-        A mask rule matches detected findings of its selected data type on
-        later outbound calls this plugin checks, unless the call is blocked
-        outright. For types other than `path` and `credential`, matching
-        requires an accepted deep-scan result.
+        Mask rules can cause Privacy HUD to return rewritten input for
+        matching findings on later outbound calls this plugin checks. A deny
+        takes precedence. Types other than path and credential require an
+        accepted deep-scan result.
 
-        The value must be detected on ingress and again on egress. When
-        either detection depends on the deep scan, a scan gap can prevent this
-        rule from matching (known limit 21). Detection is heuristic and can
-        miss values, and hosted tools never reach this plugin at all.
+        Origin rules require detection on ingress and again on egress. They
+        match the whole value normalized using value.strip().lower();
+        summaries and partial quotations may not match. Scan gaps and detector
+        misses can prevent matching, and hosted tools bypass these hooks.
 
-        That ingress-and-egress condition applies to origin rules. They match
-        the whole value normalised using `value.strip().lower()`, not a summary
-        of what was read (known limit 10). Data already disclosed stays disclosed.
-
-        `block_source` and `allow_dest` are refused. A `mask` rule selecting
-        `credential` is also refused: an outbound credential finding is
-        already denied, and that deny takes precedence over every mask rule.
+        block_source and allow_dest are refused. A mask rule selecting a
+        hard-blocked data type is also refused. Data already disclosed stays
+        disclosed.
         """
         with tool_access():
-            mcp_tools.apply_policy(ledger, session_id, rule_type=rule_type,
+            mcp_tools.apply_policy(ledger(), session_id, rule_type=rule_type,
                                    selector=selector)
         # `saved`, not `applied`. The rule is in the policy table; whether it
         # ever fires depends on a later call producing a finding it matches.
@@ -484,10 +530,11 @@ def build_app():
 
     @app.tool(name="privacy.read_guard_status")
     def read_guard_status() -> dict:
-        """Whether reads of known-sensitive paths are currently blocked
-        (`#36`). The toggle lives in `$PLUGIN_DATA/settings.json`, not
-        Codex's own config, so this is how a caller finds out what it
-        says."""
+        """Read whether the known-sensitive-path read guard is enabled in Privacy
+        HUD's settings.json. deny_read=true means the plugin is configured to
+        issue denials for recognized matching reads. It does not confirm host
+        enforcement. This tool does not change the setting.
+        """
         return mcp_tools.read_guard_status(_ledger_path().parent)
 
     return app

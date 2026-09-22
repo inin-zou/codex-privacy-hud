@@ -64,12 +64,14 @@ def led(tmp_path):
 # get_session_summary
 # --------------------------------------------------------------------- #
 
-def test_summary_returns_the_four_tiles(led):
+def test_summary_returns_the_legacy_variant(led):
     s = get_session_summary(led, "s1")
-    assert set(s.as_dict()) == {"percent", "exposed_items", "destinations",
-                                "prevented"}
-    assert s.exposed_items == 1
-    assert s.prevented == 1
+    assert list(s.as_dict()) == [
+        "accounting_version", "legacy_score", "legacy_cap", "legacy_percent",
+        "legacy_permitted_crossing_rows", "legacy_boundary_kinds",
+        "legacy_prevented_rows", "score_label", "accounting_note"]
+    assert s.legacy_permitted_crossing_rows == 1
+    assert s.legacy_prevented_rows == 1
 
 
 # --------------------------------------------------------------------- #

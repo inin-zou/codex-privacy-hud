@@ -8,7 +8,8 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
-from privacy_hud.ledger import ExposureRow, SessionCoverage, SessionSummary
+from privacy_hud.ledger import (LEGACY_SCORE_LABEL, LegacyExposureRow,
+                                LegacySessionSummary, SessionCoverage)
 from privacy_hud.matrix.loader import UnknownKey
 from privacy_hud.mcp_tools import ResolvedSession
 from privacy_hud.render import hud_line, audit, detail, receipt, hud_core
@@ -21,18 +22,24 @@ import pytest
 BANNED = ("undo", "revoke", "remove from context", "your data is protected",
           "100% secure", "threat", "dangerous", "critical")
 GOLDEN = json.loads((Path(__file__).parent / "matrix" / "hud_golden.json").read_text())
-# `ExposureRow`/`SessionSummary` rather than the dicts these used to be: the
+# `LegacyExposureRow`/`LegacySessionSummary` rather than the dicts these used to be: the
 # renderer's input is typed (see ledger.py's read-contract dataclasses). Same
 # field values, same assertions — only the carrier changed.
-ROW = ExposureRow(id=1, turn_id="t1", ts=1757000000, kind="exposed",
+ROW = LegacyExposureRow(id=1, turn_id="t1", ts=1757000000, kind="exposed",
                   data_type="email", count=12, source="support.log",
                   source_kind=None, destination="model context", boundary="B1",
                   masked_example="jo•••@acme.com", budget_delta=9.0,
                   protection=None, tool_name="Read")
-SUMMARY = SessionSummary(percent=28, exposed_items=4, destinations=2,
-                         prevented=17)
-EMPTY_SUMMARY = SessionSummary(percent=0, exposed_items=0, destinations=0,
-                               prevented=0)
+SUMMARY = LegacySessionSummary(
+    accounting_version=1, legacy_score=33.6, legacy_cap=120.0,
+    legacy_percent=28, legacy_permitted_crossing_rows=4,
+    legacy_boundary_kinds=2, legacy_prevented_rows=17,
+    score_label=LEGACY_SCORE_LABEL)
+EMPTY_SUMMARY = LegacySessionSummary(
+    accounting_version=1, legacy_score=0.0, legacy_cap=120.0,
+    legacy_percent=0, legacy_permitted_crossing_rows=0,
+    legacy_boundary_kinds=0, legacy_prevented_rows=0,
+    score_label=LEGACY_SCORE_LABEL)
 
 
 def test_hud_bar_has_ten_cells_and_percent():
@@ -88,9 +95,13 @@ def test_detail_offers_no_source_action_for_a_bare_tool_label():
 
 def test_detail_golden_for_a_path_origin_row():
     row = replace(ROW, source=".env", source_kind="path")
-    assert detail(row).endswith(
-        "\n[ Mask detected email in future calls ]\n"
-        "[ Block values read from .env ]\n"
+    text = detail(row)
+    # Terminal detail prints no action labels (#54 phase 1): plain text does
+    # not save a rule. It names the surface that does.
+    assert "[ " not in text and "Block values" not in text
+    assert text.endswith(
+        "\nPolicy rules can be saved in the local audit browser opened by "
+        "$privacy.\n"
         "\nAlready disclosed data cannot be recalled from this session.")
 
 
@@ -101,9 +112,11 @@ def test_detail_golden_for_a_command_origin_row():
     never matches. The wording is the engine's too -- a command origin is
     named as output, not as a file that was read (`origin.origin_phrase`)."""
     row = replace(ROW, source="git log", source_kind="command")
-    assert detail(row).endswith(
-        "\n[ Mask detected email in future calls ]\n"
-        "[ Block values from `git log` output ]\n"
+    text = detail(row)
+    assert "[ " not in text and "Block values" not in text
+    assert text.endswith(
+        "\nPolicy rules can be saved in the local audit browser opened by "
+        "$privacy.\n"
         "\nAlready disclosed data cannot be recalled from this session.")
 
 
@@ -116,8 +129,9 @@ def test_no_view_contains_forbidden_copy():
 
 
 def test_receipt_states_that_nothing_raw_was_stored():
-    assert "No file contents, prompts, or raw values were stored." in \
-        receipt("s1", SUMMARY, [ROW], 41)
+    assert receipt("s1", SUMMARY, [ROW], 41).endswith(
+        "This ledger stores metadata, not file contents, prompts, or raw "
+        "values.")
 
 
 # These three used to pin the opposite of what they now pin, and that is the

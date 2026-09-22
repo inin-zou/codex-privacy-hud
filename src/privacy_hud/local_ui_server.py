@@ -26,7 +26,7 @@ connection against that file safe.
 No raw sensitive value is served by any endpoint here -- every JSON
 response is built from `privacy_hud.mcp_tools` functions, which is exactly
 where that guarantee is enforced and tested (`tests/test_mcp.py`). Those
-functions return `ledger.py`'s `SessionSummary`/`ExposureRow` dataclasses, so
+functions return `ledger.py`'s summary variants and `LegacyExposureRow`, so
 every handler below serializes with an explicit `.as_dict()` immediately
 before `json.dumps` -- `ledger._EXPOSURE_JSON_FIELDS` is what pins the keys
 and their order, and `ui/app.js` reads exactly those. That call is not
@@ -59,7 +59,6 @@ origin -- never on a row whose `source` is a bare tool label.
 from __future__ import annotations
 
 import json
-import sqlite3
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -95,32 +94,6 @@ _STATIC = {
 # `None` -- there is no `/tmp` default (spec §6).
 resolve_data_dir = runtime.plugin_data_dir
 _ledger_path = runtime.ledger_path
-
-
-def _reopen_for_background_thread(ledger: Ledger) -> None:
-    """`Ledger.__init__` opens its sqlite3 connection with the default
-    `check_same_thread=True` -- correct for a caller that builds the
-    `Ledger` and immediately uses it on the same thread, but `serve()`
-    below builds it on the CALLING thread and then hands it to a
-    `UIServer` whose `serve_forever()` loop -- and therefore every
-    `do_GET`/`do_POST` call that touches `self.server.ledger` -- runs on a
-    separate background thread. Left unfixed, the first request would
-    raise `sqlite3.ProgrammingError` exactly the way `dispatch.py`'s
-    `_allow_cross_thread_access` docstring describes for the daemon.
-
-    Reopening with `check_same_thread=False` is sufficient here (unlike
-    `dispatch.py`, which ALSO needs `State.lock`) because `UIServer` is
-    single-threaded (`http.server.HTTPServer`, not `ThreadingHTTPServer`
-    -- see that class's docstring): once `serve_forever()` starts, every
-    touch of this connection happens sequentially, on that one background
-    thread, with no concurrent caller to serialize against.
-    """
-    path = Path(ledger.conn.execute("PRAGMA database_list").fetchone()[2])
-    ledger.conn.close()
-    conn = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    ledger.conn = conn
 
 
 def _latest_session_id(ledger: Ledger) -> str | None:
@@ -168,15 +141,15 @@ def _rule_confirmation(rule_type: str, selector: str) -> str:
     """
     conditions = mcp_tools.rule_enforcement_note(rule_type, selector)
     if rule_type in ("block_path", "block_command"):
-        return (f"Rule saved: block values from {selector}. It applies to "
-                "later outbound calls, not to anything already sent. Only "
-                "the whole value matches — if the model summarizes or "
-                "rewrites the content, it still leaves." + conditions)
-    return (f"Rule saved: {rule_type} {selector}, for this session. On later "
-            "outbound calls this plugin checks, a detected "
-            f"{selector} is masked unless the call is blocked outright."
-            " What the call is then allowed to do is decided by the rest of"
-            " the policy, not by this rule." + conditions)
+        return (f"Rule saved: block values from {selector}, for this session. "
+                "It can cause Privacy HUD to issue a denial on a later "
+                "outbound call when the whole normalized value matches the "
+                "recorded origin. A summary or partial quotation may not "
+                "match." + conditions)
+    return (f"Rule saved: mask {selector}, for this session. On later "
+            "outbound calls this plugin checks, matching findings can cause "
+            "Privacy HUD to return rewritten input unless the call is "
+            "denied." + conditions)
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -280,14 +253,10 @@ class _Handler(BaseHTTPRequestHandler):
             if not sid:
                 self._send_json(404, {"error": "no session"})
                 return
-            # `coverage` is appended AFTER the four tile keys, so the pinned
-            # order `ui/app.js` reads (percent, exposed_items, destinations,
-            # prevented) is untouched and an older client simply ignores the
-            # extra key. It is here rather than left implicit because the four
-            # tiles alone cannot say "these numbers are not a full account" —
-            # `percent: 0` is what both a clean session and an unrecorded one
-            # serialize to, and a JSON client that only ever sees the tiles has
-            # no way to tell them apart. See `ledger.SessionCoverage`.
+            # The summary variant, then `coverage` appended after it. An
+            # unknown session is an unrecorded summary with HTTP 200, not a
+            # 404: "no record" is an answer. Coverage is here because the
+            # tiles alone cannot say whether a legacy account is complete.
             payload = mcp_tools.get_session_summary(ledger, sid).as_dict()
             payload["coverage"] = \
                 mcp_tools.get_session_coverage(ledger, sid).as_dict()
@@ -307,6 +276,11 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             summary = mcp_tools.get_session_summary(ledger, sid)
             coverage = mcp_tools.get_session_coverage(ledger, sid)
+            # The exact "All events" count for the tab bar, from the list
+            # itself. An approximation from the summary omits kinds.
+            all_events = (len(rows) if tab == "All events" else
+                          len(mcp_tools.list_exposures(ledger, sid,
+                                                       "All events")))
             # `rows` goes to the browser as JSON and to `render_audit` as
             # typed rows -- the same values, serialized once, on purpose.
             #
@@ -327,8 +301,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(200, {
                 "rows": [r.as_dict() for r in rows],
                 "text": render_audit(summary, rows, tab, coverage=coverage,
-                                     session_id=sid),
-                "empty_message": render_empty_message(tab, coverage),
+                                     session_id=sid,
+                                     all_events_count=all_events),
+                "empty_message": render_empty_message(tab, coverage,
+                                                      summary=summary),
                 "coverage_banner": render_coverage_banner(coverage),
             })
             return
@@ -408,9 +384,17 @@ def serve(session_id: str | None = None, *, print_url: bool = True) -> UIServer:
         print("privacy-hud local-ui: PLUGIN_DATA is not set and no Codex "
               "plugin-data directory was found", file=sys.stderr)
         raise SystemExit(1)
+    if not ledger_path.exists():
+        # A reader never creates the ledger: the daemon does, on the first
+        # SessionStart. An empty file made here would be a ledger nobody
+        # writes to.
+        print(f"privacy-hud local-ui: no ledger at {ledger_path} yet; the "
+              "daemon creates it when a Codex session starts",
+              file=sys.stderr)
+        raise SystemExit(1)
     matrix = load_matrix()
-    ledger = Ledger(ledger_path, matrix)
-    _reopen_for_background_thread(ledger)
+    ledger = Ledger(ledger_path, matrix, initialize=False,
+                    check_same_thread=False)
     server = UIServer(ledger)
 
     thread = threading.Thread(target=server.serve_forever, daemon=True)

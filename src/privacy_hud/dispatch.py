@@ -118,7 +118,7 @@ from .detect.secrets import SecretDetector
 from .detect.shell import extract_destinations
 from .engine import Engine, Observation
 from .hud_snapshot import HudPublisher
-from .ledger import Ledger
+from .ledger import Ledger, LegacySessionSummary
 from .mask import new_salt
 from .matrix.loader import Matrix, load_matrix
 from .origin import OriginKind, extract_origin
@@ -684,9 +684,11 @@ def _publish_hud(state: State, session_id: str) -> None:
     I3: `percent` is the ledger's, verbatim."""
     try:
         summary = state.ledger.summary(session_id)
+        if not isinstance(summary, LegacySessionSummary):
+            return
         coverage = state.ledger.coverage(session_id)
-        state.hud.publish(session_id, percent=int(summary.percent),
-                          blocked=int(summary.prevented),
+        state.hud.publish(session_id, percent=summary.legacy_percent,
+                          blocked=summary.legacy_prevented_rows,
                           unverified=not coverage.verified)
     except Exception as exc:
         _log.debug("hud publish failed: %s", type(exc).__name__)
@@ -712,11 +714,11 @@ def _handle_session_start(state: State, session_id: str, payload: dict) -> dict:
 def _handle_session_end(state: State, session_id: str, payload: dict) -> dict:
     """Retire a session and return its receipt as hook output.
 
-    `summary` and `rows` are `ledger.py`'s `SessionSummary` and `EventRow`,
-    handed to `render_receipt` unprojected: an `EventRow` IS an `ExposureRow`
-    (see that class), so the receipt path needs no `mcp_tools` step and no
-    dict in between. The return value stays a plain dict — it is Codex's hook
-    wire format, whose shape the host dictates, not ours to type.
+    `summary` is a `ledger.py` summary variant, and the raw legacy rows are
+    projected with `to_exposure()` before they reach `render_receipt`. The
+    return value stays a plain dict — it is Codex's hook wire format, whose
+    shape the host dictates, not ours to type. With no recorded start time
+    the receipt omits the duration rather than printing `0 min`.
 
     `coverage` is read BEFORE `end_session`, which is not incidental:
     `end_session` stamps `ended_at`, and `Ledger.coverage` uses that column to
@@ -728,7 +730,8 @@ def _handle_session_end(state: State, session_id: str, payload: dict) -> dict:
     with state.lock:
         summary = state.ledger.summary(session_id)
         coverage = state.ledger.coverage(session_id)
-        rows = state.ledger.list_events(session_id, "exposed")
+        rows = [r.to_exposure()
+                for r in state.ledger.list_events(session_id, "exposed")]
         started = state.started_at.pop(session_id, None)
         state.ledger.end_session(session_id)
         # Discard the session's salt and Engine now — SessionEnd is the one
@@ -744,7 +747,7 @@ def _handle_session_end(state: State, session_id: str, payload: dict) -> dict:
             _log.debug("hud retire failed: %s", type(exc).__name__)
 
     try:
-        minutes = 0
+        minutes = None
         if started is not None:
             minutes = max(0, int((time.time() - started) // 60))
 

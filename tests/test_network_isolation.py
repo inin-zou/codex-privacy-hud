@@ -762,7 +762,12 @@ def test_local_ui_server_binds_loopback_only(network_guard, tmp_path, monkeypatc
     """
     from privacy_hud import local_ui_server
 
+    from privacy_hud.ledger import Ledger
+    from privacy_hud.matrix.loader import load_matrix
+
     monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))
+    # The daemon creates the ledger; the UI server only opens one.
+    Ledger(tmp_path / "ledger.db", load_matrix()).conn.close()
     server = local_ui_server.serve(print_url=False)
     try:
         host, port = server.server_address[0], server.server_address[1]

@@ -139,3 +139,30 @@ def test_doctor_rejects_a_nonfinite_score():
     reply = {"jsonrpc": "2.0", "id": 2, "result": {
         "content": [{"type": "text", "text": text}], "isError": False}}
     assert not doctor._is_summary_reply(reply)
+
+
+def test_server_starts_before_the_ledger_exists(monkeypatch, tmp_path):
+    """A reader's open cannot create the ledger, and Codex can start the
+    server before the daemon has. The server must still start; a call made
+    before the ledger exists fails with the fixed ledger error rather than
+    reporting a session, and the next call after the daemon creates it
+    succeeds."""
+    import asyncio
+
+    from privacy_hud.ledger import Ledger
+    from privacy_hud.matrix.loader import load_matrix
+
+    monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))
+    app = server.build_app()
+    assert not (tmp_path / "ledger.db").exists()
+    with pytest.raises(Exception) as caught:
+        asyncio.run(app.call_tool("privacy.get_session_summary",
+                                  {"session_id": "s1"}))
+    assert server.LEDGER_ERROR in str(caught.value)
+    assert not (tmp_path / "ledger.db").exists()
+
+    Ledger(tmp_path / "ledger.db", load_matrix()).conn.close()
+    result = asyncio.run(app.call_tool("privacy.get_session_summary",
+                                       {"session_id": "s1"}))
+    text = json.dumps(result, default=lambda o: getattr(o, "__dict__", str(o)))
+    assert "No session on record" in text

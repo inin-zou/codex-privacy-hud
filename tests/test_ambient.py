@@ -119,7 +119,7 @@ def _publish_snapshot(data_dir, session_id):
     coverage = led.coverage(session_id)
     led.conn.close()
     hs.HudPublisher(data_dir).publish(
-        session_id, percent=summary.percent, blocked=summary.prevented,
+        session_id, percent=summary.legacy_percent, blocked=summary.legacy_prevented_rows,
         unverified=not coverage.verified)
     return summary
 
@@ -154,7 +154,7 @@ def test_once_prints_exactly_what_render_would_produce(data_dir, capsys):
     assert ambient.main(["--once"]) == 0
 
     out = capsys.readouterr().out
-    assert out == hud_line(summary.percent, 80, summary.prevented) + "\n"
+    assert out == hud_line(summary.legacy_percent, 80, summary.legacy_prevented_rows) + "\n"
 
 
 def test_no_flags_behaves_as_once(data_dir, capsys):
@@ -163,7 +163,7 @@ def test_no_flags_behaves_as_once(data_dir, capsys):
     assert ambient.main([]) == 0
 
     out = capsys.readouterr().out
-    assert out == hud_line(summary.percent, 80, summary.prevented) + "\n"
+    assert out == hud_line(summary.legacy_percent, 80, summary.legacy_prevented_rows) + "\n"
 
 
 def test_prevented_count_is_the_blocked_input(data_dir, capsys):
@@ -230,7 +230,7 @@ def test_falls_back_to_the_most_recently_started_session_with_no_daemon(
     ambient.main(["--once"])
 
     out = capsys.readouterr().out
-    assert out == hud_line(newer.percent, 80, newer.prevented) + "\n"
+    assert out == hud_line(newer.legacy_percent, 80, newer.legacy_prevented_rows) + "\n"
 
 
 def test_session_id_override_is_honored(data_dir, capsys):
@@ -240,9 +240,9 @@ def test_session_id_override_is_honored(data_dir, capsys):
     ambient.main(["--session-id", "older", "--once"])
 
     out = capsys.readouterr().out
-    assert out == hud_line(older.percent, 80, older.prevented) + "\n"
+    assert out == hud_line(older.legacy_percent, 80, older.legacy_prevented_rows) + "\n"
     # And it is genuinely a different line than the default resolution.
-    assert older.percent != 0
+    assert older.legacy_percent != 0
 
 
 def test_the_daemons_live_session_beats_the_most_recently_started_one(
@@ -262,8 +262,8 @@ def test_the_daemons_live_session_beats_the_most_recently_started_one(
     ambient.main(["--once"])
 
     out = capsys.readouterr().out
-    assert out == hud_line(older.percent, 80, older.prevented) + "\n"
-    assert out != hud_line(newer.percent, 80, newer.prevented) + "\n"
+    assert out == hud_line(older.legacy_percent, 80, older.legacy_prevented_rows) + "\n"
+    assert out != hud_line(newer.legacy_percent, 80, newer.legacy_prevented_rows) + "\n"
 
 
 def test_the_pane_and_the_audit_name_the_same_session(data_dir, capsys,
@@ -291,7 +291,7 @@ def test_an_explicit_pin_never_asks_the_daemon(data_dir, capsys, daemon_says):
     ambient.main(["--session-id", "older", "--once"])
 
     out = capsys.readouterr().out
-    assert out == hud_line(older.percent, 80, older.prevented) + "\n"
+    assert out == hud_line(older.legacy_percent, 80, older.legacy_prevented_rows) + "\n"
     assert asked == []
 
 
@@ -403,7 +403,7 @@ def test_line_never_exceeds_the_terminal_width(data_dir, monkeypatch, capsys,
 
     line = capsys.readouterr().out.rstrip("\n")
     assert len(line) <= columns
-    assert line == hud_line(summary.percent, columns, summary.prevented)
+    assert line == hud_line(summary.legacy_percent, columns, summary.legacy_prevented_rows)
 
 
 def test_narrow_terminal_degrades_to_the_dot_form(data_dir, monkeypatch,
@@ -447,7 +447,7 @@ def test_watch_redraws_in_place_and_exits_zero_on_ctrl_c(data_dir, monkeypatch,
     assert ambient.main(["--watch"]) == 0
 
     out = capsys.readouterr().out
-    line = hud_line(summary.percent, 80, summary.prevented)
+    line = hud_line(summary.legacy_percent, 80, summary.legacy_prevented_rows)
     # Three frames, each preceded by carriage-return + erase-to-end-of-line, so
     # the pane holds one line instead of scrolling a log.
     assert out == ("\r\x1b[K" + line) * 3 + "\n"
@@ -493,8 +493,8 @@ def test_watch_honors_the_session_id_override(data_dir, monkeypatch, capsys):
     ambient.main(["--watch", "--session-id", "older"])
 
     out = capsys.readouterr().out
-    assert out == "\r\x1b[K" + hud_line(older.percent, 80,
-                                        older.prevented) + "\n"
+    assert out == "\r\x1b[K" + hud_line(older.legacy_percent, 80,
+                                        older.legacy_prevented_rows) + "\n"
 
 
 def test_watch_clears_the_line_when_there_is_nothing_to_show(
@@ -559,7 +559,7 @@ def test_watch_does_not_hop_between_sessions_between_redraws(
 
     ambient.main(["--watch"])
 
-    line = hud_line(first.percent, 80, first.prevented)
+    line = hud_line(first.legacy_percent, 80, first.legacy_prevented_rows)
     assert capsys.readouterr().out == ("\r\x1b[K" + line) * 3 + "\n"
 
 

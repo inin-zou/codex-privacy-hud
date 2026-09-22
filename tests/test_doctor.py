@@ -112,12 +112,21 @@ for line in sys.stdin:
         elif CALL.startswith("value:"):
             bad = json.loads(CALL[len("value:"):])
             result = {{"content": [{{"type": "text", "text": json.dumps(
-                {{"percent": bad, "exposed_items": 0, "destinations": 0,
-                  "prevented": 0}})}}]}}
+                {{"accounting_version": 1, "legacy_score": 0.0,
+                  "legacy_cap": 120.0, "legacy_percent": bad,
+                  "legacy_permitted_crossing_rows": 0,
+                  "legacy_boundary_kinds": 0, "legacy_prevented_rows": 0,
+                  "score_label": "legacy permitted-crossing score",
+                  "accounting_note": "Historical accounting includes "
+                  "permitted crossings and may collapse different outcomes. "
+                  "It does not establish confirmed disclosure."}})}}]}}
         else:
             result = {{"content": [{{"type": "text", "text": json.dumps(
-                {{"percent": 0, "exposed_items": 0, "destinations": 0,
-                  "prevented": 0}})}}]}}
+                {{"accounting_version": 0, "percent": None,
+                  "score_label": "No session on record",
+                  "accounting_note": "No session record is available in "
+                  "this ledger. The percentage and counts are "
+                  "unavailable."}})}}]}}
         if CALL != "hang":
             sys.stdout.write(json.dumps({{"jsonrpc": "2.0", "id": msg["id"],
                 "result": result}}) + "\\n")

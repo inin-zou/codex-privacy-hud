@@ -38,8 +38,8 @@ which session this is" through the coverage marker: that would collapse the
 three states back into two and undo the paragraph above.
 
 **Input is typed.** `audit`, `detail` and `receipt` take `ledger.py`'s
-`SessionSummary` and `ExposureRow` (or an `EventRow`, which is one — see that
-class), not dicts. These functions are almost entirely `row[...]`/`.get(...)`
+summary variants (`LegacySessionSummary` or `UnrecordedSessionSummary`) and
+`LegacyExposureRow`, not dicts. These functions are almost entirely `row[...]`/`.get(...)`
 lookups, which made them the single most exposed consumer of the old
 string-keyed contract: a mistyped key was either a `KeyError` in the middle of
 the audit the user just asked for, or a `.get()` returning `None` that rendered
@@ -53,9 +53,17 @@ from collections.abc import Callable, Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from .ledger import ExposureRow, SessionCoverage, SessionSummary
+from .ledger import (
+    LEGACY_ACCOUNTING_NOTE,
+    LEGACY_SCORE_LABEL,
+    UNRECORDED_ACCOUNTING_NOTE,
+    UNRECORDED_SCORE_LABEL,
+    LegacyExposureRow,
+    LegacySessionSummary,
+    SessionCoverage,
+    SessionSummary,
+)
 from .matrix.loader import load_matrix
-from .origin import OriginKind, origin_phrase
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     # Type-only, and deliberately so: `audit()` reads three attributes off a
@@ -138,7 +146,17 @@ _EMPTY_UNVERIFIED = (
 )
 
 
-def empty_message(tab: str, coverage: SessionCoverage | None) -> str:
+#: The one empty-state line for an unrecorded session, on every tab. It
+#: takes precedence over coverage: with no session row there are no rows to
+#: have missed, and no evidence either way about what happened.
+_EMPTY_UNRECORDED = (
+    "No events can be shown for an unrecorded session. This is not evidence "
+    "that none occurred."
+)
+
+
+def empty_message(tab: str, coverage: SessionCoverage | None, *,
+                  summary: SessionSummary | None = None) -> str:
     """The one empty-state line for `tab` under `coverage`.
 
     Public, and the only way any surface may choose this string. `audit()`
@@ -149,9 +167,9 @@ def empty_message(tab: str, coverage: SessionCoverage | None) -> str:
     shown on exactly the sessions it could not be shown on. Two surfaces each
     deciding is how they came to disagree; one function decides now.
 
-    Three answers, not two — "not asked" and "asked, and verified" are
-    different states and only the second earns `_EMPTY_VERIFIED`:
+    Four answers, and the first wins:
 
+    - `summary` is unrecorded → `_EMPTY_UNRECORDED`, on every tab.
     - coverage says not verified → `_EMPTY_UNVERIFIED`, the same line on every
       tab, because an incomplete record is a caveat about the session and not
       about one tab's contents.
@@ -159,6 +177,8 @@ def empty_message(tab: str, coverage: SessionCoverage | None) -> str:
     - `None` → the tab's line alone, which is what a caller with no coverage
       reading is entitled to and no more.
     """
+    if summary is not None and summary.accounting_version == 0:
+        return _EMPTY_UNRECORDED
     if coverage is not None and not coverage.verified:
         return _EMPTY_UNVERIFIED
     line = _EMPTY_MESSAGES.get(tab, "No events to show.")
@@ -341,16 +361,22 @@ def hud_line(percent: int, width: int, blocked: int = 0, *,
     return line[:max(width, 0)]
 
 
-def _status_chip(row: ExposureRow) -> str:
-    if row.protection in ("masked", "minimized"):
-        return "[MASKED]"
-    if row.kind == "exposed":
-        return "[EXPOSED]"
-    if row.kind == "prevented":
-        return "[PREVENTED]"
-    if row.kind == "local_access":
-        return "[LOCAL]"
-    return f"[{(row.kind or 'unknown').upper()}]"
+#: Legacy row chips, by stored `kind` alone. `protection` does not override
+#: the kind: a `masked` label records that Privacy HUD returned rewritten
+#: input, not that the host applied it, so it cannot turn a permitted
+#: crossing into something else.
+_LEGACY_CHIPS = {
+    "exposed": "LEGACY PERMITTED",
+    "prevented": "LEGACY PREVENTED ROW",
+    "local_access": "LEGACY LOCAL ACCESS",
+    "detected": "LEGACY DETECTED",
+    "retention": "LEGACY RETENTION",
+}
+_LEGACY_CHIP_UNKNOWN = "LEGACY UNKNOWN"
+
+
+def _status_chip(row: LegacyExposureRow) -> str:
+    return f"[{_LEGACY_CHIPS.get(row.kind, _LEGACY_CHIP_UNKNOWN)}]"
 
 
 def _tile(value: str, label: str) -> list[str]:
@@ -362,31 +388,66 @@ def _tile(value: str, label: str) -> list[str]:
     return [top, val, lab, bot]
 
 
+#: The unrecorded tiles: no number, and each label says what is missing.
+_UNRECORDED_TILES = (
+    ("—%", "percentage unavailable"),
+    ("—", "permitted-crossing rows unavailable"),
+    ("—", "boundary kinds unavailable"),
+    ("—", "prevented rows unavailable"),
+)
+
+
 def _tiles_block(summary: SessionSummary) -> str:
-    pct = int(summary.percent)
-    _check_band(pct)  # same fail-loud validation as hud_line
-    # Each label names what the number IS, and `ui/app.js` carries the same
-    # four (#49 item 9). They read "disclosure", "exposed items" and
-    # "destinations" until then, which evoked three things none of them is:
-    # `percent` is score/cap, an assigned budget occupancy rather than a
-    # probability or a proportion of data; `exposed` is written before the
-    # host returns its decision, so it means permitted and not delivered; and
-    # `destinations` is a DISTINCT over normalised boundary kinds, so it
-    # counts categories and never services (known limit 20).
-    tiles = [
-        (f"{pct}%", "of budget"),
-        (str(summary.exposed_items), "permitted crossings"),
-        (str(summary.destinations), "boundary kinds"),
-        (str(summary.prevented), "prevented"),
-    ]
+    """Four tiles. A legacy summary keeps its stored numbers under legacy
+    labels (#54): the score counts permitted crossings, and its rows may
+    collapse different outcomes, so none of them is a confirmed-disclosure
+    figure. An unrecorded summary has no numbers at all."""
+    if isinstance(summary, LegacySessionSummary):
+        pct = int(summary.legacy_percent)
+        _check_band(pct)  # same fail-loud validation as hud_line
+        tiles: Sequence[tuple[str, str]] = (
+            (f"{pct}%", LEGACY_SCORE_LABEL),
+            (str(summary.legacy_permitted_crossing_rows),
+             "legacy permitted-crossing rows"),
+            (str(summary.legacy_boundary_kinds), "legacy boundary kinds"),
+            (str(summary.legacy_prevented_rows), "legacy prevented rows"),
+        )
+    else:
+        tiles = _UNRECORDED_TILES
+    # Two rows of two: the legacy and unavailable labels are too long for
+    # four abreast inside design.md §5's 100-column floor.
     blocks = [_tile(value, label) for value, label in tiles]
-    return "\n".join(" ".join(b[i] for b in blocks) for i in range(4))
+    rows = [blocks[:2], blocks[2:]]
+    return "\n".join("\n".join(" ".join(b[i] for b in row) for i in range(4))
+                     for row in rows)
 
 
-def _tab_bar(exposed_n: int, prevented_n: int, all_n: int, tab: str) -> str:
+def _note(note: str) -> str:
+    """An accounting note for a terminal view. A note longer than design.md
+    §5's 100-column floor is broken between its sentences, never inside
+    one."""
+    return note if len(note) <= 100 else note.replace(". ", ".\n")
+
+
+#: Display labels for the three tabs. The API arguments stay "Exposed",
+#: "Prevented" and "All events"; what they select are stored legacy
+#: classifications, and the labels say so.
+TAB_LABELS = {
+    "Exposed": "Legacy permitted crossings",
+    "Prevented": "Legacy prevented rows",
+    "All events": "All legacy events",
+}
+
+_UNAVAILABLE = "—"
+
+
+def _tab_bar(exposed_n: int | None, prevented_n: int | None,
+             all_n: int | None, tab: str) -> str:
+    """The tab bar. A count that is not known prints `—`, never 0."""
     segs = [("Exposed", exposed_n), ("Prevented", prevented_n),
             ("All events", all_n)]
-    texts = [f"{name} {n}" for name, n in segs]
+    texts = [f"{TAB_LABELS[name]} {_UNAVAILABLE if n is None else n}"
+             for name, n in segs]
     sep = "      "
     line = " " + sep.join(texts)
     underline = " "
@@ -397,7 +458,7 @@ def _tab_bar(exposed_n: int, prevented_n: int, all_n: int, tab: str) -> str:
     return line + "\n" + underline
 
 
-def _table(rows: Sequence[ExposureRow]) -> str:
+def _table(rows: Sequence[LegacyExposureRow]) -> str:
     headers = ["SENSITIVE DATA", "SOURCE", "DESTINATION", "STATUS"]
     data = []
     for r in rows:
@@ -497,66 +558,51 @@ def _subtitle(resolved: "ResolvedSession | None", *,
     return _SUBTITLE_BY_BASIS.get(resolved.basis, "Session ID unknown")
 
 
-def audit(summary: SessionSummary, rows: Sequence[ExposureRow], tab: str, *,
+def audit(summary: SessionSummary, rows: Sequence[LegacyExposureRow],
+          tab: str, *,
           coverage: SessionCoverage | None = None,
           resolved: "ResolvedSession | None" = None,
-          session_id: str | None = None) -> str:
+          session_id: str | None = None,
+          all_events_count: int | None = None) -> str:
     """The L2 session audit (design.md §5).
 
     `rows` is whatever the caller has already selected for `tab` — this
-    function does not re-filter by kind, since `Ledger.list_events` already
-    scopes to one kind at a time and the caller is what decides which
-    kind(s) went into `rows` for "Exposed" / "Prevented" / "All events".
-    It does apply each tab's documented sort order (design.md §5):
-    Exposed by budget contribution descending, Prevented most-recent-first,
-    All events chronological.
+    function does not re-filter by kind. It does apply each tab's documented
+    sort order (design.md §5): Exposed by budget contribution descending,
+    Prevented most-recent-first, All events chronological.
 
-    The header subtitle in design.md's mockup reads "Current session · 41
-    min" — this function's fixed interface (`summary, rows, tab`, no
-    duration) has no channel for the minute count, so the subtitle here
-    omits it. `receipt()` is the function that receives `minutes` and shows
-    session duration. The first half of that subtitle is no longer a constant
-    either: see `resolved` below and `_subtitle`.
+    **Accounting.** A legacy summary renders its stored numbers under legacy
+    labels with the legacy accounting note below the tiles. An unrecorded
+    summary renders "No session on record", unavailable tiles, its own note,
+    `—` for every tab count and the unrecorded empty line: no number, band,
+    bar or row.
 
-    The "All events" tab count in the tab bar is exact when `tab == "All
-    events"` (`len(rows)`, since that's exactly what's being rendered);
-    for the other two tabs it is `exposed_items + prevented` as a
-    best-effort approximation, because `summary` (per the given `Ledger.
-    summary` interface) does not carry a total event count and this
-    function only ever sees one tab's rows at a time.
+    **Tab counts.** The two kind tabs count from the summary. "All events"
+    is `len(rows)` on its own tab and `all_events_count` otherwise; with
+    neither it prints `—`. It used to be approximated as exposed plus
+    prevented, which omits local-access, detected and retention rows.
 
     **`coverage` is a `ledger.SessionCoverage`, or `None` for "not asked".**
     It is not read here: both things it decides are decided by the two module
     functions this passes it to — `coverage_banner()` for the banner above the
-    table, `empty_message()` for the line inside it. That indirection is the
-    fix from #49, not indirection for its own sake: the browser used to make
-    the same two decisions from its own copy of the strings, and made them
-    differently, so the reassuring line was shown on exactly the sessions
-    whose record was known to be incomplete.
-
-    Three coverage answers, not two. `None` is "not asked" and gets the bare
-    tab line, so a caller with no reading cannot accidentally acquire a clean
-    bill of health it did not ask for. Verified earns one more sentence about
-    what the check found. Unverified replaces the line entirely — see
-    `_EMPTY_MESSAGES` and `_EMPTY_UNVERIFIED` for what each says and why the
-    three sentences that used to live here ("No sensitive data has crossed a
-    trust boundary this session", "The engine is running.") are gone.
+    table, `empty_message()` for the line inside it. The browser asks the
+    same two questions of the same functions.
 
     **`resolved` is an `mcp_tools.ResolvedSession`, or `None` for "not
-    asked".** It changes exactly one thing: the header subtitle, which used to
-    read the literal `"Current session"` for every session this function was
-    ever handed. That was an unsupported claim whenever the session had been
-    resolved by falling back to the ledger's most-recently-*started* row —
-    which is precisely the case where `$privacy` prints a note above this table
-    saying it could not be sure. See `_subtitle` for the copy and the argument.
-    Without `resolved`, a supplied `session_id` renders `Session <id>`;
-    otherwise the subtitle is `Session ID unknown`.
+    asked".** It changes exactly one thing: the header subtitle. See
+    `_subtitle`. Without `resolved`, a supplied `session_id` renders
+    `Session <id>`; otherwise the subtitle is `Session ID unknown`.
     """
-    exposed_n = summary.exposed_items
-    prevented_n = summary.prevented
-    all_n = len(rows) if tab == "All events" else exposed_n + prevented_n
+    legacy = isinstance(summary, LegacySessionSummary)
+    exposed_n: int | None = None
+    prevented_n: int | None = None
+    all_n: int | None = None
+    if isinstance(summary, LegacySessionSummary):
+        exposed_n = summary.legacy_permitted_crossing_rows
+        prevented_n = summary.legacy_prevented_rows
+        all_n = len(rows) if tab == "All events" else all_events_count
 
-    ordered = list(rows)
+    ordered = list(rows) if legacy else []
     if tab == "Exposed":
         ordered.sort(key=lambda r: r.budget_delta, reverse=True)
     elif tab == "Prevented":
@@ -565,18 +611,17 @@ def audit(summary: SessionSummary, rows: Sequence[ExposureRow], tab: str, *,
         ordered.sort(key=lambda r: r.ts)
 
     lines = ["Privacy Audit", _subtitle(resolved, session_id=session_id), ""]
+    if not legacy:
+        lines += [UNRECORDED_SCORE_LABEL, ""]
     lines.append(_tiles_block(summary))
+    lines.append(_note(LEGACY_ACCOUNTING_NOTE if legacy
+                       else UNRECORDED_ACCOUNTING_NOTE))
     lines.append("")
     lines.append(_tab_bar(exposed_n, prevented_n, all_n, tab))
     lines.append("")
 
     # Session-scope first, event-scope second: "we were not watching" is a
-    # bigger caveat than "one event got the fast path only", and reading them
-    # in the other order invites treating the first as a footnote to it.
-    # Through `coverage_banner()` rather than testing `coverage.verified`
-    # here: the browser asks the same question, and one of the two asking it
-    # separately is how the reassuring empty state came to be shown on
-    # sessions that could not support it.
+    # bigger caveat than "one event got the fast path only".
     banner = coverage_banner(coverage)
     if banner is not None:
         lines.append(banner)
@@ -596,160 +641,159 @@ def audit(summary: SessionSummary, rows: Sequence[ExposureRow], tab: str, *,
         lines.append("")
 
     if not ordered:
-        lines.append(empty_message(tab, coverage))
+        lines.append(empty_message(tab, coverage, summary=summary))
     else:
         lines.append(_table(ordered))
 
     return "\n".join(lines)
 
 
-def detail(row: ExposureRow) -> str:
-    """The L3 exposure detail view (design.md §6).
+#: How each stored `protection` value is shown. A display mapping only:
+#: persisted values are never changed. `blocked` and `masked`/`minimized`
+#: record what Privacy HUD returned; no current hook reports whether the
+#: host applied it. `None` (SQL NULL) and `"none"` read the same.
+_PROTECTION_DISPLAY = {
+    "blocked": "denial recorded; host enforcement unconfirmed",
+    "masked": "rewrite recorded; host application unconfirmed",
+    "minimized": "rewrite recorded; host application unconfirmed",
+    "none": "no intervention recorded",
+}
+_PROTECTION_UNKNOWN = "legacy intervention not recognized"
+
+_ASSOCIATION_NOTE = (
+    "This legacy source-to-destination association does not establish "
+    "delivery or a multi-hop flow.")
+
+#: The terminal detail view does not save policy. The buttons that do are in
+#: the local audit browser (`ui/app.js` → `/api/policy` → `apply_policy`).
+_POLICY_SURFACE = ("Policy rules can be saved in the local audit browser "
+                   "opened by $privacy.")
+
+_IRREVERSIBLE = "Already disclosed data cannot be recalled from this session."
+
+_LABEL_W = 26
+
+
+def protection_display(protection: str | None) -> str:
+    """The display text for a stored legacy `protection` value."""
+    return _PROTECTION_DISPLAY.get(protection or "none", _PROTECTION_UNKNOWN)
+
+
+def detail(row: LegacyExposureRow) -> str:
+    """The L3 legacy row detail view (design.md §6).
 
     `Already disclosed data cannot be recalled from this session.` is
     required, permanent, and unconditional — it is appended below
     regardless of any other field in `row`, and there is no code path that
     can omit it.
 
-    Fields rendered: title, flow line, First seen, Last seen (only when
-    `row["last_seen"]` is present and later than first-seen), Protection,
-    Example (only when a masked exemplar exists — credentials get none per
-    mask.py, and this must never print "Example None"), and Budget
-    contribution.
+    Every field keeps its legacy meaning and says so: the source and
+    destination are a recorded association, not an established delivery;
+    the intervention is what Privacy HUD returned, not what the host
+    applied; the contribution is to the legacy score. The legacy accounting
+    note follows the fields.
 
-    Two divergences from a literal reading of design.md, both forced by the
-    fixed one-row interface (no summary/matrix/band passed in):
-    - Budget contribution is shown as `+N pts` from `row.budget_delta`.
-      design.md's mockup shows `+9 pts of 120`, but the 120 is the session's
-      budget_cap, which this function has no access to; the "of {cap}" tail
-      is included only when the row itself carries a `budget_cap` (which is
-      why that field is optional and `None` when unknown, rather than
-      defaulted), since fabricating 120 as a hardcoded constant here would
-      silently go stale the moment tables.toml's budget_cap is retuned.
-    - `Mask detected <type> in future calls` is always rendered; a second line,
-      `Block values read from {source}` or `` Block values from `{source}`
-      output ``, follows it only when `row.source_kind` is `"path"` or
-      `"command"` -- i.e. only when `source` names a real origin rather than
-      a bare tool label (#40). The red-band note pointing at a new Codex
-      conversation (design.md §6) depends on the session's band, which this
-      function cannot see from a single row. design.md's `Block this source`
-      (`block_source`) stays withdrawn (#38): it named a label, not a
-      source, and `block_path`/`block_command` are the replacement, not a
-      revival of it.
-    - The per-action confirmation line ("Rule added: ...") describes what
-      happens after a button is pressed; there is no click state in a pure
-      render of `row`, so it is not rendered here.
+    This view prints no action labels. Plain text does not save a rule, and
+    bracketed labels here read as buttons. The sentence it prints instead
+    names the surface that does save one.
 
-    Takes the same `ExposureRow` the tab tables take, with its L3 fields
-    (`first_seen`, `last_seen`, `hops`, `budget_cap`) populated — that is what
-    `mcp_tools.get_exposure_detail` returns. Each of those is optional and
-    `None` when unknown, and each line below is still conditional on exactly
-    that, so a bare list row renders the shorter view rather than raising.
+    The "of {cap}" tail is included only when the row itself carries a
+    `budget_cap`; fabricating a constant here would go stale the moment
+    tables.toml's budget_cap is retuned.
     """
     lines = [_title(row.data_type, row.count)]
 
-    if row.hops:
-        lines.append(" → ".join(row.hops))
-    else:
-        lines.append(f"{row.source} → {row.destination}")
+    flow = (" → ".join(row.hops) if row.hops
+            else f"{row.source} → {row.destination}")
+    lines.append(f"{'Recorded association':<{_LABEL_W}} {flow}")
+    lines.append(_ASSOCIATION_NOTE)
     lines.append("")
 
     first_ts = row.first_seen if row.first_seen is not None else row.ts
     if first_ts is not None:
-        lines.append(f"{'First seen':<12} {_fmt_time(first_ts)}")
+        lines.append(f"{'First seen':<{_LABEL_W}} {_fmt_time(first_ts)}")
     last_ts = row.last_seen
     if last_ts is not None and first_ts is not None and last_ts > first_ts:
-        lines.append(f"{'Last seen':<12} {_fmt_time(last_ts)}")
+        lines.append(f"{'Last seen':<{_LABEL_W}} {_fmt_time(last_ts)}")
 
-    lines.append(f"{'Protection':<12} {row.protection or 'none'}")
+    lines.append(f"{'Legacy intervention':<{_LABEL_W}} "
+                 f"{protection_display(row.protection)}")
 
     if row.masked_example:
-        lines.append(f"{'Example':<12} {row.masked_example}")
+        lines.append(f"{'Example':<{_LABEL_W}} {row.masked_example}")
 
     if row.budget_delta is not None:
-        contrib = f"+{row.budget_delta:g} pts"
+        contrib = f"+{row.budget_delta:g} legacy pts"
         if row.budget_cap:
             contrib += f" of {row.budget_cap:g}"
-        lines.append(f"{'Budget':<12} {contrib}")
+        lines.append(f"{'Legacy score contribution':<{_LABEL_W}} {contrib}")
 
-    # Names the action, not an outcome. "Protect future occurrences"
-    # promised protection the rule cannot guarantee: it fires when a later
-    # call produces a matching finding, and for every type outside
-    # `mcp_tools.CHEAP_DATA_TYPES` (`path`, `credential`) matching requires
-    # an accepted deep-scan result (#49 item 2). `ui/app.js` renders the
-    # same label, so the two surfaces cannot drift apart.
-    lines += ["", f"[ Mask detected {row.data_type} in future calls ]"]
-    # An unrecognised `source_kind` offers nothing, rather than a button
-    # whose rule would never match (#40). The wording comes from
-    # `origin.origin_phrase`, which the engine's deny message also uses, so
-    # the button and the refusal it leads to cannot describe the same
-    # origin in two different ways.
-    if row.source_kind == "path":
-        lines.append(f"[ Block values {origin_phrase(row.source, OriginKind.PATH)} ]")
-    elif row.source_kind == "command":
-        lines.append(
-            f"[ Block values {origin_phrase(row.source, OriginKind.COMMAND)} ]")
-
-    lines += [
-        "",
-        "Already disclosed data cannot be recalled from this session.",
-    ]
+    lines += ["", _note(LEGACY_ACCOUNTING_NOTE), "", _POLICY_SURFACE, "",
+              _IRREVERSIBLE]
     return "\n".join(lines)
 
 
+_RECEIPT_FINAL = ("This ledger stores metadata, not file contents, prompts, "
+                  "or raw values.")
+
+
 def receipt(session_id: str, summary: SessionSummary,
-            rows: Sequence[ExposureRow], minutes: int, *,
+            rows: Sequence[LegacyExposureRow], minutes: int | None, *,
             coverage: SessionCoverage | None = None) -> str:
     """The end-of-session privacy receipt (design.md §10).
 
-    `No file contents, prompts, or raw values were stored.` is the
-    receipt's real payload and always the last line — it is verifiable
-    against the ledger schema (ledger.py's SCHEMA has no content/prompt/
-    raw_value/snippet/text column), and this function makes no claim
-    beyond what that schema actually guarantees.
+    The last line is the receipt's verifiable payload: the ledger schema
+    has no content, prompt, raw_value, snippet or text column.
 
-    design.md's mockup shows `Retained   transcript written to
-    ~/.codex/sessions/...` — this function is not given a transcript path
-    (it isn't part of `summary`, `rows`, or any other parameter), so rather
-    than fabricate one, the Retained line states the true, generic fact:
-    the session transcript is persisted by Codex, outside this ledger.
+    An unrecorded session gets a fixed receipt with no duration, number,
+    count, retention claim or table. A legacy receipt prints the stored
+    numbers under legacy labels, with the legacy accounting note. The
+    duration is printed only when `minutes` is known; `None` omits it rather
+    than inventing `0 min`. Rows carry no `(masked)` suffix: the stored
+    label records what Privacy HUD returned, not what the host applied.
 
-    `coverage` (a `ledger.SessionCoverage`, or `None` for "not asked") adds one
-    banner line at the top when the record is not verified. A receipt is the
-    artifact a user keeps and quotes, so it is the single worst place for a
-    disclosure figure that reads complete and is not — a receipt is a claim
-    about a whole session, and a session with an unrecorded stretch has no
-    complete claim to make. The banner goes ABOVE the header rather than beside
-    the figures because it qualifies all of them at once.
+    `coverage` (a `ledger.SessionCoverage`, or `None` for "not asked") adds a
+    banner at the top of a legacy receipt when the record is not verified.
     """
-    pct = int(summary.percent)
+    if not isinstance(summary, LegacySessionSummary):
+        return "\n".join([
+            f"PRIVACY RECEIPT · {session_id}",
+            "",
+            UNRECORDED_SCORE_LABEL,
+            "Percentage unavailable.",
+            _note(UNRECORDED_ACCOUNTING_NOTE),
+            "No event rows can be listed for this session.",
+            "",
+            _RECEIPT_FINAL,
+        ])
+
+    pct = int(summary.legacy_percent)
     _check_band(pct)
 
     lines = []
     if coverage is not None and not coverage.verified:
         lines += [_coverage_banner(coverage), ""]
+    header = f"PRIVACY RECEIPT · {session_id}"
+    if minutes is not None:
+        header += f" · {minutes} min"
     lines += [
-        f"PRIVACY RECEIPT · {session_id} · {minutes} min",
+        header,
         "",
-        f"{'Disclosure':<16} {pct}% of budget",
-        # "crossings across N boundary kinds", not "flows across N
-        # destinations": `destination` holds the KIND of boundary and not who
-        # was on the other side, so a second MCP server is not a second
-        # destination (known limit 20), and `flows` names a table nothing
-        # writes. #49 item 8.
-        f"{'Exposed':<16} {summary.exposed_items} crossings across "
-        f"{summary.destinations} boundary kinds",
-        f"{'Prevented':<16} {summary.prevented} events",
-        f"{'Retained':<16} session transcript, persisted by Codex outside "
-        "this ledger.",
+        f"{LEGACY_SCORE_LABEL}: {pct}% ({summary.legacy_score:g} pts of "
+        f"{summary.legacy_cap:g})",
+        "legacy permitted-crossing rows: "
+        f"{summary.legacy_permitted_crossing_rows}",
+        f"legacy boundary kinds: {summary.legacy_boundary_kinds}",
+        f"legacy prevented rows: {summary.legacy_prevented_rows}",
+        _note(LEGACY_ACCOUNTING_NOTE),
+        "Transcript retention is outside this ledger's account.",
         "",
     ]
 
     for r in rows:
         title = _title(r.data_type, r.count)
         source = _truncate_middle(r.source, 20)
-        suffix = "  (masked)" if r.protection == "masked" else ""
-        lines.append(f"  {title:<22}{source:<18}→ {r.destination}{suffix}")
+        lines.append(f"  {title:<22}{source:<18}→ {r.destination}")
 
-    lines += ["", "No file contents, prompts, or raw values were stored."]
+    lines += ["", _RECEIPT_FINAL]
     return "\n".join(lines)

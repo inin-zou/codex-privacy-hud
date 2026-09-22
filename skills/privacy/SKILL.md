@@ -1,6 +1,6 @@
 ---
 name: privacy
-description: Open the Privacy HUD session audit — what sensitive data was observed crossing a trust boundary in the selected session, what was prevented, and what you can do about it.
+description: Open the Privacy HUD session audit — inspect legacy accounting and recorded event classifications for the selected session, with their evidence limits.
 ---
 
 ## What this does
@@ -42,10 +42,15 @@ from privacy_hud import mcp_tools
 
 data_dir = os.environ["PLUGIN_DATA"]
 explicit = (sys.argv[1] if len(sys.argv) > 1 else "").strip()
-ledger = Ledger(os.path.join(data_dir, "ledger.db"), load_matrix())
-
-resolved = mcp_tools.resolve_audit_session(
-    ledger, data_dir, explicit=explicit or None)
+path = os.path.join(data_dir, "ledger.db")
+if os.path.exists(path):
+    ledger = Ledger(path, load_matrix(), initialize=False)
+    resolved = mcp_tools.resolve_audit_session(
+        ledger, data_dir, explicit=explicit or None)
+else:
+    # The daemon creates the ledger; a reader never does.
+    resolved = mcp_tools.ResolvedSession(
+        explicit or None, "explicit" if explicit else "none")
 print(f"session_id: {resolved.session_id or ''}")
 print(f"basis: {resolved.basis}")
 print(f"also_active: {','.join(resolved.also_active)}")
@@ -115,7 +120,8 @@ resolved = mcp_tools.ResolvedSession(
     tuple(s for s in argv[2].split(",") if s))
 
 data_dir = os.environ["PLUGIN_DATA"]
-ledger = Ledger(os.path.join(data_dir, "ledger.db"), load_matrix())
+ledger = Ledger(os.path.join(data_dir, "ledger.db"), load_matrix(),
+                initialize=False)
 
 summary = mcp_tools.get_session_summary(ledger, session_id)
 rows = mcp_tools.list_exposures(ledger, session_id, "Exposed")
@@ -128,13 +134,9 @@ PY
 Two keyword arguments, two different questions, and neither substitutes
 for the other.
 
-`coverage` says whether the ledger's account of this session is complete.
-Without it `render.audit` cannot tell "0% because nothing was disclosed"
-from "0% because nothing was recorded", and the second is exactly what a
-session whose daemon was down looks like (README known limit 1) — the same
-condition that makes step 1 fall back to `basis: started_at`.
-`render.audit` adds one banner line when the record is incomplete and
-leaves the table untouched otherwise.
+The summary distinguishes a recorded legacy session from an unrecorded session. A legacy summary retains the existing score and row counts under explicit legacy labels. An unrecorded summary has percent=null and no numeric score or counts. Print the renderer's accounting note with either variant; never substitute zero for unavailable quantities.
+
+Coverage separately reports recorded observation gaps. It does not establish that every event was seen, that a crossing occurred, or that the host applied an intervention.
 
 `resolved` says *whose* session those numbers are. It sets the header's
 second line: `Current session` only when the daemon named a single live
@@ -163,7 +165,8 @@ from privacy_hud import mcp_tools, render
 
 session_id, event_id = sys.argv[1], int(sys.argv[2])
 data_dir = os.environ["PLUGIN_DATA"]
-ledger = Ledger(os.path.join(data_dir, "ledger.db"), load_matrix())
+ledger = Ledger(os.path.join(data_dir, "ledger.db"), load_matrix(),
+                initialize=False)
 
 row = mcp_tools.get_exposure_detail(ledger, session_id, event_id)
 print(render.detail(row))
@@ -199,9 +202,8 @@ without leaving the session. It does not change `/statusline`; that decides
 whether the item is configured, this decides whether it shows right now.
 
 Replace `on` with `off` to hide the item or `status` to check the current
-state. It prints one word: `shown`, `hidden`, `stale` (a snapshot exists but
-nothing has refreshed it for 30 s — the daemon is gone or wedged, so the
-session is not being recorded either), or `absent` (no snapshot at all).
+state. It prints one word: `shown`, `hidden`, `stale`, or `absent` (no
+snapshot at all). stale means a valid snapshot has not been refreshed for more than 30 seconds. The HUD cannot establish why it stopped updating or whether ledger recording continued.
 Report `stale` as what it is; it is not the same as "off".
 
 ```bash
@@ -223,10 +225,7 @@ PY
 
 ### `$privacy read on|off|status`
 
-Turns the read guard on or off (`#36`): when on, a tool call that reads a
-known-sensitive path is denied before its bytes reach the model, rather
-than being allowed and then recorded. The default is off — a blocked
-read never runs, but nothing is blocked until the user turns this on.
+Turns the known-sensitive-path read guard on or off. When enabled, Privacy HUD issues denials for recognized matching reads. The default is off. These hooks do not confirm whether the host enforced a denial.
 
 Replace `on` with `off` to turn it off or `status` to check the current
 state. It prints one word: `on` or `off`. This setting lives in
@@ -319,12 +318,12 @@ the rc file by hand.
   was chosen to satisfy design.md §9's copy rules (no "undo", no "your
   data is protected", no severity adjectives); a paraphrase can silently
   reintroduce exactly the claims those rules forbid.
-- Do not claim protection this tool cannot back up. The
-  `[ Mask detected <type> in future calls ]` action writes a real, durable
-  `mask` rule to the session's policy table, and `Engine.observe()`
-  consults that table before its own defaults on every subsequent egress
-  observation. Say the rule is **saved**, and that a later outbound call is
-  rewritten **when that data type is detected on it**. Do not say it is
+- Do not claim protection this tool cannot back up. The terminal detail view does not save policy rules. The local audit browser has buttons that POST to /api/policy; the MCP privacy.update_policy tool is a separate policy-writing surface. Report a rule as saved only after that surface returns success, and include its returned conditions. Host application of a later denial or rewritten input is not confirmed.
+  A saved `mask` rule is in the session's policy table, and
+  `Engine.observe()` consults that table before its own defaults on every
+  subsequent egress observation. Say the rule is **saved**, and that
+  Privacy HUD can return rewritten input for a later outbound call **when
+  that data type is detected on it**. Do not say it is
   enforced, and do not say later calls will be masked: the rule fires only
   on a finding some tier actually produced. For every type other than
   `path` and `credential`, matching requires an accepted deep-scan result.
@@ -338,10 +337,11 @@ the rc file by hand.
   tool's own reply carries the conditions; pass them on rather than
   summarizing them away.
 - A row whose `source` names a real origin — a file the value was read
-  from, or the command whose output carried it — gets a second action, and
-  `render.detail()` prints it as one of two labels (#40):
-  `[ Block values read from <path> ]`, which writes a `block_path` rule, or
-  ``[ Block values from `<command>` output ]``, a `block_command` rule.
+  from, or the command whose output carried it — gets a second button in
+  the local audit browser, one of two labels (#40):
+  `Save block rule for values read from <path>`, which saves a `block_path`
+  rule, or ``Save block rule for values from `<command>` output``, a
+  `block_command` rule.
   Both save an origin rule for this session. Report it as saved and pass
   on the origin conditions: The value must be detected on ingress and
   again on egress. When either detection depends on the deep scan, a scan

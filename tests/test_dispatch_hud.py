@@ -51,8 +51,8 @@ def test_an_observation_republishes_the_ledger_numbers(state, tmp_path):
     snap = hs.read_snapshot(tmp_path, SID)
     summary = state.ledger.summary(SID)
     coverage = state.ledger.coverage(SID)
-    assert snap.percent == summary.percent
-    assert snap.blocked == summary.prevented
+    assert snap.percent == summary.legacy_percent
+    assert snap.blocked == summary.legacy_prevented_rows
     assert snap.unverified == (not coverage.verified)
 
 

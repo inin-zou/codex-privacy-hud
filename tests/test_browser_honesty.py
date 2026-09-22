@@ -126,13 +126,16 @@ def test_the_exposures_endpoint_sends_an_empty_message_at_all(ui):
 
 
 def test_an_unrecorded_session_is_not_served_a_reassuring_empty_state(ui):
-    """Nothing has been dispatched for SID, so its record is not verified.
-    Every tab must be served the unverified line, not the clean one."""
+    """Nothing has been dispatched for SID, so the ledger has no record of
+    it. Every tab must be served the unrecorded line, which takes precedence
+    over coverage (#54 phase 1), never the clean one."""
     served = {
         _exposures(ui, tab)["empty_message"] for tab in TABS
     }
     assert len(served) == 1, served
-    assert served == {render.empty_message("Exposed", UNVERIFIED)}
+    assert served == {
+        "No events can be shown for an unrecorded session. This is not "
+        "evidence that none occurred."}
 
 
 def test_the_banner_travels_as_its_own_field_for_an_unverified_session(ui):

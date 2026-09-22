@@ -210,7 +210,7 @@ def test_mcp_serializes_concurrent_tool_bodies(app_env, monkeypatch):
 
     results = asyncio.run(many())
     assert state["max"] == 1
-    assert all(_payload(r)["exposed_items"] == 1 for r in results)
+    assert all(_payload(r)["legacy_permitted_crossing_rows"] == 1 for r in results)
 
 
 def test_mcp_calls_from_another_event_loop_thread(app_env):
@@ -228,7 +228,7 @@ def test_mcp_calls_from_another_event_loop_thread(app_env):
     t.start()
     t.join(timeout=30)
     assert "error" not in out, out.get("error")
-    assert _payload(out["result"])["exposed_items"] == 1
+    assert _payload(out["result"])["legacy_permitted_crossing_rows"] == 1
 
 
 # --------------------------------------------------------------------- #
@@ -257,7 +257,7 @@ def test_mcp_database_error_is_explicit_and_sanitized(app_env, monkeypatch,
 
     monkeypatch.setattr(mcp_tools, "get_session_summary", real)
     again = _call(app, "privacy.get_session_summary", {"session_id": SID})
-    assert _payload(again)["exposed_items"] == 1, "the lock was not released"
+    assert _payload(again)["legacy_permitted_crossing_rows"] == 1, "the lock was not released"
 
 
 def test_mcp_write_contention_returns_error_without_success(app_env):
@@ -388,7 +388,7 @@ def test_mcp_shutdown_closes_connection(tmp_path, monkeypatch):
         return await call
 
     result = asyncio.run(scenario())
-    assert _payload(result)["exposed_items"] == 1
+    assert _payload(result)["legacy_permitted_crossing_rows"] == 1
     assert len(closes) == 1
     assert closes[0] >= finished[0]
 

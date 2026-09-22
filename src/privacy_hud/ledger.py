@@ -24,16 +24,22 @@ returned nothing until someone traced a live session by hand. A mistyped key
 is either a `KeyError` at the worst possible moment or, worse, a `.get()`
 returning `None` that renders as an empty cell nobody notices. The dataclasses
 below exist so that failure mode has somewhere to fail loudly instead:
-`SessionSummary`, `ExposureRow` and `EventRow` are the read contract, and the
-JSON boundary is an explicit `as_dict()` rather than an accident of whatever
-the dict happened to hold.
+`LegacySessionSummary`/`UnrecordedSessionSummary`, `LegacyExposureRow` and
+`LegacyEventRow` are the read contract, and the JSON boundary is an explicit
+`as_dict()` rather than an accident of whatever the dict happened to hold.
+
+**Every recorded session is legacy-accounted (#54 phase 1).** The readers
+label its numbers as legacy and route to `events` or, after #54's rebuild,
+`events_legacy_v1`, deciding which inside each read. Readers open without
+initializing (`Ledger(..., initialize=False)`); only the daemon applies the
+schema.
 
 **A ledger that recorded nothing looks exactly like a ledger with nothing to
 record — unless it also records whether it was watching.** That is what the
 `coverage` table is for, and it is the third state this schema previously could
-not express. `summary()` answers an unknown session with a well-formed zero,
-and zero events / 0% is also what a genuinely clean session looks like, so the
-product's central number conflated "nothing sensitive was disclosed" with "I
+not express. `summary()` used to answer an unknown session with a well-formed
+zero, and zero events / 0% is also what a genuinely clean session looks like,
+so the product's central number conflated "nothing sensitive was disclosed" with "I
 have no idea what was disclosed". This is not hypothetical: an I7 self-audit
 (CLAUDE.md §3) once read as a clean pass — zero events, budget 0.0/120.0 —
 against a session the daemon had never seen at all, because it cold-started
@@ -47,8 +53,11 @@ import os
 import sqlite3
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, fields
 from pathlib import Path
+from typing import Literal
 
 from .budget import contribution, percent
 from .matrix.loader import Matrix
@@ -299,94 +308,163 @@ class SessionCoverage:
         }
 
 
+#: The label every legacy number carries, on every surface (CLAUDE.md §4).
+LEGACY_SCORE_LABEL: Literal["legacy permitted-crossing score"] = (
+    "legacy permitted-crossing score")
+
+#: The caveat that travels with a legacy summary. A closed copy constant,
+#: not stored data.
+LEGACY_ACCOUNTING_NOTE = (
+    "Historical accounting includes permitted crossings and may collapse "
+    "different outcomes. It does not establish confirmed disclosure.")
+
+#: The label and caveat for a session this ledger has no row for.
+UNRECORDED_SCORE_LABEL: Literal["No session on record"] = (
+    "No session on record")
+UNRECORDED_ACCOUNTING_NOTE = (
+    "No session record is available in this ledger. The percentage and "
+    "counts are unavailable.")
+
+
+class UnsupportedAccounting(RuntimeError):
+    """A session or schema the legacy readers cannot describe honestly.
+
+    Raised rather than answered: a version-2 session read through a legacy
+    projection would be mislabelled, and an unknown `events` layout would be
+    read by guesswork."""
+
+
 @dataclass(frozen=True, kw_only=True)
-class SessionSummary:
-    """The four L2 tiles (design.md §5), and nothing else.
+class LegacySessionSummary:
+    """One recorded session under the legacy writer's accounting (#54).
 
-    The invariant this protects is I3: `percent` is the disclosure number,
-    `exposed_items`/`destinations` count only `kind='exposed'` rows, and
-    `prevented` is a separate count that contributes exactly zero to the
-    budget. Four same-typed integers next to each other in a dict is precisely
-    the shape a transposition survives silently -- swap `destinations` and
-    `prevented` at a call site and every test that checks "is it an int" still
-    passes while the HUD lies about how far the disclosure went. Named,
-    keyword-only fields make that swap a construction error.
+    The numbers are the stored ones: `legacy_score` and `legacy_cap` come
+    from the session row, `legacy_percent` is the existing `budget.percent`
+    of the two, and the counts are the existing row counts. What changed is
+    what they are called. The legacy writer records a permitted crossing as
+    `exposed`, dedupes on (value, destination) and increments whatever row
+    it finds first, so its score counts permitted crossings and its rows
+    may collapse different outcomes (known limits 17 and 18). Every field
+    name says `legacy`, and `score_label` and the accounting note travel
+    with the numbers, so no surface can present them as confirmed
+    disclosure.
 
-    Frozen because I4 says the budget is monotonic within a session: a summary
-    is a reading taken at a moment, not a mutable accumulator. Nothing
-    downstream needs to write to one, so nothing can.
+    Frozen because I4 says the budget is monotonic within a session: a
+    summary is a reading taken at a moment, not a mutable accumulator.
     """
 
-    percent: int
-    exposed_items: int
-    destinations: int
-    prevented: int
+    accounting_version: Literal[1]
+    legacy_score: float
+    legacy_cap: float
+    legacy_percent: int
+    legacy_permitted_crossing_rows: int
+    legacy_boundary_kinds: int
+    legacy_prevented_rows: int
+    score_label: Literal["legacy permitted-crossing score"]
 
     def as_dict(self) -> dict:
-        """The JSON payload of `privacy.get_session_summary` -- key order
-        included, since `ui/app.js` and every MCP client read this."""
+        """The JSON payload of `privacy.get_session_summary`, key order
+        included."""
         return {
-            "percent": self.percent,
-            "exposed_items": self.exposed_items,
-            "destinations": self.destinations,
-            "prevented": self.prevented,
+            "accounting_version": self.accounting_version,
+            "legacy_score": self.legacy_score,
+            "legacy_cap": self.legacy_cap,
+            "legacy_percent": self.legacy_percent,
+            "legacy_permitted_crossing_rows":
+                self.legacy_permitted_crossing_rows,
+            "legacy_boundary_kinds": self.legacy_boundary_kinds,
+            "legacy_prevented_rows": self.legacy_prevented_rows,
+            "score_label": self.score_label,
+            "accounting_note": LEGACY_ACCOUNTING_NOTE,
         }
 
 
+@dataclass(frozen=True, kw_only=True)
+class UnrecordedSessionSummary:
+    """A session this ledger has no row for.
+
+    Not a clean session. It used to read as one, a well-formed zero
+    against the matrix's cap, which is also exactly what a session with
+    nothing to record looks like. It has no score, cap or counts, and
+    `percent` is `None` so no caller can print a number for it.
+    """
+
+    accounting_version: Literal[0]
+    percent: None
+    score_label: Literal["No session on record"]
+
+    def as_dict(self) -> dict:
+        return {
+            "accounting_version": self.accounting_version,
+            "percent": self.percent,
+            "score_label": self.score_label,
+            "accounting_note": UNRECORDED_ACCOUNTING_NOTE,
+        }
+
+
+#: What `Ledger.summary` returns. A type alias, not a constructible class.
+SessionSummary = LegacySessionSummary | UnrecordedSessionSummary
+
+
 #: Exactly the keys `privacy.list_exposures` / `privacy.get_exposure_detail`
-#: have always put on the wire, in order. This tuple, not `dataclasses.asdict`,
-#: is what `ExposureRow.as_dict()` emits: the MCP tools are a public
-#: contract, so their JSON shape must be a decision recorded in one place
-#: rather than a side effect of which fields a dataclass happens to declare.
-#: Adding a field to `ExposureRow` therefore does NOT silently widen the wire
-#: format -- a new key has to be added here on purpose.
+#: put on the wire, in order. This tuple, not `dataclasses.asdict`, is what
+#: `LegacyExposureRow.as_dict()` emits: the MCP tools are a public contract,
+#: so their JSON shape must be a decision recorded in one place rather than
+#: a side effect of which fields a dataclass happens to declare. Adding a
+#: field to the row type therefore does NOT silently widen the wire format.
+#: `accounting_version` leads and is always 1: these are legacy rows.
 _EXPOSURE_JSON_FIELDS = (
+    "accounting_version",
     "id", "turn_id", "ts", "kind", "data_type", "source", "source_kind",
     "destination", "boundary", "count", "masked_example", "budget_delta",
     "protection", "tool_name",
 )
 
 #: L3-only fields (`render.detail`, design.md §6). Emitted only when set, which
-#: is what keeps a list row's JSON identical to what it was before these fields
-#: existed -- and what lets `render.detail()` distinguish "no budget cap known"
-#: from a cap of 0 without a sentinel.
+#: is what keeps a list row's JSON free of them -- and what lets
+#: `render.detail()` distinguish "no budget cap known" from a cap of 0
+#: without a sentinel.
 _DETAIL_JSON_FIELDS = ("first_seen", "last_seen", "hops", "budget_cap")
+
+#: The stored legacy columns, in the order the readers select them.
+_LEGACY_COLUMNS = (
+    "id", "session_id", "turn_id", "ts", "kind", "data_type", "source",
+    "source_kind", "destination", "boundary", "count", "value_hash",
+    "masked_example", "budget_delta", "protection", "tool_name",
+)
+
+#: Columns a legacy table added after its first release; selected as NULL
+#: from a historical table that lacks them, never added by a reader.
+_LEGACY_OPTIONAL_COLUMNS = frozenset({"source_kind"})
 
 
 @dataclass(frozen=True, kw_only=True)
-class ExposureRow:
-    """One ledger event as any consumer outside the ledger may see it.
+class LegacyExposureRow:
+    """One legacy ledger event as any consumer outside the ledger may see it.
 
-    **The field list IS the I1 allow-list.** This replaced a `_project()`
-    helper in `mcp_tools` that filtered a full row dict through a tuple of
-    string keys; the filter and the thing being filtered could drift, and
-    nothing would have noticed. Now the projection is a type: `EventRow.
-    to_exposure()` can only produce these fields, so "no raw sensitive content
-    leaves the ledger" is a property of the declaration rather than of a
-    correctly-maintained key list. Every field here is an id, a count, a type,
-    a source or destination label, a timestamp, a boundary, a protection state,
-    or the `masked_example` that `mask.py` already masked long before the value
-    reached the ledger. There is no `text`, `content`, `prompt` or `raw_value`
-    field, and adding one would be an I1 violation, not a feature.
+    **The field list IS the I1 allow-list.** `LegacyEventRow.to_exposure()`
+    can only produce these fields, so "no raw sensitive content leaves the
+    ledger" is a property of the declaration rather than of a
+    correctly-maintained key list. Every field here is an id, a count, a
+    type, a source or destination label, a timestamp, a boundary, a stored
+    intervention label, or the `masked_example` that `mask.py` already
+    masked long before the value reached the ledger. There is no `text`,
+    `content`, `prompt` or `raw_value` field, and adding one would be an I1
+    violation, not a feature.
+
+    **Legacy meanings.** `kind`, `protection`, `count` and `budget_delta`
+    keep the legacy writer's meanings: `exposed` is a permitted crossing,
+    not a confirmed delivery; `blocked`/`masked` record what Privacy HUD
+    returned, not what the host applied; `count` is a repetition count, not
+    a distinct-value or call count. The renderers label them so. This type
+    is not a base of any future accounting type.
 
     `degraded` is not a ledger column. It is a render-time flag -- True when
     the row's observation had a scan gap: an applicable deep scan supplied no
-    accepted result (see `render.audit`'s scan-gap line) -- set by a caller that
-    has the `Decision` in hand, and it is deliberately absent from
-    `_EXPOSURE_JSON_FIELDS` because it was never part of the wire format.
+    accepted result -- set by a caller that has the `Decision` in hand, and
+    it is deliberately absent from `_EXPOSURE_JSON_FIELDS`.
 
-    The four L3 fields (`first_seen`, `last_seen`, `hops`, `budget_cap`) live
-    on this same type rather than on a separate detail class. The L3 payload
-    genuinely IS a list row with more fields populated -- `get_exposure_detail`
-    returns the same curated projection plus `first_seen` and the session's
-    `budget_cap` -- and `render.detail()` was already written to treat them as
-    optional. A second class would have duplicated fourteen fields to add four,
-    and would have forced `render.audit()` and `render.detail()` to take
-    different types when they are looking at the same row.
-
-    Frozen: a row is a record of something that already happened. I4 says
-    disclosure is irreversible and there is no removal path, so there is no
-    legitimate reason for a consumer to rewrite one.
+    Frozen: a row is a record of something that already happened.
     """
 
     id: int
@@ -414,17 +492,15 @@ class ExposureRow:
     hops: tuple[str, ...] | None = None
     budget_cap: float | None = None
 
-    def as_dict(self) -> dict:
-        """The explicit serialization step at the JSON boundary.
+    @property
+    def accounting_version(self) -> Literal[1]:
+        return 1
 
-        Called by `local_ui_server` and `mcp/server.py` immediately before
-        `json.dumps` / the MCP transport. Having it be a method rather than
-        letting `dataclasses.asdict` run implicitly is what makes the wire
-        format reviewable: the keys come from `_EXPOSURE_JSON_FIELDS`, the
-        optional L3 keys appear only when populated, and a field that is not
-        in either list (`degraded`, and `EventRow`'s two) cannot reach a
-        client by accident.
-        """
+    def as_dict(self) -> dict:
+        """The explicit serialization step at the JSON boundary. The keys
+        come from `_EXPOSURE_JSON_FIELDS`, the optional L3 keys appear only
+        when populated, and a field in neither list (`degraded`, and
+        `LegacyEventRow`'s two) cannot reach a client by accident."""
         payload = {k: getattr(self, k) for k in _EXPOSURE_JSON_FIELDS}
         for k in _DETAIL_JSON_FIELDS:
             value = getattr(self, k)
@@ -434,43 +510,35 @@ class ExposureRow:
 
 
 @dataclass(frozen=True, kw_only=True)
-class EventRow(ExposureRow):
-    """A raw `events` row, as `Ledger.list_events` reads it.
+class LegacyEventRow(LegacyExposureRow):
+    """A raw legacy row, as `Ledger.list_events` reads it: the public
+    projection plus the two columns that must never leave the ledger.
 
-    An `EventRow` is an `ExposureRow` plus the two columns that must never
-    leave the ledger, which is why it subclasses rather than sits beside it:
-    everywhere a consumer accepts a row -- `render.audit`, `render.receipt`,
-    the tab tables -- an `EventRow` is substitutable, and `dispatch.
-    _handle_session_end` relies on exactly that when it feeds `list_events`
-    output straight into `render.receipt` with no projection step.
+    `session_id` is redundant to every caller and `value_hash` is a salted
+    BLOB that is not JSON at all. Neither is in `_EXPOSURE_JSON_FIELDS`, so
+    the inherited `as_dict()` cannot emit them. Callers outside the ledger
+    project with `to_exposure()` before handing a row on.
 
-    `session_id` is redundant to every caller (they asked for one session) and
-    `value_hash` is a salted BLOB that is not JSON at all. Neither is in
-    `_EXPOSURE_JSON_FIELDS`, so the inherited `as_dict()` cannot emit them --
-    that is deliberate, and it is the reason `tests/test_mcp.py`'s "rows carry
-    no value_hash bytes" assertion is now structural rather than a coincidence
-    of which keys someone remembered to strip.
-
-    Construction is `EventRow(**dict(sqlite_row))`, so a column added to the
-    schema without a matching field here raises `TypeError` on the next read
-    instead of being silently dropped.
+    Built from explicitly selected columns, so a column added to the schema
+    without a matching field here is not read by accident.
     """
 
     session_id: str
     value_hash: bytes | None = None
 
-    def to_exposure(self) -> ExposureRow:
-        """Narrow to what a consumer outside the ledger may see (the old
-        `mcp_tools._project`). Explicit, because "which fields cross this
-        boundary" is an I1 decision and deserves to be a visible call."""
-        return ExposureRow(**{f.name: getattr(self, f.name)
-                              for f in fields(ExposureRow)})
+    def to_exposure(self) -> LegacyExposureRow:
+        """Narrow to what a consumer outside the ledger may see. Explicit,
+        because "which fields cross this boundary" is an I1 decision and
+        deserves to be a visible call."""
+        return LegacyExposureRow(**{f.name: getattr(self, f.name)
+                                    for f in fields(LegacyExposureRow)})
 
 
 class Ledger:
     def __init__(self, path: Path, matrix: Matrix, *,
                  observer: str | None = None,
-                 check_same_thread: bool = True):
+                 check_same_thread: bool = True,
+                 initialize: bool = True):
         """`observer` identifies this `Ledger` instance in the `coverage` table.
 
         One id per instance, defaulted to a fresh random one, because "who was
@@ -485,20 +553,107 @@ class Ledger:
         Thread affinity is enforced by default. A caller passing
         `check_same_thread=False` must serialize every use and closure of this
         connection.
+
+        `initialize=False` is the reader's open (MCP, the local UI, ambient,
+        the skill). It opens an existing database read-write, without
+        `SCHEMA`, `_migrate()`, a journal-mode change or a chmod, and fails
+        on a missing file rather than creating one. It permits the existing
+        policy writes; it is not a read-only connection. Only the daemon
+        initializes, so a reader never changes the structure of the ledger
+        it is reading, including across #54's rebuild.
         """
         self.matrix = matrix
         self.observer = observer or uuid.uuid4().hex[:16]
+        if not initialize:
+            self.conn = sqlite3.connect(
+                f"{Path(path).resolve().as_uri()}?mode=rw", uri=True,
+                isolation_level=None, check_same_thread=check_same_thread)
+            self.conn.row_factory = sqlite3.Row
+            return
         self.conn = sqlite3.connect(path, isolation_level=None,
                                     check_same_thread=check_same_thread)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.executescript(SCHEMA)
-        # A failure here propagates: the daemon must not come up against a
-        # schema it could not migrate, because it would then write rows whose
-        # origin is silently lost. I6 covers what the hooks do when no daemon
-        # answers (open on ingress, closed on egress).
-        _migrate(self.conn)
+        # After #54's rebuild, `events` is the new accounting table. The
+        # pre-#54 `SCHEMA` and `_migrate()` describe the legacy table, and
+        # applying them would create or alter the wrong one.
+        if not self._table_exists("events_legacy_v1"):
+            self.conn.executescript(SCHEMA)
+            # A failure here propagates: the daemon must not come up against
+            # a schema it could not migrate, because it would then write rows
+            # whose origin is silently lost. I6 covers what the hooks do when
+            # no daemon answers (open on ingress, closed on egress).
+            _migrate(self.conn)
         Path(path).chmod(0o600)
+
+    def _table_exists(self, name: str) -> bool:
+        return self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (name,)).fetchone() is not None
+
+    @contextmanager
+    def _read_transaction(self) -> Iterator[None]:
+        """One consistent snapshot for a read that spans several queries.
+
+        The connection autocommits (`isolation_level=None`), so without this
+        each query sees whatever was committed when it ran, and a schema
+        inspection followed by a select could straddle #54's rebuild.
+        Starts a deferred transaction only when none is open, and ends only
+        the transaction it started: a caller already inside one keeps it.
+        """
+        if self.conn.in_transaction:
+            yield
+            return
+        self.conn.execute("BEGIN DEFERRED")
+        try:
+            yield
+        except BaseException:
+            self.conn.execute("ROLLBACK")
+            raise
+        self.conn.execute("COMMIT")
+
+    def _legacy_events_table(self) -> Literal["events", "events_legacy_v1"]:
+        """Where this ledger's legacy rows are, decided now.
+
+        `events_legacy_v1` after #54's rebuild, `events` before it. Read
+        inside the caller's transaction and never cached: a long-lived MCP
+        or UI connection can span the rebuild. A pre-rebuild `events` that
+        lacks a stored legacy column is not a layout this reader knows.
+        """
+        with self._read_transaction():
+            if self._table_exists("events_legacy_v1"):
+                return "events_legacy_v1"
+            present = self._columns("events")
+            missing = set(_LEGACY_COLUMNS) - _LEGACY_OPTIONAL_COLUMNS - present
+            if missing:
+                raise UnsupportedAccounting(
+                    "the events table does not have the legacy layout")
+            return "events"
+
+    def _columns(self, table: str) -> set[str]:
+        return {r["name"] for r in
+                self.conn.execute(f"PRAGMA table_info({table})")}
+
+    def _legacy_select(self, table: str) -> str:
+        """The explicit legacy column list for `table`. A historical table
+        without an optional column projects NULL for it; the reader never
+        adds the column."""
+        present = self._columns(table)
+        return ", ".join(
+            name if name in present else f"NULL AS {name}"
+            for name in _LEGACY_COLUMNS)
+
+    def _legacy_session(self, session_id: str):
+        """The session row, or `None`. Raises for a session a legacy reader
+        must not describe: one with a non-legacy accounting version."""
+        row = self.conn.execute(
+            "SELECT * FROM sessions WHERE session_id=?",
+            (session_id,)).fetchone()
+        if row is not None and "accounting_version" in row.keys() \
+                and row["accounting_version"] != 1:
+            raise UnsupportedAccounting(
+                "this session is not recorded under legacy accounting")
+        return row
 
     def start_session(self, session_id: str, *, cwd: str, model: str,
                       observed_start: bool = True) -> None:
@@ -710,52 +865,91 @@ class Ledger:
         return delta
 
     def summary(self, session_id: str) -> SessionSummary:
-        """The four L2 tiles for one session (design.md §5).
+        """The session's accounting summary (design.md §5's tiles).
 
-        Returns `SessionSummary`, not a dict: see that class for why four
-        interchangeable integers are worth naming. An unknown `session_id` is
-        not an error -- it reads as a clean session (score 0 against the
-        matrix's own cap), which is what `ambient.py` and `doctor.py` need
-        when they open a ledger before any session has started.
+        A recorded session is `LegacySessionSummary`: the stored score and
+        cap, the existing percentage arithmetic, and the existing row
+        counts, under legacy names. A session with no row is
+        `UnrecordedSessionSummary`, not a clean zero: see that class.
+        Existence is read before the counts, inside one transaction.
         """
-        row = self.conn.execute(
-            "SELECT budget_score, budget_cap FROM sessions WHERE session_id=?",
-            (session_id,)).fetchone()
-        score = row["budget_score"] if row else 0.0
-        cap = row["budget_cap"] if row else self.matrix.budget_cap
-
-        exposed_items = self.conn.execute(
-            "SELECT COUNT(*) FROM events WHERE session_id=? AND kind='exposed'",
-            (session_id,)).fetchone()[0]
-        destinations = self.conn.execute(
-            "SELECT COUNT(DISTINCT destination) FROM events"
-            " WHERE session_id=? AND kind='exposed'",
-            (session_id,)).fetchone()[0]
-        prevented = self.conn.execute(
-            "SELECT COUNT(*) FROM events WHERE session_id=? AND kind='prevented'",
-            (session_id,)).fetchone()[0]
-
-        return SessionSummary(
-            percent=percent(score, cap),
-            exposed_items=exposed_items,
-            destinations=destinations,
-            prevented=prevented,
+        with self._read_transaction():
+            row = self._legacy_session(session_id)
+            if row is None:
+                return UnrecordedSessionSummary(
+                    accounting_version=0, percent=None,
+                    score_label=UNRECORDED_SCORE_LABEL)
+            table = self._legacy_events_table()
+            score, cap = row["budget_score"], row["budget_cap"]
+            exposed_rows = self.conn.execute(
+                f"SELECT COUNT(*) FROM {table}"
+                " WHERE session_id=? AND kind='exposed'",
+                (session_id,)).fetchone()[0]
+            boundary_kinds = self.conn.execute(
+                f"SELECT COUNT(DISTINCT destination) FROM {table}"
+                " WHERE session_id=? AND kind='exposed'",
+                (session_id,)).fetchone()[0]
+            prevented_rows = self.conn.execute(
+                f"SELECT COUNT(*) FROM {table}"
+                " WHERE session_id=? AND kind='prevented'",
+                (session_id,)).fetchone()[0]
+        return LegacySessionSummary(
+            accounting_version=1,
+            legacy_score=score,
+            legacy_cap=cap,
+            legacy_percent=percent(score, cap),
+            legacy_permitted_crossing_rows=exposed_rows,
+            legacy_boundary_kinds=boundary_kinds,
+            legacy_prevented_rows=prevented_rows,
+            score_label=LEGACY_SCORE_LABEL,
         )
 
-    def list_events(self, session_id: str, kind: str) -> list[EventRow]:
-        """Every event of one `kind`, oldest first.
+    def list_events(self, session_id: str, kind: str) -> list[LegacyEventRow]:
+        """Every legacy event of one `kind`, oldest first.
 
-        `EventRow`, not a dict: `SELECT *` is splatted into the dataclass, so a
-        schema column with no matching field raises `TypeError` here rather
-        than reaching a consumer that silently never looks at it. Rows carry
-        `value_hash` because the ledger's own callers (`end_session`, the
-        dedupe path, `tests/test_ledger.py`) need it; `EventRow.as_dict()`
-        cannot serialize it, so it stops at this boundary.
+        Rows carry `value_hash` because the ledger's own callers need it;
+        `as_dict()` cannot serialize it, and callers outside the ledger
+        project with `to_exposure()`. An unknown session has no rows.
         """
-        rows = self.conn.execute(
-            "SELECT * FROM events WHERE session_id=? AND kind=? ORDER BY id",
-            (session_id, kind)).fetchall()
-        return [EventRow(**dict(r)) for r in rows]
+        with self._read_transaction():
+            if self._legacy_session(session_id) is None:
+                return []
+            table = self._legacy_events_table()
+            rows = self.conn.execute(
+                f"SELECT {self._legacy_select(table)} FROM {table}"
+                " WHERE session_id=? AND kind=? ORDER BY id",
+                (session_id, kind)).fetchall()
+        return [LegacyEventRow(**dict(r)) for r in rows]
+
+    def get_event(self, session_id: str, event_id: int) -> LegacyExposureRow:
+        """One public legacy row, scoped to both `session_id` and
+        `event_id`, with `first_seen` and the session's stored `budget_cap`.
+
+        Raises `LookupError` when nothing matches, including an id that
+        exists in another session: one session's audit can never read
+        another's row by guessing an id. The row and the cap are read in
+        one transaction.
+        """
+        with self._read_transaction():
+            session = self._legacy_session(session_id)
+            if session is None:
+                raise LookupError(
+                    f"no event {event_id!r} in session {session_id!r}")
+            table = self._legacy_events_table()
+            row = self.conn.execute(
+                f"SELECT {self._legacy_select(table)} FROM {table}"
+                " WHERE session_id=? AND id=?",
+                (session_id, event_id)).fetchone()
+            if row is None:
+                raise LookupError(
+                    f"no event {event_id!r} in session {session_id!r}")
+            cap = session["budget_cap"]
+        public = LegacyEventRow(**dict(row)).to_exposure()
+        return LegacyExposureRow(
+            **{f.name: getattr(public, f.name)
+               for f in fields(LegacyExposureRow)
+               if f.name not in ("first_seen", "budget_cap")},
+            first_seen=public.ts, budget_cap=cap)
 
     def end_session(self, session_id: str) -> None:
         self.conn.execute(
