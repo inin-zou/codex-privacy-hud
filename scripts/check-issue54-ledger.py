@@ -15,8 +15,10 @@ auxiliary table; the prepared schema and marker; unchanged pre-existing
 foreign-key violations and clean new tables; legacy summaries, lists and
 details before and after; a reader opened before the migration, across it;
 a continuing legacy session's arithmetic; an idempotent reopen and rerun;
-and a process killed after every migration statement and just before
-commit, each on a fresh copy, leaving the complete old schema.
+and process termination after every migration statement and immediately
+before and after commit, each on a fresh baseline copy, leaving either the
+complete old state or the complete prepared state with its triggering
+legacy session and coverage row.
 
 Deleting the work directory afterwards is logical deletion, not secure
 erasure.
@@ -60,7 +62,9 @@ led._migration_failpoint = failpoint
 with led._write_transaction():
     led.prepare_session_boundary(sys.argv[4])
     led.start_session(sys.argv[4], cwd="", model="")
-    os._exit(4)
+    if stop == 0:
+        os._exit(4)
+os._exit(5)
 """
 
 
@@ -97,11 +101,31 @@ def _copy(source: Path, dest: Path) -> None:
     os.chmod(dest, 0o600)
 
 
+def _quote(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def _layout(conn: sqlite3.Connection, table: str) -> list[tuple]:
+    return list(conn.execute(f"PRAGMA table_info({_quote(table)})"))
+
+
+def _schema(conn: sqlite3.Connection) -> dict:
+    return {
+        (kind, name): (table, sql)
+        for kind, name, table, sql in conn.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master")
+    }
+
+
 def _cells(conn: sqlite3.Connection, table: str) -> list[tuple]:
-    cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
-    select = ", ".join(f"typeof({c}), {c}" for c in cols)
+    cols = [_quote(r[1]) for r in _layout(conn, table)]
+    select = ", ".join(
+        f"typeof({c}), CASE WHEN typeof({c})='text' "
+        f"THEN CAST({c} AS BLOB) ELSE {c} END"
+        for c in cols)
     rows = []
-    for row in conn.execute(f"SELECT {select} FROM {table} ORDER BY rowid"):
+    for row in conn.execute(
+            f"SELECT {select} FROM {_quote(table)} ORDER BY rowid"):
         cells = []
         for i in range(0, len(row), 2):
             kind, value = row[i], row[i + 1]
@@ -160,6 +184,8 @@ def phase2(source: Path, work: Path) -> None:
     # (for example `scan_gaps`). The rebuild is checked against that state,
     # which is also what every crash copy returns to.
     Ledger(copy, matrix).conn.close()
+    baseline = work / "baseline.db"
+    _copy(copy, baseline)
 
     raw = _raw(copy)
     try:
@@ -168,10 +194,18 @@ def phase2(source: Path, work: Path) -> None:
         _check("events" in tables and "sessions" in tables,
                "source-not-a-ledger")
         before = {t: _cells(raw, t) for t in tables}
-        indexes = sorted(raw.execute(
-            "SELECT name, sql FROM sqlite_master WHERE type='index'"
-            " AND sql IS NOT NULL").fetchall())
+        layouts = {t: _layout(raw, t) for t in tables}
+        original_schema = _schema(raw)
         violations = _fk_violations(raw)
+
+        reference = sqlite3.connect(":memory:", isolation_level=None)
+        try:
+            raw.backup(reference)
+            reference.execute(
+                "ALTER TABLE events RENAME TO events_legacy_v1")
+            renamed_schema = _schema(reference)
+        finally:
+            reference.close()
     finally:
         raw.close()
 
@@ -201,11 +235,24 @@ def phase2(source: Path, work: Path) -> None:
                 width = len(cells[0]) if cells else 0
                 after = [row[:width] for row in after[:len(cells)]]
             _check(after == cells, "auxiliary-cells")
-        after_indexes = dict(raw.execute(
-            "SELECT name, sql FROM sqlite_master WHERE type='index'"
-            " AND sql IS NOT NULL").fetchall())
-        _check(all(after_indexes.get(n) == s for n, s in indexes),
-               "auxiliary-indexes")
+        for table, layout in layouts.items():
+            target = "events_legacy_v1" if table == "events" else table
+            actual_layout = _layout(raw, target)
+            if table == "sessions":
+                actual_layout = actual_layout[:len(layout)]
+            _check(actual_layout == layout, "preserved-layout")
+
+        actual_schema = _schema(raw)
+        for key, definition in renamed_schema.items():
+            if key != ("table", "sessions"):
+                _check(actual_schema.get(key) == definition,
+                       "preserved-schema")
+        old_sessions = ledger_schema._norm(
+            original_schema[("table", "sessions")][1])
+        new_sessions = ledger_schema._norm(
+            actual_schema[("table", "sessions")][1])
+        _check(new_sessions.startswith(old_sessions[:-1].rstrip()),
+               "preserved-session-definition")
         after_violations = _fk_violations(raw)
         renamed = {(("events_legacy_v1",) + v[1:]) if v[0] == "events" else v
                    for v in violations}
@@ -258,21 +305,77 @@ def phase2(source: Path, work: Path) -> None:
     child = work / "child.py"
     child.write_text(_CHILD, encoding="utf-8")
     os.chmod(child, 0o600)
-    for stop in list(range(1, total + 1)) + [0]:
+    for stop in list(range(1, total + 1)) + [0, -1]:
         path = work / f"crash-{stop}.db"
-        _copy(source, path)
+        _copy(baseline, path)
         proc = subprocess.run(
             [sys.executable, str(child), str(path), str(stop),
              str(REPO / "src"), trigger],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             timeout=300)
-        _check(proc.returncode in (3, 4), "crash-child")
+        expected_exit = 5 if stop == -1 else 4 if stop == 0 else 3
+        _check(proc.returncode == expected_exit, "crash-child")
         raw = _raw(path)
         try:
-            _check(raw.execute("PRAGMA user_version").fetchone()[0] == 0,
-                   "crash-marker")
-            _check(_tables(raw) == tables, "crash-tables")
-            _check(_cells(raw, "events") == before["events"], "crash-cells")
+            prepared = stop == -1
+            _check(
+                ledger_schema.validate_schema(raw)
+                == (5401 if prepared else 0),
+                "crash-marker")
+
+            if prepared:
+                _check(
+                    set(_tables(raw))
+                    == set(tables) | new_tables | {"events_legacy_v1"},
+                    "crash-tables")
+                actual_schema = _schema(raw)
+                for key, definition in renamed_schema.items():
+                    if key != ("table", "sessions"):
+                        _check(actual_schema.get(key) == definition,
+                               "crash-schema")
+                old_sessions = ledger_schema._norm(
+                    original_schema[("table", "sessions")][1])
+                new_sessions = ledger_schema._norm(
+                    actual_schema[("table", "sessions")][1])
+                _check(
+                    new_sessions.startswith(old_sessions[:-1].rstrip()),
+                    "crash-session-definition")
+                _check(_fk_violations(raw) == renamed, "crash-foreign-keys")
+                _check(raw.execute(
+                    "SELECT accounting_version, accounting_status, "
+                    "profile_id FROM sessions WHERE session_id=?",
+                    (trigger,)).fetchone() == (1, "legacy", None),
+                    "crash-trigger-session")
+                _check(raw.execute(
+                    "SELECT COUNT(*) FROM coverage "
+                    "WHERE session_id=? AND reason='session_start'",
+                    (trigger,)).fetchone()[0] == 1,
+                    "crash-trigger-coverage")
+            else:
+                _check(_schema(raw) == original_schema, "crash-schema")
+                _check(_fk_violations(raw) == violations,
+                       "crash-foreign-keys")
+
+            for table, cells in before.items():
+                target = (
+                    "events_legacy_v1"
+                    if prepared and table == "events" else table)
+                actual_layout = _layout(raw, target)
+                after_cells = _cells(raw, target)
+                if prepared and table == "sessions":
+                    actual_layout = actual_layout[:len(layouts[table])]
+                    # _cells yields one (storage class, value) pair per
+                    # column, so the original columns are the first
+                    # len(layout) entries of each row.
+                    after_cells = [
+                        row[:len(layouts[table])]
+                        for row in after_cells
+                    ]
+                _check(actual_layout == layouts[table], "crash-layout")
+                extra = int(prepared and table in ("sessions", "coverage"))
+                _check(len(after_cells) == len(cells) + extra,
+                       "crash-row-count")
+                _check(after_cells[:len(cells)] == cells, "crash-cells")
         finally:
             raw.close()
         for suffix in ("", "-wal", "-shm"):

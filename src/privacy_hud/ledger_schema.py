@@ -556,7 +556,13 @@ def _reference() -> dict[tuple[str, str], str]:
             ref.execute(statement)
         return {(t, n): _norm(sql) for t, n, sql in ref.execute(
             "SELECT type, name, sql FROM sqlite_master")
-            if (t, n) not in before and sql is not None}
+            if sql is not None and (
+                (t, n) not in before
+                or (t, n) in {
+                    ("table", "events"),
+                    ("table", "sessions"),
+                }
+            )}
     finally:
         ref.close()
 
@@ -593,7 +599,11 @@ def validate_schema(conn: sqlite3.Connection
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     tables = _tables(conn)
     if version == 0:
-        if "events_legacy_v1" in tables or set(_NEW_TABLES[:4]) & tables:
+        if (
+            "events_legacy_v1" in tables
+            or (set(_NEW_TABLES) - {"events"}) & tables
+            or _SESSION_COLUMNS & _columns(conn, "sessions")
+        ):
             raise UnsupportedAccounting(
                 "the ledger holds a partial rebuild without a schema marker")
         if "events" in tables:
@@ -608,9 +618,17 @@ def validate_schema(conn: sqlite3.Connection
         raise UnsupportedAccounting("the rebuilt ledger's sessions are incomplete")
     actual = {(t, n): _norm(sql) for t, n, sql in conn.execute(
         "SELECT type, name, sql FROM sqlite_master")}
-    for key, sql in _reference().items():
-        # The renamed legacy table keeps whatever definition it had (a
-        # historical one may lack source_kind); `sessions` gained columns.
+    reference = _reference()
+    session_suffix = ", accounting_version" + reference[
+        ("table", "sessions")
+    ].split(", accounting_version", 1)[1]
+    if not actual.get(("table", "sessions"), "").endswith(session_suffix):
+        raise UnsupportedAccounting(
+            "the rebuilt ledger's session accounting definitions are invalid")
+
+    for key, sql in reference.items():
+        # Preserve the historical session definition preceding the added
+        # accounting columns and the renamed legacy table's actual layout.
         if key in (("table", "sessions"), ("table", "events_legacy_v1")):
             continue
         if actual.get(key) != sql:

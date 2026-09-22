@@ -721,16 +721,17 @@ def _handle_session_start(state: State, session_id: str, payload: dict) -> dict:
             return _allow()
 
         salt = new_salt()
-        state.salts[session_id] = salt
         with ledger._write_transaction():
             if not ledger.session_exists(session_id):
                 ledger.prepare_session_boundary(session_id)
             ledger.start_session(session_id,
                                  cwd=payload.get("cwd", "") or "",
                                  model=payload.get("model", "") or "")
-        state.engines[session_id] = Engine(
+        engine = Engine(
             ledger=state.ledger, matrix=state.matrix, salt=salt,
             detectors=state.detectors, settings=state.settings)
+        state.salts[session_id] = salt
+        state.engines[session_id] = engine
         state.started_at[session_id] = time.time()
         _publish_hud(state, session_id)
     # Outside the lock: `live_lock` and `lock` are never nested (State's

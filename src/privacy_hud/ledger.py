@@ -572,12 +572,18 @@ class Ledger:
         self._write_depth = 1
         try:
             yield
+            self.conn.execute("COMMIT")
         except BaseException:
-            self._write_depth = 0
-            self.conn.execute("ROLLBACK")
+            if self.conn.in_transaction:
+                try:
+                    self.conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    # An unusable connection must not expose pending state
+                    # or accept subsequent ledger operations.
+                    self.conn.close()
             raise
-        self._write_depth = 0
-        self.conn.execute("COMMIT")
+        finally:
+            self._write_depth = 0
 
     def session_exists(self, session_id: str) -> bool:
         return self.conn.execute(

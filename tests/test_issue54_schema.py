@@ -115,3 +115,40 @@ def test_identity_hash_can_only_be_erased_after_end(conn):
 def test_the_schema_validates_after_migration(conn):
     from privacy_hud import ledger_schema
     assert ledger_schema.validate_schema(conn) == 5401
+
+
+@pytest.mark.parametrize("constraint", [
+    "CHECK (kind <> 'exposed' OR (boundary <> 'B0' AND (evidence & 64) <> 0))",
+    "CHECK (accounting_version IN (1, 2))",
+    "CHECK (accounting_status IN ('legacy', 'available', 'unavailable'))",
+])
+def test_validation_rejects_weakened_accounting_definitions(constraint):
+    from privacy_hud import ledger_schema
+
+    c = sqlite3.connect(":memory:", isolation_level=None)
+    try:
+        for statement in ledger_schema.legacy_statements():
+            c.execute(statement)
+        changed = False
+        for statement in ledger_schema.migration_statements():
+            changed |= constraint in statement
+            c.execute(statement.replace(constraint, "CHECK (1)"))
+        assert changed
+        with pytest.raises(ledger_schema.UnsupportedAccounting):
+            ledger_schema.validate_schema(c)
+    finally:
+        c.close()
+
+
+def test_validation_rejects_a_partial_disclosures_table_at_version_zero():
+    from privacy_hud import ledger_schema
+
+    c = sqlite3.connect(":memory:", isolation_level=None)
+    try:
+        for statement in ledger_schema.legacy_statements():
+            c.execute(statement)
+        c.execute("CREATE TABLE disclosures (x INTEGER)")
+        with pytest.raises(ledger_schema.UnsupportedAccounting):
+            ledger_schema.validate_schema(c)
+    finally:
+        c.close()

@@ -338,6 +338,58 @@ def test_legacy_record_is_one_write_transaction(legacy):
     led.conn.close()
 
 
+def test_commit_failure_rolls_back_and_releases_write_ownership(legacy):
+    led = Ledger(legacy, M)
+
+    def authorizer(action, arg1, arg2, database, trigger):
+        if action == sqlite3.SQLITE_TRANSACTION and arg1 == "COMMIT":
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    try:
+        led.conn.set_authorizer(authorizer)
+        with pytest.raises(sqlite3.DatabaseError):
+            with led._write_transaction():
+                led.prepare_session_boundary("commit-failed")
+                led.start_session("commit-failed", cwd="", model="")
+        led.conn.set_authorizer(None)
+
+        assert not led.conn.in_transaction
+        assert led._write_depth == 0
+        assert _version(led.conn) == 0
+        assert not led.session_exists("commit-failed")
+        assert "events_legacy_v1" not in _tables(led.conn)
+
+        with led._write_transaction():
+            led.prepare_session_boundary("retry")
+            led.start_session("retry", cwd="", model="")
+        assert _version(led.conn) == 5401
+    finally:
+        led.conn.close()
+
+
+def test_failed_boundary_does_not_install_session_state(legacy):
+    state = dispatch_mod.new_state(legacy.parent)
+
+    def failpoint(statement):
+        raise RuntimeError("injected")
+
+    state.ledger._migration_failpoint = failpoint
+    try:
+        with pytest.raises(RuntimeError):
+            dispatch_mod.dispatch(state, {
+                "hook_event_name": "SessionStart",
+                "session_id": "failed-start",
+            })
+        assert "failed-start" not in state.salts
+        assert "failed-start" not in state.engines
+        assert "failed-start" not in state.started_at
+        assert not state.ledger.session_exists("failed-start")
+        assert _version(state.ledger.conn) == 0
+    finally:
+        state.ledger.conn.close()
+
+
 # -- crashes ----------------------------------------------------------------
 
 _CHILD = textwrap.dedent("""

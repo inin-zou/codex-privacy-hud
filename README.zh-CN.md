@@ -59,7 +59,9 @@ Privacy HUD:  What does this session's legacy accounting record?
 
 ## 安装
 
-Privacy HUD 0.7.8 写入 snapshot v2。新版读取器将 v1 明确标为旧版记账，并支持带可空记账字段的 v2。旧补丁版 Codex 读取器会拒绝 v2，不显示 Privacy 状态项。Codex 版本相同并不代表快照兼容。请使用支持 snapshot v2 的补丁版构建，或在独立终端窗格运行 `privacy-hud-ambient --watch`。
+Privacy HUD 0.7.9 继续使用 snapshot v2 和旧版记账。新版读取器将 v1 明确标为旧版记账，并支持带可空记账字段的 v2。旧补丁版 Codex 读取器会拒绝 v2，不显示 Privacy 状态项。Codex 版本相同并不代表快照兼容。请使用支持 snapshot v2 的补丁版构建，或在独立终端窗格运行 `privacy-hud-ambient --watch`。
+
+更新插件不会更新已安装的 Codex 补丁二进制。账本结构由守护进程在收到真正的新会话开始事件时迁移，安装脚本不执行迁移。迁移后，不要再用 0.7.9 之前的守护进程打开此账本。请重新安装兼容版本；本项目不提供降级迁移。
 
 已经发布的 snapshot v1 构建不支持 0.7.8 快照。本次变更尚未发布新版构建。
 

@@ -60,7 +60,9 @@ Design-intent illustration. It predates the explicit legacy labels; its bar and 
 
 ## Install
 
-Privacy HUD 0.7.8 writes snapshot version 2. Updated readers accept version 1 as explicitly legacy and accept version 2 with nullable accounting fields. Older patched Codex readers reject version 2 and show no Privacy item. A matching Codex version alone does not establish snapshot compatibility. Use a snapshot-v2-compatible patched build, or run privacy-hud-ambient --watch in a separate terminal pane.
+Privacy HUD 0.7.9 retains snapshot version 2 and legacy accounting. Updated readers accept version 1 as explicitly legacy and accept version 2 with nullable accounting fields. Older patched Codex readers reject version 2 and show no Privacy item. A matching Codex version alone does not establish snapshot compatibility. Use a snapshot-v2-compatible patched build, or run privacy-hud-ambient --watch in a separate terminal pane.
+
+Updating the plugin does not update an installed patched binary. The daemon rebuilds the ledger at a genuine new-session boundary; the installer does not migrate it. After the rebuild, do not run a pre-0.7.9 daemon against this ledger. Reinstall a compatible version; no downgrade migration is provided.
 
 The already-published snapshot-v1 builds do not support 0.7.8 snapshots. Updated release artifacts have not been published as part of this change.
 
