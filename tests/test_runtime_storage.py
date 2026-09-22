@@ -457,3 +457,195 @@ def test_cutover_crash_after_every_durable_step(tmp_path):
         assert not storage.legacy_path(data_dir).is_file(), stage
     assert crashed == list(stages), (
         "some stage was never reached, so it was never crash-tested")
+
+
+@pytest.mark.parametrize("candidate", ["stale", "incomplete"])
+def test_retry_revalidates_existing_staged_backup(tmp_path, candidate):
+    data_dir = tmp_path / "data"
+    source = _write(data_dir, prepared=False)
+    assert _crash_at(data_dir, "backup_verified") == 3
+
+    journal = storage.read_journal(data_dir)
+    assert journal is not None
+    retired = storage.retired_dir(data_dir, journal["transition_id"])
+    staged = retired / storage.STAGED_DB_NAME
+    assert staged.is_file()
+
+    if candidate == "stale":
+        conn = sqlite3.connect(source)
+        try:
+            conn.execute(
+                "UPDATE sessions SET budget_score=budget_score+1 "
+                "WHERE session_id='s1'"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    else:
+        staged.write_bytes(b"incomplete sqlite backup")
+
+    source_before = _state(source)
+    staged_before = staged.read_bytes()
+
+    with pytest.raises(RuntimeRefusal) as refusal:
+        _cutover(data_dir)
+
+    assert refusal.value.code == "transition_incomplete"
+    assert _state(source) == source_before
+    assert staged.read_bytes() == staged_before
+    assert not (retired / storage.LEGACY_NAME).exists()
+    assert not storage.is_fenced(data_dir)
+    assert not storage.active_path(data_dir).exists()
+
+
+def test_retry_finishes_retirement_after_main_database_rename(tmp_path):
+    data_dir = tmp_path / "data"
+    _write(data_dir, prepared=False)
+
+    writer = subprocess.run(
+        [sys.executable, "-B", "-c", _WAL_WRITER,
+         str(REPO / "src"), str(data_dir)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert writer.returncode == 0, writer.stderr
+
+    legacy = storage.legacy_path(data_dir)
+    wal = legacy.with_name("ledger.db-wal")
+    assert wal.is_file() and wal.stat().st_size > 0
+    before = _state(legacy)
+
+    child = textwrap.dedent("""
+        import os
+        import sys
+        from pathlib import Path
+
+        sys.path.insert(0, sys.argv[1])
+        from privacy_hud import runtime_storage as storage
+        from privacy_hud.runtime_owner import (
+            acquire_writer, unselected_activation,
+        )
+
+        root = Path(sys.argv[2])
+        original_replace = storage.os.replace
+
+        def crash_after_main_move(src, dst):
+            original_replace(src, dst)
+            if (Path(src) == storage.legacy_path(root)
+                    and Path(dst).name == storage.LEGACY_NAME):
+                os._exit(3)
+
+        storage.os.replace = crash_after_main_move
+        with storage.acquire_transition(root):
+            with acquire_writer(
+                root, activation=unselected_activation()
+            ) as lease:
+                storage.prepare_storage(root, activation=lease.activation)
+        os._exit(0)
+    """)
+    crashed = subprocess.run(
+        [sys.executable, "-B", "-c", child,
+         str(REPO / "src"), str(data_dir)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert crashed.returncode == 3, crashed.stderr
+    assert not legacy.exists()
+    assert wal.is_file()
+
+    result = _cutover(data_dir)
+
+    retained = storage.retired_dir(
+        data_dir, result.transition_id
+    ) / storage.LEGACY_NAME
+    assert _state(storage.active_path(data_dir)) == before
+    assert _state(retained) == before
+    assert storage.is_fenced(data_dir)
+    assert not legacy.with_name("ledger.db-wal").exists()
+    assert not legacy.with_name("ledger.db-shm").exists()
+
+
+@pytest.mark.parametrize("operation", ["open", "fsync"])
+def test_directory_durability_failure_is_not_suppressed(
+    tmp_path, monkeypatch, operation
+):
+    import errno
+
+    def fail(*args, **kwargs):
+        raise OSError(errno.EIO, "injected durability failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(storage.os, operation, fail)
+        with pytest.raises(OSError) as failure:
+            storage._fsync_dir(tmp_path)
+
+    assert failure.value.errno == errno.EIO
+
+
+def test_retirement_parent_sync_failure_prevents_publication(
+    tmp_path, monkeypatch
+):
+    import errno
+
+    data_dir = tmp_path / "data"
+    source = _write(data_dir, prepared=False)
+    before = _state(source)
+    original_sync = storage._fsync_dir
+    retirement_parent = data_dir / storage.RETIRED_DIR_NAME
+
+    def fail_retirement_parent(path):
+        if Path(path) == retirement_parent:
+            raise OSError(errno.EIO, "injected retirement sync failure")
+        original_sync(path)
+
+    monkeypatch.setattr(storage, "_fsync_dir", fail_retirement_parent)
+
+    with pytest.raises(OSError) as failure:
+        _cutover(data_dir)
+
+    assert failure.value.errno == errno.EIO
+    assert _state(source) == before
+    assert not storage.is_fenced(data_dir)
+    assert not storage.active_path(data_dir).exists()
+
+
+def test_historical_session_start_mutates_a_prepared_ledger(tmp_path):
+    data_dir = tmp_path / "data"
+    path = _write(data_dir, prepared=True)
+    before = _state(path)
+
+    child = textwrap.dedent("""
+        import sys
+        sys.path.insert(0, sys.argv[1])
+        from privacy_hud.ledger import Ledger
+        from privacy_hud.matrix.loader import load_matrix
+
+        led = Ledger(sys.argv[2], load_matrix())
+        try:
+            led.start_session(
+                "historical-on-prepared", cwd="/w", model="m"
+            )
+        finally:
+            led.conn.close()
+    """)
+    result = subprocess.run(
+        [sys.executable, "-B", "-I", "-c", child,
+         str(HISTORICAL), str(path)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+
+    after = _state(path)
+    assert after[:2] == before[:2]
+    assert after[2] != before[2]
+
+    conn = _raw(path)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM sessions WHERE session_id=?",
+            ("historical-on-prepared",),
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM coverage WHERE session_id=?",
+            ("historical-on-prepared",),
+        ).fetchone()[0] == 1
+    finally:
+        conn.close()

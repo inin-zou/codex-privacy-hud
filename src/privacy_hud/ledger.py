@@ -82,9 +82,8 @@ def open_connection(path: Path, *, initialize: bool,
 
     `read_only=True` opens `mode=ro`: SQLite itself then refuses every
     INSERT, UPDATE, DELETE and ALTER on this connection, which is the whole
-    point — a reader that merely *intends* not to write is one stray
-    `_migrate()` away from adding a column to the daemon's prepared schema
-    (#66). It is deliberately **not** `immutable=1`: that would also
+    point: reader intent alone does not prevent accidental DDL or data
+    mutations (#66). It is deliberately **not** `immutable=1`: that would also
     produce an unwritable connection and would additionally ignore the
     write-ahead log, so every row committed since the last checkpoint would
     be invisible on a live database. `mode=ro` reads the WAL.
@@ -590,7 +589,7 @@ class Ledger:
                 raise RuntimeRefusal("runtime_mismatch")
         else:
             writer_lease.assert_current()
-        if initialize and Path(path).exists():
+        if writer_lease is not None and Path(path).exists():
             # Read-only, and before any writable connection exists. A
             # failure here propagates: the daemon must not come up against a
             # schema it cannot describe. I6 covers what the hooks do when no

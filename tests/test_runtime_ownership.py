@@ -87,8 +87,8 @@ def test_reader_connection_rejects_insert_and_ddl(tmp_path):
     """A reader's connection is `mode=ro`, so SQLite refuses the write —
     not the caller's good manners.
 
-    The ALTER is the exact statement #66 exists to stop: a 0.7.1
-    `_migrate()` adding `source_kind` to a prepared `events` table.
+    The ALTER adds a previously absent test column, so its failure proves
+    read-only enforcement rather than a duplicate-column error.
     """
     path = _seed(tmp_path)
     conn = open_connection(path, initialize=False, read_only=True)
@@ -97,8 +97,10 @@ def test_reader_connection_rejects_insert_and_ddl(tmp_path):
             conn.execute(
                 "INSERT INTO sessions(session_id,started_at,cwd,model,"
                 "budget_cap) VALUES('s2',1,'/w','m',120.0)")
-        with pytest.raises(sqlite3.OperationalError):
-            conn.execute("ALTER TABLE events ADD COLUMN source_kind TEXT")
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            conn.execute(
+                "ALTER TABLE events ADD COLUMN readonly_probe TEXT"
+            )
         with pytest.raises(sqlite3.OperationalError):
             conn.execute("DELETE FROM sessions")
     finally:
@@ -295,3 +297,46 @@ def test_socket_conflict_precedes_ledger_open(monkeypatch, tmp_path):
     assert built == [], "a refused daemon must not initialize detectors"
     assert not (data_dir / "ledger.db").exists(), (
         "a refused daemon must not open a ledger")
+
+
+@pytest.mark.parametrize("layout", ["unknown", "activated", "altered"])
+def test_noninitializing_writer_validates_before_writable_open(
+    tmp_path, monkeypatch, layout
+):
+    from privacy_hud import ledger as ledger_module, ledger_schema
+
+    path = _seed(tmp_path)
+    conn = sqlite3.connect(path, isolation_level=None)
+    try:
+        if layout == "unknown":
+            conn.execute("PRAGMA user_version=999")
+        else:
+            for statement in ledger_schema.migration_statements():
+                conn.execute(statement)
+            if layout == "activated":
+                conn.execute("PRAGMA user_version=5402")
+            else:
+                conn.execute(
+                    "ALTER TABLE events ADD COLUMN unexpected_column TEXT"
+                )
+    finally:
+        conn.close()
+
+    before = path.read_bytes()
+    original_open = ledger_module.open_connection
+    reads = []
+
+    def checked_open(db_path, **kwargs):
+        assert kwargs.get("read_only") is True, (
+            "unsupported ledger reached a writable open"
+        )
+        reads.append(db_path)
+        return original_open(db_path, **kwargs)
+
+    monkeypatch.setattr(ledger_module, "open_connection", checked_open)
+    with writer_lease(tmp_path) as lease:
+        with pytest.raises(ledger_schema.UnsupportedAccounting):
+            Ledger(path, M, initialize=False, writer_lease=lease)
+
+    assert reads == [path]
+    assert path.read_bytes() == before

@@ -14,9 +14,10 @@ $PLUGIN_DATA/runtime-transition.lock   transition exclusion
 
 **Why a directory where the database used to be.** A handshake constrains
 code that performs one. It cannot constrain a 0.7.1 `Ledger.__init__` that
-opens `$PLUGIN_DATA/ledger.db` and runs `executescript(SCHEMA)`,
-`PRAGMA journal_mode=WAL` and an `ALTER TABLE` before any hook protocol
-exists. What does constrain it is the operating system: `sqlite3.connect`
+opens `$PLUGIN_DATA/ledger.db` without the current handshake or writer
+lease. Its initializer leaves a valid prepared 5401 schema unchanged;
+it adds `source_kind` only when that column is absent. Historical session
+and coverage methods can still mutate a prepared ledger. What does constrain it is the operating system: `sqlite3.connect`
 on a directory fails, and a directory cannot be opened as a database by
 any version of anything. The fence is therefore a permanent occupant of
 the old pathname rather than a check.
@@ -316,12 +317,26 @@ def prepare_storage(data_dir, *, activation: Activation) -> CutoverResult:
     if source is not None:
         retired.mkdir(parents=True, exist_ok=True)
         _chmod_private(retired)
-        if not staged.is_file():
+        _fsync_dir(retired.parent)
+        if staged.exists() or staged.is_symlink():
+            if staged.is_symlink() or not staged.is_file():
+                raise RuntimeRefusal("transition_incomplete")
+            try:
+                matches = _fingerprint(source) == _fingerprint(staged)
+            except (sqlite3.Error, OSError):
+                raise RuntimeRefusal("transition_incomplete") from None
+            if not matches:
+                raise RuntimeRefusal("transition_incomplete")
+        else:
             _stage_backup(source, staged)
         _record(root, transition_id, "backup_verified", preserved)
 
         _record(root, transition_id, "retirement_started", preserved)
         _retire(source, retained)
+        _record(root, transition_id, "legacy_retired", preserved)
+
+    if source is None and retained.is_file():
+        _retire(legacy, retained)
         _record(root, transition_id, "legacy_retired", preserved)
 
     _fence(root)
@@ -529,6 +544,7 @@ def _publish_active(staged: Path, active: Path) -> None:
         raise RuntimeRefusal("transition_incomplete")
     os.replace(staged, active)
     _fsync_dir(active.parent)
+    _fsync_dir(staged.parent)
 
 
 # --------------------------------------------------------------------- #
@@ -575,14 +591,9 @@ def _fsync_file(path: Path) -> None:
 
 
 def _fsync_dir(path: Path) -> None:
-    try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    except OSError:
-        return
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         os.fsync(fd)
-    except OSError:
-        pass
     finally:
         os.close(fd)
 
