@@ -53,6 +53,9 @@ def _fake_interpreter(tmp_path, *, sleep: float = 20.0) -> tuple[Path, Path]:
     ~7 s to load its model before it binds, and the hook has 5 s to answer
     Codex.
     """
+    # Written to a temporary name and renamed into place: the shell creates
+    # the redirect target before the block runs, so a test polling for the
+    # file could otherwise read it half-written.
     marker = tmp_path / "spawned.txt"
     script = tmp_path / "fake-python3"
     script.write_text(
@@ -63,7 +66,7 @@ def _fake_interpreter(tmp_path, *, sleep: float = 20.0) -> tuple[Path, Path]:
         '; echo "HF_HOME=$HF_HOME"'
         '; env | grep -E "OFFLINE|TELEMETRY|DO_NOT_TRACK|UPDATE_CHECK|SAFETENSORS"'
         '; echo "cwd=$(pwd)"'
-        f'; }} > "{marker}"\n'
+        f'; }} > "{marker}.tmp" && mv "{marker}.tmp" "{marker}"\n'
         f"exec sleep {sleep}\n"
     )
     script.chmod(0o755)
