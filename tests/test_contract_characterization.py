@@ -132,7 +132,7 @@ def _audit(ledger, session_id, tab):
 
 AUDIT_EXPOSED = (
     "Privacy Audit\n"
-    "Current session\n"
+    "Session ID unknown\n"
     "\n"
     "┌───────────┐ ┌─────────────────────┐ ┌────────────────┐ ┌───────────┐\n"
     "│     6%    │ │          2          │ │       2        │ │     1     │\n"
@@ -149,7 +149,7 @@ AUDIT_EXPOSED = (
 
 AUDIT_PREVENTED = (
     "Privacy Audit\n"
-    "Current session\n"
+    "Session ID unknown\n"
     "\n"
     "┌───────────┐ ┌─────────────────────┐ ┌────────────────┐ ┌───────────┐\n"
     "│     6%    │ │          2          │ │       2        │ │     1     │\n"
@@ -165,7 +165,7 @@ AUDIT_PREVENTED = (
 
 AUDIT_ALL = (
     "Privacy Audit\n"
-    "Current session\n"
+    "Session ID unknown\n"
     "\n"
     "┌───────────┐ ┌─────────────────────┐ ┌────────────────┐ ┌───────────┐\n"
     "│     6%    │ │          2          │ │       2        │ │     1     │\n"
@@ -184,7 +184,7 @@ AUDIT_ALL = (
 
 _EMPTY_TILES = (
     "Privacy Audit\n"
-    "Current session\n"
+    "Session ID unknown\n"
     "\n"
     "┌───────────┐ ┌─────────────────────┐ ┌────────────────┐ ┌───────────┐\n"
     "│     0%    │ │          0          │ │       0        │ │     0     │\n"
@@ -238,7 +238,7 @@ def test_audit_empty_session_is_byte_identical(led, tab):
 #: between two things the record can actually support.
 AUDIT_UNVERIFIED = (
     "Privacy Audit\n"
-    "Current session\n"
+    "Session ID unknown\n"
     "\n"
     "┌───────────┐ ┌─────────────────────┐ ┌────────────────┐ ┌───────────┐\n"
     "│     0%    │ │          0          │ │       0        │ │     0     │\n"
@@ -644,7 +644,10 @@ def test_ui_exposures_endpoint_json_is_byte_identical(ui):
     payload = _get(ui, f"/api/exposures?session_id={SESSION}&tab=All%20events")
     assert list(payload) == ["rows", "text", "empty_message", "coverage_banner"]
     assert payload["rows"] == JSON_ROWS
-    assert payload["text"] == AUDIT_ALL
+    # The browser's ASCII view names the session it was asked about (#49
+    # item 1b); everything below the subtitle is the shared golden.
+    assert payload["text"] == AUDIT_ALL.replace(
+        "Session ID unknown\n", f"Session {SESSION}\n", 1)
     # Two fields the browser needs and the ASCII block cannot give it: that
     # block is rendered into a region `ui/index.html` hides by default, so a
     # caveat delivered only inside `text` reaches the terminal and not the

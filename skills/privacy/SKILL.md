@@ -1,12 +1,12 @@
 ---
 name: privacy
-description: Open the Privacy HUD session audit — what sensitive data was observed crossing a trust boundary this session, what was prevented, and what you can do about it.
+description: Open the Privacy HUD session audit — what sensitive data was observed crossing a trust boundary in the selected session, what was prevented, and what you can do about it.
 ---
 
 ## What this does
 
 Prints the Level 2 session audit (design.md §5) as an ASCII table using
-real data from the running session's ledger, and starts the local audit
+real data from the selected session's ledger, and starts the local audit
 UI so the same data is also browsable — the ASCII table is the one that
 always works; the browser UI is an enhancement, never a dependency
 (design.md P6).
@@ -54,12 +54,10 @@ if resolved.note:
 PY
 ```
 
-`session_id` is what the rest of the steps use, and `basis` /
-`also_active` travel with it into step 2 — the audit table's own header
-line is written from them (`render._subtitle`), so an id passed on its
-own makes the table go back to claiming "Current session" for a session
-nothing established was current. Resolve once, here, and carry all three;
-do not re-run this script per step.
+Use `session_id` for every later step. Carry `basis` and `also_active`
+into step 2 to preserve its resolution-specific subtitle. Resolve once; do
+not re-run this script per step. The browser labels the selected session by
+its full ID.
 
 **If a `note:` line is printed, print it to the user verbatim, above the
 audit table.** It is there because the resolution was not certain, and the
@@ -110,11 +108,8 @@ from privacy_hud import mcp_tools, render
 
 argv = sys.argv[1:] + ["", ""]
 session_id = argv[0]
-# No basis carried over -> the weakest claim the id can support, never the
-# strongest. An unlabelled session id read out of a ledger IS the most
-# recently started one; assuming "current" here is the overclaim this
-# argument exists to prevent.
-basis = argv[1].strip() or "started_at"
+# Without a basis, label the supplied ID without inferring its origin.
+basis = argv[1].strip() or "explicit"
 resolved = mcp_tools.ResolvedSession(
     session_id, basis,
     tuple(s for s in argv[2].split(",") if s))
