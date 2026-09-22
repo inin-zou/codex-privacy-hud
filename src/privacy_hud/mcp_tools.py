@@ -84,7 +84,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .ledger import LegacyExposureRow, SessionCoverage, SessionSummary
+from .ledger import ExposureRow, Ledger, SessionCoverage, SessionSummary
 from .matrix.loader import HARD_BLOCKED_DATA_TYPES
 from .minimize import mint_token
 
@@ -112,6 +112,15 @@ _TAB_KINDS = {
     "Exposed": ("exposed",),
     "Prevented": ("prevented",),
     "All events": _ALL_EVENT_KINDS,
+}
+
+#: The same three tabs over a version-2 session (#54 Phase 3), whose "All
+#: events" also includes `permitted`. The legacy map above is unchanged.
+_V2_TAB_KINDS = {
+    "Exposed": ("exposed",),
+    "Prevented": ("prevented",),
+    "All events": ("detected", "local_access", "permitted", "exposed",
+                   "prevented", "retention"),
 }
 
 _POLICY_RULE_TYPES = {"mask", "block_path", "block_command"}
@@ -484,7 +493,9 @@ def resolve_audit_session(ledger, data_dir, *, explicit: str | None = None,
                            daemon_answered=sessions is not None)
 
 
-def get_session_summary(ledger, session_id: str) -> SessionSummary:
+def get_session_summary(
+    ledger: Ledger, session_id: str,
+) -> SessionSummary:
     """The session's accounting summary, passed through as the discriminated
     type `Ledger.summary` returns: `LegacySessionSummary` for a recorded
     session, `UnrecordedSessionSummary` (no percentage, no counts) for one
@@ -512,32 +523,40 @@ def get_session_coverage(ledger, session_id: str) -> SessionCoverage:
     return ledger.coverage(session_id)
 
 
-def list_exposures(ledger, session_id: str,
-                   tab: str) -> list[LegacyExposureRow]:
+def list_exposures(
+    ledger: Ledger, session_id: str, tab: str,
+) -> list[ExposureRow]:
     """Rows for one of design.md §5's three tabs: `"Exposed"`,
-    `"Prevented"`, or `"All events"`. The tab arguments select stored legacy
-    classifications; the surfaces label them "Legacy permitted crossings",
-    "Legacy prevented rows" and "All legacy events". Each row is a
-    `LegacyExposureRow`, the curated projection whose field list is itself
-    the I1 allow-list. An unrecorded session has no rows, which is not
-    evidence that no events occurred.
+    `"Prevented"`, or `"All events"`. For a legacy session the tab arguments
+    select stored legacy classifications; the surfaces label them "Legacy
+    permitted crossings", "Legacy prevented rows" and "All legacy events".
+    For a version-2 session (#54 Phase 3) they select version-2 event kinds,
+    and "All events" includes `permitted`. Each row is a public projection
+    whose field list is itself the I1 allow-list. An unrecorded session has
+    no rows, which is not evidence that no events occurred.
+
+    The version and every kind of the tab are read in one read transaction.
 
     Does not aggregate by `(data_type, source, destination)`: every surface
     renders one row per ledger event, and doing the same aggregation twice,
     in two different ways, is a bug waiting to happen.
     """
-    kinds = _TAB_KINDS.get(tab)
-    if kinds is None:
+    if tab not in _TAB_KINDS:
         raise ValueError(f"unknown tab {tab!r}; expected one of {sorted(_TAB_KINDS)}")
 
-    rows: list[LegacyExposureRow] = []
-    for kind in kinds:
-        rows.extend(r.to_exposure() for r in ledger.list_events(session_id, kind))
+    rows: list[ExposureRow] = []
+    with ledger._read_transaction():
+        version2 = ledger._accounting_version(session_id) == 2
+        kinds = (_V2_TAB_KINDS if version2 else _TAB_KINDS)[tab]
+        for kind in kinds:
+            rows.extend(r.to_exposure()
+                        for r in ledger.list_events(session_id, kind))
     return rows
 
 
-def get_exposure_detail(ledger, session_id: str,
-                        event_id: int) -> LegacyExposureRow:
+def get_exposure_detail(
+    ledger: Ledger, session_id: str, event_id: int,
+) -> ExposureRow:
     """The L3 payload for one legacy row (design.md §6), keyed by its
     integer row `id` -- see this module's docstring for why that selector
     was chosen over a composite key. Delegates to `Ledger.get_event`, which

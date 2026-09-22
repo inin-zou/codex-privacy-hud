@@ -518,12 +518,152 @@ class OutcomeCounts:
     unresolved_actions: int
 
 
+_STOPPED = Evidence.DENY_ENFORCED | Evidence.REJECTED_BEFORE_CROSSING
+_EXECUTED = Evidence.EXECUTION_OBSERVED | Evidence.CROSSING_CONFIRMED
+#: The obligation a potential crossing with no identified pair creates.
+_ZERO_FINDING = ("", "")
+
+
+def _pair(event: OutcomeEvent) -> tuple[str, str] | None:
+    """The event's pair, or None when either identity is unresolved: an
+    unresolved reference is never matched to any receipt."""
+    if event.subject_resolution != "resolved" \
+            or event.recipient_resolution != "resolved":
+        return None
+    return (event.subject_id, event.recipient_id)
+
+
+def _partition_unresolved(observations: Sequence[OutcomeObservation],
+                          events_of: Mapping[str, list[OutcomeEvent]]
+                          ) -> bool:
+    """Whether one action/boundary partition leaves any outcome unresolved.
+
+    Obligations: a crossing outcome for each identified pair of a potential
+    crossing (or one for the whole boundary when it identified none), a
+    denial outcome for an issued denial, and a removal outcome for each
+    pair an issued rewrite names. Receipts resolve them only within their
+    `resolution_scope`; conflicts stay unresolved and subtract nothing."""
+    crossing: set[tuple[str, str]] = set()
+    rewrites: set[tuple[str, str]] = set()
+    unmatchable = deny_pending = rewrite_unidentified = executed = False
+    crossed: set[tuple[str, str]] = set()
+    stopped: set[tuple[str, str]] = set()
+    removed: set[tuple[str, str]] = set()
+    boundary_stopped = zero_receipt = False
+
+    for observation in observations:
+        record = observation.record
+        events = events_of.get(observation.observation_id, [])
+        if record.evidence & _EXECUTED:
+            executed = True
+        if record.potential_crossing:
+            if not events:
+                crossing.add(_ZERO_FINDING)
+            for event in events:
+                pair = _pair(event)
+                if pair is None:
+                    unmatchable = True
+                else:
+                    crossing.add(pair)
+        if Evidence.DENY_ISSUED in record.evidence:
+            deny_pending = True
+        if Evidence.REWRITE_ISSUED in record.evidence:
+            named = [e for e in events if Evidence.REWRITE_ISSUED in e.evidence]
+            if not named:
+                rewrite_unidentified = True
+            for event in named:
+                pair = _pair(event)
+                if pair is None:
+                    unmatchable = True
+                else:
+                    rewrites.add(pair)
+        if record.resolution_scope == "pairs":
+            for event in events:
+                pair = _pair(event)
+                if pair is None:
+                    continue
+                if Evidence.CROSSING_CONFIRMED in event.evidence:
+                    crossed.add(pair)
+                if event.evidence & _STOPPED:
+                    stopped.add(pair)
+                if Evidence.REWRITE_ENFORCED in event.evidence:
+                    removed.add(pair)
+        elif record.resolution_scope == "boundary":
+            if record.evidence & _STOPPED:
+                boundary_stopped = True
+            if Evidence.CROSSING_CONFIRMED in record.evidence and not events:
+                zero_receipt = True
+
+    if crossed & (stopped | removed):
+        return True
+    if boundary_stopped and executed:
+        return True
+    if unmatchable and not boundary_stopped:
+        return True
+    for pair in crossing:
+        if pair == _ZERO_FINDING:
+            if not (boundary_stopped or zero_receipt):
+                return True
+        elif not (boundary_stopped or pair in crossed | stopped | removed):
+            return True
+    if deny_pending:
+        pairs = crossing - {_ZERO_FINDING}
+        pair_stopped = (bool(pairs) and _ZERO_FINDING not in crossing
+                        and pairs <= stopped)
+        if executed or not (boundary_stopped or pair_stopped):
+            return True
+    for pair in rewrites:
+        if not (boundary_stopped or pair in removed):
+            return True
+    return rewrite_unidentified and not boundary_stopped
+
+
 def resolve_outcomes(
     observations: Sequence[OutcomeObservation],
     events: Sequence[OutcomeEvent],
 ) -> OutcomeCounts:
-    from .ledger_schema import UnsupportedAccounting
-    raise UnsupportedAccounting("version-2 accounting is not implemented")
+    """Action outcome counts for one session.
+
+    Issuance and enforcement counts are distinct action IDs carrying the
+    bit, recorded even when a conflict leaves the action unresolved. An
+    action is unresolved once if any of its boundaries is. A stopped read
+    is a read action with an enforced denial, no execution or crossing, and
+    nothing unresolved."""
+    events_of: dict[str, list[OutcomeEvent]] = {}
+    for event in events:
+        events_of.setdefault(event.observation_id, []).append(event)
+    partitions: dict[tuple[str, str], list[OutcomeObservation]] = {}
+    carried: dict[str, Evidence] = {}
+    kinds: dict[str, set[str]] = {}
+    for observation in observations:
+        record = observation.record
+        partitions.setdefault((record.action_id, record.boundary),
+                              []).append(observation)
+        carried[record.action_id] = (
+            carried.get(record.action_id, Evidence(0)) | record.evidence)
+        kinds.setdefault(record.action_id, set()).add(record.action_kind)
+
+    unresolved = {action for (action, _boundary), group in partitions.items()
+                  if _partition_unresolved(group, events_of)}
+
+    def with_bit(bit: Evidence) -> int:
+        return sum(1 for evidence in carried.values() if bit in evidence)
+
+    reads_stopped = sum(
+        1 for action, evidence in carried.items()
+        if "read" in kinds[action]
+        and Evidence.DENY_ENFORCED in evidence
+        and not evidence & _EXECUTED
+        and action not in unresolved)
+    return OutcomeCounts(
+        permission_actions=with_bit(Evidence.PERMISSION_ISSUED),
+        denials_issued=with_bit(Evidence.DENY_ISSUED),
+        denials_enforced=with_bit(Evidence.DENY_ENFORCED),
+        reads_stopped=reads_stopped,
+        rewrite_actions_issued=with_bit(Evidence.REWRITE_ISSUED),
+        rewrite_actions_enforced=with_bit(Evidence.REWRITE_ENFORCED),
+        unresolved_actions=len(unresolved),
+    )
 
 
 # -- read models -------------------------------------------------------------

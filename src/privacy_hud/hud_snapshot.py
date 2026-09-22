@@ -210,16 +210,26 @@ class HudPublisher:
         with every quantity null and `unverified` true. No quantity is
         converted or defaulted: the document is validated before it is
         written, and an invalid one raises rather than reaching a reader.
+
+        A version-2 summary is refused with the fixed Phase 3 error before
+        any snapshot state is read or written (#54 Phase 3): it is never
+        published as accounting 0.
         """
+        if summary.accounting_version == 2:
+            from .accounting import PHASE3_SURFACE_UNSUPPORTED
+            from .ledger_schema import UnsupportedAccounting
+            raise UnsupportedAccounting(PHASE3_SURFACE_UNSUPPORTED)
         fields: dict[str, int | bool | None]
         if summary.accounting_version == 1:
             fields = {"accounting_version": 1,
                       "percent": summary.legacy_percent,
                       "legacy_prevented_rows": summary.legacy_prevented_rows,
                       "unverified": bool(unverified)}
-        else:
+        elif summary.accounting_version == 0:
             fields = {"accounting_version": 0, "percent": None,
                       "legacy_prevented_rows": None, "unverified": True}
+        else:
+            raise ValueError("snapshot does not satisfy contract A")
         doc = {"v": SNAPSHOT_VERSION,
                "accounting_version": fields["accounting_version"],
                "percent": fields["percent"],

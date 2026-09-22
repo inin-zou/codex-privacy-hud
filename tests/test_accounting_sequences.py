@@ -79,7 +79,8 @@ def test_exposed_then_prevented(led):
 
 def test_two_pem_files_denied(led):
     sid = start_v2(led)
-    for path in ("/home/u/keys/one.pem", "/home/u/keys/two.pem"):
+    for path in ("/home/zq-user/zq-vault/alpha-secret.pem",
+                 "/home/zq-user/zq-vault/beta-secret.pem"):
         led.record_observation(
             denied(sid, action_kind="read", boundary="B1"),
             [prevented(file_subject(path), model_context(), boundary="B1",
@@ -99,8 +100,9 @@ def test_two_pem_files_denied(led):
     assert len({r.subject_id for r in rows}) == 2
     for row in rows:
         public = repr(row.to_exposure().as_dict())
-        assert "keys" not in public and "one" not in public
-        assert "two" not in public and "/home" not in public
+        for part in ("zq-user", "zq-vault", "alpha-secret", "beta-secret",
+                     "/home"):
+            assert part not in public
         assert row.masked_example is None
 
 

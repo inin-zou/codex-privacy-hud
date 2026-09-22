@@ -1897,6 +1897,27 @@ _UNRECORDED_SUMMARY_LABEL = "No session on record"
 _UNRECORDED_SUMMARY_NOTE = (
     "No session record is available in this ledger. The percentage and "
     "counts are unavailable.")
+#: The version-2 summary (#54 Phase 3), in its emitted key order.
+_V2_SUMMARY_FIELDS = (
+    "accounting_version", "accounting_status", "profile_id",
+    "confirmed_points", "budget_cap", "percent", "observations",
+    "event_rows", "finding_occurrences", "distinct_subjects",
+    "exposure_events", "intervention_events", "distinct_disclosures",
+    "concrete_recipients", "permission_actions", "denials_issued",
+    "denials_enforced", "reads_stopped", "rewrite_actions_issued",
+    "rewrite_actions_enforced", "unresolved_actions",
+    "unresolved_subject_events", "unresolved_recipient_events",
+    "percentage_unavailable_reasons", "score_label", "accounting_note")
+_V2_SUMMARY_COUNTS = _V2_SUMMARY_FIELDS[6:23]
+_V2_SUMMARY_REASONS = (
+    "accounting_unavailable", "unresolved_actions", "unresolved_subjects",
+    "unresolved_recipients", "coverage_incomplete")
+_V2_SUMMARY_LABEL = "confirmed disclosure points"
+_V2_SUMMARY_NOTE = (
+    "This score is a versioned policy index over evidenced disclosures, "
+    "not a measurement of harm. Permission, a returned denial, a returned "
+    "rewrite, and a successful tool result do not by themselves confirm "
+    "disclosure or host enforcement.")
 
 
 def _mcp_probe(command, cwd, env, timeout) -> tuple[list[str], bool]:
@@ -2056,7 +2077,7 @@ def _is_finite(value) -> bool:
 
 
 def _is_summary(summary) -> bool:
-    """Exactly one of the two summary variants, with its label and note.
+    """Exactly one of the three summary variants, with its label and note.
 
     `accounting_version` must be an actual integer, not a boolean. The old
     four-integer summary is rejected: it cannot say whether its numbers are
@@ -2085,7 +2106,42 @@ def _is_summary(summary) -> bool:
                 and _is_count(summary["legacy_prevented_rows"])
                 and summary["score_label"] == _LEGACY_SUMMARY_LABEL
                 and summary["accounting_note"] == _LEGACY_SUMMARY_NOTE)
+    if version == 2:
+        return _is_v2_summary(summary)
     return False
+
+
+def _is_v2_summary(summary: dict) -> bool:
+    """The exact version-2 summary: its keys, finite nonnegative numbers,
+    actual integer counts, reasons in their fixed order without repeats,
+    a null percentage exactly when a reason holds, and its label and
+    note."""
+    if set(summary) != set(_V2_SUMMARY_FIELDS):
+        return False
+    reasons = summary["percentage_unavailable_reasons"]
+    if not isinstance(reasons, list) or not all(
+            type(r) is str and r in _V2_SUMMARY_REASONS for r in reasons):
+        return False
+    order = [_V2_SUMMARY_REASONS.index(r) for r in reasons]
+    if order != sorted(set(order)):
+        return False
+    status = summary["accounting_status"]
+    profile_id = summary["profile_id"]
+    pct = summary["percent"]
+    return (status in ("available", "unavailable")
+            and (status == "unavailable") == (
+                "accounting_unavailable" in reasons)
+            and type(profile_id) is str and len(profile_id) == 64
+            and all(c in "0123456789abcdef" for c in profile_id)
+            and _is_finite(summary["confirmed_points"])
+            and summary["confirmed_points"] >= 0
+            and _is_finite(summary["budget_cap"])
+            and summary["budget_cap"] > 0
+            and ((pct is None) if reasons
+                 else (_is_count(pct) and pct <= 100))
+            and all(_is_count(summary[k]) for k in _V2_SUMMARY_COUNTS)
+            and summary["score_label"] == _V2_SUMMARY_LABEL
+            and summary["accounting_note"] == _V2_SUMMARY_NOTE)
 
 
 def _attach_stderr(

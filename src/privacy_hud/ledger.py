@@ -65,8 +65,9 @@ from . import ledger_schema
 from .accounting import (
     PATH_RULE_IDS, SOURCE_LABELS, AccountingEventRow, AccountingExposureRow,
     AccountingSummary, ActionKind, Boundary, DataType, Decision, EventKind,
-    EventRecord, Evidence, HookEvent, ObservationRecord, RecipientInput,
-    RecordResult, ResolutionScope, ScanGap, ScoringProfile, SubjectInput,
+    EventRecord, Evidence, HookEvent, ObservationRecord, OutcomeEvent,
+    OutcomeObservation, RecipientInput, RecordResult, ResolutionScope, ScanGap,
+    ScoringProfile, SubjectInput, UnavailableReason, resolve_outcomes,
 )
 from .budget import contribution, next_disclosure_delta, percent
 from .matrix.loader import Matrix
@@ -694,6 +695,25 @@ def _recipient_label(recipient_id: str, recipient: RecipientInput) -> str:
     }[recipient.destination_kind]
 
 
+def _stored_evidence(value: object) -> Evidence:
+    if not isinstance(value, int) or isinstance(value, bool) \
+            or not 0 <= value <= 2047:
+        raise UnsupportedAccounting(_INVALID_V2_SESSION)
+    return Evidence(value)
+
+
+def _observation_record(row: sqlite3.Row) -> ObservationRecord:
+    return ObservationRecord(
+        session_id=row["session_id"], delivery_key=row["delivery_key"],
+        action_id=row["action_id"], turn_id=row["turn_id"], ts=row["ts"],
+        hook_event=row["hook_event"], phase=row["phase"],
+        action_kind=row["action_kind"], boundary=row["boundary"],
+        decision=row["decision"], evidence=_stored_evidence(row["evidence"]),
+        resolution_scope=row["resolution_scope"],
+        potential_crossing=bool(row["potential_crossing"]),
+        scan_gap=row["scan_gap"])
+
+
 class Ledger:
     def __init__(self, path: Path, matrix: Matrix, *,
                  observer: str | None = None,
@@ -1054,6 +1074,12 @@ class Ledger:
         if batch is None:
             raise ValueError(_INVALID_EVENT)
         _check_observation(observation)
+        kinds = {r[0] for r in self.conn.execute(
+            "SELECT DISTINCT action_kind FROM observations"
+            " WHERE session_id=? AND action_id=?",
+            (session_id, observation.action_id))}
+        if kinds - {observation.action_kind}:
+            raise ValueError(_INVALID_OBSERVATION)
         open_session = (session["accounting_status"] == "available"
                         and session["ended_at"] is None)
         keys = set()
@@ -1224,11 +1250,172 @@ class Ledger:
             local[(to.destination_kind, to.unresolved_token)] = recipient_id
         return recipient_id
 
+    def _accounting_version(self, session_id: str) -> Literal[0, 1, 2]:
+        """How `session_id` is accounted, read inside the caller's
+        transaction: 0 for no session row, 1 legacy, 2 version 2. Any other
+        stored version is refused."""
+        row = self.conn.execute(
+            "SELECT * FROM sessions WHERE session_id=?",
+            (session_id,)).fetchone()
+        if row is None:
+            return 0
+        if "accounting_version" not in row.keys():
+            return 1
+        version = row["accounting_version"]
+        if version == 1:
+            return 1
+        if version == 2:
+            return 2
+        raise UnsupportedAccounting(_INVALID_V2_SESSION)
+
     def _summary_v2(self, session_id: str) -> AccountingSummary:
-        raise UnsupportedAccounting("version-2 accounting is not implemented")
+        """The version-2 summary, every quantity from one read snapshot.
+        Stored charges are read, never recomputed from the live matrix."""
+        with self._read_transaction():
+            session, _profile = self._v2_session(session_id)
+            observations = [
+                OutcomeObservation(observation_id=r["observation_id"],
+                                   record=_observation_record(r))
+                for r in self.conn.execute(
+                    "SELECT * FROM observations WHERE session_id=?"
+                    " ORDER BY rowid", (session_id,))]
+            event_rows = self.conn.execute(
+                "SELECT e.*, s.resolution AS subject_resolution,"
+                " r.resolution AS recipient_resolution"
+                " FROM events e"
+                " JOIN subjects s ON s.session_id = e.session_id"
+                "  AND s.subject_id = e.subject_id"
+                " JOIN recipients r ON r.session_id = e.session_id"
+                "  AND r.recipient_id = e.recipient_id"
+                " WHERE e.session_id=? ORDER BY e.id",
+                (session_id,)).fetchall()
+            disclosures = self.conn.execute(
+                "SELECT COUNT(*), COUNT(DISTINCT recipient_id)"
+                " FROM disclosures WHERE session_id=?",
+                (session_id,)).fetchone()
+            verified = self.coverage(session_id).verified
+
+        outcome_events = [
+            OutcomeEvent(observation_id=r["observation_id"],
+                         subject_id=r["subject_id"],
+                         recipient_id=r["recipient_id"],
+                         subject_resolution=r["subject_resolution"],
+                         recipient_resolution=r["recipient_resolution"],
+                         kind=r["kind"], evidence=_stored_evidence(
+                             r["evidence"]))
+            for r in event_rows]
+        outcomes = resolve_outcomes(observations, outcome_events)
+        unresolved_subjects = sum(
+            1 for r in event_rows if r["subject_resolution"] == "unresolved")
+        unresolved_recipients = sum(
+            1 for r in event_rows
+            if r["recipient_resolution"] == "unresolved")
+        status = session["accounting_status"]
+        if status not in ("available", "unavailable"):
+            raise UnsupportedAccounting(_INVALID_V2_SESSION)
+        reasons: list[UnavailableReason] = []
+        if status == "unavailable":
+            reasons.append("accounting_unavailable")
+        if outcomes.unresolved_actions:
+            reasons.append("unresolved_actions")
+        if unresolved_subjects:
+            reasons.append("unresolved_subjects")
+        if unresolved_recipients:
+            reasons.append("unresolved_recipients")
+        if not verified:
+            reasons.append("coverage_incomplete")
+        score, cap = float(session["budget_score"]), float(session["budget_cap"])
+        return AccountingSummary(
+            accounting_version=2,
+            accounting_status=status,
+            profile_id=session["profile_id"],
+            confirmed_points=score,
+            budget_cap=cap,
+            percent=None if reasons else percent(score, cap),
+            observations=len(observations),
+            event_rows=len(event_rows),
+            finding_occurrences=sum(r["occurrences"] for r in event_rows),
+            distinct_subjects=len({
+                r["subject_id"] for r in event_rows
+                if r["subject_resolution"] == "resolved"}),
+            exposure_events=sum(1 for r in event_rows
+                                if r["kind"] == "exposed"),
+            intervention_events=sum(
+                1 for r in event_rows
+                if r["kind"] == "prevented"
+                or r["evidence"] & Evidence.REWRITE_ISSUED),
+            distinct_disclosures=disclosures[0],
+            concrete_recipients=disclosures[1],
+            permission_actions=outcomes.permission_actions,
+            denials_issued=outcomes.denials_issued,
+            denials_enforced=outcomes.denials_enforced,
+            reads_stopped=outcomes.reads_stopped,
+            rewrite_actions_issued=outcomes.rewrite_actions_issued,
+            rewrite_actions_enforced=outcomes.rewrite_actions_enforced,
+            unresolved_actions=outcomes.unresolved_actions,
+            unresolved_subject_events=unresolved_subjects,
+            unresolved_recipient_events=unresolved_recipients,
+            percentage_unavailable_reasons=tuple(reasons),
+        )
+
+    def _v2_events(self, session_id: str, *, kind: str | None = None,
+                   event_id: int | None = None) -> list[AccountingEventRow]:
+        """Version-2 event rows of one session, oldest first. A row's
+        `budget_delta` is the delta of the disclosure it first charged, and
+        0.0 for every other row."""
+        where = "e.session_id=?"
+        params: list[object] = [session_id]
+        if kind is not None:
+            where += " AND e.kind=?"
+            params.append(kind)
+        if event_id is not None:
+            where += " AND e.id=?"
+            params.append(event_id)
+        rows = self.conn.execute(
+            "SELECT e.id, e.observation_id, o.action_id, o.turn_id, o.ts,"
+            " o.hook_event, o.phase, o.action_kind, e.kind, e.evidence,"
+            " e.data_type, e.rule_id, e.occurrences, e.subject_id,"
+            " s.subject_kind, s.resolution AS subject_resolution,"
+            " s.label AS subject_label, e.recipient_id,"
+            " r.resolution AS recipient_resolution, r.destination_kind,"
+            " r.label AS recipient_label, e.source_label, e.source_kind,"
+            " e.boundary, e.masked_example,"
+            " COALESCE(d.budget_delta, 0.0) AS budget_delta, o.scan_gap,"
+            " x.budget_cap, e.session_id"
+            " FROM events e"
+            " JOIN observations o ON o.session_id = e.session_id"
+            "  AND o.observation_id = e.observation_id"
+            " JOIN subjects s ON s.session_id = e.session_id"
+            "  AND s.subject_id = e.subject_id"
+            " JOIN recipients r ON r.session_id = e.session_id"
+            "  AND r.recipient_id = e.recipient_id"
+            " JOIN sessions x ON x.session_id = e.session_id"
+            " LEFT JOIN disclosures d ON d.session_id = e.session_id"
+            "  AND d.first_event_id = e.id"
+            f" WHERE {where} ORDER BY e.id", params).fetchall()
+        out = []
+        for row in rows:
+            values = dict(row)
+            if values["source_kind"] is not None:
+                raise UnsupportedAccounting(_INVALID_V2_SESSION)
+            values["evidence"] = _stored_evidence(values["evidence"])
+            values["budget_delta"] = float(values["budget_delta"])
+            values["budget_cap"] = float(values["budget_cap"])
+            out.append(AccountingEventRow(**values))
+        return out
 
     def mark_accounting_unavailable(self, session_id: str) -> None:
-        raise UnsupportedAccounting("version-2 accounting is not implemented")
+        """Mark a version-2 session's accounting unavailable, permanently.
+        Idempotent. Changes only the status: score, cap, profile, history
+        and (while the session is open) identity hashes are untouched."""
+        with self._atomic_accounting_write():
+            if self._accounting_version(session_id) != 2:
+                raise UnsupportedAccounting(_INVALID_V2_SESSION)
+            self._v2_session(session_id)
+            self.conn.execute(
+                "UPDATE sessions SET accounting_status='unavailable'"
+                " WHERE session_id=? AND accounting_status='available'",
+                (session_id,))
 
     def _legacy_events_table(self) -> Literal["events", "events_legacy_v1"]:
         """Where this ledger's legacy rows are, decided now.
@@ -1556,6 +1743,8 @@ class Ledger:
         Existence is read before the counts, inside one transaction.
         """
         with self._read_transaction():
+            if self._accounting_version(session_id) == 2:
+                return self._summary_v2(session_id)
             row = self._legacy_session(session_id)
             if row is None:
                 return UnrecordedSessionSummary(
@@ -1586,7 +1775,7 @@ class Ledger:
             score_label=LEGACY_SCORE_LABEL,
         )
 
-    def list_events(self, session_id: str, kind: str) -> list[LegacyEventRow]:
+    def list_events(self, session_id: str, kind: str) -> list[EventRow]:
         """Every legacy event of one `kind`, oldest first.
 
         Rows carry `value_hash` because the ledger's own callers need it;
@@ -1594,6 +1783,9 @@ class Ledger:
         project with `to_exposure()`. An unknown session has no rows.
         """
         with self._read_transaction():
+            if self._accounting_version(session_id) == 2:
+                self._v2_session(session_id)
+                return list(self._v2_events(session_id, kind=kind))
             if self._legacy_session(session_id) is None:
                 return []
             table = self._legacy_events_table()
@@ -1603,7 +1795,7 @@ class Ledger:
                 (session_id, kind)).fetchall()
         return [LegacyEventRow(**dict(r)) for r in rows]
 
-    def get_event(self, session_id: str, event_id: int) -> LegacyExposureRow:
+    def get_event(self, session_id: str, event_id: int) -> ExposureRow:
         """One public legacy row, scoped to both `session_id` and
         `event_id`, with `first_seen` and the session's stored `budget_cap`.
 
@@ -1613,6 +1805,13 @@ class Ledger:
         one transaction.
         """
         with self._read_transaction():
+            if self._accounting_version(session_id) == 2:
+                self._v2_session(session_id)
+                found = self._v2_events(session_id, event_id=event_id)
+                if not found:
+                    raise LookupError(
+                        f"no event {event_id!r} in session {session_id!r}")
+                return found[0].to_exposure()
             session = self._legacy_session(session_id)
             if session is None:
                 raise LookupError(
@@ -1637,6 +1836,9 @@ class Ledger:
         """End the session and null its legacy value hashes, in one write
         transaction. An ended session keeps its first end time."""
         with self._write_transaction():
+            if self._accounting_version(session_id) == 2:
+                self._end_v2_session(session_id)
+                return
             self.conn.execute(
                 "UPDATE sessions SET ended_at=? WHERE session_id=?"
                 " AND ended_at IS NULL", (int(time.time()), session_id))
@@ -1644,6 +1846,24 @@ class Ledger:
             self.conn.execute(
                 f"UPDATE {table} SET value_hash=NULL WHERE session_id=?",
                 (session_id,))
+
+    def _end_v2_session(self, session_id: str) -> None:
+        """End a version-2 session in one accounting savepoint: set the end
+        time if it is unset, then null the identity hashes of its subjects
+        and recipients. Opaque IDs, labels, resolution, history and charges
+        are kept. This is ledger erasure only; it does not destroy any
+        accounting key."""
+        with self._atomic_accounting_write():
+            self._v2_session(session_id)
+            self.conn.execute(
+                "UPDATE sessions SET ended_at=? WHERE session_id=?"
+                " AND ended_at IS NULL", (int(time.time()), session_id))
+            self.conn.execute(
+                "UPDATE subjects SET identity_hash=NULL WHERE session_id=?"
+                " AND identity_hash IS NOT NULL", (session_id,))
+            self.conn.execute(
+                "UPDATE recipients SET identity_hash=NULL WHERE session_id=?"
+                " AND identity_hash IS NOT NULL", (session_id,))
 
     # -- policy and one-shot consent tokens (SCHEMA's last two tables) -----
     #

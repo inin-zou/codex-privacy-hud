@@ -66,6 +66,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import mcp_tools, runtime, runtime_commands
+from .accounting import PHASE3_SURFACE_UNSUPPORTED
 from .ledger import Ledger
 from .matrix.loader import load_matrix
 from .render import _ACRONYMS as _RENDER_ACRONYMS
@@ -77,6 +78,11 @@ from .runtime_contract import RuntimeRefusal, load_activation
 from .runtime_messages import POLICY_OUTCOME_UNKNOWN, POLICY_PREFLIGHT_REFUSAL
 
 _UI_DIR = Path(__file__).resolve().parent.parent.parent / "ui"
+
+#: The endpoints that read a session's accounting. A version-2 session is
+#: refused on each with HTTP 409 and the fixed Phase 3 error (#54).
+_ACCOUNTING_ENDPOINTS = frozenset({"/api/summary", "/api/exposures",
+                                   "/api/detail"})
 
 _STATIC = {
     "/": ("index.html", "text/html; charset=utf-8"),
@@ -249,6 +255,16 @@ class _Handler(BaseHTTPRequestHandler):
             # is deliberately no second source for it to fall back to.
             self._send_json(200, {"acronyms": _RENDER_ACRONYMS})
             return
+
+        if parsed.path in _ACCOUNTING_ENDPOINTS:
+            sid = self._session_id(query)
+            if sid and mcp_tools.get_session_summary(
+                    ledger, sid).accounting_version == 2:
+                # #54 Phase 3: the browser renders legacy and unrecorded
+                # sessions only. A version-2 session gets the fixed refusal
+                # and no partial data.
+                self._send_json(409, {"error": PHASE3_SURFACE_UNSUPPORTED})
+                return
 
         if parsed.path == "/api/summary":
             sid = self._session_id(query)
