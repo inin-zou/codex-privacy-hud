@@ -2,9 +2,9 @@
 
 **Status:** Draft v0.1 · **Date:** 2026-09-03 · **Track:** Agentic AI — Making Privacy Native to Personal Agents
 
-**Current contract — #54 Phase 1 (0.7.8).**
+**Current contract — #54 Phase 2 (0.7.9).**
 
-Phase 1 of #54 prepares readers and labels existing accounting. Recorded sessions still use the legacy writer, deduplication, and score arithmetic. Their displayed number is a legacy permitted-crossing score, not a confirmed-disclosure percentage. An unrecorded session has no percentage or numeric counts. The new observation, evidence, recipient, and distinct-disclosure accounting has not been activated. #43, #44, and the related #47 accounting limitations remain unresolved.
+The daemon prepares the new accounting schema at a new-session boundary. Production sessions still use legacy accounting. Migration preserves every stored legacy value and performs no backfill or rescoring. Readers do not migrate the ledger. The new observations, identities, evidence, and disclosure charges are not active. #43, #44, and the related #47 accounting limitations remain unresolved.
 
 ---
 

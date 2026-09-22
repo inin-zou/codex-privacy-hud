@@ -269,19 +269,24 @@ def test_a_noninitializing_open_does_not_create_a_database(tmp_path):
     assert not missing.exists()
 
 
-def test_initializing_open_does_not_migrate_a_rebuilt_schema(tmp_path):
+def test_initializing_open_refuses_a_partial_rebuild(tmp_path):
+    """A renamed legacy table with no schema marker is an incomplete rebuild
+    (#54 Phase 2): the daemon refuses it rather than recreating `events`."""
     path = tmp_path / "ledger.db"
     led = Ledger(path, M)
     led.start_session("s1", cwd="/repo", model="gpt-5")
     led.conn.close()
     _rename_to_legacy(path)
-    reopened = Ledger(path, M)
+    with pytest.raises(Exception) as caught:
+        Ledger(path, M)
+    assert type(caught.value).__name__ == "UnsupportedAccounting"
+    raw = sqlite3.connect(path)
     try:
-        tables = {r[0] for r in reopened.conn.execute(
+        tables = {r[0] for r in raw.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
         assert "events" not in tables
     finally:
-        reopened.conn.close()
+        raw.close()
 
 
 def test_a_version_two_session_is_not_read_as_legacy(tmp_path):

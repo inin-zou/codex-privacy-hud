@@ -118,7 +118,7 @@ from .detect.secrets import SecretDetector
 from .detect.shell import extract_destinations
 from .engine import Engine, Observation
 from .hud_snapshot import HudPublisher
-from .ledger import Ledger
+from .ledger import Ledger, open_connection
 from .mask import new_salt
 from .matrix.loader import Matrix, load_matrix
 from .origin import OriginKind, extract_origin
@@ -310,10 +310,11 @@ def _allow_cross_thread_access(ledger: Ledger, db_path: Path) -> None:
     sequential request thread.
     """
     ledger.conn.close()
-    conn = sqlite3.connect(db_path, isolation_level=None, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    ledger.conn = conn
+    # The same helper every ledger connection uses, so this one keeps
+    # foreign keys, the busy wait and full synchronous writes. The observer
+    # id stays the instance's: it identifies this daemon in `coverage`.
+    ledger.conn = open_connection(db_path, initialize=True,
+                                  check_same_thread=False)
 
 
 # --------------------------------------------------------------------- #
@@ -406,6 +407,17 @@ def _get_or_start_engine(state: State, session_id: str, *, cwd: str = "",
     `SessionStart` keeps its stronger record when it later re-resolves through
     here (after a `SessionEnd`, say).
     """
+    session = state.ledger.conn.execute(
+        "SELECT ended_at FROM sessions WHERE session_id=?",
+        (session_id,)).fetchone()
+    if session is not None and session["ended_at"] is not None:
+        # Enforcement can run after end, but this engine and its randomness
+        # must not become session accounting state. Ledger.record persists
+        # late findings with NULL hashes and zero contributions.
+        return Engine(
+            ledger=state.ledger, matrix=state.matrix, salt=new_salt(),
+            detectors=state.detectors, settings=state.settings)
+
     engine = state.engines.get(session_id)
     if engine is not None:
         return engine
@@ -693,14 +705,33 @@ def _publish_hud(state: State, session_id: str) -> None:
 
 
 def _handle_session_start(state: State, session_id: str, payload: dict) -> dict:
+    """A genuine `SessionStart`. For a session the ledger does not hold yet,
+    this is the one place #54's structural rebuild may run: it and the new
+    session commit in one write transaction, or neither does. A replayed
+    start for a known session changes nothing structural."""
     with state.lock:
+        ledger = state.ledger
+        session = ledger.conn.execute(
+            "SELECT ended_at FROM sessions WHERE session_id=?",
+            (session_id,)).fetchone()
+        if session is not None and session["ended_at"] is not None:
+            return _allow()
+        if session_id in state.engines:
+            # A replay must not replace an existing live matching namespace.
+            return _allow()
+
         salt = new_salt()
-        state.salts[session_id] = salt
-        state.ledger.start_session(session_id, cwd=payload.get("cwd", "") or "",
-                                    model=payload.get("model", "") or "")
-        state.engines[session_id] = Engine(
+        with ledger._write_transaction():
+            if not ledger.session_exists(session_id):
+                ledger.prepare_session_boundary(session_id)
+            ledger.start_session(session_id,
+                                 cwd=payload.get("cwd", "") or "",
+                                 model=payload.get("model", "") or "")
+        engine = Engine(
             ledger=state.ledger, matrix=state.matrix, salt=salt,
             detectors=state.detectors, settings=state.settings)
+        state.salts[session_id] = salt
+        state.engines[session_id] = engine
         state.started_at[session_id] = time.time()
         _publish_hud(state, session_id)
     # Outside the lock: `live_lock` and `lock` are never nested (State's
@@ -734,9 +765,10 @@ def _handle_session_end(state: State, session_id: str, payload: dict) -> dict:
         state.ledger.end_session(session_id)
         # Discard the session's salt and Engine now — SessionEnd is the one
         # place a salt is destroyed, per the session/salt lifecycle
-        # contract above. Any hook event for this session_id that arrives
-        # after this point gets a brand-new salt via
-        # `_get_or_start_engine`, never the old one.
+        # contract above. A hook event for this session_id that arrives
+        # after this point is enforced with a temporary engine whose salt
+        # never becomes session state (`_get_or_start_engine`), and its
+        # findings are recorded with a NULL hash and no charge.
         state.salts.pop(session_id, None)
         state.engines.pop(session_id, None)
         try:
@@ -838,10 +870,10 @@ def dispatch(state: State, payload: dict) -> dict:
         # Re-resolve rather than reusing the Engine from step 1. A
         # `SessionEnd` for this session_id can land while the scan above is
         # running, and it pops `state.engines`/`state.salts`; re-resolving
-        # means we then use the fresh Engine and fresh salt, which is
-        # exactly the behavior `_handle_session_end` already documents for
-        # any event arriving after SessionEnd ("gets a brand-new salt via
-        # `_get_or_start_engine`, never the old one"). Findings are
+        # then returns a temporary engine for the ended session, the
+        # behavior `_handle_session_end` documents for any event arriving
+        # after SessionEnd: enforcement runs, and the ledger records the
+        # findings with a NULL hash and no charge. Findings are
         # salt-independent (see Engine.observe's docstring), so this is a
         # legal serialization of the two operations, not a reinterpretation
         # of the scan. `_get_or_start_engine` is idempotent, so in the

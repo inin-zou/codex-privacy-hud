@@ -299,7 +299,8 @@ def test_an_unusable_latch_is_silence_not_a_crash(tmp_path, body):
     assert st.ledger.unattributed_gaps() == 0
 
 
-def test_a_gap_recorded_at_startup_marks_the_session_running_through_it(tmp_path):
+def test_a_gap_recorded_at_startup_marks_the_session_running_through_it(
+        tmp_path, monkeypatch):
     """A session that was already open when hooks started going unserved has a
     hole in its record, and the startup scan is what puts that on the row.
 
@@ -314,27 +315,28 @@ def test_a_gap_recorded_at_startup_marks_the_session_running_through_it(tmp_path
     instead (the test above)."""
     _write_latch(tmp_path, pid=4242)
     st = new_state(tmp_path)
-    _start(st)
     gap = st.ledger.conn.execute(
         "SELECT ts FROM coverage WHERE reason='unobserved_hooks'").fetchone()[0]
-    st.ledger.conn.execute(
-        "UPDATE sessions SET started_at=? WHERE session_id='s1'", (gap - 300,))
+    with monkeypatch.context() as patch:
+        patch.setattr("privacy_hud.ledger.time.time", lambda: gap - 300)
+        _start(st)
 
     assert not st.ledger.coverage("s1").verified
 
 
-def test_a_session_starting_after_the_daemon_is_up_is_unaffected(tmp_path):
+def test_a_session_starting_after_the_daemon_is_up_is_unaffected(
+        tmp_path, monkeypatch):
     """The other side of that bound. Once the daemon is listening, a new session
     is fully observed, and the cold start that preceded it must not follow it
     around -- a caveat that fires on a healthy session is a caveat that gets
     trained away."""
     _write_latch(tmp_path, pid=4242)
     st = new_state(tmp_path)
-    _start(st)
     gap = st.ledger.conn.execute(
         "SELECT ts FROM coverage WHERE reason='unobserved_hooks'").fetchone()[0]
-    st.ledger.conn.execute(
-        "UPDATE sessions SET started_at=? WHERE session_id='s1'", (gap + 300,))
+    with monkeypatch.context() as patch:
+        patch.setattr("privacy_hud.ledger.time.time", lambda: gap + 300)
+        _start(st)
 
     assert st.ledger.coverage("s1").verified
 
@@ -583,7 +585,8 @@ def test_concurrent_calls_for_the_same_session_do_not_corrupt_the_ledger(running
         "SELECT budget_score FROM sessions WHERE session_id=?",
         ("sockc",)).fetchone()[0]
     delta_sum = conn.execute(
-        "SELECT COALESCE(SUM(budget_delta), 0) FROM events WHERE session_id=?",
+        "SELECT COALESCE(SUM(budget_delta), 0) FROM events_legacy_v1"
+        " WHERE session_id=?",
         ("sockc",)).fetchone()[0]
     assert score == pytest.approx(delta_sum), (
         f"lost budget update: sessions.budget_score={score} but "
@@ -592,7 +595,7 @@ def test_concurrent_calls_for_the_same_session_do_not_corrupt_the_ledger(running
     # here, and every recorded delta must have been an increment.
     assert score >= 0
     assert conn.execute(
-        "SELECT COUNT(*) FROM events WHERE budget_delta < 0").fetchone()[0] == 0
+        "SELECT COUNT(*) FROM events_legacy_v1 WHERE budget_delta < 0").fetchone()[0] == 0
 
     # Dedupe survived the interleaving: UNIQUE(session_id, value_hash,
     # destination) is enforced by Ledger.record's SELECT-then-INSERT, which
@@ -600,7 +603,7 @@ def test_concurrent_calls_for_the_same_session_do_not_corrupt_the_ledger(running
     # here would mean two threads both passed the SELECT before either
     # INSERTed.
     dupes = conn.execute(
-        "SELECT COUNT(*) FROM (SELECT value_hash, destination FROM events"
+        "SELECT COUNT(*) FROM (SELECT value_hash, destination FROM events_legacy_v1"
         " WHERE session_id=? GROUP BY value_hash, destination"
         " HAVING COUNT(*) > 1)", ("sockc",)).fetchone()[0]
     assert dupes == 0
@@ -812,22 +815,15 @@ def test_daemon_fails_closed_when_the_unlocked_scan_phase_raises(
 
 
 def test_a_session_ending_mid_scan_does_not_reuse_the_discarded_salt(tmp_path):
-    # The one thing the phase split genuinely lets interleave: a SessionEnd
-    # can land between `scan()` and `observe()`. `_handle_session_end` pops
-    # the session's Engine and salt, so `dispatch()` re-resolves the Engine
-    # under the second lock hold rather than reusing the one it scanned
-    # with. Findings are salt-independent, so the result is exactly what a
-    # serialized "scan, then SessionEnd, then record" would have produced:
-    # the post-SessionEnd salt, which is the behavior `_handle_session_end`
-    # already documents for any event arriving after it.
+    # SessionEnd can land between scan and observe. Dispatch must recheck
+    # ended state, retain the findings without a charge or matching hash,
+    # and leave the retired session engine/salt absent.
     from privacy_hud import dispatch as dispatch_mod
     from privacy_hud.dispatch import dispatch, new_state
 
     st = new_state(tmp_path)
     dispatch(st, {"hook_event_name": "SessionStart", "session_id": "race",
                   "cwd": "/r", "model": "gpt-5"})
-    original_engine = st.engines["race"]
-    original_salt = st.salts["race"]
 
     # Fire SessionEnd from inside the scan, i.e. exactly in the window the
     # split opens. Patching `Engine.scan` is how we make that window
@@ -839,6 +835,8 @@ def test_a_session_ending_mid_scan_does_not_reuse_the_discarded_salt(tmp_path):
         result = real_scan(self, obs)
         dispatch(st, {"hook_event_name": "SessionEnd", "session_id": "race",
                       "reason": "exit"})
+        seen["ended_session"] = tuple(st.ledger.conn.execute(
+            "SELECT * FROM sessions WHERE session_id='race'").fetchone())
         return result
 
     dispatch_mod.Engine.scan = scan_then_end
@@ -849,11 +847,20 @@ def test_a_session_ending_mid_scan_does_not_reuse_the_discarded_salt(tmp_path):
     finally:
         dispatch_mod.Engine.scan = real_scan
 
-    # The record went through the NEW engine/salt, not the discarded one.
-    assert st.engines["race"] is not original_engine
-    assert st.salts["race"] != original_salt
-    assert st.engines["race"].salt == st.salts["race"]
-    # And nothing was silently dropped: the observation was still recorded.
+    assert isinstance(seen["out"], dict)
+    assert "race" not in st.engines
+    assert "race" not in st.salts
+    assert "race" not in st.started_at
+    assert tuple(st.ledger.conn.execute(
+        "SELECT * FROM sessions WHERE session_id='race'").fetchone()
+    ) == seen["ended_session"]
+
+    rows = st.ledger.conn.execute(
+        "SELECT value_hash, budget_delta FROM events_legacy_v1"
+        " WHERE session_id='race'").fetchall()
+    assert rows
+    assert all(row["value_hash"] is None for row in rows)
+    assert all(row["budget_delta"] == 0.0 for row in rows)
     assert st.ledger.summary("race").legacy_permitted_crossing_rows >= 1
 
 
@@ -1889,7 +1896,7 @@ def test_a_clean_session_with_no_events_still_resolves(sock_dir):
                           "session_id": "clean", "cwd": "/r", "model": "gpt-5"})
         ledger = Ledger(sock_dir / "ledger.db", load_matrix())
         assert ledger.conn.execute(
-            "SELECT COUNT(*) AS n FROM events").fetchone()["n"] == 0
+            "SELECT COUNT(*) AS n FROM events_legacy_v1").fetchone()["n"] == 0
         assert resolve_audit_session(ledger, sock_dir).session_id == "clean"
     finally:
         daemon.stop()
