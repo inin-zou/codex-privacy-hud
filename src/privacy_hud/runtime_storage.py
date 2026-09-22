@@ -350,7 +350,16 @@ def prepare_storage(data_dir, *, activation: Activation) -> CutoverResult:
         _retire(source, retained)
         _record(root, transition_id, "legacy_retired", preserved)
 
-    if source is None and retained.is_file():
+    if source is None and retained.is_file() and not is_fenced(root):
+        # The inter-rename window only: the database was moved and a
+        # sidecar was not, so the retained original is still separated
+        # from its write-ahead log. Once the fence is in place there is
+        # nothing left at the historical pathname to retire -- and calling
+        # `_retire` anyway would hand it the fence directory as a source
+        # and a destination that already exists, which is the ambiguity
+        # that function correctly refuses. A crash between the fence and
+        # publication was therefore unrecoverable: every retry refused,
+        # forever, on a transition that had already preserved everything.
         _retire(legacy, retained)
         _record(root, transition_id, "legacy_retired", preserved)
 
@@ -460,6 +469,18 @@ def _quiescent(root: Path) -> bool:
     return hud_snapshot.read_daemon_marker(root) is None
 
 
+#: Where `lsof` is on the systems this runs on, for the case where it is
+#: not on the inherited `PATH`. Repair is launched from an installer, a
+#: managed wrapper and a hook, none of which has the user's shell `PATH`
+#: -- and on macOS `lsof` lives in `/usr/sbin`, which a minimal `PATH`
+#: does not include. Without this, holder inspection failed closed on
+#: exactly those invocations, so repair refused every time and could
+#: never complete. Absolute, ordinary system locations only; the `PATH`
+#: lookup still comes first.
+_LSOF_LOCATIONS = ("/usr/sbin/lsof", "/usr/bin/lsof", "/bin/lsof",
+                   "/usr/local/bin/lsof", "/opt/homebrew/bin/lsof")
+
+
 def _inspector():
     """The way this host can be asked who has a file open, or `None`.
 
@@ -471,6 +492,11 @@ def _inspector():
     if sys.platform.startswith("linux") and Path("/proc/self/fd").is_dir():
         return _proc_holders
     lsof = shutil.which("lsof")
+    if not lsof:
+        for candidate in _LSOF_LOCATIONS:
+            if os.access(candidate, os.X_OK) and Path(candidate).is_file():
+                lsof = candidate
+                break
     if lsof:
         return lambda paths: _lsof_holders(lsof, paths)
     return None

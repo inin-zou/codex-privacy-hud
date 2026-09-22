@@ -131,6 +131,25 @@ def format_repair_command(bundle_root, data_dir) -> str:
     ])
 
 
+def _ambient_argv(argv: list) -> tuple[list, list]:
+    """Split the launcher's own flags off an `ambient` invocation.
+
+    `ambient` forwards to `privacy_hud.ambient`'s parser, which owns
+    `--once`, `--watch` and `--session-id`. `argparse.REMAINDER` does not
+    hold them: an option-looking token immediately after the subcommand is
+    consumed by *this* parser, so the shipped wrapper's
+    `privacy-hud-ambient --watch` -- and the exact ambient command the
+    contract tells a user to run -- exited 2 with a usage message. The
+    split is by position and nothing else, and the token is only taken as
+    the subcommand where it is not the value of `--plugin-data`.
+    """
+    for index, token in enumerate(argv):
+        if token == "ambient" and (index == 0
+                                   or argv[index - 1] != "--plugin-data"):
+            return argv[:index + 1], argv[index + 1:]
+    return argv, []
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="runtime.py")
     parser.add_argument("--plugin-data", required=True, metavar="DIR")
@@ -435,10 +454,16 @@ def _dispatch(args, activation) -> int:
 
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else list(argv)
+    # The re-exec passes the *whole* command line on, launcher flags
+    # included; only this process's own parsing is given the head.
+    full_argv = list(argv)
+    argv, ambient_args = _ambient_argv(argv)
     try:
         args = _parser().parse_args(argv)
     except SystemExit as exc:
         return int(exc.code or 0)
+    if args.command == "ambient":
+        args.ambient_args = ambient_args
     data_dir = Path(os.path.abspath(os.path.expanduser(args.plugin_data)))
 
     if args.command == "repair" and args.print_command:
@@ -470,7 +495,7 @@ def main(argv=None) -> int:
         if not _process_is_selected(activation):
             if forged_or_reexecuted:
                 raise _Refused()
-            _reexec(standalone, activation, argv, data_dir)
+            _reexec(standalone, activation, full_argv, data_dir)
         _contract, activation = _enter_selected(data_dir)
         if args.command == "mcp":
             server = _load_mcp_server()
