@@ -23,21 +23,27 @@ DESCRIPTIONS = {
         '\n'
         'accounting_version=1 returns legacy_score, legacy_cap, legacy_percent, legacy_permitted_crossing_rows, legacy_boundary_kinds, legacy_prevented_rows, score_label, and accounting_note. legacy_percent is the existing score divided by its stored cap, rounded and capped at 100. It is not a probability or a fraction of data disclosed. Row counts are not call counts, and boundary kinds are not concrete recipients. Historical accounting includes permitted crossings and may collapse different outcomes. It does not establish confirmed disclosure.\n'
         '\n'
+        'accounting_version=2 returns confirmed_points, budget_cap, a nullable percent, profile_id, accounting_status, observation/event/disclosure counts, action outcome counts, and percentage_unavailable_reasons. Its score_label is "confirmed disclosure points". Evidence gaps or unavailable accounting withhold percent without subtracting charges. Production sessions remain legacy-accounted in Phase 3; version 2 is exercised only in isolated synthetic tests and private copies.\n'
+        '\n'
         'accounting_version=0 returns percent=null, score_label="No session on record", and accounting_note. No numeric score, cap, or counts are available for that session.\n'
         '\n'
         'Report score_label and accounting_note with the result. Do not replace null with zero. The old percent, exposed_items, destinations, and prevented fields are not returned for legacy summaries.\n'
     ),
     'privacy.list_exposures': (
-        'Read public legacy event rows for the selected session. Accepted tab values are "Exposed", "Prevented", and "All events"; they select stored legacy classifications.\n'
+        'Read public event rows for the selected session. Accepted tab values are "Exposed", "Prevented", and "All events".\n'
         '\n'
-        'Each returned row has accounting_version=1. "Exposed" selects legacy permitted-crossing rows, not confirmed deliveries. "Prevented" selects legacy prevented rows, not confirmed host-enforced interventions. count is the stored legacy repetition count, not a distinct-value or call count. Different outcomes may have collapsed into one row.\n'
+        'For accounting_version=1, "Exposed" selects legacy permitted-crossing rows, not confirmed deliveries. "Prevented" selects legacy prevented rows, not confirmed host-enforced interventions. count is the stored legacy repetition count, not a distinct-value or call count. Different outcomes may have collapsed into one row.\n'
+        '\n'
+        'For accounting_version=2, the tabs select exposed events, prevented events, or all six event kinds, including permitted. Evidence is a list of symbolic names. occurrences counts findings, not calls or distinct disclosures. budget_delta is nonzero only on the event that first incurred a disclosure charge; repeats remain visible. A prevented event can record issuance without host enforcement. Production sessions remain legacy-accounted in Phase 3.\n'
         '\n'
         'An unrecorded session returns an empty list. That is not evidence that no events occurred. Raw values and identity hashes are not returned.\n'
     ),
     'privacy.get_exposure_detail': (
-        'Read one public legacy event row by session_id and event_id. The lookup is scoped to both identifiers and returns accounting_version=1.\n'
+        "Read one public event row by session_id and event_id. The lookup is scoped to both identifiers and the session's accounting version.\n"
         '\n'
-        'The stored classification, intervention label, repetition count, and budget contribution retain legacy meanings. They do not establish delivery, host enforcement, or a multi-hop flow. first_seen and budget_cap are included when available.\n'
+        'For accounting_version=1, the stored classification, intervention label, repetition count, and budget contribution retain legacy meanings. They do not establish delivery, host enforcement, or a multi-hop flow. first_seen and budget_cap are included when available.\n'
+        '\n'
+        'For accounting_version=2, the row includes symbolic evidence, observation/action IDs, opaque subject/recipient metadata, occurrences, and the first-disclosure budget_delta. Issuance, execution, host enforcement, and crossing are separate evidence. Production sessions remain legacy-accounted in Phase 3.\n'
         '\n'
         'An unknown event or an event outside the selected session is an error. An unrecorded session has no event detail. This tool reads metadata; it does not save a policy rule.\n'
     ),

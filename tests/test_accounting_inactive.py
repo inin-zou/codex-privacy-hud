@@ -308,7 +308,7 @@ def test_phase3_browser_refuses_malformed_v2_before_projection(tmp_path):
             handler = object.__new__(local_ui_server._Handler)
             handler.server = SimpleNamespace(ledger=led)
             handler.path = endpoint + "?session_id=corrupt&id=1"
-            handler._send_json = lambda status, body: replies.append(
+            handler._send_json = lambda status, body, replies=replies: replies.append(
                 (status, body))
             handler.do_GET()
             assert replies == [(409, {"error": PHASE3_SURFACE_UNSUPPORTED})]
