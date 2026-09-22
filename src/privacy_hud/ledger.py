@@ -53,13 +53,16 @@ import os
 import sqlite3
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Literal
 
 from . import ledger_schema
+from .accounting import (
+    EventRecord, ObservationRecord, RecordResult, ScoringProfile,
+)
 from .budget import contribution, percent
 from .matrix.loader import Matrix
 from .runtime_contract import RuntimeRefusal
@@ -704,6 +707,36 @@ class Ledger:
             if self._migration_failpoint is not None:
                 self._migration_failpoint(statement)
         ledger_schema.validate_schema(self.conn)
+
+    # -- version-2 accounting (#54 Phase 3; no production caller) ----------
+
+    def ensure_profile(self, profile: ScoringProfile) -> str:
+        raise UnsupportedAccounting("version-2 accounting is not implemented")
+
+    def profile_for_session(self, session_id: str) -> ScoringProfile:
+        raise UnsupportedAccounting("version-2 accounting is not implemented")
+
+    def _start_v2_session(
+        self,
+        session_id: str,
+        *,
+        cwd: str,
+        model: str,
+        profile: ScoringProfile,
+    ) -> None:
+        raise UnsupportedAccounting("version-2 accounting is not implemented")
+
+    @contextmanager
+    def _atomic_accounting_write(self) -> Iterator[None]:
+        raise UnsupportedAccounting("version-2 accounting is not implemented")
+        yield  # pragma: no cover
+
+    def record_observation(
+        self,
+        observation: ObservationRecord,
+        events: Sequence[EventRecord],
+    ) -> RecordResult:
+        raise UnsupportedAccounting("version-2 accounting is not implemented")
 
     def _legacy_events_table(self) -> Literal["events", "events_legacy_v1"]:
         """Where this ledger's legacy rows are, decided now.

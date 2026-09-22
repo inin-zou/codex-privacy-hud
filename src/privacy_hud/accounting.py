@@ -406,3 +406,66 @@ def coalesce_value_findings(
             masked_example=safe_masked_example(data_type, value),
         ))
     return tuple(out)
+
+
+#: Detector rule identifiers an event may carry in Phase 3: the committed
+#: guarded-path rules. Every other rule identifier is null.
+PATH_RULE_IDS = frozenset({
+    "path.env",
+    "path.ssh_private_key",
+    "path.key_container",
+    "path.aws_credentials",
+    "path.credentials_json",
+    "path.ssh_config",
+})
+
+#: The source labels an event may carry.
+SOURCE_LABELS = frozenset({
+    "user prompt",
+    "tool input",
+    "tool result",
+    "main agent",
+    "local file",
+    "lifecycle",
+})
+
+
+@dataclass(frozen=True, kw_only=True)
+class ObservationRecord:
+    session_id: str
+    delivery_key: str
+    action_id: str
+    turn_id: str | None
+    ts: int
+    hook_event: HookEvent
+    phase: Phase
+    action_kind: ActionKind
+    boundary: Boundary
+    decision: Decision
+    evidence: Evidence
+    resolution_scope: ResolutionScope
+    potential_crossing: bool
+    scan_gap: ScanGap | None
+
+
+@dataclass(frozen=True, kw_only=True)
+class EventRecord:
+    subject: SubjectInput
+    recipient: RecipientInput
+    kind: EventKind
+    evidence: Evidence
+    data_type: DataType
+    rule_id: str | None
+    occurrences: int
+    source_label: str
+    boundary: Boundary
+    masked_example: str | None
+
+
+@dataclass(frozen=True, kw_only=True)
+class RecordResult:
+    observation_id: str
+    event_ids: tuple[int, ...]
+    disclosure_ids: tuple[int, ...]
+    budget_delta: float
+    duplicate_delivery: bool
