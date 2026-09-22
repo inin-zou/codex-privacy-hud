@@ -621,14 +621,15 @@ class Ledger:
         lacks a stored legacy column is not a layout this reader knows.
         """
         with self._read_transaction():
-            if self._table_exists("events_legacy_v1"):
-                return "events_legacy_v1"
-            present = self._columns("events")
+            table: Literal["events", "events_legacy_v1"] = (
+                "events_legacy_v1"
+                if self._table_exists("events_legacy_v1") else "events")
+            present = self._columns(table)
             missing = set(_LEGACY_COLUMNS) - _LEGACY_OPTIONAL_COLUMNS - present
             if missing:
                 raise UnsupportedAccounting(
-                    "the events table does not have the legacy layout")
-            return "events"
+                    "the legacy events table does not have the required layout")
+            return table
 
     def _columns(self, table: str) -> set[str]:
         return {r["name"] for r in

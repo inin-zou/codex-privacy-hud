@@ -146,7 +146,11 @@
 
   async function fetchJSON(path) {
     const res = await fetch(path);
-    return res.json();
+    const data = await res.json();
+    if (!res.ok || (data && data.error)) {
+      throw new Error("Privacy HUD request failed.");
+    }
+    return data;
   }
 
   async function postJSON(path, body) {
@@ -161,6 +165,10 @@
   async function loadAll() {
     if (!sessionId) {
       const s = await fetchJSON("/api/session");
+      if (!s || !(s.session_id === null ||
+          (typeof s.session_id === "string" && s.session_id.length > 0))) {
+        throw new Error("Privacy HUD session response is invalid.");
+      }
       sessionId = s.session_id;
     }
     if (!sessionId) {
@@ -169,10 +177,7 @@
       mode = "unrecorded";
       summary = null;
       tabData = {};
-      $("subtitle").textContent = "No session on record";
-      renderTiles();
-      renderTabs();
-      renderTable();
+      render();
       return;
     }
 
@@ -279,7 +284,11 @@
       emptyEl.hidden = false;
       emptyEl.textContent = mode === "unrecorded"
         ? (data && data.empty_message) || UNRECORDED_EMPTY
-        : (data && data.empty_message) || "No events to show.";
+        : mode === "unavailable"
+          ? "Could not load session accounting."
+          : tabRows(activeTab) === null
+            ? "Could not load events for this tab."
+            : (data && data.empty_message) || "No events to show.";
     } else {
       emptyEl.hidden = true;
       tbody.innerHTML = rows.map((r, i) => {
@@ -364,7 +373,7 @@
     // rule confirmation never carry over.
     $("ruleConfirmation").textContent = "";
     const emptyEl = $("detailEmpty");
-    if (!row) {
+    if (!row || mode !== "legacy") {
       $("detailTitle").textContent = "";
       $("detailFlow").textContent = "";
       $("detailFields").innerHTML = "";
@@ -436,11 +445,14 @@
     actionsEl.querySelectorAll("button[data-i]").forEach((btn) => {
       const a = actions[Number(btn.dataset.i)];
       btn.addEventListener("click", async () => {
+        if (mode !== "legacy") return;
+        const requestedSession = sessionId;
         const { ok, data } = await postJSON("/api/policy", {
-          session_id: sessionId,
+          session_id: requestedSession,
           rule_type: a.rule_type,
           selector: a.selector,
         });
+        if (mode !== "legacy" || sessionId !== requestedSession) return;
         $("ruleConfirmation").textContent = ok
           ? data.message
           : `Could not save rule: ${data.error || "unknown error"}`;
@@ -454,14 +466,18 @@
   }
 
   function render() {
-    $("subtitle").textContent = sessionId ? `Session ${sessionId}` : "Session ID unknown";
+    $("subtitle").textContent = sessionId ? `Session ${sessionId}`
+      : mode === "unrecorded" ? "No session on record" : "Session ID unknown";
     renderTiles();
     renderTabs();
     renderTable();
     // An unrecorded session has no row to show: an open detail panel is
     // replaced by the empty-detail line, never left on a stale row.
-    if (mode === "unrecorded" && $("detail").style.display === "block") {
+    if (mode === "unrecorded") {
+      selectedIndex = -1;
+      const wasOpen = $("detail").style.display === "block";
       renderDetail(null);
+      if (!wasOpen) $("detail").style.display = "none";
     }
   }
 
@@ -474,5 +490,13 @@
     el.style.display = el.style.display === "block" ? "none" : "block";
   });
 
-  loadAll();
+  loadAll().catch(() => {
+    mode = "unavailable";
+    summary = null;
+    tabData = {};
+    selectedIndex = -1;
+    render();
+    renderDetail(null);
+    $("detail").style.display = "none";
+  });
 })();
