@@ -34,8 +34,17 @@ import server  # `mcp/` is on sys.path via conftest
 from privacy_hud import mcp_tools
 from privacy_hud.ledger import Ledger
 from privacy_hud.matrix.loader import load_matrix
-from privacy_hud.runtime_messages import POLICY_PREFLIGHT_REFUSAL
-from runtime_helpers import close_writer, writer_ledger
+from privacy_hud.runtime_messages import (
+    POLICY_OUTCOME_UNKNOWN,
+    POLICY_PREFLIGHT_REFUSAL,
+)
+from runtime_helpers import (
+    close_writer,
+    policy_daemon,
+    select_runtime,
+    short_data_dir,
+    writer_ledger,
+)
 
 M = load_matrix()
 REPO = Path(__file__).resolve().parents[1]
@@ -70,10 +79,20 @@ def _seed(data_dir: Path) -> int:
 
 
 @pytest.fixture
-def app_env(tmp_path, monkeypatch):
+def app_env(monkeypatch):
     """The real app over a seeded ledger. The connection the app opens is
     captured so teardown can close it: these tests call `app.call_tool`
-    directly, without the server lifespan that closes it in production."""
+    directly, without the server lifespan that closes it in production.
+
+    A short `$PLUGIN_DATA`: `privacy.update_policy` now sends its
+    mutation to the daemon that owns the ledger (#66 Pair 6), and a
+    daemon needs a unix socket beside the data directory. The receipt is
+    written first, before anything takes a writer lease against it.
+    """
+    import shutil
+
+    tmp_path = short_data_dir(prefix="phc")
+    select_runtime(tmp_path)
     event_id = _seed(tmp_path)
     monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))
     opened: list[Ledger] = []
@@ -94,6 +113,7 @@ def app_env(tmp_path, monkeypatch):
                 led.conn.close()
             except sqlite3.Error:
                 pass
+        shutil.rmtree(tmp_path, ignore_errors=True)
 
 
 def _call(app, name, args):
@@ -137,8 +157,16 @@ def test_the_cases_cover_every_exposed_tool(tmp_path):
 
 @pytest.mark.parametrize("name", sorted(server.EXPOSED_TOOLS))
 def test_every_exposed_tool_through_sdk_call_tool(app_env, name):
+    import contextlib
+
     app, data_dir, event_id = app_env
-    got = _payload(_call(app, name, _cases(data_dir, event_id)[name]))
+    with contextlib.ExitStack() as running:
+        if name == "privacy.update_policy":
+            # The one tool that mutates. It no longer opens a writable
+            # connection of its own; the daemon that owns the ledger
+            # applies the rule (#66 Pair 6).
+            running.enter_context(policy_daemon(data_dir))
+        got = _payload(_call(app, name, _cases(data_dir, event_id)[name]))
 
     direct = _direct(data_dir)
     try:
@@ -265,28 +293,37 @@ def test_mcp_database_error_is_explicit_and_sanitized(app_env, monkeypatch,
 
 
 def test_mcp_write_contention_returns_error_without_success(app_env):
-    """Another process holds the write lock past sqlite's 5s busy timeout.
-    The tool must report failure, never `saved: true`, and write nothing."""
+    """Another process holds the write lock past sqlite's busy timeout.
+
+    The tool must never report `saved: true`, and nothing may be written.
+    What it reports changed with #66 Pair 6: the write happens in the
+    daemon now, so a contended write is a request that was transmitted
+    and never answered — an unknown outcome, not a claim that no rule was
+    saved, and not a retry.
+    """
     app, data_dir, _event_id = app_env
-    holder = subprocess.Popen(
-        [sys.executable, "-c",
-         "import sqlite3, sys, time\n"
-         "c = sqlite3.connect(sys.argv[1], isolation_level=None)\n"
-         "c.execute('BEGIN IMMEDIATE')\n"
-         "print('locked', flush=True)\n"
-         "time.sleep(8)\n"
-         "c.execute('ROLLBACK')\n",
-         str(data_dir / "ledger.db")],
-        stdout=subprocess.PIPE, text=True)
-    try:
-        assert holder.stdout.readline().strip() == "locked"
-        with pytest.raises(ToolError) as caught:
-            _call(app, "privacy.update_policy",
-                  {"session_id": SID, "rule_type": "block_path",
-                   "selector": "/tmp/contended"})
-        assert str(caught.value).endswith(FIXED_ERROR)
-    finally:
-        holder.wait(timeout=30)
+    with policy_daemon(data_dir):
+        holder = subprocess.Popen(
+            [sys.executable, "-c",
+             "import sqlite3, sys, time\n"
+             "c = sqlite3.connect(sys.argv[1], isolation_level=None)\n"
+             "c.execute('BEGIN IMMEDIATE')\n"
+             "print('locked', flush=True)\n"
+             "time.sleep(8)\n"
+             "c.execute('ROLLBACK')\n",
+             str(data_dir / "ledger.db")],
+            stdout=subprocess.PIPE, text=True)
+        try:
+            assert holder.stdout.readline().strip() == "locked"
+            with pytest.raises(ToolError) as caught:
+                _call(app, "privacy.update_policy",
+                      {"session_id": SID, "rule_type": "block_path",
+                       "selector": "/tmp/contended"})
+            assert str(caught.value).endswith(POLICY_OUTCOME_UNKNOWN)
+            assert "saved" not in str(caught.value).lower().replace(
+                "was saved", "")
+        finally:
+            holder.wait(timeout=30)
     direct = _direct(data_dir)
     try:
         assert direct.policy_selectors(SID, "block_path") == set()
@@ -317,9 +354,9 @@ def test_mcp_policy_waits_for_the_ledger_owner(app_env):
          "from privacy_hud.ledger import Ledger\n"
          "from privacy_hud.matrix.loader import load_matrix\n"
          "from privacy_hud.runtime_owner import (\n"
-         "    acquire_writer, unselected_activation)\n"
+         "    acquire_writer, running_activation)\n"
          "root = Path(sys.argv[1])\n"
-         "lease = acquire_writer(root, activation=unselected_activation())\n"
+         "lease = acquire_writer(root, activation=running_activation(root))\n"
          "led = Ledger(root / 'ledger.db', load_matrix(),\n"
          "             writer_lease=lease)\n"
          "for i in range(40):\n"
@@ -346,9 +383,10 @@ def test_mcp_policy_waits_for_the_ledger_owner(app_env):
         owner.stdin.flush()
         assert owner.wait(timeout=60) == 0
 
-    _payload(_call(app, "privacy.update_policy",
-                   {"session_id": SID, "rule_type": "block_path",
-                    "selector": "/tmp/after"}))
+    with policy_daemon(data_dir):
+        _payload(_call(app, "privacy.update_policy",
+                       {"session_id": SID, "rule_type": "block_path",
+                        "selector": "/tmp/after"}))
     direct = _direct(data_dir)
     try:
         assert direct.policy_selectors(SID, "block_path") == {"/tmp/after"}
@@ -426,17 +464,22 @@ def test_mcp_shutdown_closes_connection(tmp_path, monkeypatch):
 # the real launcher, over stdio
 # --------------------------------------------------------------------- #
 
-def test_mcp_stdio_round_trip(tmp_path):
+def test_mcp_stdio_round_trip():
     """A client session against `mcp/server.py` through its launcher: the
     runtime receipt (v2) names this interpreter and a bundle, the launcher
     hands over to the bundled bootstrap, which re-execs under it in
     isolated mode, and all five tools answer. No detector is constructed and
     nothing is downloaded."""
+    import shutil
+
     from runtime_helpers import make_bundle, write_receipt_v2
 
-    event_id = _seed(tmp_path)
+    # Short, because `privacy.update_policy` needs the daemon that owns
+    # the ledger and a daemon needs a unix socket beside the data root.
+    tmp_path = short_data_dir(prefix="phi")
     bundle = make_bundle(tmp_path / "bundle")
     write_receipt_v2(tmp_path, bundle=bundle, python=sys.executable)
+    event_id = _seed(tmp_path)
     env = {k: v for k, v in os.environ.items()
            if k not in ("PRIVACY_HUD_BOOTSTRAP_REEXEC", "PYTHONPATH")}
     env.update({"PLUGIN_DATA": str(tmp_path),
@@ -455,7 +498,8 @@ def test_mcp_stdio_round_trip(tmp_path):
                     out[name] = res
         return out
 
-    results = asyncio.run(session())
+    with policy_daemon(tmp_path):
+        results = asyncio.run(session())
     assert set(results) == set(server.EXPOSED_TOOLS)
     for name, res in results.items():
         assert res.is_error is False, (name, res)
@@ -464,3 +508,4 @@ def test_mcp_stdio_round_trip(tmp_path):
         assert direct.policy_selectors(SID, "mask") == {"email"}
     finally:
         close_writer(direct)
+    shutil.rmtree(tmp_path, ignore_errors=True)

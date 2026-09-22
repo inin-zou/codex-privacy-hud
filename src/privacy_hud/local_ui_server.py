@@ -65,16 +65,16 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import mcp_tools, runtime
-from .ledger import Ledger, writer_connection
+from . import mcp_tools, runtime, runtime_commands
+from .ledger import Ledger
 from .matrix.loader import load_matrix
 from .render import _ACRONYMS as _RENDER_ACRONYMS
 from .render import audit as render_audit
 from .render import coverage_banner as render_coverage_banner
 from .render import empty_message as render_empty_message
 from .render import detail as render_detail
-from .runtime_contract import RuntimeRefusal
-from .runtime_messages import POLICY_PREFLIGHT_REFUSAL
+from .runtime_contract import RuntimeRefusal, load_activation
+from .runtime_messages import POLICY_OUTCOME_UNKNOWN, POLICY_PREFLIGHT_REFUSAL
 
 _UI_DIR = Path(__file__).resolve().parent.parent.parent / "ui"
 
@@ -331,7 +331,6 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
-        ledger: Ledger = self.server.ledger  # type: ignore[attr-defined]
         body = self._read_json_body()
 
         if parsed.path == "/api/policy":
@@ -343,27 +342,34 @@ class _Handler(BaseHTTPRequestHandler):
                     400, {"error": "session_id, rule_type, selector are required"})
                 return
             server = self.server  # type: ignore[assignment]
+            data_dir = server.data_dir  # type: ignore[attr-defined]
+            if data_dir is None:
+                self._send_json(503, {"error": POLICY_PREFLIGHT_REFUSAL,
+                                      "code": "setup_missing"})
+                return
             try:
-                # A write needs ownership, and this process is not the
-                # daemon (#66). The lease is taken for exactly this
-                # mutation and given back with it, so the daemon can start
-                # (or a repair can run) the moment the rule is written.
-                with writer_connection(
-                        server.ledger_path,  # type: ignore[attr-defined]
-                        ledger.matrix,
-                        data_dir=server.data_dir,  # type: ignore[attr-defined]
-                        check_same_thread=False) as writable:
-                    mcp_tools.apply_policy(writable, sid, rule_type=rule_type,
-                                           selector=selector)
+                # The mutation goes to the daemon that owns the ledger
+                # (#66 Pair 6). This process's connection is `mode=ro`.
+                activation = load_activation(data_dir)
+                runtime_commands.update_policy(
+                    data_dir, activation=activation, session_id=sid,
+                    rule_type=rule_type, selector=selector)
             except ValueError as exc:
                 self._send_json(400, {"error": str(exc)})
                 return
             except RuntimeRefusal as refusal:
-                # I5/§D: say what is known. Nothing was sent anywhere and
+                # I5/§D: say what is known. Nothing was transmitted and
                 # nothing was written, so "no rule was saved" is a fact
                 # here, not a guess.
                 self._send_json(503, {"error": POLICY_PREFLIGHT_REFUSAL,
                                       "code": refusal.code})
+                return
+            except runtime_commands.PolicyOutcomeUnknown:
+                # Transmitted, and no reply. The rule may or may not have
+                # been saved; the one thing this must not do is claim it
+                # was not, and the one thing it must not try is again.
+                self._send_json(503, {"error": POLICY_OUTCOME_UNKNOWN,
+                                      "code": "request_failed"})
                 return
             # `saved`, not `applied`: the write happened, and that is the
             # only thing this response can honestly certify. `enforcement`

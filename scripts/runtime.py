@@ -8,7 +8,11 @@
                                        [--allow-degraded]
     runtime.py --plugin-data DIR daemon
     runtime.py --plugin-data DIR ambient [existing ambient arguments]
+    runtime.py --plugin-data DIR audit [SESSION_ID] [--tab TAB]
+    runtime.py --plugin-data DIR detail SESSION_ID EVENT_ID
     runtime.py --plugin-data DIR ui [SESSION_ID]
+    runtime.py --plugin-data DIR hud SESSION_ID on|off|status
+    runtime.py --plugin-data DIR read on|off|status
     runtime.py --plugin-data DIR repair --print-command
     runtime.py --plugin-data DIR mcp
 
@@ -138,6 +142,17 @@ def _parser() -> argparse.ArgumentParser:
     ambient.add_argument("ambient_args", nargs=argparse.REMAINDER)
     ui = sub.add_parser("ui")
     ui.add_argument("session_id", nargs="?")
+    audit = sub.add_parser("audit")
+    audit.add_argument("session_id", nargs="?")
+    audit.add_argument("--tab", default="Exposed")
+    detail = sub.add_parser("detail")
+    detail.add_argument("session_id")
+    detail.add_argument("event_id")
+    hud = sub.add_parser("hud")
+    hud.add_argument("session_id")
+    hud.add_argument("action", choices=("on", "off", "status"))
+    read = sub.add_parser("read")
+    read.add_argument("action", choices=("on", "off", "status"))
     setup = sub.add_parser("setup")
     setup.add_argument("--python", required=True, metavar="ABSOLUTE_PYTHON")
     setup.add_argument("--allow-degraded", action="store_true")
@@ -372,6 +387,48 @@ def _dispatch(args, activation) -> int:
         from privacy_hud import local_ui_server
         return local_ui_server.main([args.session_id] if args.session_id
                                     else [])
+    if command == "audit":
+        import json as _json
+
+        from privacy_hud import runtime_commands
+        result = runtime_commands.audit(
+            Path(os.environ["PLUGIN_DATA"]), activation=activation,
+            session_id=args.session_id, tab=args.tab)
+        if result.banner:
+            print(result.banner)
+        print(result.text)
+        # The resolution, once, so a caller that also opens the browser
+        # hands it the same session rather than resolving a second time
+        # and naming another one.
+        print(_json.dumps({"session_id": result.resolved.session_id,
+                           "basis": result.resolved.basis,
+                           "also_active": list(result.resolved.also_active),
+                           "runtime_mismatch": result.runtime_mismatch},
+                          sort_keys=True))
+        return 0
+    if command == "detail":
+        from privacy_hud import runtime_commands
+        try:
+            event_id = int(args.event_id)
+        except ValueError:
+            print("detail: EVENT_ID must be an integer", file=sys.stderr)
+            return 2
+        print(runtime_commands.detail(Path(os.environ["PLUGIN_DATA"]),
+                                      session_id=args.session_id,
+                                      event_id=event_id))
+        return 0
+    if command in ("hud", "read"):
+        import json as _json
+
+        from privacy_hud import runtime_commands
+        data_dir = Path(os.environ["PLUGIN_DATA"])
+        if command == "hud":
+            out = runtime_commands.hud(data_dir, session_id=args.session_id,
+                                       action=args.action)
+        else:
+            out = runtime_commands.read_guard(data_dir, action=args.action)
+        print(_json.dumps(out, sort_keys=True))
+        return 0
     raise _Refused()
 
 

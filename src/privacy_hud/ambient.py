@@ -193,15 +193,22 @@ def _resolve_session_id() -> str | None:
         data_dir = resolve_data_dir()
         if data_dir is None:
             return None
-        path = data_dir / "ledger.db"
-        if not path.exists():
+        # `codex.ledger_path`, never `$PLUGIN_DATA/ledger.db` spelled out
+        # here: after #66's storage transition that pathname is the
+        # directory fence and the ledger is `ledger/active.db`.
+        from . import codex, mcp_tools
+        path = codex.ledger_path(data_dir)
+        if not path.is_file():
             return None
-        from . import mcp_tools
         from .ledger import Ledger
         ledger = None
         try:
             ledger = Ledger(path, _matrix(), initialize=False)
-            return mcp_tools.resolve_audit_session(ledger, path.parent).session_id
+            # The data directory, not the ledger's parent: once the
+            # active store moved, that parent is `$PLUGIN_DATA/ledger/`
+            # and the daemon socket is not in it.
+            return mcp_tools.resolve_audit_session(ledger,
+                                                   data_dir).session_id
         finally:
             if ledger is not None:
                 try:

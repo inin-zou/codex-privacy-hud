@@ -111,32 +111,6 @@ def open_connection(path: Path, *, initialize: bool,
     return conn
 
 
-@contextmanager
-def writer_connection(path: Path, matrix: Matrix, *, data_dir: Path,
-                      check_same_thread: bool = True) -> Iterator["Ledger"]:
-    """A short-lived writable `Ledger` at `path`, under a real writer lease
-    taken in `data_dir`, closed on the way out.
-
-    For the surfaces that still write the ledger directly — the MCP
-    `update_policy` tool and the local browser's `/api/policy` — while the
-    daemon-side policy RPC is not yet in place. Refuses with
-    `RuntimeRefusal("holder_unknown")` while another process owns the
-    ledger, which is what happens whenever the daemon is running, and with
-    `runtime_mismatch` when the runtime selected on disk is not the one
-    running here.
-    """
-    from .runtime_owner import acquire_writer, running_activation
-
-    with acquire_writer(data_dir,
-                        activation=running_activation(data_dir)) as lease:
-        ledger = Ledger(path, matrix, initialize=False, writer_lease=lease,
-                        check_same_thread=check_same_thread)
-        try:
-            yield ledger
-        finally:
-            ledger.conn.close()
-
-
 def _refuse_unsupported(path: Path, check_same_thread: bool) -> None:
     """Validate an existing ledger's schema on a read-only connection.
 

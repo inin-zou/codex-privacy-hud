@@ -9,10 +9,13 @@ checkout's own manifest has been regenerated since the last edit.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import shutil
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -222,3 +225,78 @@ def writer_state(data_dir, *, selected=None, keep: bool = False):
     return new_state(
         data_dir,
         writer_lease=writer_lease(data_dir, selected=selected, keep=keep))
+
+
+# --------------------------------------------------------------------- #
+# a daemon to write policy to (#66 Pair 6)
+# --------------------------------------------------------------------- #
+
+#: One bundle copy for the whole run. `make_bundle` copies a few hundred
+#: files and recomputes a digest; every daemon a test starts wants the
+#: same bundle, and copying it per test is the difference between a
+#: second and a minute.
+_SHARED_BUNDLE: list[Path] = []
+
+
+def shared_bundle() -> Path:
+    if not _SHARED_BUNDLE:
+        _SHARED_BUNDLE.append(
+            make_bundle(Path(tempfile.mkdtemp(prefix="phB")) / "bundle"))
+    return _SHARED_BUNDLE[0]
+
+
+def short_data_dir(prefix: str = "phd") -> Path:
+    """A `$PLUGIN_DATA` short enough to hold a unix socket.
+
+    `AF_UNIX` paths are capped at about 104 bytes and a pytest temporary
+    directory already spends most of that on the test's own name, so any
+    test that starts a daemon takes one of these instead — the same
+    `tempfile.mkdtemp` every socket test in this suite already uses.
+    """
+    return Path(tempfile.mkdtemp(prefix=prefix)).resolve()
+
+
+def select_runtime(data_dir) -> None:
+    """Give `data_dir` a receipt v2 over the shared bundle, if it has none.
+
+    Written *before* a test takes its writer lease: a lease records the
+    selection it was granted under, and a receipt appearing afterwards is
+    correctly a mismatch.
+    """
+    from privacy_hud import runtime_contract
+
+    if (Path(data_dir) / runtime_contract.RECEIPT_NAME).exists():
+        return
+    write_receipt_v2(Path(data_dir), bundle=shared_bundle(),
+                     python=sys.executable)
+
+
+@contextlib.contextmanager
+def policy_daemon(data_dir):
+    """A real daemon serving `data_dir`, stopped on the way out.
+
+    Policy mutations travel to the daemon that owns the ledger (#66 Pair
+    6), so a surface test that saves a rule needs one. Real, not a
+    stand-in: the point of the RPC is that the rule is applied under the
+    daemon's own serialized ledger access, and a stand-in would be a
+    second copy of exactly the code under test.
+    """
+    from privacy_hud import codex
+    from privacy_hud.daemon import Daemon
+    from privacy_hud.runtime_contract import load_activation
+
+    root = Path(data_dir)
+    select_runtime(root)
+    socket_path = codex.socket_path(root)
+    daemon = Daemon(socket_path, root, idle_timeout=3600, poll_interval=0.05,
+                    activation=load_activation(root))
+    thread = threading.Thread(target=daemon.serve_forever, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 20.0
+    while not socket_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    try:
+        yield daemon
+    finally:
+        daemon.stop()
+        thread.join(timeout=20.0)

@@ -76,9 +76,9 @@ from .runtime_contract import (
 from .runtime_owner import owns_writer
 
 #: `$PLUGIN_DATA/ledger/` — the directory that holds the active store.
-ACTIVE_DIR_NAME = "ledger"
+ACTIVE_DIR_NAME = codex.ACTIVE_DIR_NAME
 #: `$PLUGIN_DATA/ledger/active.db`.
-ACTIVE_DB_NAME = "active.db"
+ACTIVE_DB_NAME = codex.ACTIVE_DB_NAME
 #: `$PLUGIN_DATA/ledger.db` — a directory after the transition.
 LEGACY_NAME = codex.LEDGER_NAME
 #: `$PLUGIN_DATA/legacy-retired/<transition-id>/`.
@@ -162,17 +162,10 @@ def journal_path(data_dir) -> Path:
 
 
 def resolved_ledger_path(data_dir) -> Path:
-    """The database this generation opens: the active store once the
-    historical pathname is fenced, and the historical pathname until then.
-
-    Two answers rather than one, because an installation that has not yet
-    been repaired still has its ledger where it always was, and inventing
-    an empty `ledger/active.db` beside it would be inventing a ledger
-    nobody wrote. After repair there is exactly one database and the old
-    pathname is a directory, so the question stops being ambiguous.
-    """
-    root = Path(data_dir)
-    return active_path(root) if is_fenced(root) else legacy_path(root)
+    """The database this generation opens. `codex.ledger_path` is the
+    definition; this name exists for callers already holding this
+    module."""
+    return codex.ledger_path(data_dir)
 
 
 def is_fenced(data_dir) -> bool:

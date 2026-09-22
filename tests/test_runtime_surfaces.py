@@ -315,8 +315,8 @@ def test_mcp_worker_reads_use_read_only_connection(surface, monkeypatch):
             surface.data)
         with pytest.raises(sqlite3.OperationalError, match="readonly"):
             ledger.conn.execute(
-                "INSERT INTO policy(session_id, rule_type, selector, "
-                "created_at) VALUES('s1','mask','email',1)")
+                "INSERT INTO policy(scope, rule_type, selector, "
+                "created_at) VALUES('session:s1','mask','email',1)")
         with pytest.raises(sqlite3.OperationalError, match="readonly"):
             ledger.conn.execute("ALTER TABLE events ADD COLUMN probe TEXT")
     finally:
@@ -394,7 +394,11 @@ def test_skill_audit_resolves_session_once(surface, monkeypatch):
 
     assert len(calls) == 1, "the audit resolved its session more than once"
     assert result.resolved is calls[0]["resolved"]
-    assert result.resolved.session_id in result.text
+    assert result.resolved.session_id == "s1"
+    # The fallback subtitle survives: an inferred resolution is labelled
+    # as inferred rather than printed as "Current session", and the id
+    # itself is deliberately not in the header for that basis.
+    assert "Most recently started session" in result.text
 
 
 def test_history_remains_readable_during_runtime_mismatch(surface):
@@ -406,5 +410,27 @@ def test_history_remains_readable_during_runtime_mismatch(surface):
     assert result.runtime_mismatch is True
     assert result.banner == runtime_messages.AUDIT_RUNTIME_MISMATCH
     assert "Historical records may still be viewed." in result.banner
-    assert "s1" in result.text
+    assert "support.log" in result.text, "the history did not render"
     assert result.resolved.session_id == "s1"
+
+
+def test_ambient_resolves_a_session_from_the_active_store(surface,
+                                                          monkeypatch):
+    """The ambient launcher reads the relocated ledger too.
+
+    It spelled `$PLUGIN_DATA/ledger.db` out for itself, which after the
+    transition is the directory fence: the line would go silent on a
+    repaired installation and look exactly like a machine with nothing to
+    report. It also passed the ledger's own parent as the data directory,
+    which is where the daemon socket is not.
+
+    Landed with the GREEN commit rather than the RED one: the defect was
+    found by reading the remaining callers after the resolver changed,
+    and it is recorded here rather than left to Pair 7.
+    """
+    from privacy_hud import ambient
+
+    monkeypatch.setenv("PLUGIN_DATA", str(surface.data))
+    assert storage.is_fenced(surface.data)
+    assert not storage.legacy_path(surface.data).is_file()
+    assert ambient._resolve_session_id() == "s1"

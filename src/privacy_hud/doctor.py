@@ -709,7 +709,10 @@ def check_runtime_pin(timeout: float = runtime.PROBE_TIMEOUT) -> Check:
     ledger_path = _ledger_path()
     if ledger_path is None:
         return _plugin_data_unset_check("Runtime pin")
-    data_dir = ledger_path.parent
+    # Not `ledger_path.parent`: after #66's storage transition the active
+    # store is `$PLUGIN_DATA/ledger/active.db`, so that parent is the
+    # `ledger/` directory and the receipt is not in it.
+    data_dir = runtime.plugin_data_dir() or ledger_path.parent
     receipt, problem = runtime.load_receipt(data_dir)
 
     if receipt is None and problem == "absent":
@@ -956,7 +959,10 @@ def check_daemon(timeout: float = DAEMON_TIMEOUT, *,
     ledger_path = _ledger_path()
     if ledger_path is None:
         return _plugin_data_unset_check("Daemon")
-    data_dir = ledger_path.parent
+    # Not `ledger_path.parent`, for the same reason as above: the daemon
+    # socket lives beside the receipt in `$PLUGIN_DATA`, not beside the
+    # relocated active store.
+    data_dir = runtime.plugin_data_dir() or ledger_path.parent
     sock_path = _socket_path(data_dir)
     shown = _display_path(sock_path)
     quoted = _shell_path(sock_path)

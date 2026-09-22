@@ -75,9 +75,18 @@ PLUGIN_DATA_DIRNAME = f"{MARKETPLACE_NAME}-{PLUGIN_NAME}"
 #: on and every hook in the session is answered unverified.
 SOCKET_NAME = "daemon.sock"
 
-#: The ledger. `$PLUGIN_DATA/ledger.db` is the one file every reader in this
-#: project — daemon, `$privacy` UI, MCP server, doctor — must agree on.
+#: The historical ledger pathname. A database before #66's transition, and
+#: the directory fence afterwards. `ledger_path()` below is what every
+#: reader in this project — daemon, `$privacy` UI, MCP server, doctor —
+#: must agree on; this constant is only the name of the old place.
 LEDGER_NAME = "ledger.db"
+
+#: Storage generation 1: `$PLUGIN_DATA/ledger/active.db`, the database the
+#: fence exists to keep historical entry points away from.
+#: `runtime_storage` owns the transition that creates it and repeats these
+#: two names; `tests/test_codex_facts.py` keeps the copies honest.
+ACTIVE_DIR_NAME = "ledger"
+ACTIVE_DB_NAME = "active.db"
 
 # --------------------------------------------------------------------- #
 # Hook events
@@ -218,9 +227,27 @@ def codex_data_candidates() -> list[Path]:
 
 
 def ledger_path(data_dir) -> Path:
-    """`$PLUGIN_DATA/ledger.db`. The one derivation; `runtime.ledger_path`
-    is the resolver that decides *which* `$PLUGIN_DATA` first."""
-    return Path(data_dir) / LEDGER_NAME
+    """The ledger every surface opens, given an already-resolved
+    `$PLUGIN_DATA`. `runtime.ledger_path` is the resolver that decides
+    *which* `$PLUGIN_DATA` first.
+
+    Two answers, because a machine can be in two states (#66). Once the
+    historical pathname is the directory fence, the ledger is the active
+    store beside it; until then it is still where it always was. The two
+    never coexist -- `runtime_storage.prepare_storage` retires one as it
+    publishes the other -- so this is a question about which state the
+    installation is in, not a search.
+
+    A file at `ledger.db` is therefore never ignored, and no empty
+    `ledger/active.db` is ever conjured beside one: inventing a database
+    nobody wrote is how a surface comes to report a clean session that
+    never happened.
+    """
+    root = Path(data_dir)
+    fence = root / LEDGER_NAME
+    if fence.is_dir() and not fence.is_symlink():
+        return root / ACTIVE_DIR_NAME / ACTIVE_DB_NAME
+    return fence
 
 
 def socket_path(data_dir) -> Path:

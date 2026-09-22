@@ -90,6 +90,7 @@ from .runtime_client import (
     EVENT_FRAME_LIMIT,
     HELLO_FRAME_LIMIT,
     OP_HELLO,
+    OP_POLICY_UPDATE,
     connect_socket,
     decode_frame,
     encode_frame,
@@ -397,8 +398,13 @@ class _Handler(socketserver.StreamRequestHandler):
             self._write(reply)
             return
 
+        if op == OP_POLICY_UPDATE:
+            saved = self._policy_update_reply(body)
+            if saved is not None:
+                self._write(saved)
+            return
+
         if op != OP_EVENT:
-            # `policy_update` is not served by this daemon yet: silence.
             return
 
         payload = body.get("payload")
@@ -432,6 +438,49 @@ class _Handler(socketserver.StreamRequestHandler):
 
         self._write({"v": PROTOCOL_VERSION, "op": OP_EVENT, "ok": True,
                      "output": output})
+
+    def _policy_update_reply(self, body: dict) -> dict | None:
+        """Save one policy rule, under this daemon's own serialized ledger
+        access, and answer with the result shape the surfaces already
+        return.
+
+        `None` means silence, and silence is the honest answer to a
+        request this daemon could not complete: the client hands its
+        socket away as it transmits, so it reports an unknown outcome
+        rather than inventing one (#66 Pair 6). A *validation* failure
+        cannot reach here — `runtime_commands.update_policy` refuses a
+        malformed rule before it is sent, and `mcp_tools.apply_policy`
+        checks again below — so there is no error string to relay, which
+        is also what keeps peer-chosen text off this wire (I1).
+        """
+        from . import mcp_tools
+
+        required = ("session_id", "rule_type", "selector")
+        if set(body) != set(required) or not all(
+                isinstance(body[name], str) and body[name]
+                for name in required):
+            return None
+        session_id = body["session_id"]
+        rule_type = body["rule_type"]
+        selector = body["selector"]
+        state = self.server.state
+        try:
+            with state.lock:
+                mcp_tools.apply_policy(state.ledger, session_id,
+                                       rule_type=rule_type,
+                                       selector=selector)
+        except Exception:
+            return None
+        return {
+            "v": PROTOCOL_VERSION, "op": OP_POLICY_UPDATE, "ok": True,
+            # `saved`, not `applied`: the rule is in the policy table;
+            # whether it ever fires depends on a later call producing a
+            # finding it matches.
+            "saved": True, "enforcement": "conditional",
+            "rule_type": rule_type, "selector": selector,
+            "conditions": mcp_tools.rule_enforcement_note(
+                rule_type, selector).strip(),
+        }
 
     def _write(self, reply: dict) -> None:
         """One newline-delimited JSON reply, or nothing if the peer is gone.

@@ -251,14 +251,26 @@ def _data_dir() -> Path:
 
 
 def _ledger_path() -> Path:
-    """`$PLUGIN_DATA/ledger.db`."""
-    return _data_dir() / "ledger.db"
+    """The canonical ledger for this data directory (#66).
+
+    `codex.ledger_path`, never `$PLUGIN_DATA/ledger.db` spelled out here:
+    after the storage transition that pathname is the directory fence,
+    and the ledger is `$PLUGIN_DATA/ledger/active.db`.
+    """
+    from privacy_hud import codex
+    return codex.ledger_path(_data_dir())
 
 
 def _read_guard_status() -> dict:
-    """The read guard's setting, from `settings.json` in `$PLUGIN_DATA`."""
+    """The read guard's setting, from `settings.json` in `$PLUGIN_DATA`.
+
+    The data directory, not `_ledger_path().parent`: once the active
+    store moved, that parent is `$PLUGIN_DATA/ledger/`, and a settings
+    lookup there finds nothing and reports the guard off for a user who
+    turned it on.
+    """
     from privacy_hud import mcp_tools as tools
-    return tools.read_guard_status(_ledger_path().parent)
+    return tools.read_guard_status(_data_dir())
 
 
 def _open_ledger() -> "Ledger":
@@ -508,38 +520,41 @@ def build_app():
         hard-blocked data type is also refused. Data already disclosed stays
         disclosed.
         """
-        from privacy_hud.ledger import writer_connection
-        from privacy_hud.matrix.loader import load_matrix
-        from privacy_hud.runtime_contract import RuntimeRefusal
-        from privacy_hud.runtime_messages import POLICY_PREFLIGHT_REFUSAL
+        from privacy_hud import runtime_commands
+        from privacy_hud.runtime_contract import RuntimeRefusal, load_activation
+        from privacy_hud.runtime_messages import (
+            POLICY_OUTCOME_UNKNOWN,
+            POLICY_PREFLIGHT_REFUSAL,
+        )
 
-        with tool_access():
-            # The server's own connection is `mode=ro` (#66): the daemon
-            # owns ledger writes, and this process is not it. A rule is
-            # written under a lease taken for this one mutation, inside the
-            # same `tool_access()` lock as every other ledger use here, so
-            # the worker-thread serialization this server depends on is
-            # unchanged.
-            try:
-                with writer_connection(_ledger_path(), load_matrix(),
-                                       data_dir=_data_dir(),
-                                       check_same_thread=False) as writable:
-                    mcp_tools.apply_policy(writable, session_id,
-                                           rule_type=rule_type,
-                                           selector=selector)
-            except RuntimeRefusal:
-                # Refused before the write. Nothing was saved, and saying so
-                # is a fact rather than a guess (§D).
-                raise ToolError(POLICY_PREFLIGHT_REFUSAL) from None
+        # The mutation goes to the daemon that owns the ledger (#66 Pair
+        # 6). This process opens `mode=ro` and could not write the rule
+        # even if it tried. Note that `_data_dir()` is read outside
+        # `tool_access()` on purpose: the lock serializes THIS server's
+        # ledger connection, and a socket round trip to another process
+        # has no business holding it.
+        data_dir = _data_dir()
+        try:
+            activation = load_activation(data_dir)
+            result = runtime_commands.update_policy(
+                data_dir, activation=activation, session_id=session_id,
+                rule_type=rule_type, selector=selector)
+        except ValueError as invalid:
+            # The rule itself, refused before anything was sent.
+            raise ToolError(str(invalid)) from None
+        except RuntimeRefusal:
+            # Refused before transmission. Nothing was saved, and saying
+            # so is a fact rather than a guess (§D).
+            raise ToolError(POLICY_PREFLIGHT_REFUSAL) from None
+        except runtime_commands.PolicyOutcomeUnknown:
+            # Sent, and no reply. Never "not saved", and never retried.
+            raise ToolError(POLICY_OUTCOME_UNKNOWN) from None
         # `saved`, not `applied`. The rule is in the policy table; whether it
         # ever fires depends on a later call producing a finding it matches.
         # For every type outside `mcp_tools.CHEAP_DATA_TYPES`, matching
         # requires an accepted deep-scan result (#49 item 2, known limit 21). Report what happened, not what the
         # user hopes will happen.
-        return {"saved": True, "enforcement": "conditional",
-                "rule_type": rule_type, "selector": selector,
-                "conditions": mcp_tools.rule_enforcement_note(
-                    rule_type, selector).strip()}
+        return result
 
     @app.tool(name="privacy.read_guard_status")
     def read_guard_status() -> dict:

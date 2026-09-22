@@ -519,11 +519,23 @@ def _registered_tools(app):
 
 
 @pytest.fixture
-def mcp_app(tmp_path, monkeypatch):
+def mcp_app(monkeypatch):
+    """The MCP app over a seeded ledger, with the daemon that owns it.
+
+    A short `$PLUGIN_DATA` and a real daemon, because `update_policy`
+    sends its mutation over the socket since #66 Pair 6; the receipt is
+    written before anything takes a writer lease against it.
+    """
+    import shutil
+
+    from runtime_helpers import policy_daemon, select_runtime, short_data_dir
+
     sys.path.insert(0, str(REPO / "mcp"))
     import server
     from privacy_hud.matrix.loader import load_matrix
 
+    tmp_path = short_data_dir(prefix="phr")
+    select_runtime(tmp_path)
     led = writer_ledger(tmp_path / "ledger.db", load_matrix())
     led.start_session("s1", cwd="/r", model="gpt-5")
     led.conn.close()
@@ -539,10 +551,12 @@ def mcp_app(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "_open_ledger", capture)
     app = server.build_app()
     try:
-        yield app
+        with policy_daemon(tmp_path):
+            yield app
     finally:
         for ledger in opened:
             ledger.conn.close()
+        shutil.rmtree(tmp_path, ignore_errors=True)
 
 
 def test_policy_tool_registered_description_is_conditional(mcp_app):
