@@ -2,6 +2,10 @@
 
 The [one-command installer](../README.md#install) runs the steps below itself. Read this page to see or control each one — installing the plugin, recording the interpreter, or running only the fallback pane without a patched Codex build.
 
+Privacy HUD 0.7.8 writes snapshot version 2. Updated readers accept version 1 as explicitly legacy and accept version 2 with nullable accounting fields. Older patched Codex readers reject version 2 and show no Privacy item. A matching Codex version alone does not establish snapshot compatibility. Use a snapshot-v2-compatible patched build, or run privacy-hud-ambient --watch in a separate terminal pane.
+
+The already-published snapshot-v1 builds do not support 0.7.8 snapshots. Updated release artifacts have not been published as part of this change.
+
 ## Prerequisites
 
 Tier 3 detection (person, address, date, account number — the categories no regex can shape-match) runs the `openai/privacy-filter` model locally. It is not optional equipment: without it the engine still runs, but only tiers 0–2, which means credentials and paths are still caught and **names and addresses are not**.
@@ -118,13 +122,13 @@ The daemon check is a real round trip, not a look at the socket file — a unix 
 
 Note that the doctor and the daemon need not be the same interpreter any more. Run `privacy-hud-doctor` from anywhere; where its own `transformers` view differs from the daemon's, the report says so rather than passing one off as the other.
 
-Starting with version 0.7.5, the MCP check validates the five-tool list and calls `privacy.get_session_summary` with the synthetic session ID `__privacy_hud_doctor_probe__`. It requires a valid summary response; tool discovery alone is insufficient. The probe adds no session, policy, event or coverage rows, although server initialization can create or migrate the database. A successful read confirms that the MCP ledger-read path responds; zero totals do not establish that monitoring is working.
+Starting with version 0.7.5, the MCP check validates the five-tool list and calls `privacy.get_session_summary` with the synthetic session ID `__privacy_hud_doctor_probe__`. It requires a valid summary response; tool discovery alone is insufficient. In 0.7.8 the MCP reader opens an existing ledger without initialization or migration. The probe adds no session, policy, event or coverage rows and normally returns the unrecorded variant with `percent=null`. A successful read confirms that the MCP ledger-read path responds; it does not establish that monitoring is working.
 
 **Exit code 0 when the setup is usable, 1 only when something is genuinely broken.** Degraded-but-working is a warning, not a failure: with no model weights the engine still runs tiers 0–2, so that is reported as `[WARN]` with the consequence spelled out — *names and addresses will not be detected* — and the command still exits 0, which is what makes it usable in a setup script. `[FAIL]` is reserved for states where nothing this plugin promises can happen at all: no runtime pin, so nothing will ever start a daemon; a recorded interpreter that is gone or cannot import the package; a daemon that is listening and not answering; no `PLUGIN_DATA`; no installed plugin; an interpreter below the floor.
 
 It reads the ledger read-only and never creates it, and it reports counts, versions, timestamps and the paths of its own machinery — never a prompt, a file, a detected value, or anything from a session. `--check-model` swaps the cheap on-disk weights check for actually constructing the tier 3 detector (~2.8 GB, about 7 s); by default it says the weights are present and that it did not load them, rather than claiming to know.
 
-**3. Optional — start the fallback Level 1 HUD in a second terminal pane.** If `install.sh` (or the forwarder) found a patched Codex build matching your version, the `privacy` item already lives in Codex's own status line and you can skip this step. Otherwise this is the fallback: a separate process, not a Codex status item, that reads `$PLUGIN_DATA/hud/<session_id>.json` — the same snapshot file (contract A) the patched binary itself reads — and redraws one line in place, so give it its own pane or split beside the pane running Codex. It only moves while a daemon is up and has written that file: with no daemon running, or before the file exists, the HUD shows nothing. Codex's first tool call starts the daemon — but if you want the pane live before that, start the daemon by hand as shown in step 2. It never reports 0% for a session that is simply unmonitored.
+**3. Optional — start the fallback Level 1 HUD in a second terminal pane.** If `install.sh` (or the forwarder) found a snapshot-v2-compatible patched Codex build matching your version, the `privacy` item already lives in Codex's own status line and you can skip this step. Otherwise this is the fallback: a separate process, not a Codex status item, that reads `$PLUGIN_DATA/hud/<session_id>.json` — the same snapshot file (contract A) the patched binary itself reads — and redraws one line in place, so give it its own pane or split beside the pane running Codex. It only moves while a daemon is up and has written that file: with no daemon running, or before the file exists, the HUD shows nothing. Codex's first tool call starts the daemon — but if you want the pane live before that, start the daemon by hand as shown in step 2. It never reports 0% for a session that is simply unmonitored.
 
 ```bash
 export PLUGIN_DATA=~/.codex/plugins/data/codex-privacy-hud-codex-privacy-hud
@@ -132,26 +136,26 @@ PYTHONPATH=src python3 -m privacy_hud.ambient --watch
 ```
 
 ```text
-PRIVACY  Disclosure ███░░░░░░░ 30%  ›
+Privacy legacy 30%
 ```
 
 `--watch` redraws every 2 seconds; `--watch N` sets the interval. With no flags (or `--once`) it prints a single line and exits, which is what you want from a shell prompt or another status bar. `--session-id <id>` pins the pane to one session and skips resolution entirely. Without it, *which* session the line is about is resolved the same way `$privacy` resolves it — by asking the daemon — but only about once every 30 seconds, not on every redraw: see known limit 8 for both halves of that trade. If the package is installed, the same entry point is available as `privacy-hud-ambient`.
 
-`--once` is also the quickest way to confirm the whole stack is live: if it prints a line, the daemon is up and the snapshot file is readable. If it prints nothing, nothing has been recorded yet — and `privacy-hud-doctor` is what tells you *why* not.
+`--once` checks what the snapshot reader can display. A line is not proof that the whole stack is live. Silence can mean a missing, malformed, stale, or hidden snapshot, unresolved session selection, or insufficient width; it does not establish an empty ledger. Use `privacy-hud-doctor` to investigate runtime availability.
 
-A third form appears when the ledger's account of the session has a known hole:
+A recorded legacy session with known coverage gaps can show:
 
 ```text
-PRIVACY  Disclosure ░░░░░░░░░░  0% ⚠unverified ›
+Privacy legacy 0% ⚠unverified
 ```
 
-Read this as *"the ledger holds 0%, and the ledger is not a complete record of this session"* — not as a clean session. It is what you get when the daemon cold-started after the session began, when it was replaced mid-session, or when hook calls were answered while nothing was listening. `$privacy` names which of those it was. Below 28 columns the word does not fit and the line becomes `⚠ 0%`, the warning glyph taking the band dot's place rather than trailing the number, so truncation can never leave a bare percentage behind. See known limit 2 for what this marker does and does not catch.
+This is a legacy zero with incomplete coverage, not proof of no disclosure. An explicitly unrecorded session shows `Privacy —% · No session on record`. Daemon-reported gaps without a resolved session show `Privacy —% · unattributed hook gaps`. The pane selects complete width candidates, retaining `legacy` beside legacy percentages and a warning for incomplete coverage; it renders nothing if none fits. See known limit 2.
 
 **4. Use Codex normally.** The plugin's hooks (`hooks/hooks.json`) fire on every `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SubagentStart`/`Stop`, and `SessionEnd` — no per-command action needed. The first hook of the session starts the daemon if nothing is listening; that hook and the ones during the ~7 s model load are answered without detection.
 
 **5. Run `$privacy` at any point** to see the session audit — the ASCII table always works; it also starts a local browser UI at a `127.0.0.1` URL it prints (never a link to anything else).
 
-**6. When a call is blocked**, Codex surfaces the reason via `systemMessage`. Run `$privacy` to review the exposure. Neither "minimize and retry" nor "allow once" is an action any surface offers *you* — [`design.md` §8](../.claude/docs/design.md) is an internal design document describing a consent flow that was never built, not a feature this plugin ships. Masking itself is not missing: the engine does it on its own, without asking, wherever the policy for that destination is "mask" rather than "block", and says so (`PRIVACY HUD masked a tool call`). What does not exist is the choice — a prompt asking you which of the two you want for this call.
+**6. When Privacy HUD issues a denial or returns rewritten input**, its `systemMessage` describes that decision and directs you to `$privacy` to review the ledger. Host enforcement or application of rewritten input is not confirmed. Neither “minimize and retry” nor “allow once” is an available user action; [`design.md` §8](../.claude/docs/design.md) records an unbuilt consent proposal. The current rewrite message is `PRIVACY HUD returned rewritten input`.
 
 **7. Uninstall the plugin itself.** (If you used the one-command installer, run [`install.sh --uninstall`](../README.md#uninstall) instead — it also removes the patched Codex build and the forwarder. This step only removes the plugin; also stop any daemon still running — an auto-started one exits by itself five minutes after your last Codex session ends — and the ambient HUD from step 3 if you started it):
 

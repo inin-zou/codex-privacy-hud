@@ -1,6 +1,8 @@
 # Codex Privacy HUD
 
-![运行补丁版 Codex 0.154 的真实会话：一条包含街道地址的提示词、模型的回复，以及输入框下方已显示 5% 的 Privacy 状态项，与 Codex 自带的模型状态项并排显示](docs/images/banner.png)
+![补丁版 Codex 0.154 的历史会话，显示旧版记账数值 5%](docs/images/banner.png)
+
+这是 snapshot v1 HUD 的历史截图。图中的百分比采用旧版记账，截图早于显式 legacy 标签的加入。
 
 [![CI](https://github.com/inin-zou/codex-privacy-hud/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/inin-zou/codex-privacy-hud/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/inin-zou/codex-privacy-hud)](LICENSE)
@@ -12,7 +14,11 @@
 
 > **看清智能体知道什么。掌控数据去向。**
 
-Codex Privacy HUD 是一个本地优先的 Codex 插件。插件为每个 Codex 会话实时维护一份**披露账本**，在工具执行**之前**尽量减少敏感上下文。你可以查看插件实际观察到的数据跨越边界的记录：进入模型上下文、发送给 MCP 工具，或发送到外部主机。
+Codex Privacy HUD 是一个本地优先的 Codex 插件，在会话账本中记录 hook 观测，并可在工具执行前返回拒绝决定或改写后的输入。
+
+HUD 当前显示旧版许可跨界评分（legacy permitted-crossing score）。旧版记账包含获准的跨界操作，也可能将不同结果合并到同一行；它不能证明数据已实际披露。计数标记统计旧版 prevented 行数，不是被拒绝的调用次数，也不是已确认由宿主执行的干预次数。未记录的会话显示“No session on record”，不显示百分比或数字计数。
+
+Privacy HUD 返回拒绝决定或改写后的输入，并不能证明宿主实际应用了它。当前 hook 无法证明被拒绝的调用没有执行，也无法证明改写后的输入到达了预期接收方。
 
 这里的“目的地”指边界类别，不代表具体接收方：目前，第二个 MCP 服务器不算新的目的地，子智能体启动时继承了什么则完全没有记录，见已知限制第 19、20 条。
 
@@ -20,10 +26,12 @@ Codex Privacy HUD 是一个本地优先的 Codex 插件。插件为每个 Codex 
 
 ```text
 Token HUD:    How much context has been consumed?
-Privacy HUD:  How much sensitive context has been disclosed?
+Privacy HUD:  What does this session's legacy accounting record?
 ```
 
 ![Codex Privacy HUD 使用流程：从常驻披露条进入会话审计，查看暴露详情，并在数据到达外部工具之前精简发送内容](docs/images/user-journey-mockup.zh-CN.png)
+
+这张手绘图用于说明设计意图，绘制于显式 legacy 标签加入之前。图中的进度条和干预流程不代表当前显示格式或已确认的宿主行为。
 
 **使用前请先了解：**模型加载期间，会话开头没有监控。托管工具绕过 hook。检测采用启发式方法。如果 HUD 已知某个会话的记录有缺口，则会标记该会话，不会只显示一个看似无事发生的 0%。但 HUD 无法告诉你漏掉了什么。请阅读[已知限制](#已知限制)。
 
@@ -48,6 +56,10 @@ Privacy HUD:  How much sensitive context has been disclosed?
 - 2026-09-05：已使用 Codex CLI 0.153.0 手动验证：在插件自身的开发会话中运行插件，暴露数为零（事件数为零，预算为 0.0/120.0）。这**不是**自动化测试。验证需要真实运行的 Codex 会话，而 CI 既没有相应二进制，也没有所需的网络条件。
 
 ## 安装
+
+Privacy HUD 0.7.8 写入 snapshot v2。新版读取器将 v1 明确标为旧版记账，并支持带可空记账字段的 v2。旧补丁版 Codex 读取器会拒绝 v2，不显示 Privacy 状态项。Codex 版本相同并不代表快照兼容。请使用支持 snapshot v2 的补丁版构建，或在独立终端窗格运行 `privacy-hud-ambient --watch`。
+
+已经发布的 snapshot v1 构建不支持 0.7.8 快照。本次变更尚未发布新版构建。
 
 已在真实的 Codex CLI 0.145.0 和 0.153.0 安装环境中完成端到端验证。
 
@@ -116,10 +128,10 @@ codex plugin add codex-privacy-hud@codex-privacy-hud
 起初状态行看起来没有变化。Codex 在第一轮交互时才触发 `SessionStart` hook，启动时不会触发。因此，在你发送消息之前，守护进程收不到任何内容。发送第一条提示词后，状态行项会出现在输入框下方，与常规状态行项并排显示，见[下方截图](#界面概览)：
 
 ```text
-Privacy ░░░░░░░░░░  0% · gpt-5.4 · ~/proj · Context 96% left
+Privacy legacy 0% · gpt-5.4 · ~/proj · Context 96% left
 ```
 
-在敏感内容进入模型上下文之前，数值保持 0%。随着文件、提示词和工具参数进入上下文，数值会相应变化。
+已记录的旧版会话从 `legacy 0%` 开始，数值沿用现有评分算法。零分不能证明没有发生披露。
 
 如果本机守护进程尚未运行，则第一条提示词也会启动守护进程。加载模型大约需要七秒。第一个 hook 的回复会显示 `Privacy HUD unavailable — disclosure unverified`，状态行项稍后才出现。加载期间没有监控，详见[已知限制](#已知限制)。接下来可以使用：
 
@@ -129,47 +141,36 @@ Privacy ░░░░░░░░░░  0% · gpt-5.4 · ~/proj · Context 96% l
 
 ## 界面概览
 
-**Level 1：常驻显示。** 在 Codex 输入框下方的原生状态行中显示一个状态行项：
+**Level 1：常驻显示。** 支持 snapshot v2 的补丁版 Codex 在输入框下方显示一个状态行项：
 
 ```text
-gpt-5.4 · ~/proj · Privacy ███░░░░░░░ 28% ⚠2
+gpt-5.4 · ~/proj · Privacy legacy 28% · 2 prevented rows
 ```
 
-下面是补丁版 Codex 0.154 真实会话的输出，不是效果图。发送一条含街道地址的提示词后，输入框下方的 `Privacy` 状态行项已显示 5%，旁边是 Codex 自带的模型和目录状态行项：
+这是 snapshot v1 HUD 的历史截图。图中的百分比采用旧版记账，截图早于显式 legacy 标签的加入。
 
-![Codex 真实会话：含街道地址的提示词、模型回复，以及输入框下方显示披露比例 5% 的插件 `Privacy` 状态行项，旁边是 Codex 自带的模型和目录状态行项](docs/images/status-line-patched.png)
+![补丁版 Codex 历史会话中的旧版记账数值 5%](docs/images/status-line-patched.png)
 
 原版 Codex 不支持插件自有的状态行项，因此需要带有小补丁的 Codex 构建。补丁为 `patches/privacy-status-line.patch`，只新增一个状态行项，没有其他改动。`install.sh` 下载与你的 Codex 版本完全一致的构建，将其放在官方二进制旁边，绝不修改官方二进制。只有版本匹配时，`codex` 才指向补丁版构建。
 
 运行 Codex 内的 `/statusline`，可切换状态行项的显示。运行 `$privacy hud off`，可临时隐藏。如果没有匹配的构建，则使用伴随窗格：在第二个终端运行 `privacy-hud-ambient --watch`。
 
-伴随窗格以三种形式显示同一条状态信息。常规形式如下：
+伴随窗格使用相同的记账标签：
 
 ```text
-PRIVACY  Disclosure ███░░░░░░░ 30%  ›
+Privacy legacy 30%
+Privacy legacy 0% ⚠unverified
+Privacy —% · No session on record
+Privacy —% · unattributed hook gaps
 ```
 
-如果账本已知会话记录有缺口，则显示以下形式，明确提示缺口，不会只给出一个看似完整的数值：
+以上分别表示旧版记账、旧版记录存在缺口、明确未记录的会话，以及守护进程报告了缺口但尚未解析出会话。窗格只选择能完整放下的候选文本；旧版百分比始终保留 `legacy`，记录不完整时保留警告。没有候选文本能放下时不显示。快照缺失、格式错误、过期或隐藏时也不显示。
 
-```text
-PRIVACY  Disclosure ░░░░░░░░░░  0% ⚠unverified ›
-```
+**Level 2：会话审计**（`$privacy`）。四张卡片分别标为 `legacy permitted-crossing score`、`legacy permitted-crossing rows`、`legacy boundary kinds` 和 `legacy prevented rows`，并显示记账说明。未记录的会话显示不可用，不以零替代。
 
-如果宽度不足 28 列，则无法容纳这个单词，状态行会改为 `⚠ 0%`。警告符号取代表示区间的圆点，确保截断后绝不会只剩一个百分比。
+标签页为 `Legacy permitted crossings`、`Legacy prevented rows` 和 `All legacy events`。每行展示保存的旧版分类、重复计数及来源与目的地的记录关联，不能证明实际送达或宿主执行了干预。
 
-**Level 2：会话审计**（`$privacy`）。界面包含汇总卡片，以及按标签页展示每条数据流的表格：
-
-```text
-SENSITIVE DATA        SOURCE           DESTINATION      STATUS
-Customer email ×12    support.log      model context    [EXPOSED]
-Full name ×1          user prompt      model context    [EXPOSED]
-Repository path ×4    tool input       GitHub MCP       [EXPOSED]
-API credential ×1     .env             none             [PREVENTED]
-```
-
-标签页：`Exposed`（已暴露）· `Prevented`（已阻止）· `All events`（全部事件）。
-
-**Level 3：暴露详情。** 查看单条数据流、脱敏后的证据，以及面向后续披露的补救措施（`Mask detected <type> in future calls`；对于标明真实来源的行，还可使用 `Block values read from <file>`）。这些措施无法撤销披露——已经披露的数据无法收回，且来源规则仅匹配未经改动就向外发送的值。
+**Level 3：暴露详情。** 展示一条公开的旧版记录、脱敏示例及旧版干预标签。终端详情不保存策略规则。本地审计浏览器的按钮通过 `/api/policy` 保存规则；MCP `privacy.update_policy` 是另一个写入入口。只有入口返回成功后，才能报告规则已保存，并应同时说明返回的适用条件。后续拒绝决定或改写输入是否由宿主实际应用，仍未确认。
 
 **MCP 工具。** Codex 还提供五个可由模型调用的工具：查看会话摘要、暴露列表、单次暴露的详情和读取防护状态，以及写入策略规则。服务器以 `privacy.<name>` 注册这些工具，Codex 向模型提供的名称则使用下划线，因此会话记录中显示的是 `privacy_get_session_summary`、`privacy_list_exposures`、`privacy_get_exposure_detail`、`privacy_read_guard_status` 和 `privacy_update_policy`。前四个只提供查询，第五个只能收紧防护，因为引擎会优先执行唯一的无条件硬拦截——拦截携带凭据的出站调用——再考虑你或模型能写入的任何规则：携带凭据的调用直接由内置默认策略决定，即予以拦截，完全跳过用户掩码规则。无论规则的选择器指定什么，这一点都成立，而这正是关键所在：即使规则针对的是文件路径这类无害类型，它也可能匹配到同时携带凭据的调用。选择器直接指定被硬拦截类型的掩码规则仍会在写入时被拒绝，因为这样的规则如今无法决定任何处理结果，却会让人误以为已经施加了防护。关闭读取防护和隐藏 HUD 不在这五个工具之中，因为 MCP 工具由模型调用，而放宽防护的开关不能交给防护所约束的模型。这两项操作只能通过你亲自输入的 `$privacy` 执行。临时放行一次被拦截的调用也不在其中，但原因不同：这项操作根本没有任何入口——`$privacy` 不提供，审计界面不提供，MCP 工具也不提供——见[已知限制第 13 条](docs/known-limits.md#13-no-policy-rule-can-be-removed-within-the-session-that-wrote-it)。
 
@@ -210,7 +211,7 @@ support.log → main agent → GitHub MCP
 
 ### 读取防护
 
-上面的规则都在数据向外发送时生效。在数据**进入**模型之前，有一类操作可以拦截：读取已知敏感路径（如 `.env`、`id_rsa`、`deploy/key.pem`）的 shell 命令会在运行前触发 `PreToolUse`，此时可以拒绝这次调用。命令不执行，文件中的任何内容就都不会到达模型。
+读取防护可在 `PreToolUse` 阶段，对能识别出的敏感路径 shell 读取发出拒绝决定，例如读取 `.env` 或 `deploy/key.pem`。它在执行前检查命令文本；当前 hook 无法确认宿主是否执行了拒绝决定。
 
 读取防护只检查 shell，因为 Codex 通过 shell 读取文件：它没有原生的文件读取工具，模型会运行 `cat` 来读取。其他工具一律不经检查直接放行，见已知限制第 14 条。
 
@@ -277,10 +278,10 @@ flowchart TD
 14. **只有提取器能识别出读取操作的 shell 命令才会被拦截。** 防护只检查 shell 这一种工具，因为 Codex 通过它读取文件；其他工具一律不经检查直接放行。即使是 shell 命令，也只有 `cat .env` 这样的读取会被拦截；`wc -l .env`、`source .env`、`cp .env /tmp/x`、`strings id_rsa`、`head -5 .env` 和 `python -c "open('.env')"` 都不会被拦截：不拒绝、不提示、不写入记录。具体机制见第 11 条。（[详情](docs/known-limits.md#14-only-a-shell-command-whose-read-the-extractor-recognises-is-stopped)）
 15. **模板文件永远不会被拦截。** 即使其中确实包含密钥也一样，但检测仍会将其标记出来。（[详情](docs/known-limits.md#15-a-template-file-is-never-blocked)）
 16. **只有手动开启防护后，读取才会被拦截。** 默认只记录读取，并在每个会话中提示一次防护功能，不会拦截任何读取。（[详情](docs/known-limits.md#16-nothing-is-blocked-until-you-turn-it-on)）
-17. **在特定操作顺序下，被拦截的读取可能留下与实际情况相反的记录。** 先在防护关闭时读取，再开启防护并再次读取：账本按 `(session_id, value_hash, destination)` 去重，因此这次拒绝只会增加原有行的 `count`。最终保留的是一行 `local_access` 记录，表示第一次读取的文件被读取了两次，且没有任何操作被拦截。由于没有写入 `prevented` 行，即使确实发生了拒绝，状态行项的拦截计数仍为 `0`。（[详情](docs/known-limits.md#17-a-blocked-read-can-leave-a-record-that-says-the-opposite-in-one-sequence)）
-18. **被拦截读取的记录不包含文件名。** 记录依据的是匹配到的模式（`.pem`、`.env` 等），因此两个匹配同一模式的不同文件会被去重为一行。你能看到有读取被拦截，但无法知道是哪个文件。计数标记统计的是行数，因此对两个 `.pem` 文件的两次读取均被拒绝时，显示的计数为 `1`。（[详情](docs/known-limits.md#18-a-blocked-reads-row-does-not-name-the-file)）
+17. **在特定操作顺序下，被拦截的读取可能留下与实际情况相反的记录。** 先在防护关闭时读取，再开启防护并再次读取：账本按 `(session_id, value_hash, destination)` 去重，因此这次拒绝只会增加原有行的 `count`。最终保留的是一行 `local_access` 记录，表示第一次读取的文件被读取了两次，且没有任何操作被拦截。由于没有写入 `prevented` 行，插件发出拒绝决定后，`legacy_prevented_rows` 仍为 0；HUD 不显示为零的次要计数。这不能证明宿主执行了拒绝决定。（[详情](docs/known-limits.md#17-a-blocked-read-can-leave-a-record-that-says-the-opposite-in-one-sequence)）
+18. **被拦截读取的记录不包含文件名。** 记录依据的是匹配到的模式（`.pem`、`.env` 等），因此两个匹配同一模式的不同文件会被去重为一行。该行记录插件的 prevented 分类，不能确认宿主已拦截，也不能区分具体文件。两次读取匹配 `.pem` 时，HUD 可能只显示 `1 prevented row`。（[详情](docs/known-limits.md#18-a-blocked-reads-row-does-not-name-the-file)）
 19. **子智能体继承了什么，没有记录。** `SubagentStart` 的观测事件不携带文本，因此不会运行任何检测器，也不会产生账本记录。“子智能体是否继承了 `.env`？”这个问题在账本中没有答案。（[详情](docs/known-limits.md#19-what-a-subagent-inherited-is-not-recorded)）
-20. **目的地表示边界类别，不代表具体接收方。** 所有 MCP 调用都归为 `mcp_tool`；将同一个值发送给第二个 MCP 服务器不算新的目的地，也不会再增加披露预算用量。`destinations` 卡片统计的是类别数，不是服务数。（[详情](docs/known-limits.md#20-a-destination-is-a-boundary-category-not-a-recipient)）
+20. **目的地表示边界类别，不代表具体接收方。** 所有 MCP 调用都归为 `mcp_tool`；将同一个值发送给第二个 MCP 服务器不算新的目的地，也不会再增加披露预算用量。`legacy boundary kinds` 卡片（`legacy_boundary_kinds`）统计的是类别数，不是服务数。（[详情](docs/known-limits.md#20-a-destination-is-a-boundary-category-not-a-recipient)）
 21. **出站调用的深度扫描尽力而为。** 模型串行执行，而出站调用一旦错过 hook 时限就会被判为拒绝（I6）。出站扫描使用基于剩余预算的请求超时，并以完成时间不晚于截止点作为采纳结果的必要条件；两者都不保证实际耗时。详见 `engine.TIER3_EGRESS_BUDGET`。（实测：在 1.0 秒预算下，一次调用到 1.25 秒才返回。）同一时间最多允许一个出站扫描工作线程运行。准入是非阻塞的；工作线程会一直占用其名额直到退出，即使调用方已放弃等待也是如此。扫描缺口是指本应适用的深度扫描未提供被采纳的结果。此时调用仅依据快速检测层的结果继续处理，与引入这项功能之前的所有出站调用相同。扫描缺口可能漏掉原本会触发拦截或脱敏的发现。每次观测中的扫描缺口都会记录，并按会话计数，包括未产生事件行的观测。因此会话不再显示为已完全验证，但审计无法指出具体是哪些调用。（[详情](docs/known-limits.md#21-on-an-outbound-call-the-deep-scan-is-best-effort)）
 
 ## 配置

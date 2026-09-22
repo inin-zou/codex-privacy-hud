@@ -2,11 +2,15 @@
 
 **Status:** Draft v1 · **Date:** 2026-09-15 · **Companion to:** `.claude/docs/design.md` §4, `.claude/docs/architecture.md` §9, README "Known limits" #5
 
+**Amended for #54 Phase 1 (0.7.8).** The contracts and rendering below describe the updated source. Compatible release artifacts have not yet been published.
+
+Privacy HUD 0.7.8 writes snapshot version 2. Updated readers accept version 1 as explicitly legacy and accept version 2 with nullable accounting fields. Older patched Codex readers reject version 2 and show no Privacy item. A matching Codex version alone does not establish snapshot compatibility. Use a snapshot-v2-compatible patched build, or run privacy-hud-ambient --watch in a separate terminal pane.
+
 ## 1. Goal
 
 Move the Level 1 ambient HUD from a second terminal pane into the Codex TUI
 itself: one `privacy` item in Codex's own status line, under the composer,
-rendering `Privacy ███░░░░░░░ 28%` beside `Context 18% used`, toggled from
+rendering `Privacy legacy 28% · 2 prevented rows` beside other items, toggled from
 inside a running session, installed and uninstalled by one command each, for
 macOS users.
 
@@ -76,18 +80,19 @@ Path: `$PLUGIN_DATA/hud/<session_id>.json`. Writer: the daemon, only.
 Readers: the patched TUI, `ambient.py`. Readers never write.
 
 ```json
-{"v": 1, "percent": 28, "blocked": 2, "unverified": false,
- "hidden": false, "updated_at": 1757900000.0}
+{"v": 2, "accounting_version": 1, "percent": 28,
+ "confirmed_points": null, "denials_issued": null,
+ "legacy_prevented_rows": 2, "unresolved_actions": null,
+ "unverified": false, "hidden": false, "updated_at": 1757900000.0}
 ```
 
-| field | type | meaning |
-|---|---|---|
-| `v` | int | schema version; readers treat any value ≠ 1 as "no file" |
-| `percent` | int 0–100 | `Ledger.summary()["percent"]`, verbatim (I3) |
-| `blocked` | int ≥ 0 | prevented-event count, as `hud_line(blocked=…)` takes today |
-| `unverified` | bool | `Ledger.coverage()` says the record has a known hole (design.md §4 "Engine degraded") |
-| `hidden` | bool | set by contract B; readers render nothing while true |
-| `updated_at` | float | Unix seconds, daemon clock |
+Exactly these ten fields are allowed. Counts are integers in `0..2^53-1`; booleans are not numbers. Percentages are null or integers in `0..100`; points are null or finite nonnegative numbers; timestamps are finite nonnegative numbers. `hidden` and `unverified` are booleans.
+
+- Accounting 0: all five numeric reading fields null, `unverified=true`.
+- Accounting 1: numeric `percent` and `legacy_prevented_rows`; points, denials, and unresolved actions null. The percent retains the legacy permitted-crossing arithmetic; rows are not calls.
+- Reserved accounting 2: nonnegative points, denial and unresolved counts, null legacy count. A numeric percentage requires zero unresolved actions and `unverified=false`; a null percentage remains valid. Phase 1 does not publish accounting 2.
+
+Updated readers also accept the exact six-field v1 document and normalize `blocked` to `legacy_prevented_rows`. The v2 schema describes the writer format; cross-field rules are enforced by both readers. The daemon marker retains its separate version 1.
 
 Rules:
 
@@ -96,12 +101,12 @@ Rules:
 - **Atomic writes**: write `<sid>.json.tmp` then `os.replace`. A reader
   never sees a partial file.
 - **Written on every change**: after each observation is recorded for the
-  session, on `SessionStart` (zeros), and when `hidden` flips. The *numbers*
+  session, on `SessionStart` (the actual summary), and when `hidden` flips on a valid snapshot. The *numbers*
   change only on those events — never on a timer.
 - **Heartbeat every 10 s** (`HudPublisher.heartbeat`, amended 2026-09-15):
   the daemon's serve loop re-stamps `updated_at` on the snapshots of every
   session it believes is live (`dispatch.State.live`, same staleness cutoff
-  the lifetime policy uses) and on `_daemon.json`, changing no other field.
+  the lifetime policy uses) and on `_daemon.json`, preserving every reading field. A legacy v1 snapshot is normalized and rewritten as v2.
   This is not a second writer of the numbers; it is the writer saying "still
   here". Without it the staleness rule below meant "nothing has happened
   lately" rather than "the daemon is gone": a session whose user paused for
@@ -111,9 +116,7 @@ Rules:
   for two missed beats inside the 30 s window, so a daemon busy with a
   tier-3 scan does not make the item blink.
 - **Stale after 30 s**: a reader that finds `updated_at` older than 30 s
-  treats the file as absent. A crashed daemon must not leave a frozen number
-  on screen — and, given the heartbeat above, a stale file now means exactly
-  that and nothing else.
+  treats the file as absent. Age exactly 30 s is fresh. Staleness does not establish why refresh stopped or whether ledger recording continued.
 - **Deleted on `SessionEnd`**, and the whole `hud/` directory is swept of
   files older than 4 h at daemon start (matches the daemon's own leaked-
   session bound).
@@ -130,8 +133,7 @@ Rules:
 ### 4.2 Contract B — hide/show
 
 `HudPublisher.set_hidden(session_id: str, hidden: bool) -> None`. Rewrites
-the session's snapshot with `hidden` flipped and `updated_at` refreshed;
-nothing else changes. Sole caller: the MCP tool behind `$privacy hud`.
+a valid session snapshot as v2 with `hidden` changed and `updated_at` refreshed, preserving every reading field. Missing or malformed snapshots are a no-op. The `$privacy hud` skill calls the Python helper; it is not an exposed MCP tool.
 
 ### 4.3 Contract C — install manifest
 
@@ -152,9 +154,9 @@ Uninstall never infers; it only reverses what is listed.
 
 ## 5. Units
 
-### 5.1 `HudPublisher` (new, `src/privacy_hud/hud_publisher.py`)
+### 5.1 `HudPublisher` (`src/privacy_hud/hud_snapshot.py`)
 
-- `publish(session_id, *, percent, blocked, unverified)` — writes contract A,
+- `publish(session_id, *, summary, unverified)` — writes contract A,
   preserving the current `hidden`.
 - `set_hidden(session_id, hidden)` — contract B.
 - `retire(session_id)` — deletes the file.
@@ -164,7 +166,7 @@ Uninstall never infers; it only reverses what is listed.
   rule). Called from `daemon.Daemon`'s serve loop, not from a hook path.
 
 Depends on `PLUGIN_DATA` only. Never opens the ledger; the caller passes
-numbers it already has. Call sites in `dispatch.py`: after
+the typed summary and coverage it already has. Call sites in `dispatch.py`: after
 `state.ledger.record(...)` for the session, in the `SessionStart` branch, and
 in the `SessionEnd` branch. Three lines. Any exception inside the publisher
 is caught there and logged; publishing must never fail a hook (I6).
@@ -172,7 +174,14 @@ is caught there and logged; publishing must never fail a hook (I6).
 ### 5.2 `PrivacyStatusSource` (new, Rust, `codex-rs/tui/src/privacy_status.rs`)
 
 ```rust
-pub(crate) struct PrivacyReading { percent: u8, blocked: u32, unverified: bool }
+pub(crate) enum PrivacyReading {
+    Unrecorded,
+    Legacy { percent: u8, prevented_rows: u64, unverified: bool },
+    Evidence {
+        percent: Option<u8>, confirmed_points: f64,
+        denials_issued: u64, unresolved_actions: u64, unverified: bool,
+    },
+}
 pub(crate) struct PrivacyStatusSource { last_read: Option<Instant>, cached: Option<PrivacyReading> }
 impl PrivacyStatusSource {
     pub(crate) fn current(&mut self, thread_id: Option<&str>) -> Option<PrivacyReading>;
@@ -185,8 +194,7 @@ impl PrivacyStatusSource {
   `CODEX_HOME` defaulting to `~/.codex`. The plugin id is a constant in the
   patch; it is our plugin.
 - Returns `None` for: no thread id, missing file, unreadable file, JSON parse
-  error, `v != 1`, `hidden == true`, `updated_at` older than 30 s, `percent`
-  outside 0–100. One exit for every failure; no partial readings.
+  error, unsupported version, `hidden == true`, age greater than 30 s, wrong fields/types/ranges, or an invalid accounting-field combination. Versions 1 and 2 are supported; no partial readings.
 - Never logs file contents. There are none to log, by contract A.
 
 ### 5.3 `StatusLineItem::Privacy` (patch to Codex)
@@ -196,16 +204,13 @@ existing sibling, which is what keeps the rebase cheap:
 
 1. `tui/src/bottom_pane/status_line_setup.rs`: add `Privacy` to
    `StatusLineItem` (strum serializes it as `privacy`); add its
-   `description()` — "Privacy disclosure of this session (omitted when the
-   Privacy HUD plugin is not running)"; add its `preview_item()`.
+   `description()` — "Privacy HUD accounting for this session; legacy scores are labelled, and unavailable readings have no percentage"; add its `preview_item()`.
 2. `tui/src/bottom_pane/status_surface_preview.rs`: add
    `StatusSurfacePreviewItem::Privacy` with placeholder
-   `Privacy ███░░░░░░░ 28%`.
+   `Privacy legacy 28%`.
 3. `tui/src/chatwidget/status_surfaces.rs`: in the item → `Option<String>`
    match, `StatusLineItem::Privacy => self.privacy_status.current(thread_id)
-   .map(|r| render_privacy(&r))`. Items here are plain strings
-   (`Context 28% used` is the sibling), so the bar is Unicode text, exactly
-   as `render.hud_line()` draws it today. Colour follows Codex's existing
+   .map(render_privacy)`. Items here are plain strings; the current privacy line is bar-free. Colour follows Codex's existing
    `status_line_use_colors` treatment of items; per-band colour is a
    follow-up, not part of this change, because the composition API is
    string-typed.
@@ -215,22 +220,9 @@ existing sibling, which is what keeps the rebase cheap:
    place, so the item updates within a second of the file changing without a
    new timer.
 
-`render_privacy(reading) -> String` is a pure function in
-`privacy_status.rs`: `Privacy ` followed by the **core segment**
-`{bar} {pct}%`, plus ` ⚠{blocked}` when `blocked > 0`, plus ` ⚠unverified`
-when unverified. Bar: 10 cells, `█` filled, `░` empty, band thresholds
-0–33 / 34–66 / 67–100 per design.md §3. Width degradation is left to Codex's
-status line, which already truncates items to the available width.
+`render_privacy(reading) -> String` prefixes `Privacy ` to the accounting-aware core. Legacy readings show `legacy {P}%` and an optional singular/plural prevented-row count; zero omits the count. Incomplete legacy coverage appends `⚠unverified`. Unrecorded readings show `Privacy —% · No session on record` without an extra warning suffix. Reserved accounting-2 examples are `Privacy —% · 3 unresolved · 2 denials issued` and `Privacy 28% · 2 denials issued`; Phase 1 does not publish them.
 
-The core segment is the part the two languages share. `render.py` gains
-`hud_core(percent, blocked, unverified) -> str` producing exactly that
-segment, and `hud_line()` is refactored to build its full/mid formats from it
-(its wider `PRIVACY  Disclosure … ›` framing and the compact/dot rungs stay
-Python-only). The golden file in §8 pins `hud_core`, so a copy change in one
-language fails the other's test.
-
-Patch budget: ≤ 300 lines including the new file and its unit tests. If it
-grows past that, stop and revisit.
+Python `hud_line(reading, width)` uses the complete candidates in `design.md` §4, rendering nothing if none fits. Rust returns the full line and Codex owns final layout. Python `hud_core(percent)` and Rust's test-only `render_bar_core(percent)` retain the numeric rounding fixture; neither supplies the current HUD text. `hud_reading_golden.json` and its byte-identical embedded Rust copy pin snapshot-to-text behavior.
 
 `/statusline` needs no change: the picker enumerates `StatusLineItem` and
 persists selections through `status_line_items_edit`. `privacy` appears in
@@ -238,22 +230,11 @@ the list, is checked or unchecked there, and the choice survives restarts.
 
 ### 5.4 `$privacy hud on|off|status` (extend `mcp_tools.py`)
 
-New MCP tool `privacy_hud_toggle(session_id, hidden: bool)` → contract B.
-The skill gains the subcommand. `status` reports one of four words
-(amended 2026-09-15): `shown`, `hidden`, `stale` (a snapshot exists but
-nothing has refreshed it inside `STALE_AFTER` — the daemon is gone or
-wedged, which also means the session is not being recorded) and `absent`
-(no snapshot at all). The first two are the only ones for which `present`
-is true. Does not touch `config.toml`; does not know
-`/statusline` exists. The two toggles compose: `/statusline` decides whether
-the item is configured, `$privacy hud` decides whether it currently shows.
+The `$privacy hud` skill invokes Python helpers for contract B; no HUD toggle is exposed to the model as an MCP tool. `status` reports `shown`, `hidden`, `stale`, or `absent`. Stale means a valid snapshot has not been refreshed for more than 30 seconds; it does not establish why or whether ledger recording continued. Missing or malformed snapshots are absent. Only shown and hidden have `present=true`. `/statusline` controls configuration; `$privacy hud` changes current visibility without editing `config.toml`.
 
 ### 5.5 `ambient.py` (existing, data source only)
 
-`_line_for()` reads contract A instead of opening sqlite. `_SessionPin`,
-`hud_line`'s width ladder, `--watch`, the silence-on-failure rules all stay.
-README demotes it from "the Level 1 surface" to "the fallback when no
-patched build matches your Codex version".
+`_line_for()` reads contract A and passes the complete reading to `hud_line(reading, width)`. Without a resolved session, a daemon marker reporting gaps uses `unattributed_gap_line(width)` and no invented zero. `_SessionPin` and `--watch` remain. The pane is the fallback when no snapshot-compatible patched build matches the installed Codex version.
 
 ### 5.6 Distribution (`scripts/`, `install.sh`)
 
@@ -376,11 +357,11 @@ inherits it).
 | layer | test |
 |---|---|
 | contract A | JSON Schema in `tests/matrix/hud_snapshot.schema.json`; Python writer and Rust reader each validated against it and against golden samples |
-| rendering | `tests/matrix/hud_golden.json` pins the core segment; `render.hud_core` (Python) and `render_privacy` (Rust, after stripping the `Privacy ` prefix) must both reproduce it for every case; `hud_line`'s existing goldens are unchanged |
+| rendering | `hud_golden.json` pins the retained numeric primitive; `hud_reading_golden.json` pins accounting-aware text in Python and the executed Rust module. Width characterization is rebaselined to the new complete candidates. |
 | `HudPublisher` | atomic write (no `.tmp` visible to a concurrent reader), `hidden` preserved across `publish`, `retire`, `sweep` |
-| `PrivacyStatusSource` | missing / stale / malformed / hidden / `v=2` → `None`; throttle returns cache within 1 s |
-| `$privacy hud` | on/off/status round-trip through the MCP tool |
-| `ambient.py` | existing goldens pass with the new data source |
+| `PrivacyStatusSource` | missing / stale / malformed / hidden / unsupported version → `None`; v1 is legacy, v2 is discriminated; age exactly 30 s is fresh; throttle returns cache within 1 s |
+| `$privacy hud` | on/off/status through skill-invoked Python helpers; missing/malformed hide is a no-op |
+| `ambient.py` | legacy, unrecorded, gaps, hidden, malformed, stale, and complete width candidates |
 | distribution | `install.sh` then `--uninstall` in a temporary `HOME` with a fake `codex`; assert filesystem before == after; assert manifest lists every created path |
 | patch health | CI `git apply --check` against latest upstream tag, daily |
 | `/tmp` | §6 test |

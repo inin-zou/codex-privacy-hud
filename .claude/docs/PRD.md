@@ -2,6 +2,10 @@
 
 **Status:** Draft v0.1 · **Date:** 2026-09-03 · **Track:** Agentic AI — Making Privacy Native to Personal Agents
 
+**Current contract — #54 Phase 1 (0.7.8).**
+
+Phase 1 of #54 prepares readers and labels existing accounting. Recorded sessions still use the legacy writer, deduplication, and score arithmetic. Their displayed number is a legacy permitted-crossing score, not a confirmed-disclosure percentage. An unrecorded session has no percentage or numeric counts. The new observation, evidence, recipient, and distinct-disclosure accounting has not been activated. #43, #44, and the related #47 accounting limitations remain unresolved.
+
 ---
 
 ## 1. One-line definition
@@ -70,14 +74,16 @@ The gap: **there is no per-session, content-aware, local record of what an agent
 |---|---|---|
 | **Solo dev on a client codebase** | Agent reads logs/`.env`; unclear what left the machine | Level 1 HUD, `$privacy` before pasting a bug report |
 | **Support/ops engineer** | Triages logs full of real customer PII | `Prevented` tab, minimization on outbound MCP/HTTP |
-| **Privacy-conscious individual** | Personal agent touches personal files | Level 3 detail, `Mask detected <type> in future calls` |
+| **Privacy-conscious individual** | Personal agent touches personal files | Level 3 detail; browser `Save mask rule for detected <type>` |
 | **Team lead evaluating agents** | Needs an answer to "what does it send?" | Session privacy receipt at `SessionEnd` |
 
-### Primary scenario (demo narrative)
+### Primary scenario (historical design narrative)
+
+The scenario below is an unbuilt product target, not an acceptance script for 0.7.8. The HUD now labels legacy scores, current hooks do not prove delivery or host enforcement, and no surface offers `Minimize & retry`.
 
 A support engineer asks Codex to triage `support.log` and file a GitHub issue.
 
-1. Codex reads `support.log` → **12 customer emails enter model context.** HUD moves to 28%.
+1. Codex reads `support.log` → **12 customer emails enter model context.** The corresponding current HUD example is `Privacy legacy 28%`.
 2. Codex prepares a GitHub MCP call whose body contains those emails → **blocked**, exposure detail shown.
 3. User picks **Minimize & retry** → PII is replaced by stable pseudonyms; the call succeeds.
 4. Codex attempts `curl` of `.env` to an external endpoint → **blocked**, logged as `Prevented`.
@@ -122,7 +128,9 @@ support.log → main agent → github MCP
 
 ### 5.3 Disclosure budget formula
 
-`disclosure% = min(100, round(100 × score / budget_cap))`
+`legacy_percent = min(100, round(100 × legacy_score / legacy_cap))`
+
+This section records the legacy arithmetic and its original design rationale. Phase 1 preserves the stored score and cap; the result is not a confirmed-disclosure percentage. Dedupe can collapse outcomes, and boundary categories are not concrete recipients (limits 17–20).
 
 ```text
 score = Σ_over_exposures  severity(data_type) × volume(n) × destination_multiplier(boundary)
@@ -150,12 +158,12 @@ budget_cap:    120 points (policy-configurable)
 ### Level 1 — Ambient HUD
 
 ```text
-PRIVACY  Disclosure ███░░░░░░░ 28%  ›
+Privacy legacy 28% · 2 prevented rows
 ```
 
-Environmental awareness only; never interrupts. `28%` = consumed budget, excluding anything successfully prevented.
+The current HUD is bar-free and labels the legacy score and prevented-row count. Unknown accounting is unavailable, never zero. Python uses the complete width candidates in `design.md` §4; Rust supplies the full line for Codex to lay out.
 
-Real-time interruption happens only via hook `systemMessage` when a call is blocked.
+Intervention messages say that the plugin issued a denial or returned rewritten input. They do not confirm host application.
 
 ### Level 2 — Session Audit (`$privacy`)
 
@@ -163,36 +171,25 @@ Real-time interruption happens only via hook `systemMessage` when a call is bloc
 Privacy Audit
 Session session_123
 
-  28%          4              2               17
-  disclosure   exposed items  destinations    prevented
+28%  legacy permitted-crossing score
+4    legacy permitted-crossing rows
+2    legacy boundary kinds
+17   legacy prevented rows
 
-[Exposed 4]  Prevented 17   All events 24
+Historical accounting includes permitted crossings and may collapse different outcomes. It does not establish confirmed disclosure.
 
-SENSITIVE DATA        SOURCE          DESTINATION      STATUS
-Customer email ×12    support.log     model context    EXPOSED
-Full name ×1          user prompt     model context    EXPOSED
-Repository path ×4    tool input      GitHub MCP       EXPOSED
-Internal hostname ×3  terminal output model context    MASKED
+Legacy permitted crossings 4 · Legacy prevented rows 17 · All legacy events 24
 ```
 
-Tabs: **Exposed** (crossed a boundary) · **Prevented** (blocked/redacted/minimized) · **All events** (full timeline).
+The legacy wire keys are `legacy_percent`, `legacy_permitted_crossing_rows`, `legacy_boundary_kinds`, and `legacy_prevented_rows`. API tab arguments remain `Exposed`, `Prevented`, and `All events`. Unrecorded summaries return `percent=null` and no numeric score or counts.
 
 ### Level 3 — Exposure Detail
 
-```text
-Customer email ×12
-support.log → model context
+A detail view shows one public legacy row, its recorded source/destination association, masked exemplar, timestamps, legacy intervention, and legacy contribution. Its accounting note does not establish delivery or host enforcement.
 
-First seen   12:41:08
-Protection   none
-Example      jo•••@acme.com
+The terminal detail view does not save policy rules. The local audit browser has buttons that POST to `/api/policy`; the MCP `privacy.update_policy` tool is a separate policy-writing surface. Report a rule as saved only after that surface returns success, and include its returned conditions. Host application of a later denial or rewritten input is not confirmed.
 
-[ Mask detected email in future calls ]
-
-Already disclosed data cannot be recalled from this session.
-```
-
-Actions write policy, they do not rewrite history. The irreversibility notice is **required copy**, not decoration.
+`Already disclosed data cannot be recalled from this session.` remains required copy.
 
 ---
 
@@ -361,7 +358,7 @@ Verified constraints force this decision:
 1. **Hosted tools bypass hooks.** WebSearch and similar hosted tools do not trigger local function-tool hook paths. Privacy HUD is a practical guardrail, not a mathematically complete enforcement boundary.
 2. **No `ask` decision.** Interactive consent requires the deny → token → retry dance (§7.6).
 3. **No custom status item.** See §8.
-4. **Model-context accounting is inferential for file reads.** We know a tool returned content and that content entered context; we attribute exposure at that point.
+4. **Model-context accounting is inferential for file reads.** A tool result does not establish admission into model context. Phase 1 retains the legacy charge and labels it; evidence-based accounting is not activated.
 5. **Prompt-injection resistance is out of scope.** A hostile repo could try to talk the agent out of using the tool; the hook layer is not bypassable by the model, which is precisely why enforcement lives there.
 
 ---
@@ -390,7 +387,7 @@ Non-negotiable properties, and the first thing a judge will ask:
 - [ ] Metadata-only SQLite ledger + budget math with the §5.3 invariants tested
 - [ ] `$privacy` skill
 - [ ] Local interactive audit UI: `Exposed / Prevented / All events` + exposure detail
-- [ ] Actions: `Mask detected <type> in future calls`, `Allow once`, and — on a row that names a real origin — `block_path`/`block_command` (#40; the earlier `Block this source`/`block_source` stays withdrawn, #38)
+- [ ] Historical action target: masking, one-shot consent, and origin rules. Current browser/MCP writers save conditional `mask`, `block_path`, or `block_command` rules; terminal labels do not write, and no surface offers `Allow once`.
 - [ ] One real MCP outbound minimization demo, end to end
 
 ### Should
@@ -418,9 +415,9 @@ Risk note: step 3 is the only step with unknown platform behavior. Do it **third
 
 ## 12. Success criteria
 
-**Demo (must all work live):**
+**Historical demo targets (not achieved or claimed by Phase 1):**
 
-1. HUD shows 0% → reads `support.log` → jumps to 28% with a visible flow `support.log → model agent`.
+1. A controlled legacy fixture can move the HUD from `Privacy legacy 0%` to `Privacy legacy 28%`; the recorded association `support.log → model_context` does not prove admission into model context.
 2. GitHub MCP call carrying PII is blocked; audit UI explains why; `Minimize & retry` makes it succeed with pseudonymized values.
 3. `.env` exfil via `curl` is blocked and lands in `Prevented`, contributing **0%** to the budget.
 4. `$privacy` shows all three tabs with real data from a real session.

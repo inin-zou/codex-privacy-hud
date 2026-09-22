@@ -80,9 +80,9 @@ class Allowed:
 
 ALLOWED: list[Allowed] = [
     Allowed('.claude/docs/design.md',
-            '- `Mask detected <type> in future calls` — writes a policy rule to mask this data type going forward. *(Two corrections to what this line used to say. It said "from this source": the rule carries the data type only, and the engine matches type without source — issue #47 item 10. And the label used to be `Protect future occurrences`, which named an outcome the rule cannot guarantee; the rule fires when a later call produces a matching finding, and for every type other than `path` and `credential` matching requires an accepted deep-scan result — #49 item 2.)*',
+            "- `Save mask rule for detected <type>` — the browser POSTs a `mask` rule to `/api/policy`. The rule selects a data type, not a source. The former label `Protect future occurrences` claimed an outcome that saving a rule cannot guarantee. Matching requires detection; types other than `path` and `credential` require an accepted deep-scan result. Host application is not confirmed.",
             'Protect future occurrences',
-            "Explicit 'the label used to be' correction note (#49 item 2)."),
+            'Explicit historical-label correction; current browser action saves a conditional rule.'),
     Allowed('.claude/docs/plans/2026-09-03-decisions.md',
             'Two of the three L3 actions — "Block this source" and "Protect future occurrences" — wrote',
             'Protect future occurrences',
