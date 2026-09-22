@@ -30,8 +30,9 @@ import json
 import os
 import socket
 import sys
+import time
 
-TIMEOUT = 2.0  # seconds
+TIMEOUT = 2.0  # seconds -- ONE budget: connect, hello, event and reply
 # Was 0.12s under the assumption that tier 3 (the model detector) rarely
 # ran. Engine._scan() now runs tier 3 unconditionally on every qualifying
 # observation (see engine.py's fix commit) -- measured real round trip for
@@ -85,10 +86,37 @@ OFFLINE_ENV = {
     "HF_HUB_DISABLE_UPDATE_CHECK": "1",
     "DISABLE_SAFETENSORS_CONVERSION": "1",
 }
-# `daemon.main`'s "nothing is wrong -- the daemon you wanted already exists"
-# exit code, deliberately outside the 0/1 usable/broken convention. Not a
-# failure, so a child that exits with it does not latch as one.
+# `daemon.main`'s "another daemon already owns the socket" exit code. #66:
+# that says something holds the socket, not that it is a compatible daemon,
+# so a latch recording it no longer reads as "starting"; only a matching
+# hello proves a compatible daemon is serving.
 EXIT_ALREADY_RUNNING = 3
+
+# --- socket protocol 2 (#66) ---------------------------------------------
+# Restated from `privacy_hud/runtime_client.py` and `runtime_contract.py`;
+# tests/test_runtime_protocol.py pins every one of them.
+PROTOCOL_VERSION = 2
+STORAGE_GENERATION = 1
+READABLE_SCHEMAS = (0, 5401)
+HELLO_FRAME_LIMIT = 16384  # 16 KiB
+EVENT_FRAME_LIMIT = 8388608  # 8 MiB
+HELLO_REPLY_FIELDS = ("v", "op", "ok", "release", "build_id",
+                      "activation_epoch", "storage_generation",
+                      "schema_version", "ready")
+
+# --- fixed copy (#66), restated from `privacy_hud/runtime_messages.py` ----
+INGRESS_REFUSAL = (
+    "Privacy HUD runtime mismatch — this event was not checked by a "
+    "compatible daemon.\n"
+    "Run $privacy repair to get the recovery command.")
+EGRESS_REFUSAL = (
+    "Privacy HUD issued a denial because no compatible daemon could verify "
+    "this outbound call.\n"
+    "Run $privacy repair to get the recovery command.")
+STARTING_INGRESS = "Privacy HUD is starting — this event is unverified."
+STARTING_EGRESS = (
+    "Privacy HUD issued a denial because the daemon is still starting.\n"
+    "Retry after startup completes.")
 
 
 
@@ -155,14 +183,22 @@ def _unverified(payload, starting):
     """
     if _looks_like_egress(payload):
         if starting:
-            return _deny("Privacy HUD is still starting and could not verify "
-                         "this call. Retry in a few seconds, or allow once.")
+            return _deny(STARTING_EGRESS)
         return _deny("Privacy HUD could not verify this call. "
-                     "Run $privacy to review, or allow once.")
+                     "Run $privacy to review.")
     if starting:
-        return {"systemMessage": "Privacy HUD is starting — this call is "
-                                 "unverified."}
+        return {"systemMessage": STARTING_INGRESS}
     return {"systemMessage": "Privacy HUD unavailable — disclosure unverified."}
+
+
+def _runtime_refusal(payload):
+    """#66: something answered, but not a daemon of the selected build and
+    epoch -- or this hook's own bundle is not the selected one. The payload
+    was not sent. I6 still decides the shape: a warning on ingress, a
+    denial on egress. Neither claims the host enforced anything."""
+    if _looks_like_egress(payload):
+        return _deny(EGRESS_REFUSAL)
+    return {"systemMessage": INGRESS_REFUSAL}
 
 
 def _bundle_root():
@@ -269,7 +305,7 @@ def _spawn_daemon(data_dir):
                 with open(latch) as handle:
                     record = json.load(handle)
                 return bool(record.get("pid")) and not record.get("error") \
-                    and record.get("exit") in (None, 0, EXIT_ALREADY_RUNNING)
+                    and record.get("exit") in (None, 0)
             except (OSError, ValueError, AttributeError):
                 return False
     except OSError:
@@ -365,10 +401,139 @@ def _spawn_daemon(data_dir):
     return True
 
 
+class _Frame(Exception):
+    """A frame that was oversized, truncated, or not a JSON object."""
+
+
+def _read_frame(s, limit, deadline):
+    """One newline-terminated JSON object of at most `limit` bytes, before
+    `deadline`. Raises `socket.timeout` when the budget runs out, `_Frame`
+    for anything malformed."""
+    buf = b""
+    while b"\n" not in buf:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise socket.timeout()
+        s.settimeout(remaining)
+        chunk = s.recv(min(65536, limit + 2 - len(buf)))
+        if not chunk:
+            raise _Frame()
+        buf += chunk
+        if len(buf) > limit + 1 and b"\n" not in buf:
+            raise _Frame()
+    line, rest = buf.split(b"\n", 1)
+    if len(line) > limit or rest:
+        raise _Frame()
+    try:
+        value = json.loads(line.decode("utf-8"))
+    except ValueError:
+        raise _Frame() from None
+    if not isinstance(value, dict):
+        raise _Frame()
+    return value
+
+
+def _send(s, message, deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise socket.timeout()
+    s.settimeout(remaining)
+    s.sendall((json.dumps(message, separators=(",", ":")) + "\n").encode())
+
+
+def _is_int(value, expected):
+    return (isinstance(value, int) and not isinstance(value, bool)
+            and value == expected)
+
+
+def _matching_hello(reply, build_id, epoch):
+    return (sorted(reply) == sorted(HELLO_REPLY_FIELDS)
+            and _is_int(reply["v"], PROTOCOL_VERSION)
+            and reply["op"] == "hello" and reply["ok"] is True
+            and isinstance(reply["release"], str)
+            and reply["build_id"] == build_id
+            and reply["activation_epoch"] == epoch
+            and _is_int(reply["storage_generation"], STORAGE_GENERATION)
+            and isinstance(reply["schema_version"], int)
+            and not isinstance(reply["schema_version"], bool)
+            and reply["schema_version"] in READABLE_SCHEMAS
+            and reply["ready"] is True)
+
+
+def _selection(data_dir):
+    """`("ok", (build_id, epoch))`, `("setup_missing", None)` or
+    `("runtime_mismatch", None)`, from receipt v2 and this bundle's
+    manifest. Never raises."""
+    try:
+        receipt, _python = _read_selection(data_dir)
+    except ValueError as exc:
+        if str(exc) == "runtime mismatch":
+            return "runtime_mismatch", None
+        return "setup_missing", None
+    except Exception:
+        return "setup_missing", None
+    epoch = receipt.get("activation_epoch")
+    if (not isinstance(epoch, str) or len(epoch) != 32
+            or epoch.strip("0123456789abcdef")):
+        return "setup_missing", None
+    return "ok", (receipt["selected_build_id"], epoch)
+
+
+def _exchange(s, payload, build_id, epoch, deadline):
+    """Hello, then -- only after a matching hello on this connection -- the
+    event. Every step shares `deadline`. Nothing the daemon sends is
+    relayed unless it is a valid event reply; a protocol error object never
+    becomes hook output."""
+    try:
+        _send(s, {"v": PROTOCOL_VERSION, "op": "hello",
+                  "build_id": build_id, "activation_epoch": epoch,
+                  "storage_generation": STORAGE_GENERATION}, deadline)
+        reply = _read_frame(s, HELLO_FRAME_LIMIT, deadline)
+    except socket.timeout:
+        # Accepted and then silent past the budget: what a busy daemon looks
+        # like (see the connect branch in `main`).
+        return _unverified(payload, False)
+    except (_Frame, OSError):
+        # Something answered, and it was not a daemon speaking protocol 2:
+        # an older daemon closes on a hello it does not know.
+        return _runtime_refusal(payload)
+    if not _matching_hello(reply, build_id, epoch):
+        return _runtime_refusal(payload)
+
+    try:
+        data = (json.dumps({"v": PROTOCOL_VERSION, "op": "event",
+                            "build_id": build_id, "activation_epoch": epoch,
+                            "payload": payload}, separators=(",", ":"))
+                + "\n").encode()
+    except (TypeError, ValueError):
+        return _unverified(payload, False)
+    if len(data) > EVENT_FRAME_LIMIT + 1:
+        return _unverified(payload, False)
+    try:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return _unverified(payload, False)
+        s.settimeout(remaining)
+        s.sendall(data)
+        # Sent. From here a failure is an unknown outcome, reported as
+        # unverified and never replayed.
+        reply = _read_frame(s, EVENT_FRAME_LIMIT, deadline)
+    except (socket.timeout, _Frame, OSError):
+        return _unverified(payload, False)
+    output = reply.get("output")
+    if (not _is_int(reply.get("v"), PROTOCOL_VERSION)
+            or reply.get("op") != "event" or reply.get("ok") is not True
+            or not isinstance(output, dict)):
+        return _unverified(payload, False)
+    return output
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
     except Exception:
+        return {}
+    if not isinstance(payload, dict):
         return {}
     data_dir = os.environ.get("PLUGIN_DATA")
     if not data_dir:
@@ -377,15 +542,32 @@ def main():
         # caller happened to be sitting in (spec §6; the old `/tmp` default
         # is what put a stray ledger.db beside this repo on 2026-09-03).
         return {}
+    # One budget for the whole exchange (#66), taken before anything else.
+    deadline = time.monotonic() + TIMEOUT
+
+    status, selected = _selection(data_dir)
+    if status == "runtime_mismatch":
+        # This hook's bundle is not the selected one: nothing is sent to
+        # whatever daemon may be listening, and none is started.
+        return _runtime_refusal(payload)
+    if status != "ok":
+        # No usable receipt v2 (none, v1, damaged): no daemon can be
+        # verified and none is started.
+        if (payload.get("hook_event_name") == "SessionStart"
+                and not os.path.exists(os.path.join(data_dir, RECEIPT_NAME))):
+            return _setup_hint()
+        return _unverified(payload, False)
+    build_id, epoch = selected
+
     sock_path = os.path.join(data_dir, "daemon.sock")
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(TIMEOUT)
+        s.settimeout(max(deadline - time.monotonic(), 0.001))
         s.connect(sock_path)
     except Exception:
         # Only a failed *connect* means nothing is listening. This is
         # deliberately not the same `except` as the exchange below: the cold
-        # model load is ~7s against a 2s client timeout, the daemon answers
+        # model load is ~7s against a 2s client budget, the daemon answers
         # requests serially, and so a timeout mid-conversation is what a BUSY
         # daemon looks like. Treating that as death would spawn a rival and
         # leave two ~2.8 GB processes fighting over one socket.
@@ -394,25 +576,15 @@ def main():
             starting = _spawn_daemon(data_dir)
         except Exception:
             pass  # I6: a failed spawn must never break Codex
-        if (payload.get("hook_event_name") == "SessionStart"
-                and not os.path.exists(os.path.join(data_dir, RECEIPT_NAME))):
-            return _setup_hint()
         return _unverified(payload, starting)
 
     try:
-        s.sendall((json.dumps({"v": 1, "op": "event",
-                               "payload": payload}) + "\n").encode())
-        buf = b""
-        while not buf.endswith(b"\n"):
-            chunk = s.recv(65536)
-            if not chunk:
-                break
-            buf += chunk
-        return json.loads(buf.decode())
-    except Exception:
-        # Something answered and then the exchange failed: a wedged, busy or
-        # mid-restart daemon. No spawn -- see above.
-        return _unverified(payload, False)
+        return _exchange(s, payload, build_id, epoch, deadline)
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":

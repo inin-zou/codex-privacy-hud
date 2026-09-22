@@ -79,3 +79,33 @@ def test_bootstrap_repair_command_matches_the_package():
             runtime_repair.format_repair_command(bundle, data)
     assert runtime_repair.format_repair_command(Path("/a b"), Path("/d")) == (
         "sh '/a b/install.sh' --repair-runtime --plugin-data /d --yes")
+
+
+HANDLER = REPO / "hooks" / "handler.py"
+
+
+@pytest.mark.parametrize("name", [
+    "INGRESS_REFUSAL", "EGRESS_REFUSAL", "STARTING_INGRESS", "STARTING_EGRESS",
+])
+def test_hook_client_restates_runtime_messages(name):
+    assert _literals(HANDLER)[name] == getattr(runtime_messages, name)
+
+
+def test_hook_message_literals():
+    assert runtime_messages.INGRESS_REFUSAL == (
+        "Privacy HUD runtime mismatch — this event was not checked by a "
+        "compatible daemon.\n"
+        "Run $privacy repair to get the recovery command.")
+    assert runtime_messages.EGRESS_REFUSAL == (
+        "Privacy HUD issued a denial because no compatible daemon could "
+        "verify this outbound call.\n"
+        "Run $privacy repair to get the recovery command.")
+    assert runtime_messages.STARTING_INGRESS == \
+        "Privacy HUD is starting — this event is unverified."
+    assert runtime_messages.STARTING_EGRESS == (
+        "Privacy HUD issued a denial because the daemon is still starting.\n"
+        "Retry after startup completes.")
+
+
+def test_hook_client_offers_no_allow_once():
+    assert "allow once" not in HANDLER.read_text(encoding="utf-8").lower()

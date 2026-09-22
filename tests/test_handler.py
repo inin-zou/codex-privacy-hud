@@ -128,18 +128,23 @@ def test_client_imports_only_stdlib():
 
 
 def test_spawn_only_imports_are_deferred():
-    """`subprocess` and `time` are paid on the spawn path only.
+    """`subprocess` is paid on the spawn path only.
 
     The daemon answers on the hot path of every tool call, and CLAUDE.md §4's
-    rule is about what that path costs — so the two modules auto-spawn needs
-    are imported inside the function that spawns, not at module scope.
+    rule is about what that path costs — so the module auto-spawn needs is
+    imported inside the function that spawns, not at module scope.
+
+    `time` moved to module scope in #66: the one monotonic deadline that
+    bounds connect, hello, request and reply is taken on every invocation,
+    before anything else happens, so deferring it would buy nothing. It is a
+    builtin extension module the interpreter has already loaded.
     """
     import ast
     tree = ast.parse(HANDLER.read_text())
     top_level = {alias.name
                  for node in tree.body if isinstance(node, ast.Import)
                  for alias in node.names}
-    assert top_level == {"json", "os", "socket", "sys"}
+    assert top_level == {"json", "os", "socket", "sys", "time"}
 
 
 def test_missing_daemon_on_ingress_fails_open(tmp_path):
@@ -213,17 +218,22 @@ def test_a_v1_receipt_is_repair_input_only(tmp_path):
 
 def test_a_receipt_selecting_another_build_is_not_spawned(tmp_path):
     """Hooks may start only the already-selected runtime of their own
-    bundle: another bundle root or another build id starts nothing."""
+    bundle: another bundle root or another build id starts nothing.
+
+    #66: the selection is read before the socket, so a mismatch is decided
+    without connecting, without spawning and without a spawn attempt to
+    record — and the payload is never sent to whatever may be listening.
+    """
     script, marker = _fake_interpreter(tmp_path)
     for override in ({"selected_build_id": "f" * 64},
                      {"selected_bundle_root": str(tmp_path / "other")}):
         _write_receipt(tmp_path, script, **override)
         try:
-            run(INGRESS, {"PLUGIN_DATA": str(tmp_path)})
+            _code, out = run(INGRESS, {"PLUGIN_DATA": str(tmp_path)})
             time.sleep(0.3)
             assert not marker.exists(), override
-            latch = json.loads((tmp_path / "daemon.spawn-attempt").read_text())
-            assert latch["error"] == "runtime mismatch"
+            assert not (tmp_path / "daemon.spawn-attempt").exists(), override
+            assert "runtime mismatch" in json.loads(out)["systemMessage"]
         finally:
             _kill_marked(marker)
             (tmp_path / "daemon.spawn-attempt").unlink(missing_ok=True)
@@ -487,8 +497,10 @@ def test_a_receipt_other_users_can_write_is_not_used(tmp_path):
         time.sleep(0.3)
         assert code == 0
         assert not marker.exists()
-        latch = json.loads((tmp_path / "daemon.spawn-attempt").read_text())
-        assert "writable" in latch["error"]
+        # #66: with no receipt it can trust, the client knows no selected
+        # build to name in a hello, so it neither connects nor spawns.
+        assert not (tmp_path / "daemon.spawn-attempt").exists()
+        assert "unverified" in json.loads(out)["systemMessage"]
     finally:
         _kill_marked(marker)
 
@@ -550,10 +562,26 @@ def test_a_daemon_that_answers_is_never_second_guessed(tmp_path):
     import tempfile
     import threading
 
+    build_id = json.loads((REPO / "runtime-build.json").read_text())["build_id"]
+    epoch = "0123456789abcdef0123456789abcdef"
+
     class _Handler(socketserver.StreamRequestHandler):
         def handle(self):
+            hello = json.loads(self.rfile.readline())
+            assert hello == {"v": 2, "op": "hello", "build_id": build_id,
+                             "activation_epoch": epoch,
+                             "storage_generation": 1}
+            self.wfile.write((json.dumps(
+                {"v": 2, "op": "hello", "ok": True, "release": "0.8.0",
+                 "build_id": build_id, "activation_epoch": epoch,
+                 "storage_generation": 1, "schema_version": 0,
+                 "ready": True}) + "\n").encode())
+            self.wfile.flush()
             self.rfile.readline()
-            self.wfile.write(b'{"systemMessage": "from the daemon"}\n')
+            self.wfile.write((json.dumps(
+                {"v": 2, "op": "event", "ok": True,
+                 "output": {"systemMessage": "from the daemon"}}) + "\n")
+                .encode())
 
     # AF_UNIX paths are capped at ~104 bytes and pytest's tmp_path exceeds it.
     short = Path(tempfile.mkdtemp(prefix="phh"))

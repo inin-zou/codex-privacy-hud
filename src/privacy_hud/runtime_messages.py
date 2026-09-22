@@ -45,3 +45,22 @@ DAEMON_STARTUP_REFUSAL = (
 
 #: Ambient launcher, in place of a percentage.
 AMBIENT_RUNTIME_MISMATCH = "Privacy — runtime mismatch"
+
+#: Hook replies (#66), restated by `hooks/handler.py`. The payload was not
+#: checked by a compatible daemon: a warning on ingress, a denial on egress.
+#: Neither claims host enforcement.
+INGRESS_REFUSAL = (
+    "Privacy HUD runtime mismatch — this event was not checked by a "
+    "compatible daemon.\n"
+    "Run $privacy repair to get the recovery command."
+)
+EGRESS_REFUSAL = (
+    "Privacy HUD issued a denial because no compatible daemon could verify "
+    "this outbound call.\n"
+    "Run $privacy repair to get the recovery command."
+)
+STARTING_INGRESS = "Privacy HUD is starting — this event is unverified."
+STARTING_EGRESS = (
+    "Privacy HUD issued a denial because the daemon is still starting.\n"
+    "Retry after startup completes."
+)

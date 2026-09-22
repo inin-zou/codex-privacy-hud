@@ -423,3 +423,53 @@ def test_oversized_hello_reply_is_a_refusal(data_dir):
         server.close()
     assert out == {"systemMessage": INGRESS_REFUSAL}
     assert CANARY.encode() not in server.traffic
+
+
+# --------------------------------------------------------------------- #
+# the stdlib-only restatement stays pinned to the package
+# --------------------------------------------------------------------- #
+
+def _handler_literals() -> dict:
+    import ast
+    tree = ast.parse(HANDLER.read_text(encoding="utf-8"))
+    out = {}
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)):
+            try:
+                out[node.targets[0].id] = ast.literal_eval(node.value)
+            except ValueError:
+                pass
+    return out
+
+
+def test_hook_client_restates_the_protocol():
+    from privacy_hud import runtime_client, runtime_contract
+    values = _handler_literals()
+    assert values["PROTOCOL_VERSION"] == runtime_contract.PROTOCOL_VERSION
+    assert values["STORAGE_GENERATION"] == runtime_contract.STORAGE_GENERATION
+    assert values["READABLE_SCHEMAS"] == runtime_contract.READABLE_SCHEMAS
+    assert values["HELLO_FRAME_LIMIT"] == runtime_client.HELLO_FRAME_LIMIT == \
+        16 * 1024
+    assert values["EVENT_FRAME_LIMIT"] == runtime_client.EVENT_FRAME_LIMIT == \
+        8 * 1024 * 1024
+    assert set(values["HELLO_REPLY_FIELDS"]) == \
+        runtime_client.HELLO_REPLY_FIELDS
+
+
+def test_runtime_client_round_trip_and_refusal(real_daemon, data_dir):
+    """The package client: hello, then one request, on one connection; a
+    daemon of another build is a `runtime_mismatch` refusal."""
+    from privacy_hud.runtime_client import connect_runtime
+    from privacy_hud.runtime_contract import RuntimeRefusal
+    real_daemon(data_dir)
+    selected = activation(build_id=REPO_BUILD)
+    with connect_runtime(data_dir, activation=selected,
+                         timeout=5.0) as connection:
+        assert connection.hello["ok"] is True
+        reply = connection.request("active_sessions", {})
+    assert reply["sessions"] == []
+    with pytest.raises(RuntimeRefusal) as refused:
+        connect_runtime(data_dir, activation=activation(build_id=OTHER_BUILD),
+                        timeout=5.0)
+    assert refused.value.code == "runtime_mismatch"

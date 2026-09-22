@@ -28,15 +28,29 @@ from privacy_hud.daemon import (
     EXIT_ALREADY_RUNNING,
     EXIT_FAILURE,
     AlreadyRunning,
-    Daemon,
 )
+from privacy_hud.daemon import Daemon as _RealDaemon
 from privacy_hud.detect.base import Cost, DetectorProfile
 from privacy_hud.dispatch import dispatch, new_state
 from privacy_hud.runtime import LATCH_NAME
-from runtime_helpers import activation as test_activation
+from privacy_hud.runtime_contract import load_activation
 from runtime_helpers import make_bundle, write_receipt_v2
+from runtime_helpers import activation as _activation
 
 CREDENTIAL = "sk-proj-Ab3xY9zQw1Er5Ty7Ui0OpAs2Df4Gh6Jk8Lm"
+
+
+class Daemon(_RealDaemon):
+    """The real daemon, serving the one test activation (#66).
+
+    Every daemon in this file stands in for an installed, selected runtime,
+    so each would otherwise repeat the same `activation=` argument. A test
+    that needs a different selected build passes its own.
+    """
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("activation", _activation())
+        super().__init__(*args, **kwargs)
 
 
 # --------------------------------------------------------------------- #
@@ -345,8 +359,8 @@ def test_a_session_starting_after_the_daemon_is_up_is_unaffected(
 
 # --------------------------------------------------------------------- #
 # Socket-level harness — a real Daemon on a temp unix socket, driven by a
-# raw client the same way hooks/handler.py drives it: connect, write one
-# newline-delimited JSON line, read one line back.
+# raw client the same way hooks/handler.py drives it: connect, hello, then
+# one request, all on one connection, newline-delimited JSON (#66).
 # --------------------------------------------------------------------- #
 
 @pytest.fixture
@@ -375,19 +389,58 @@ def running_daemon(tmp_path):
     thread.join(timeout=2.0)
 
 
-def _raw_call(sock_path, payload: dict, timeout: float = 2.0) -> dict:
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(timeout)
-    s.connect(str(sock_path))
-    s.sendall((json.dumps({"v": 1, "op": "event", "payload": payload}) + "\n").encode())
+def _envelope(selected=None, **fields) -> dict:
+    """A protocol-2 request in the selected runtime's identity envelope,
+    `_activation()`'s unless a test names another."""
+    selected = selected or _activation()
+    return {"v": 2, "build_id": selected.identity.build_id,
+            "activation_epoch": selected.epoch, **fields}
+
+
+def _hello(selected=None) -> dict:
+    return _envelope(selected, op="hello", storage_generation=1)
+
+
+def _readline(s) -> bytes:
     buf = b""
     while not buf.endswith(b"\n"):
         chunk = s.recv(65536)
         if not chunk:
             break
         buf += chunk
-    s.close()
-    return json.loads(buf.decode())
+    return buf
+
+
+def _after_hello(sock_path, request: dict, timeout: float = 5.0,
+                 selected=None):
+    """Hello, then one request, on one connection — what every client of
+    this socket does (#66). Returns the parsed reply, or `None` when the
+    daemon answered with silence (a defined outcome: see `_Handler.handle`).
+    """
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    s.connect(str(sock_path))
+    try:
+        s.sendall((json.dumps(_hello(selected)) + "\n").encode())
+        hello = _readline(s)
+        assert hello, "the daemon did not answer the hello"
+        assert json.loads(hello)["ok"] is True
+        s.sendall((json.dumps(request) + "\n").encode())
+        buf = _readline(s)
+    finally:
+        s.close()
+    return json.loads(buf.decode()) if buf else None
+
+
+def _raw_call(sock_path, payload: dict, timeout: float = 2.0,
+              selected=None) -> dict:
+    """One hook event, and the hook output the daemon wrapped in its reply."""
+    reply = _after_hello(sock_path,
+                         _envelope(selected, op="event", payload=payload),
+                         timeout=timeout, selected=selected)
+    assert reply is not None, f"the daemon dispatched nothing for {payload}"
+    assert reply["ok"] is True
+    return reply["output"]
 
 
 def test_socket_file_is_created_with_mode_0600(running_daemon):
@@ -1203,7 +1256,7 @@ def test_main_returns_already_running_when_a_daemon_owns_the_socket(
     thread.start()
     try:
         before = sock_path.stat().st_ino
-        assert daemon_mod.main([], activation=test_activation()) \
+        assert daemon_mod.main([], activation=_activation()) \
             == EXIT_ALREADY_RUNNING
         assert EXIT_ALREADY_RUNNING not in (0, EXIT_FAILURE)
         assert "already owns" in capsys.readouterr().err
@@ -1225,7 +1278,7 @@ def test_main_returns_failure_on_a_real_bind_failure(sock_dir, startup_state,
     # test is about the exit code, not about the detector stack.
     monkeypatch.setattr(daemon_mod, "new_state", lambda data_dir: startup_state)
 
-    assert daemon_mod.main([], activation=test_activation()) == EXIT_FAILURE
+    assert daemon_mod.main([], activation=_activation()) == EXIT_FAILURE
     assert "cannot start" in capsys.readouterr().err
 
 
@@ -1806,15 +1859,15 @@ def _raw_request(sock_path, request: dict, timeout: float = 5.0):
     return json.loads(buf.decode())
 
 
-def _hook(sock_path, payload: dict):
-    return _raw_call(sock_path, payload)
+def _hook(sock_path, payload: dict, selected=None):
+    return _raw_call(sock_path, payload, selected=selected)
 
 
 def test_active_sessions_op_lists_a_live_session(running_daemon):
     _daemon, sock_path = running_daemon
     _hook(sock_path, {"hook_event_name": "SessionStart", "session_id": "solo",
                       "cwd": "/r", "model": "gpt-5"})
-    reply = _raw_request(sock_path, {"v": 1, "op": OP_ACTIVE_SESSIONS})
+    reply = _after_hello(sock_path, _envelope(op=OP_ACTIVE_SESSIONS))
     assert reply["op"] == OP_ACTIVE_SESSIONS
     assert [s["session_id"] for s in reply["sessions"]] == ["solo"]
     assert reply["sessions"][0]["age"] >= 0
@@ -1825,7 +1878,7 @@ def test_active_sessions_op_is_empty_before_any_session(running_daemon):
     client's `None` ("could not ask") — the two must not be conflated, or
     "I do not know" starts reading as "there is no session"."""
     _daemon, sock_path = running_daemon
-    reply = _raw_request(sock_path, {"v": 1, "op": OP_ACTIVE_SESSIONS})
+    reply = _after_hello(sock_path, _envelope(op=OP_ACTIVE_SESSIONS))
     assert reply["sessions"] == []
 
 
@@ -1840,7 +1893,7 @@ def test_active_sessions_op_orders_most_recently_active_first(running_daemon):
     _hook(sock_path, {"hook_event_name": "PreToolUse", "session_id": "first",
                       "turn_id": "t1", "tool_name": "Bash",
                       "tool_input": {"command": "ls -la"}})
-    reply = _raw_request(sock_path, {"v": 1, "op": OP_ACTIVE_SESSIONS})
+    reply = _after_hello(sock_path, _envelope(op=OP_ACTIVE_SESSIONS))
     assert [s["session_id"] for s in reply["sessions"]] == ["first", "second"]
 
 
@@ -1850,9 +1903,20 @@ def test_the_bug_active_beats_most_recently_started(sock_dir):
     Session A starts, session B starts, then A fires a hook — the user who
     opened a second window and went back to the first one. The old
     resolution names B; the new one names A.
+
+    #66: `resolve_audit_session` asks the daemon over protocol 2, so this
+    data root carries the receipt an installed one has — without a selected
+    runtime there is no hello to send, and the answer would silently fall
+    back to the ledger, which is the bug this test exists to catch.
     """
     sock_path = sock_dir / "daemon.sock"
-    daemon = Daemon(sock_path, sock_dir, idle_timeout=3600, poll_interval=0.05)
+    write_receipt_v2(sock_dir,
+                     bundle=make_bundle(Path(tempfile.mkdtemp(prefix="phb"))
+                                        / "bundle"),
+                     python=sys.executable)
+    selected = load_activation(sock_dir)
+    daemon = Daemon(sock_path, sock_dir, idle_timeout=3600, poll_interval=0.05,
+                    activation=selected)
     thread = threading.Thread(target=daemon.serve_forever, daemon=True)
     thread.start()
     try:
@@ -1861,7 +1925,8 @@ def test_the_bug_active_beats_most_recently_started(sock_dir):
             time.sleep(0.01)
 
         _hook(sock_path, {"hook_event_name": "SessionStart",
-                          "session_id": "A", "cwd": "/r", "model": "gpt-5"})
+                          "session_id": "A", "cwd": "/r", "model": "gpt-5"},
+              selected=selected)
         # `sessions.started_at` is whole seconds, and two rows in the same
         # second make the old query's answer arbitrary rather than wrong —
         # which is its own indictment, but not the reported bug. Sleep past
@@ -1869,7 +1934,8 @@ def test_the_bug_active_beats_most_recently_started(sock_dir):
         # STARTED session, exactly as it was in the real ledger.
         time.sleep(1.05)
         _hook(sock_path, {"hook_event_name": "SessionStart",
-                          "session_id": "B", "cwd": "/r", "model": "gpt-5"})
+                          "session_id": "B", "cwd": "/r", "model": "gpt-5"},
+              selected=selected)
         # Then the user goes back to the first window and runs `$privacy`,
         # whose own bash is this PreToolUse. The gap matters: B has to stop
         # being the most recently *active* session, which is the whole
@@ -1877,7 +1943,8 @@ def test_the_bug_active_beats_most_recently_started(sock_dir):
         time.sleep(0.3)
         _hook(sock_path, {"hook_event_name": "PreToolUse", "session_id": "A",
                           "turn_id": "t1", "tool_name": "Bash",
-                          "tool_input": {"command": "ls"}})
+                          "tool_input": {"command": "ls"}},
+              selected=selected)
 
         # What the skill used to do, verbatim.
         ledger = Ledger(sock_dir / "ledger.db", load_matrix())
@@ -1936,29 +2003,37 @@ def test_query_active_sessions_round_trips_against_a_real_daemon(running_daemon)
     _daemon, sock_path = running_daemon
     _hook(sock_path, {"hook_event_name": "SessionStart", "session_id": "rt",
                       "cwd": "/r", "model": "gpt-5"})
-    sessions = query_active_sessions(sock_path)
+    sessions = query_active_sessions(sock_path, activation=_activation())
     assert [s["session_id"] for s in sessions] == ["rt"]
 
 
 def test_an_unknown_op_gets_silence_not_an_error_object(running_daemon):
     """Silence is the degradation every client on this socket already
     handles. An error dict would travel back through `hooks/handler.py` and
-    reach Codex as hook output (I6)."""
+    reach Codex as hook output (I6). #66 keeps that for an unknown op both
+    before the hello and after one."""
     _daemon, sock_path = running_daemon
     assert _raw_request(sock_path, {"v": 1, "op": "no-such-op",
                                     "payload": {"hook_event_name": "SessionStart",
                                                 "session_id": "x"}}) is None
+    assert _after_hello(sock_path, _envelope(
+        op="no-such-op",
+        payload={"hook_event_name": "SessionStart",
+                 "session_id": "x"})) is None
 
 
-def test_a_request_with_no_op_is_still_dispatched_as_an_event(running_daemon):
-    """Backward compatibility with any client that predates the second op —
-    `op` has always defaulted to "event"."""
-    _daemon, sock_path = running_daemon
-    reply = _raw_request(sock_path, {"v": 1, "payload": {
+def test_a_request_with_no_op_is_no_longer_dispatched(running_daemon):
+    """`op` used to default to "event", so a client that predated the
+    second op still worked. #66 ends that: a frame with no `op` is not a
+    protocol-2 hello, so it reaches no dispatch at all — deliberately, since
+    a client too old to send `op` is also too old to prove which runtime it
+    belongs to.
+    """
+    daemon, sock_path = running_daemon
+    assert _raw_request(sock_path, {"v": 1, "payload": {
         "hook_event_name": "SessionStart", "session_id": "noop",
-        "cwd": "/r", "model": "gpt-5"}})
-    assert reply == {}
-    assert "noop" in _daemon.state.live
+        "cwd": "/r", "model": "gpt-5"}}) is None
+    assert "noop" not in daemon.state.live
 
 
 def test_the_hook_client_still_sends_the_event_op_literally():
