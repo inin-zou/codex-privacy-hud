@@ -15,9 +15,10 @@ from privacy_hud.accounting import (
     Evidence, EventRecord, ObservationRecord, RecipientInput, ScoringProfile,
     SubjectInput,
 )
-from privacy_hud.identity import recipient_identity, value_identity
+from privacy_hud.identity import file_identity, recipient_identity, value_identity
 from privacy_hud.ledger import Ledger
 from privacy_hud.matrix.loader import load_matrix
+from runtime_helpers import writer_ledger
 
 M = load_matrix()
 PROFILE = ScoringProfile.from_matrix(M)
@@ -34,8 +35,14 @@ def hex_id() -> str:
 
 
 def prepared_ledger(path: Path) -> Ledger:
-    """A ledger at generation 5401, prepared by a genuine legacy boundary."""
-    led = Ledger(path, M)
+    """A ledger at generation 5401, prepared by a genuine legacy boundary.
+
+    A writer, so it holds a real writer lease (#66): initializing applies
+    `SCHEMA` and switches the file to WAL, and both are writes. Close it
+    with `runtime_helpers.close_writer` when a second process has to own
+    the data root afterwards.
+    """
+    led = writer_ledger(path, M)
     with led._write_transaction():
         led.prepare_session_boundary("legacy-boundary")
         led.start_session("legacy-boundary", cwd="", model="")
@@ -157,3 +164,56 @@ def count(conn: sqlite3.Connection, table: str, session_id: str | None = None
 def score(conn: sqlite3.Connection, session_id: str) -> float:
     return conn.execute("SELECT budget_score FROM sessions WHERE session_id=?",
                         (session_id,)).fetchone()[0]
+
+
+def file_subject(path: str, suffix: str | None = ".pem") -> SubjectInput:
+    return SubjectInput(subject_kind="file",
+                        identity_hash=file_identity(KEY, path, "/"),
+                        safe_suffix=suffix)  # type: ignore[arg-type]
+
+
+E = Evidence
+
+
+def pre(session_id: str, **changes) -> ObservationRecord:
+    """A permitted PreToolUse about to cross: a pending crossing."""
+    values = {"evidence": E.PERMISSION_ISSUED | E.LOCAL_DETECTION,
+              "potential_crossing": True}
+    values.update(changes)
+    return observation(session_id, **values)
+
+
+def crossed(session_id: str, **changes) -> ObservationRecord:
+    """A PostToolUse whose pair receipts confirm the crossing."""
+    values = {"hook_event": "PostToolUse", "phase": "post",
+              "decision": "none",
+              "evidence": E.EXECUTION_OBSERVED | E.CROSSING_CONFIRMED,
+              "resolution_scope": "pairs", "potential_crossing": False}
+    values.update(changes)
+    return observation(session_id, **values)
+
+
+def denied(session_id: str, **changes) -> ObservationRecord:
+    """A PreToolUse denial the host enforced for the whole boundary."""
+    values = {"decision": "deny",
+              "evidence": (E.DENY_ISSUED | E.DENY_ENFORCED
+                           | E.LOCAL_DETECTION),
+              "resolution_scope": "boundary", "potential_crossing": True}
+    values.update(changes)
+    return observation(session_id, **values)
+
+
+def prevented(subject=None, to=None, **changes) -> EventRecord:
+    values = {"kind": "prevented", "evidence": E.DENY_ENFORCED}
+    values.update(changes)
+    return event(subject, to, **values)
+
+
+def detected(subject=None, to=None, **changes) -> EventRecord:
+    values = {"kind": "detected", "evidence": E.LOCAL_DETECTION}
+    values.update(changes)
+    return event(subject, to, **values)
+
+
+def model_context() -> RecipientInput:
+    return recipient("model_context", "model context")

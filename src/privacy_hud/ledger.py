@@ -63,10 +63,10 @@ from typing import Literal, get_args
 
 from . import ledger_schema
 from .accounting import (
-    PATH_RULE_IDS, SOURCE_LABELS, ActionKind, Boundary, DataType, Decision,
-    EventKind, EventRecord, Evidence, HookEvent, ObservationRecord,
-    RecipientInput, RecordResult, ResolutionScope, ScanGap, ScoringProfile,
-    SubjectInput,
+    PATH_RULE_IDS, SOURCE_LABELS, AccountingEventRow, AccountingExposureRow,
+    AccountingSummary, ActionKind, Boundary, DataType, Decision, EventKind,
+    EventRecord, Evidence, HookEvent, ObservationRecord, RecipientInput,
+    RecordResult, ResolutionScope, ScanGap, ScoringProfile, SubjectInput,
 )
 from .budget import contribution, next_disclosure_delta, percent
 from .matrix.loader import Matrix
@@ -381,7 +381,9 @@ class UnrecordedSessionSummary:
 
 
 #: What `Ledger.summary` returns. A type alias, not a constructible class.
-SessionSummary = LegacySessionSummary | UnrecordedSessionSummary
+SessionSummary = (
+    LegacySessionSummary | UnrecordedSessionSummary | AccountingSummary
+)
 
 
 #: Exactly the keys `privacy.list_exposures` / `privacy.get_exposure_detail`
@@ -510,6 +512,11 @@ class LegacyEventRow(LegacyExposureRow):
         deserves to be a visible call."""
         return LegacyExposureRow(**{f.name: getattr(self, f.name)
                                     for f in fields(LegacyExposureRow)})
+
+
+#: A raw ledger row of either accounting, and its public projection.
+EventRow = LegacyEventRow | AccountingEventRow
+ExposureRow = LegacyExposureRow | AccountingExposureRow
 
 
 # -- version-2 record validation (#54 Phase 3) ------------------------------
@@ -1216,6 +1223,12 @@ class Ledger:
         if not resolved:
             local[(to.destination_kind, to.unresolved_token)] = recipient_id
         return recipient_id
+
+    def _summary_v2(self, session_id: str) -> AccountingSummary:
+        raise UnsupportedAccounting("version-2 accounting is not implemented")
+
+    def mark_accounting_unavailable(self, session_id: str) -> None:
+        raise UnsupportedAccounting("version-2 accounting is not implemented")
 
     def _legacy_events_table(self) -> Literal["events", "events_legacy_v1"]:
         """Where this ledger's legacy rows are, decided now.

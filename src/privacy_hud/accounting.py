@@ -12,7 +12,7 @@ import math
 import re
 import secrets
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from enum import IntFlag
 from types import MappingProxyType
 from typing import Any, Literal, cast, get_args
@@ -469,3 +469,165 @@ class RecordResult:
     disclosure_ids: tuple[int, ...]
     budget_delta: float
     duplicate_delivery: bool
+
+
+# -- shared version-2 copy (#54 Phase 3, §C) ---------------------------------
+
+ACCOUNTING_SCORE_LABEL = "confirmed disclosure points"
+
+ACCOUNTING_NOTE = (
+    "This score is a versioned policy index over evidenced disclosures, "
+    "not a measurement of harm. Permission, a returned denial, a returned "
+    "rewrite, and a successful tool result do not by themselves confirm "
+    "disclosure or host enforcement."
+)
+
+PHASE3_SURFACE_UNSUPPORTED = (
+    "This Privacy HUD surface does not support version-2 accounting "
+    "in 0.7.10."
+)
+
+
+# -- outcomes ----------------------------------------------------------------
+
+@dataclass(frozen=True, kw_only=True)
+class OutcomeObservation:
+    observation_id: str
+    record: ObservationRecord
+
+
+@dataclass(frozen=True, kw_only=True)
+class OutcomeEvent:
+    observation_id: str
+    subject_id: str
+    recipient_id: str
+    subject_resolution: Resolution
+    recipient_resolution: Resolution
+    kind: EventKind
+    evidence: Evidence
+
+
+@dataclass(frozen=True, kw_only=True)
+class OutcomeCounts:
+    permission_actions: int
+    denials_issued: int
+    denials_enforced: int
+    reads_stopped: int
+    rewrite_actions_issued: int
+    rewrite_actions_enforced: int
+    unresolved_actions: int
+
+
+def resolve_outcomes(
+    observations: Sequence[OutcomeObservation],
+    events: Sequence[OutcomeEvent],
+) -> OutcomeCounts:
+    from .ledger_schema import UnsupportedAccounting
+    raise UnsupportedAccounting("version-2 accounting is not implemented")
+
+
+# -- read models -------------------------------------------------------------
+
+@dataclass(frozen=True, kw_only=True)
+class AccountingSummary:
+    """One version-2 session's summary. `percent` is null whenever any
+    reason in `percentage_unavailable_reasons` holds."""
+
+    accounting_version: Literal[2]
+    accounting_status: Literal["available", "unavailable"]
+    profile_id: str
+    confirmed_points: float
+    budget_cap: float
+    percent: int | None
+    observations: int
+    event_rows: int
+    finding_occurrences: int
+    distinct_subjects: int
+    exposure_events: int
+    intervention_events: int
+    distinct_disclosures: int
+    concrete_recipients: int
+    permission_actions: int
+    denials_issued: int
+    denials_enforced: int
+    reads_stopped: int
+    rewrite_actions_issued: int
+    rewrite_actions_enforced: int
+    unresolved_actions: int
+    unresolved_subject_events: int
+    unresolved_recipient_events: int
+    percentage_unavailable_reasons: tuple[UnavailableReason, ...]
+
+    @property
+    def score_label(self) -> str:
+        return ACCOUNTING_SCORE_LABEL
+
+    @property
+    def accounting_note(self) -> str:
+        return ACCOUNTING_NOTE
+
+    def as_dict(self) -> dict:
+        payload: dict[str, Any] = {
+            f.name: getattr(self, f.name) for f in fields(self)}
+        payload["percentage_unavailable_reasons"] = list(
+            self.percentage_unavailable_reasons)
+        payload["score_label"] = self.score_label
+        payload["accounting_note"] = self.accounting_note
+        return payload
+
+
+@dataclass(frozen=True, kw_only=True)
+class AccountingExposureRow:
+    """One version-2 event as a consumer outside the ledger may see it. The
+    field list is the allow-list: no session ID, hash, unresolved token or
+    delivery key. Not derived from any legacy row type."""
+
+    id: int
+    observation_id: str
+    action_id: str
+    turn_id: str | None
+    ts: int
+    hook_event: HookEvent
+    phase: Phase
+    action_kind: ActionKind
+    kind: EventKind
+    evidence: Evidence
+    data_type: DataType
+    rule_id: str | None
+    occurrences: int
+    subject_id: str
+    subject_kind: Literal["value", "file"]
+    subject_resolution: Resolution
+    subject_label: str
+    recipient_id: str
+    recipient_resolution: Resolution
+    destination_kind: DestinationKind
+    recipient_label: str
+    source_label: str
+    source_kind: None
+    boundary: Boundary
+    masked_example: str | None
+    budget_delta: float
+    scan_gap: ScanGap | None
+    budget_cap: float
+
+    @property
+    def accounting_version(self) -> Literal[2]:
+        return 2
+
+    def as_dict(self) -> dict:
+        payload: dict[str, Any] = {"accounting_version": 2}
+        for f in fields(AccountingExposureRow):
+            payload[f.name] = getattr(self, f.name)
+        payload["evidence"] = list(evidence_names(self.evidence))
+        return payload
+
+
+@dataclass(frozen=True, kw_only=True)
+class AccountingEventRow(AccountingExposureRow):
+    session_id: str
+
+    def to_exposure(self) -> AccountingExposureRow:
+        return AccountingExposureRow(**{
+            f.name: getattr(self, f.name)
+            for f in fields(AccountingExposureRow)})

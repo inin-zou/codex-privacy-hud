@@ -27,6 +27,7 @@ from privacy_hud import ledger_schema
 from privacy_hud.accounting import Evidence, ScoringProfile
 from privacy_hud.budget import group_score
 from privacy_hud.ledger import Ledger, UnsupportedAccounting
+from runtime_helpers import close_writer, writer_ledger
 
 E = Evidence
 EMAIL_B3 = 6.0 * 1.5
@@ -111,12 +112,12 @@ def test_existing_profile_is_never_replaced(led, tmp_path):
         led.ensure_profile(other)
     assert snapshot(led.conn) == corrupt
 
-    legacy = Ledger(tmp_path / "legacy.db", M)
+    legacy = writer_ledger(tmp_path / "legacy.db", M)
     try:
         with pytest.raises(UnsupportedAccounting):
             legacy.ensure_profile(PROFILE)
     finally:
-        legacy.conn.close()
+        close_writer(legacy)
 
 
 def test_profile_read_validates_digest_and_columns(led):
@@ -193,7 +194,7 @@ def test_v2_constructor_requires_prepared_owned_absent_session(led, tmp_path):
             f"PRAGMA user_version = {ledger_schema.PREPARED_VERSION}")
     assert snapshot(led.conn) == before
 
-    legacy = Ledger(tmp_path / "legacy.db", M)
+    legacy = writer_ledger(tmp_path / "legacy.db", M)
     try:
         legacy.start_session("old", cwd="", model="")
         legacy_before = snapshot(legacy.conn)
@@ -204,7 +205,7 @@ def test_v2_constructor_requires_prepared_owned_absent_session(led, tmp_path):
         assert snapshot(legacy.conn) == legacy_before
         assert legacy.conn.execute("PRAGMA user_version").fetchone()[0] == 0
     finally:
-        legacy.conn.close()
+        close_writer(legacy)
 
 
 def test_v2_constructor_stores_no_cwd_or_model(led):
@@ -665,7 +666,7 @@ def _contend(path: Path, records) -> list:
     results: list = [None] * len(records)
 
     def run(i, obs, events):
-        led = Ledger(path, M, initialize=False)
+        led = writer_ledger(path, M, initialize=False)
         try:
             barrier.wait()
             deadline = time.monotonic() + 30
@@ -680,7 +681,7 @@ def _contend(path: Path, records) -> list:
         except BaseException as exc:
             results[i] = exc
         finally:
-            led.conn.close()
+            close_writer(led)
 
     threads = [threading.Thread(target=run, args=(i, *r))
                for i, r in enumerate(records)]
@@ -803,3 +804,17 @@ def test_fakes_are_test_only():
     for module in src.rglob("*.py"):
         assert "accounting_fakes" not in module.read_text(encoding="utf-8"), module
     assert KEY  # the shared synthetic key is a test constant
+
+
+def test_reused_action_id_keeps_its_action_kind(led):
+    sid = start_v2(led)
+    action = hex_id()
+    led.record_observation(observation(sid, action_id=action,
+                                       action_kind="read"), [])
+    before = snapshot(led.conn)
+    with pytest.raises(ValueError, match=INVALID_RECORD):
+        led.record_observation(observation(sid, action_id=action,
+                                           action_kind="tool"), [])
+    assert snapshot(led.conn) == before
+    assert led.record_observation(observation(
+        sid, action_id=action, action_kind="read"), []).event_ids == ()
