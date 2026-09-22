@@ -30,8 +30,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
+import stat
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypeAlias
@@ -247,16 +250,178 @@ def render_manifest(manifest: JSONObject) -> str:
 
 
 # --------------------------------------------------------------------- #
-# loading (scaffold: implemented in the GREEN commit)
+# loading
 # --------------------------------------------------------------------- #
 
+def _int_list(value: object) -> tuple[int, ...] | None:
+    if not isinstance(value, list) or not all(is_int(v) for v in value):
+        return None
+    return tuple(value)
+
+
 def load_identity(bundle_root: Path) -> RuntimeIdentity:
-    raise NotImplementedError
+    """Read and verify `bundle_root/runtime-build.json`.
+
+    Raises `RuntimeRefusal("bundle_invalid")` for an absent, malformed or
+    stale manifest, including a bundle whose files no longer hash to the
+    recorded `build_id` (a same-release edit, a missing file, an extra
+    source file).
+    """
+    root = Path(bundle_root)
+    try:
+        raw = (root / MANIFEST_NAME).read_bytes()
+    except OSError:
+        raise RuntimeRefusal("bundle_invalid") from None
+    if len(raw) > _MAX_MANIFEST_BYTES:
+        raise RuntimeRefusal("bundle_invalid")
+    try:
+        manifest = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise RuntimeRefusal("bundle_invalid") from None
+    if not isinstance(manifest, dict) or set(manifest) != MANIFEST_FIELDS:
+        raise RuntimeRefusal("bundle_invalid")
+    release = manifest["release"]
+    build_id = manifest["build_id"]
+    readable = _int_list(manifest["readable_schemas"])
+    writable = _int_list(manifest["writable_schemas"])
+    snapshots = _int_list(manifest["snapshot_versions"])
+    if (manifest["format"] != MANIFEST_FORMAT
+            or not is_int(manifest["format"])
+            or not isinstance(release, str) or not release
+            or not is_build_id(build_id)
+            or not is_int(manifest["protocol"])
+            or not is_int(manifest["storage_generation"])
+            or readable is None or writable is None or snapshots is None):
+        raise RuntimeRefusal("bundle_invalid")
+    metadata = {k: v for k, v in manifest.items() if k != "build_id"}
+    if compute_build_id(root, metadata) != build_id:
+        raise RuntimeRefusal("bundle_invalid")
+    return RuntimeIdentity(
+        release=release, build_id=build_id,
+        protocol=manifest["protocol"],
+        storage_generation=manifest["storage_generation"],
+        readable_schemas=readable, writable_schemas=writable,
+        snapshot_versions=snapshots)
+
+
+def read_receipt(data_dir: Path) -> JSONObject:
+    """The receipt's JSON object, read only if this user owns it and nobody
+    else can write it. Raises `RuntimeRefusal("setup_missing")` otherwise.
+
+    `fstat` on the open descriptor, and `O_NOFOLLOW`: the check has to
+    describe the bytes actually read, because this file names a program a
+    hook will execute.
+    """
+    path = Path(data_dir) / RECEIPT_NAME
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        raise RuntimeRefusal("setup_missing") from None
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_mode & 0o022
+                or info.st_size > _MAX_RECEIPT_BYTES):
+            raise RuntimeRefusal("setup_missing")
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            raw = handle.read(_MAX_RECEIPT_BYTES + 1)
+    except OSError:
+        raise RuntimeRefusal("setup_missing") from None
+    finally:
+        os.close(fd)
+    try:
+        receipt = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise RuntimeRefusal("setup_missing") from None
+    if not isinstance(receipt, dict):
+        raise RuntimeRefusal("setup_missing")
+    return receipt
+
+
+def _valid_receipt_v2(receipt: JSONObject) -> bool:
+    if set(receipt) != RECEIPT_FIELDS:
+        return False
+    if not is_int(receipt["v"]) or receipt["v"] != RECEIPT_VERSION:
+        return False
+    python = receipt["python"]
+    root = receipt["selected_bundle_root"]
+    if not isinstance(python, str) or not os.path.isabs(python):
+        return False
+    if not isinstance(root, str) or not os.path.isabs(root):
+        return False
+    env = receipt["env"]
+    if not isinstance(env, dict) or not all(
+            k in PINNED_ENV_NAMES and isinstance(v, str)
+            for k, v in env.items()):
+        return False
+    probe = receipt["dependency_probe"]
+    if not isinstance(probe, dict) or not all(
+            isinstance(v, (str, bool)) or v is None for v in probe.values()):
+        return False
+    if not is_build_id(receipt["selected_build_id"]):
+        return False
+    if not is_epoch(receipt["activation_epoch"]):
+        return False
+    if (not is_int(receipt["storage_generation"])
+            or receipt["storage_generation"] != STORAGE_GENERATION):
+        return False
+    recorded = receipt["recorded_at"]
+    if (isinstance(recorded, bool) or not isinstance(recorded, (int, float))
+            or not math.isfinite(recorded) or recorded < 0):
+        return False
+    return True
 
 
 def load_activation(data_dir: Path) -> Activation:
-    raise NotImplementedError
+    """The selected runtime, from receipt v2, with the selected bundle's
+    identity verified against its files.
+
+    * no receipt, an unreadable or unsafe one, receipt v1 (repair input
+      only), or a malformed v2 -> `setup_missing`;
+    * a recorded interpreter that is not an executable file ->
+      `setup_missing`;
+    * a selected bundle whose files do not match its manifest ->
+      `bundle_invalid`;
+    * a selected bundle whose build is not the recorded build ->
+      `runtime_mismatch`.
+    """
+    receipt = read_receipt(data_dir)
+    if not _valid_receipt_v2(receipt):
+        raise RuntimeRefusal("setup_missing")
+    python = str(receipt["python"])
+    if not os.path.isfile(python) or not os.access(python, os.X_OK):
+        raise RuntimeRefusal("setup_missing")
+    bundle_root = Path(str(receipt["selected_bundle_root"]))
+    identity = load_identity(bundle_root)
+    if (identity.build_id != receipt["selected_build_id"]
+            or identity.storage_generation != STORAGE_GENERATION):
+        raise RuntimeRefusal("runtime_mismatch")
+    return Activation(identity=identity, epoch=str(receipt["activation_epoch"]),
+                      bundle_root=bundle_root, python=Path(python))
 
 
 def verify_import_origins(bundle_root: Path) -> None:
-    raise NotImplementedError
+    """Every loaded `privacy_hud` module must be a file under
+    `bundle_root/src/privacy_hud`, and the package's search path must be
+    exactly that directory. Raises `RuntimeRefusal("bundle_invalid")`.
+
+    Distribution metadata is never consulted: an installed `privacy-hud`
+    distribution is not evidence of which code is running.
+    """
+    package_dir = (Path(bundle_root) / "src" / "privacy_hud").resolve()
+    package = sys.modules.get("privacy_hud")
+    if package is None:
+        raise RuntimeRefusal("bundle_invalid")
+    search = [Path(p).resolve() for p in getattr(package, "__path__", [])]
+    if search != [package_dir]:
+        raise RuntimeRefusal("bundle_invalid")
+    for name, module in list(sys.modules.items()):
+        if name != "privacy_hud" and not name.startswith("privacy_hud."):
+            continue
+        origin = getattr(module, "__file__", None)
+        if not isinstance(origin, str):
+            raise RuntimeRefusal("bundle_invalid")
+        resolved = Path(origin).resolve()
+        if not resolved.is_relative_to(package_dir):
+            raise RuntimeRefusal("bundle_invalid")

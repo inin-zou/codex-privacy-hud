@@ -33,6 +33,8 @@ from privacy_hud.daemon import (
 from privacy_hud.detect.base import Cost, DetectorProfile
 from privacy_hud.dispatch import dispatch, new_state
 from privacy_hud.runtime import LATCH_NAME
+from runtime_helpers import activation as test_activation
+from runtime_helpers import make_bundle, write_receipt_v2
 
 CREDENTIAL = "sk-proj-Ab3xY9zQw1Er5Ty7Ui0OpAs2Df4Gh6Jk8Lm"
 
@@ -1201,7 +1203,8 @@ def test_main_returns_already_running_when_a_daemon_owns_the_socket(
     thread.start()
     try:
         before = sock_path.stat().st_ino
-        assert daemon_mod.main([]) == EXIT_ALREADY_RUNNING
+        assert daemon_mod.main([], activation=test_activation()) \
+            == EXIT_ALREADY_RUNNING
         assert EXIT_ALREADY_RUNNING not in (0, EXIT_FAILURE)
         assert "already owns" in capsys.readouterr().err
         # The incumbent is untouched and still serving.
@@ -1222,8 +1225,24 @@ def test_main_returns_failure_on_a_real_bind_failure(sock_dir, startup_state,
     # test is about the exit code, not about the detector stack.
     monkeypatch.setattr(daemon_mod, "new_state", lambda data_dir: startup_state)
 
-    assert daemon_mod.main([]) == EXIT_FAILURE
+    assert daemon_mod.main([], activation=test_activation()) == EXIT_FAILURE
     assert "cannot start" in capsys.readouterr().err
+
+
+def test_main_refuses_without_a_selected_runtime(sock_dir, monkeypatch,
+                                                 capsys):
+    """#66: started without the bootstrap and without receipt v2, the daemon
+    refuses before it builds any state or opens the ledger."""
+    monkeypatch.setenv("PLUGIN_DATA", str(sock_dir))
+    monkeypatch.setattr(daemon_mod, "new_state", lambda data_dir: (
+        pytest.fail("state was built without a selected runtime")))
+    assert daemon_mod.main([]) == EXIT_FAILURE
+    assert capsys.readouterr().err == (
+        "privacy-hud daemon: runtime identity or ledger compatibility check "
+        "failed; no writable ledger was opened.\n"
+        "Run the repair command reported by the current plugin's doctor.\n")
+    assert not (sock_dir / "ledger.db").exists()
+    assert not (sock_dir / "daemon.sock").exists()
 
 
 def test_the_cli_reports_already_running_with_its_own_exit_code(sock_dir,
@@ -1241,11 +1260,16 @@ def test_the_cli_reports_already_running_with_its_own_exit_code(sock_dir,
     thread = threading.Thread(target=incumbent.serve_forever, daemon=True)
     thread.start()
     try:
-        src = str(Path(daemon_mod.__file__).resolve().parents[1])   # .../src
-        env = {**os.environ, "PLUGIN_DATA": str(sock_dir), "PYTHONPATH": src}
-        proc = subprocess.run([sys.executable, "-m", "privacy_hud.daemon"],
-                              env=env, capture_output=True, text=True,
-                              timeout=120)
+        # The real spawn path (#66): the bundled bootstrap, in the receipt's
+        # interpreter, in isolated mode.
+        bundle = make_bundle(Path(tempfile.mkdtemp(prefix="phb")) / "bundle")
+        write_receipt_v2(sock_dir, bundle=bundle, python=sys.executable)
+        env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+        env["PLUGIN_DATA"] = str(sock_dir)
+        proc = subprocess.run(
+            [sys.executable, "-I", str(bundle / "scripts" / "runtime.py"),
+             "--plugin-data", str(sock_dir), "daemon"],
+            env=env, capture_output=True, text=True, timeout=120)
         assert proc.returncode == EXIT_ALREADY_RUNNING, proc.stderr
         assert "already owns" in proc.stderr
         # The incumbent survived the spawn attempt.

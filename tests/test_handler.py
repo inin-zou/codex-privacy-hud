@@ -5,7 +5,8 @@ tiny shell script that records the argv and environment it was given and then
 sleeps, which is what makes three separate claims checkable at once and
 without any model weights:
 
-* the client execs **the recorded interpreter**, with `-m privacy_hud.daemon`
+* the client execs **the recorded interpreter**, in isolated mode, on this
+  bundle's bootstrap (`-I scripts/runtime.py --plugin-data DIR daemon`, #66)
   — not `sys.executable`, and not a `python3` off `PATH`, which on a real
   Codex hook is a system interpreter with no `transformers` and would produce
   a daemon with tier 3 silently dead;
@@ -73,11 +74,24 @@ def _fake_interpreter(tmp_path, *, sleep: float = 20.0) -> tuple[Path, Path]:
     return script, marker
 
 
+REPO = HANDLER.parents[1]
+BOOTSTRAP = REPO / "scripts" / "runtime.py"
+
+
 def _write_receipt(data_dir: Path, python, **overrides) -> None:
-    receipt = {"v": 1, "python": str(python), "pythonpath": str(SRC),
-               "plugin_data": str(data_dir), "recorded_at": time.time(),
-               "recorded": {"transformers": "5.16.1", "torch": "2.14.0"},
-               "env": {"HF_HOME": str(data_dir / "hf")}}
+    """Receipt v2 selecting this checkout. The hook client compares the
+    selected build with this bundle's manifest; it does not hash the bundle
+    (the daemon's bootstrap does), so these tests do not depend on the
+    checkout's manifest being current."""
+    build_id = json.loads((REPO / "runtime-build.json").read_text())["build_id"]
+    receipt = {"v": 2, "python": str(python),
+               "env": {"HF_HOME": str(data_dir / "hf")},
+               "dependency_probe": {"transformers": "5.16.1",
+                                    "torch": "2.14.0"},
+               "selected_bundle_root": str(REPO),
+               "selected_build_id": build_id,
+               "activation_epoch": "0123456789abcdef0123456789abcdef",
+               "storage_generation": 1, "recorded_at": time.time()}
     receipt.update(overrides)
     (data_dir / "runtime.json").write_text(json.dumps(receipt))
 
@@ -176,10 +190,58 @@ def test_a_missing_daemon_is_started_from_the_recorded_interpreter(tmp_path):
     finally:
         _kill_marked(marker)
 
-    assert "argv:-m privacy_hud.daemon" in recorded
+    assert (f"argv:-I {BOOTSTRAP} --plugin-data {tmp_path} daemon"
+            in recorded.splitlines())
     assert f"PLUGIN_DATA={tmp_path}" in recorded
-    assert str(SRC) in recorded            # the recorded sys.path entry
+    # #66: no path entry reaches the daemon; the bootstrap selects the code.
+    assert "PYTHONPATH=" in recorded.splitlines()
     assert f"HF_HOME={tmp_path / 'hf'}" in recorded  # the weights location
+
+
+def test_a_v1_receipt_is_repair_input_only(tmp_path):
+    """Receipt v1 carries a `pythonpath` that selected application code.
+    #66: it is accepted only as repair input, so the hook starts nothing."""
+    script, marker = _fake_interpreter(tmp_path)
+    _write_receipt(tmp_path, script, v=1, pythonpath=str(SRC))
+    try:
+        run(INGRESS, {"PLUGIN_DATA": str(tmp_path)})
+        time.sleep(0.3)
+        assert not marker.exists()
+    finally:
+        _kill_marked(marker)
+
+
+def test_a_receipt_selecting_another_build_is_not_spawned(tmp_path):
+    """Hooks may start only the already-selected runtime of their own
+    bundle: another bundle root or another build id starts nothing."""
+    script, marker = _fake_interpreter(tmp_path)
+    for override in ({"selected_build_id": "f" * 64},
+                     {"selected_bundle_root": str(tmp_path / "other")}):
+        _write_receipt(tmp_path, script, **override)
+        try:
+            run(INGRESS, {"PLUGIN_DATA": str(tmp_path)})
+            time.sleep(0.3)
+            assert not marker.exists(), override
+            latch = json.loads((tmp_path / "daemon.spawn-attempt").read_text())
+            assert latch["error"] == "runtime mismatch"
+        finally:
+            _kill_marked(marker)
+            (tmp_path / "daemon.spawn-attempt").unlink(missing_ok=True)
+
+
+def test_inherited_pythonpath_never_reaches_the_daemon(tmp_path):
+    script, marker = _fake_interpreter(tmp_path)
+    _write_receipt(tmp_path, script)
+    try:
+        run(INGRESS, {"PLUGIN_DATA": str(tmp_path),
+                      "PYTHONPATH": "/hostile/path"})
+        deadline = time.time() + 5.0
+        while not marker.exists() and time.time() < deadline:
+            time.sleep(0.02)
+        recorded = marker.read_text()
+    finally:
+        _kill_marked(marker)
+    assert "/hostile/path" not in recorded
 
 
 def test_spawn_daemon_forces_offline_flags(tmp_path):

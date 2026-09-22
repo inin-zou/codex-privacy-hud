@@ -86,41 +86,24 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:  # import-time cost is the whole point of not importing these
     from privacy_hud.ledger import Ledger
 
-#: `$PLUGIN_DATA/runtime.json` — written by `privacy-hud-setup`, read by
-#: `hooks/handler.py` to launch the daemon and by this file to launch itself.
-#: Restated rather than imported: `handler.py` inlines these checks inside
-#: `_spawn_daemon`, on the path every tool call runs, and extracting them to
-#: share would change the hook client for this file's benefit. The repo's
-#: precedent for a fact two stdlib-only ends must share is to restate it and
-#: pin both copies with one test —
+#: `$PLUGIN_DATA/runtime.json` (receipt v2), read by `hooks/handler.py` to
+#: launch the daemon and checked here before this file hands over to the
+#: bundled bootstrap. Restated rather than imported: `handler.py` inlines
+#: these checks on the path every tool call runs. The repo's precedent for a
+#: fact two stdlib-only ends must share is to restate it and pin both copies
+#: with one test —
 #: `tests/test_mcp_launcher.py::test_the_receipt_checks_match_the_hook_client`.
 RECEIPT_NAME = "runtime.json"
-RECEIPT_VERSION = 1
+RECEIPT_VERSION = 2
 
-#: Set in the child's environment before `execve`, so an entry that finds it
-#: already set does not exec again. Without it, a receipt naming an
-#: interpreter that re-enters this file loops until the process table gives up.
-REEXEC_MARKER = "PRIVACY_HUD_MCP_REEXEC"
+#: The bundled bootstrap, relative to this plugin bundle (#66).
+BOOTSTRAP = ("scripts", "runtime.py")
 
 #: What a ledger-backed tool reports when sqlite fails. Fixed text: the
 #: exception's own message could carry anything, and the tool must never
 #: return an empty summary or `saved: true` in its place.
 LEDGER_ERROR = ("Privacy HUD ledger operation failed; no successful result "
                 "is available.")
-
-#: I2: assigned into the child's environment last, after every merge, so an
-#: inherited value cannot turn the network back on in the pinned
-#: interpreter. A copy of `privacy_hud.offline.FORCED_ENV`, which this file
-#: cannot import; `tests/test_offline.py` pins the two together.
-OFFLINE_ENV = {
-    "HF_HUB_OFFLINE": "1",
-    "TRANSFORMERS_OFFLINE": "1",
-    "HF_DATASETS_OFFLINE": "1",
-    "HF_HUB_DISABLE_TELEMETRY": "1",
-    "DO_NOT_TRACK": "1",
-    "HF_HUB_DISABLE_UPDATE_CHECK": "1",
-    "DISABLE_SAFETENSORS_CONVERSION": "1",
-}
 
 
 #: Codex's own name for this plugin's data directory is
@@ -188,25 +171,31 @@ def _resolved_data_dir() -> str | None:
     return candidates[0] if len(candidates) == 1 else None
 
 
-def _reexec_under_pinned_interpreter() -> None:
-    """Replace this process with the interpreter `runtime.json` records.
+def _bundle_root() -> Path:
+    """This plugin bundle: the directory above `mcp/`."""
+    return Path(__file__).resolve().parent.parent
+
+
+def _launch_through_bootstrap() -> int:
+    """Hand this process to the bundled bootstrap (#66).
 
     Codex constrains an MCP `command` to a bare executable on the host PATH
     or a `./` path inside the plugin root, and rejects `${PLUGIN_ROOT}` there
-    — unlike `hooks.json`, where `$PLUGIN_ROOT` expands. The plugin's venv is
-    neither, so the manifest launches host `python3` and this is how the
-    process reaches an interpreter that can import `privacy_hud` and `mcp`.
+    — unlike `hooks.json`, where `$PLUGIN_ROOT` expands. So the manifest
+    launches host `python3`, which can import neither `privacy_hud` nor
+    `mcp`, and this is how the process reaches the selected interpreter.
 
-    Re-exec, not `sys.path`: `mcp` depends on `pydantic`, whose core is a
-    compiled extension built for one interpreter version. Borrowing the
-    venv's `site-packages` from a different host `python3` is a binary
-    mismatch waiting for the two versions to differ.
+    The checks below run first so the cheap, common failures keep their
+    fixed one-line diagnostics. The bootstrap then does the rest: it
+    verifies the selected build, re-executes the receipt's interpreter in
+    isolated mode (`python -I`, so no inherited `PYTHONPATH` can supply
+    first-party code), imports `privacy_hud` only from this bundle, and
+    calls `serve()` below. Nothing on this path writes to stdout: it is the
+    JSON-RPC channel.
 
-    Returns only when already running under the pinned interpreter. Otherwise
-    `execve` replaces the process and this never returns.
+    Re-exec rather than borrowing `sys.path`: `mcp` depends on `pydantic`,
+    whose core is a compiled extension built for one interpreter version.
     """
-    if os.environ.get(REEXEC_MARKER):
-        return
     data_dir = _resolved_data_dir()
     if not data_dir:
         _fail("PLUGIN_DATA is not set and no Codex plugin-data directory for "
@@ -223,7 +212,9 @@ def _reexec_under_pinned_interpreter() -> None:
                 _fail(f"{RECEIPT_NAME} is writable by others; refusing to "
                       "execute the interpreter it names")
             receipt = json.load(handle)
-        if not isinstance(receipt, dict) or receipt.get("v") != RECEIPT_VERSION:
+        if (not isinstance(receipt, dict)
+                or isinstance(receipt.get("v"), bool)
+                or receipt.get("v") != RECEIPT_VERSION):
             raise ValueError("unusable receipt")
         python = receipt["python"]
         if not isinstance(python, str) or not python:
@@ -234,25 +225,16 @@ def _reexec_under_pinned_interpreter() -> None:
     if not os.access(python, os.X_OK) or os.path.isdir(python):
         _fail("the recorded interpreter is not executable; run privacy-hud-setup")
 
-    env = dict(os.environ)
-    env[REEXEC_MARKER] = "1"
-    # Hand the child the directory this half resolved, so the two halves
-    # cannot disagree about which ledger this server is for. When
-    # `PLUGIN_DATA` was set this is a no-op; when it was not, it is the
-    # resolution above, made explicit rather than re-derived after the exec.
-    env["PLUGIN_DATA"] = data_dir
-    pythonpath = receipt.get("pythonpath")
-    if isinstance(pythonpath, str) and pythonpath:
-        parts = [pythonpath] + [p for p in env.get("PYTHONPATH", "").split(
-            os.pathsep) if p]
-        seen, ordered = set(), []
-        for part in parts:
-            if part not in seen:
-                seen.add(part)
-                ordered.append(part)
-        env["PYTHONPATH"] = os.pathsep.join(ordered)
-    env.update(OFFLINE_ENV)
-    os.execve(python, [python, os.path.abspath(__file__)], env)
+    import importlib.util
+    path = _bundle_root().joinpath(*BOOTSTRAP)
+    spec = importlib.util.spec_from_file_location(
+        "_privacy_hud_bootstrap", path)
+    if spec is None or spec.loader is None:  # pragma: no cover - a bundle
+        # without its bootstrap is refused by the digest check anyway
+        raise SystemExit(1)
+    bootstrap = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bootstrap)
+    return bootstrap.main(["--plugin-data", data_dir, "mcp"])
 
 
 def _ledger_path() -> Path:
@@ -540,11 +522,16 @@ def build_app():
     return app
 
 
-def main() -> int:
-    _reexec_under_pinned_interpreter()
+def serve() -> int:
+    """Run the stdio server. Called by the bootstrap, in the selected
+    interpreter, after the runtime identity checks."""
     app = build_app()
     app.run(transport="stdio")
     return 0
+
+
+def main() -> int:
+    return _launch_through_bootstrap()
 
 
 if __name__ == "__main__":

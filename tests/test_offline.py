@@ -104,7 +104,7 @@ def _inline_dict(path: Path, name: str) -> dict[str, str]:
 
 
 @pytest.mark.parametrize("path", [REPO / "hooks" / "handler.py",
-                                  REPO / "mcp" / "server.py"])
+                                  REPO / "scripts" / "runtime.py"])
 def test_launcher_flags_match_shared_policy(path):
     assert _inline_dict(path, "OFFLINE_ENV") == offline.FORCED_ENV
 

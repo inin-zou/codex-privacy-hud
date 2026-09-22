@@ -50,19 +50,28 @@ TIMEOUT = 2.0  # seconds
 EGRESS_EVENTS = {"PreToolUse"}
 
 # --- lazy daemon start ------------------------------------------------------
-# These five literals are the contract with `privacy_hud/runtime.py`, restated
-# here because this file is stdlib-only and never imports the package (that
-# constraint is what keeps a broken install from breaking Codex, and it is
-# asserted by tests/test_handler.py). tests/test_runtime.py parses this file
-# and asserts every one of them matches `runtime.py`, so the duplication is
-# checked rather than trusted -- the same treatment `daemon.sock` already gets.
+# These literals are the contract with `privacy_hud/runtime.py` and
+# `privacy_hud/runtime_contract.py`, restated here because this file is
+# stdlib-only and never imports the package (that constraint is what keeps a
+# broken install from breaking Codex, and it is asserted by
+# tests/test_handler.py). tests/test_runtime.py parses this file and asserts
+# every one of them matches, so the duplication is checked rather than
+# trusted -- the same treatment `daemon.sock` already gets.
 RECEIPT_NAME = "runtime.json"
-RECEIPT_VERSION = 1
+RECEIPT_VERSION = 2
+MANIFEST_NAME = "runtime-build.json"
 LATCH_NAME = "daemon.spawn-attempt"
 SPAWN_COOLDOWN = 30.0
-DAEMON_MODULE = "privacy_hud.daemon"
 NO_SPAWN_ENV = "PRIVACY_HUD_NO_SPAWN"
 PINNED_ENV_NAMES = ("HF_HOME", "HF_HUB_CACHE", "TRANSFORMERS_CACHE")
+#: #66: the daemon is started through this bundle's bootstrap, in the
+#: receipt's interpreter, in isolated mode. Never `-m privacy_hud.daemon`:
+#: that would import whichever `privacy_hud` the interpreter finds first.
+BOOTSTRAP = ("scripts", "runtime.py")
+#: Removed from the spawned daemon's environment (see `scripts/runtime.py`).
+STRIPPED_ENV = ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP",
+                "PYTHONUSERBASE", "PYTHONEXECUTABLE", "PYTHONINSPECT",
+                "PRIVACY_HUD_MCP_REEXEC")
 #: I2: assigned into the child's environment last, after every merge, so an
 #: inherited value cannot turn the network back on in the process that loads
 #: the model. A copy of `privacy_hud.offline.FORCED_ENV`, which this file
@@ -156,14 +165,70 @@ def _unverified(payload, starting):
     return {"systemMessage": "Privacy HUD unavailable — disclosure unverified."}
 
 
+def _bundle_root():
+    """This hook's own plugin bundle: two directories above this file."""
+    return os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+
+def _own_build_id(bundle_root):
+    """The `build_id` this bundle's manifest declares, or None. Read, not
+    recomputed: the daemon verifies the digest of the bundle it runs from,
+    and a hook that hashed the whole bundle on every tool call would pay
+    for a check the daemon already makes."""
+    try:
+        with open(os.path.join(bundle_root, MANIFEST_NAME)) as handle:
+            manifest = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    build_id = manifest.get("build_id") if isinstance(manifest, dict) else None
+    return build_id if isinstance(build_id, str) and build_id else None
+
+
+def _read_selection(data_dir):
+    """Receipt v2's selection, or raise.
+
+    Returns `(receipt, python)`. Raises `ValueError` for a receipt that is
+    unsafe (writable by others: it names a program this process executes),
+    of another version -- receipt v1 is repair input only, and its
+    `pythonpath` must never select application code -- or does not select
+    this bundle's build, and `OSError` when there is none.
+    """
+    with open(os.path.join(data_dir, RECEIPT_NAME)) as handle:
+        # `fstat` on the open handle rather than `stat` on the path: the
+        # check has to describe the bytes actually read. There is no `/tmp`
+        # default (spec §6), and this stays as defence in depth against a
+        # receipt another local user could have written.
+        info = os.fstat(handle.fileno())
+        if info.st_uid != os.getuid() or info.st_mode & 0o022:
+            raise ValueError("receipt is writable by others")
+        receipt = json.load(handle)
+    if not isinstance(receipt, dict):
+        raise ValueError("unusable receipt")
+    version = receipt.get("v")
+    if isinstance(version, bool) or version != RECEIPT_VERSION:
+        raise ValueError("unusable receipt")
+    python = receipt.get("python")
+    if not isinstance(python, str) or not os.path.isabs(python):
+        raise ValueError("unusable receipt")
+    root = receipt.get("selected_bundle_root")
+    bundle_root = _bundle_root()
+    if not isinstance(root, str) or os.path.realpath(root) != bundle_root:
+        raise ValueError("runtime mismatch")
+    build_id = _own_build_id(bundle_root)
+    if build_id is None or receipt.get("selected_build_id") != build_id:
+        raise ValueError("runtime mismatch")
+    return receipt, python
+
+
 def _spawn_daemon(data_dir):
     """Start the daemon detached. Returns True when one is expected to be
     coming up — either this call launched it, or a recent call did.
 
     Returns without doing anything at all if auto-spawn is disabled, if
     another hook attempted a spawn within `SPAWN_COOLDOWN` seconds, or if the
-    receipt is missing, unreadable, of an unknown version, or names an
-    interpreter that is not an executable file. Every one of those degrades to
+    receipt is missing, unreadable, not receipt v2 (v1 is repair input
+    only), does not select this bundle's build, or names an interpreter
+    that is not an executable file. Every one of those degrades to
     exactly the behaviour this file had before auto-spawn existed (I6): the
     caller still gets its fail-open/fail-closed answer, and Codex is never
     blocked by a daemon that could not be started.
@@ -220,29 +285,14 @@ def _spawn_daemon(data_dir):
             pass
 
     try:
-        with open(os.path.join(data_dir, RECEIPT_NAME)) as handle:
-            # This file names a program this process is about to execute, so
-            # who can write it matters. There is no `/tmp` default any more
-            # (spec §6) -- `main()` already returns `{}` before this runs if
-            # `PLUGIN_DATA` is unset -- but this fstat check stays as defence
-            # in depth: a world-writable `runtime.json` planted by another
-            # local user in whatever directory Codex DID assign would
-            # otherwise be an arbitrary-exec hole. `fstat` on the open
-            # handle rather than `stat` on the path: the check has to describe
-            # the bytes actually read, not a file that may have been swapped
-            # since. `write_receipt` creates it 0600, so this never fires on a
-            # real setup.
-            info = os.fstat(handle.fileno())
-            if info.st_uid != os.getuid() or info.st_mode & 0o022:
-                _latch(error="receipt is writable by others")
-                return False
-            receipt = json.load(handle)
-        if not isinstance(receipt, dict) or receipt.get("v") != RECEIPT_VERSION:
-            raise ValueError("unusable receipt")
-        python = receipt["python"]
-        if not isinstance(python, str) or not python:
-            raise ValueError("unusable receipt")
-    except (OSError, ValueError, KeyError) as exc:
+        receipt, python = _read_selection(data_dir)
+    except ValueError as exc:
+        # Fixed strings from `_read_selection`, never file content (I1).
+        _latch(error=str(exc) if str(exc) in (
+            "receipt is writable by others", "runtime mismatch")
+            else "ValueError")
+        return False
+    except OSError as exc:
         # No receipt means setup was never run. Deliberately silent here and
         # loud in `privacy-hud-doctor`: a hook is not a place to lecture, and
         # the reply already says the call was not verified.
@@ -258,16 +308,12 @@ def _spawn_daemon(data_dir):
     # process because Codex put it there, and that is the whole reason this
     # spawn belongs in the hook client.
     env["PLUGIN_DATA"] = data_dir
-    pythonpath = receipt.get("pythonpath")
-    if isinstance(pythonpath, str) and pythonpath:
-        parts = [pythonpath] + [p for p in env.get("PYTHONPATH", "").split(
-            os.pathsep) if p]
-        seen, ordered = set(), []
-        for part in parts:
-            if part not in seen:
-                seen.add(part)
-                ordered.append(part)
-        env["PYTHONPATH"] = os.pathsep.join(ordered)
+    # #66: no inherited path may supply first-party code. The bootstrap runs
+    # the interpreter with `-I` as well; removing these keeps them from
+    # reaching anything the daemon starts.
+    for name in STRIPPED_ENV:
+        env.pop(name, None)
+    env["PYTHONNOUSERSITE"] = "1"
     recorded_env = receipt.get("env")
     if isinstance(recorded_env, dict):
         # Where the pinned interpreter should look for model weights. Only
@@ -281,7 +327,8 @@ def _spawn_daemon(data_dir):
 
     try:
         proc = subprocess.Popen(
-            [python, "-m", DAEMON_MODULE],
+            [python, "-I", os.path.join(_bundle_root(), *BOOTSTRAP),
+             "--plugin-data", data_dir, "daemon"],
             # A hook's stdout IS its reply to Codex and its stderr is read by
             # Codex; a detached daemon must inherit neither. DEVNULL rather
             # than a log file is also an I1 decision: an exception message or

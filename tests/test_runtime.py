@@ -166,11 +166,16 @@ def test_load_receipt_never_raises_on_a_directory(tmp_path):
 # the environment a spawned daemon gets
 # --------------------------------------------------------------------- #
 
-def test_spawn_env_prepends_the_recorded_path_entry(tmp_path):
+def test_spawn_env_never_carries_a_path_entry(tmp_path):
+    """#66: neither the receipt's recorded `pythonpath` nor an inherited
+    `PYTHONPATH` may select first-party code; the bootstrap does."""
     receipt = runtime.build_receipt(tmp_path)
-    env = runtime.spawn_env(receipt, {"PYTHONPATH": "/already/here"})
-    assert env["PYTHONPATH"].split(os.pathsep) == [receipt["pythonpath"],
-                                                   "/already/here"]
+    assert receipt["pythonpath"]
+    env = runtime.spawn_env(receipt, {"PYTHONPATH": "/already/here",
+                                      "PYTHONHOME": "/elsewhere"})
+    assert "PYTHONPATH" not in env
+    assert "PYTHONHOME" not in env
+    assert env["PYTHONNOUSERSITE"] == "1"
 
 
 def test_spawn_env_lets_the_live_environment_win(tmp_path, monkeypatch):
@@ -455,8 +460,8 @@ def _handler_constants() -> dict:
 
 
 @pytest.mark.parametrize("name", [
-    "RECEIPT_NAME", "RECEIPT_VERSION", "LATCH_NAME", "SPAWN_COOLDOWN",
-    "DAEMON_MODULE", "NO_SPAWN_ENV", "PINNED_ENV_NAMES",
+    "RECEIPT_NAME", "LATCH_NAME", "SPAWN_COOLDOWN",
+    "BOOTSTRAP", "STRIPPED_ENV", "NO_SPAWN_ENV", "PINNED_ENV_NAMES",
 ])
 def test_handler_restates_the_receipt_contract_correctly(name):
     """`hooks/handler.py` cannot import this module — it is stdlib-only so
@@ -465,6 +470,16 @@ def test_handler_restates_the_receipt_contract_correctly(name):
     auto-spawn, so the duplication is checked rather than trusted, exactly as
     `MIN_PYTHON` is checked against `pyproject.toml`."""
     assert _handler_constants()[name] == getattr(runtime, name)
+
+
+@pytest.mark.parametrize("name", [
+    "RECEIPT_NAME", "RECEIPT_VERSION", "MANIFEST_NAME", "PINNED_ENV_NAMES",
+])
+def test_handler_restates_the_runtime_contract_correctly(name):
+    """#66: the hook client reads receipt v2 and its bundle's manifest; the
+    names and the version are `runtime_contract`'s."""
+    from privacy_hud import runtime_contract
+    assert _handler_constants()[name] == getattr(runtime_contract, name)
 
 
 def test_handler_restates_the_egress_event_set_correctly():

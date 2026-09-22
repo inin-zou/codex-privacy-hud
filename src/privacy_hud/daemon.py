@@ -77,6 +77,13 @@ from .dispatch import (
     new_state,
 )
 from .hud_snapshot import HEARTBEAT_INTERVAL
+from .runtime_contract import (
+    Activation,
+    RuntimeRefusal,
+    load_activation,
+    verify_import_origins,
+)
+from .runtime_messages import DAEMON_STARTUP_REFUSAL
 
 _log = logging.getLogger(__name__)
 
@@ -1336,10 +1343,19 @@ def query_active_sessions(socket_path, *, timeout: float = QUERY_TIMEOUT
             and s["session_id"] and isinstance(s.get("age"), (int, float))]
 
 
-def main(argv: list[str] | None = None) -> int:
-    """CLI entrypoint: `python -m privacy_hud.daemon` (or spawned detached
-    by a lazy-start caller). Reads `PLUGIN_DATA` for the data directory,
-    same env var `hooks/handler.py` reads for the socket path.
+def main(argv: list[str] | None = None, *,
+         activation: Activation | None = None) -> int:
+    """CLI entrypoint: `scripts/runtime.py --plugin-data DIR daemon` (which
+    the hook client spawns), or `python -m privacy_hud.daemon`. Reads
+    `PLUGIN_DATA` for the data directory, same env var `hooks/handler.py`
+    reads for the socket path.
+
+    The bootstrap passes the `activation` it verified. Started any other
+    way, this loads and verifies it itself -- receipt v2, the selected
+    bundle's build digest, and that every imported `privacy_hud` module came
+    from that bundle -- and refuses before anything is opened otherwise
+    (#66: a stale package in the dependency environment must never become
+    the daemon).
 
     Exit-code contract, which an auto-spawning hook client can rely on:
 
@@ -1353,8 +1369,9 @@ def main(argv: list[str] | None = None) -> int:
             loaded. `EXIT_ALREADY_RUNNING`.
     1       Real startup failure: `PLUGIN_DATA` unset (no `/tmp` default
             any more -- spec §6) or unwritable, `bind()` refused, an
-            `AF_UNIX` path over the kernel's ~104-byte limit, and so
-            on. One line on stderr says which. `EXIT_FAILURE`.
+            `AF_UNIX` path over the kernel's ~104-byte limit, a
+            runtime identity check that failed, and so on. Fixed text
+            on stderr says which. `EXIT_FAILURE`.
     ======  ======================================================
 
     Keeping 3 distinct from 1 is the whole point: a spawner that cannot
@@ -1372,6 +1389,13 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return EXIT_FAILURE
     data_dir = Path(raw)
+    if activation is None:
+        try:
+            activation = load_activation(data_dir)
+            verify_import_origins(activation.bundle_root)
+        except RuntimeRefusal:
+            print(DAEMON_STARTUP_REFUSAL, file=sys.stderr)
+            return EXIT_FAILURE
     socket_path = _default_socket_path(data_dir)
     try:
         daemon = Daemon(socket_path, data_dir)

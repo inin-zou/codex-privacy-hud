@@ -117,11 +117,18 @@ LATCH_NAME = "daemon.spawn-attempt"
 #: into the next tool call rather than never.
 SPAWN_COOLDOWN = 30.0
 
-#: What the client runs. `-m` rather than a path so the pinned interpreter
-#: resolves the module through its own `sys.path` (plus the recorded
-#: `pythonpath`), which is what makes a `pip install -e .` and a bare
-#: checkout behave identically.
-DAEMON_MODULE = "privacy_hud.daemon"
+#: What the client runs, relative to the plugin bundle: the bundled
+#: bootstrap, as `python -I <bundle>/scripts/runtime.py --plugin-data DIR
+#: daemon` (#66). Never `-m privacy_hud.daemon`, which imports whichever
+#: `privacy_hud` the interpreter happens to find first — an installed old
+#: distribution, an editable checkout, or an inherited `PYTHONPATH`.
+BOOTSTRAP = ("scripts", "runtime.py")
+
+#: Removed from a spawned process's environment (#66). No inherited path
+#: may supply first-party code.
+STRIPPED_ENV = ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP",
+                "PYTHONUSERBASE", "PYTHONEXECUTABLE", "PYTHONINSPECT",
+                "PRIVACY_HUD_MCP_REEXEC")
 
 #: Escape hatch, honoured before anything else on the spawn path. On a
 #: sandboxed or resource-capped box, paying a fork on every hook that cannot
@@ -236,24 +243,26 @@ def spawn_env(receipt: dict, base: dict[str, str] | None = None) -> dict[str, st
 
     Starts from the caller's own environment — for a hook that is Codex's,
     which is the authoritative source for `PLUGIN_DATA` and must stay
-    untouched — and fills in only the recorded `sys.path` entry and any
-    `PINNED_ENV_NAMES` the caller does not already set. Caller wins on every
-    key except the offline flags, deliberately: the live environment
+    untouched — and fills in only the `PINNED_ENV_NAMES` the caller does not
+    already set. Caller wins on those, deliberately: the live environment
     describes the machine as it is now, while the receipt describes it as it
     was at setup time, and the only values worth taking from the past are
     the ones nobody has an opinion about in the present.
 
-    The exception is `offline.FORCED_ENV`, assigned last, after every merge:
-    the daemon is the process that loads the model, and I2 does not let an
-    inherited value turn the network back on.
+    #66: a receipt's `pythonpath` never selects application code, and no
+    inherited `PYTHONPATH` may either, so both are dropped (`STRIPPED_ENV`)
+    and user site-packages are disabled. First-party code comes from the
+    selected bundle, through the bootstrap.
+
+    The offline flags are the other exception: `offline.FORCED_ENV`,
+    assigned last, after every merge: the daemon is the process that loads
+    the model, and I2 does not let an inherited value turn the network back
+    on.
     """
     env = dict(os.environ if base is None else base)
-
-    pythonpath = receipt.get("pythonpath")
-    if isinstance(pythonpath, str) and pythonpath:
-        existing = env.get("PYTHONPATH", "")
-        parts = [pythonpath] + [p for p in existing.split(os.pathsep) if p]
-        env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(parts))
+    for name in STRIPPED_ENV:
+        env.pop(name, None)
+    env["PYTHONNOUSERSITE"] = "1"
 
     recorded = receipt.get("env")
     if isinstance(recorded, dict):

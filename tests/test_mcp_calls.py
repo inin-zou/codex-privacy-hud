@@ -399,23 +399,24 @@ def test_mcp_shutdown_closes_connection(tmp_path, monkeypatch):
 
 def test_mcp_stdio_round_trip(tmp_path):
     """A client session against `mcp/server.py` through its launcher: the
-    runtime receipt names this interpreter, the launcher re-execs under it,
-    and all five tools answer. No detector is constructed and nothing is
-    downloaded."""
+    runtime receipt (v2) names this interpreter and a bundle, the launcher
+    hands over to the bundled bootstrap, which re-execs under it in
+    isolated mode, and all five tools answer. No detector is constructed and
+    nothing is downloaded."""
+    from runtime_helpers import make_bundle, write_receipt_v2
+
     event_id = _seed(tmp_path)
-    receipt = tmp_path / "runtime.json"
-    receipt.write_text(json.dumps({
-        "v": 1, "python": sys.executable, "pythonpath": str(SRC),
-        "plugin_data": str(tmp_path), "env": {}}), encoding="utf-8")
-    receipt.chmod(0o600)
+    bundle = make_bundle(tmp_path / "bundle")
+    write_receipt_v2(tmp_path, bundle=bundle, python=sys.executable)
     env = {k: v for k, v in os.environ.items()
-           if k not in ("PRIVACY_HUD_MCP_REEXEC", "PYTHONPATH")}
+           if k not in ("PRIVACY_HUD_BOOTSTRAP_REEXEC", "PYTHONPATH")}
     env.update({"PLUGIN_DATA": str(tmp_path),
                 "CODEX_HOME": str(tmp_path / "no-codex-home")})
 
     async def session():
-        params = StdioServerParameters(command=sys.executable,
-                                       args=[str(SERVER)], env=env)
+        params = StdioServerParameters(
+            command=sys.executable,
+            args=[str(bundle / "mcp" / "server.py")], env=env)
         out = {}
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as s:

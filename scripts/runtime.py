@@ -1,58 +1,373 @@
 #!/usr/bin/env python3
 # scripts/runtime.py
-"""Bundled bootstrap -- RED scaffold.
+"""The bundled bootstrap (#66): the one way Privacy HUD's Python code runs.
 
-This placeholder reproduces the launch path the plugin uses today (the
-re-exec in `mcp/server.py` and the spawn in `hooks/handler.py`): read the
-receipt, prepend its recorded path entry to the inherited `PYTHONPATH`,
-re-exec the recorded interpreter once (guarded by an environment marker),
-and import `privacy_hud` from wherever that interpreter resolves it. It has
-no digest check, no origin check and no repair command. The GREEN commit
-replaces it.
+    runtime.py --plugin-data DIR probe
+    runtime.py --plugin-data DIR doctor [--load-model]
+    runtime.py --plugin-data DIR daemon
+    runtime.py --plugin-data DIR ambient [existing ambient arguments]
+    runtime.py --plugin-data DIR ui [SESSION_ID]
+    runtime.py --plugin-data DIR repair --print-command
+    runtime.py --plugin-data DIR mcp
+
+What it guarantees, in order:
+
+1. **The bundle is this file's own.** The bundle root is two directories
+   above this file. Nothing is taken from `cwd`, a cache listing, or an
+   installed distribution's metadata.
+2. **The selected runtime is this bundle.** Receipt v2 in `DIR` must select
+   this bundle root, and the bundle's files must hash to the recorded build
+   (`runtime_contract.load_activation`). Receipt v1 is repair input only.
+3. **The receipt's interpreter runs in isolated mode.** The process
+   re-executes `python -I` with inherited `PYTHONPATH` and friends removed
+   and user site-packages disabled, so the dependency environment supplies
+   dependencies and nothing else. The interpreter check compares the
+   executable *and* the virtual-environment prefix: two environments can
+   share one base executable.
+4. **First-party imports come only from `<bundle>/src`,** checked after
+   import (`runtime_contract.verify_import_origins`).
+5. **Offline before anything optional is imported** (I2).
+
+The re-exec marker only prevents a loop. A process that carries it but is
+not the selected, isolated interpreter is refused, never trusted.
+
+`repair --print-command` needs no receipt and imports nothing beyond the
+standard library, so it works in exactly the states that need it. Refusals
+print fixed text (copied from `privacy_hud.runtime_messages`, pinned by
+`tests/test_runtime_messages.py`) and no traceback. For `mcp`, nothing is
+ever written to stdout: stdout is the JSON-RPC channel.
+
+Stdlib only.
 """
+import argparse
+import importlib
+import importlib.util
 import json
 import os
+import shlex
 import sys
+from pathlib import Path
 
-MARKER = "PRIVACY_HUD_BOOTSTRAP_REEXEC"
+BUNDLE_ROOT = Path(__file__).resolve().parent.parent
+BOOTSTRAP = BUNDLE_ROOT / "scripts" / "runtime.py"
+
+#: Set before the re-exec so the child does not exec again. Never trusted:
+#: see the module docstring.
+REEXEC_MARKER = "PRIVACY_HUD_BOOTSTRAP_REEXEC"
+
+#: Removed from the environment of everything this starts. `-I` already
+#: makes the selected interpreter ignore them; removing them keeps them
+#: from reaching anything that interpreter starts in turn.
+STRIPPED_ENV = ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP",
+                "PYTHONUSERBASE", "PYTHONEXECUTABLE", "PYTHONINSPECT",
+                "PRIVACY_HUD_MCP_REEXEC")
+
+#: A copy of `privacy_hud.offline.FORCED_ENV` (I2), assigned last.
+#: `tests/test_offline.py` pins the two together.
+OFFLINE_ENV = {
+    "HF_HUB_OFFLINE": "1",
+    "TRANSFORMERS_OFFLINE": "1",
+    "HF_DATASETS_OFFLINE": "1",
+    "HF_HUB_DISABLE_TELEMETRY": "1",
+    "DO_NOT_TRACK": "1",
+    "HF_HUB_DISABLE_UPDATE_CHECK": "1",
+    "DISABLE_SAFETENSORS_CONVERSION": "1",
+}
+
+#: The existing allowlisted cache settings a receipt may pin.
+PINNED_ENV_NAMES = ("HF_HOME", "HF_HUB_CACHE", "TRANSFORMERS_CACHE")
+
+#: Dependencies `probe` reports, imported for real (an installed package
+#: that fails on import is not usable).
+PROBED_DEPENDENCIES = ("transformers", "torch", "mcp")
+
+# -- fixed text: copies of privacy_hud.runtime_messages ----------------- #
+RUNTIME_SETUP_FAIL = (
+    "[FAIL] Runtime setup\n"
+    "No usable Privacy HUD runtime is configured.\n"
+    "Run this command in another terminal:\n"
+    "  {repair_command}\n"
+    "Installation may download dependencies and model weights."
+)
+REPAIR_COMMAND_OUTPUT = (
+    "Run this command in another terminal:\n"
+    "  {repair_command}\n"
+    "This command may download dependencies and model weights.\n"
+    "It does not install or replace a patched Codex binary."
+)
+MCP_BOOTSTRAP_REFUSAL = (
+    "privacy-hud mcp: runtime setup is incompatible; no ledger was opened.\n"
+    "Run in another terminal:\n"
+    "  {repair_command}"
+)
+DAEMON_STARTUP_REFUSAL = (
+    "privacy-hud daemon: runtime identity or ledger compatibility check "
+    "failed; no writable ledger was opened.\n"
+    "Run the repair command reported by the current plugin's doctor."
+)
+AMBIENT_RUNTIME_MISMATCH = "Privacy — runtime mismatch"
 
 
-def _run(command, rest):
-    if command == "probe":
-        import privacy_hud
-        print(json.dumps({
-            "first_party_origin": os.path.dirname(
-                os.path.realpath(privacy_hud.__file__)),
-            "sys_path": list(sys.path),
-            "isolated": bool(sys.flags.isolated),
-        }))
-        return 0
-    return 2
+class _Refused(Exception):
+    """Internal: the bootstrap stage failed. Carries nothing."""
 
 
-def main(argv=None):
-    argv = sys.argv[1:] if argv is None else argv
-    if len(argv) < 3 or argv[0] != "--plugin-data":
-        print("usage: runtime.py --plugin-data DIR COMMAND", file=sys.stderr)
-        return 2
-    data_dir, command = argv[1], argv[2]
-    if os.environ.get(MARKER):
-        return _run(command, argv[3:])
-    with open(os.path.join(data_dir, "runtime.json")) as handle:
-        receipt = json.load(handle)
-    python = receipt["python"]
-    entry = receipt.get("pythonpath") or ""
-    if not entry and receipt.get("selected_bundle_root"):
-        entry = os.path.join(receipt["selected_bundle_root"], "src")
-    env = dict(os.environ)
-    env[MARKER] = "1"
-    env["PLUGIN_DATA"] = data_dir
-    if entry:
-        parts = [entry] + [p for p in env.get("PYTHONPATH", "").split(
-            os.pathsep) if p]
-        env["PYTHONPATH"] = os.pathsep.join(parts)
-    os.execve(python, [python, os.path.abspath(__file__)] + argv, env)
+def format_repair_command(bundle_root, data_dir) -> str:
+    """A copy of `privacy_hud.runtime_repair.format_repair_command`."""
+    return shlex.join([
+        "sh", str(Path(bundle_root) / "install.sh"),
+        "--repair-runtime", "--plugin-data", str(data_dir), "--yes",
+    ])
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="runtime.py")
+    parser.add_argument("--plugin-data", required=True, metavar="DIR")
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("probe")
+    doctor = sub.add_parser("doctor")
+    doctor.add_argument("--load-model", action="store_true")
+    sub.add_parser("daemon")
+    ambient = sub.add_parser("ambient")
+    ambient.add_argument("ambient_args", nargs=argparse.REMAINDER)
+    ui = sub.add_parser("ui")
+    ui.add_argument("session_id", nargs="?")
+    repair = sub.add_parser("repair")
+    repair.add_argument("--print-command", action="store_true", required=True)
+    sub.add_parser("mcp")
+    return parser
+
+
+def _refuse(command: str, data_dir: Path) -> int:
+    repair = format_repair_command(BUNDLE_ROOT, data_dir)
+    if command == "mcp":
+        print(MCP_BOOTSTRAP_REFUSAL.format(repair_command=repair),
+              file=sys.stderr)
+    elif command == "daemon":
+        print(DAEMON_STARTUP_REFUSAL, file=sys.stderr)
+    elif command == "doctor":
+        print(RUNTIME_SETUP_FAIL.format(repair_command=repair))
+    elif command == "ambient":
+        print(AMBIENT_RUNTIME_MISMATCH)
+    else:
+        body = RUNTIME_SETUP_FAIL.split("\n", 1)[1]
+        print(body.format(repair_command=repair), file=sys.stderr)
     return 1
+
+
+# --------------------------------------------------------------------- #
+# selection
+# --------------------------------------------------------------------- #
+
+def _standalone_contract():
+    """`runtime_contract.py` from this bundle, loaded by path and without
+    importing the `privacy_hud` package: which package may be imported is
+    what is being decided."""
+    path = BUNDLE_ROOT / "src" / "privacy_hud" / "runtime_contract.py"
+    if not path.is_file():
+        raise _Refused()
+    name = "_privacy_hud_bootstrap_contract"
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise _Refused()
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(name, None)
+        raise _Refused() from None
+    return module
+
+
+def _select(contract, data_dir: Path):
+    """The activation, if it selects this bundle; else `_Refused`."""
+    try:
+        activation = contract.load_activation(data_dir)
+    except contract.RuntimeRefusal:
+        raise _Refused() from None
+    if Path(activation.bundle_root).resolve() != BUNDLE_ROOT:
+        raise _Refused()
+    return activation
+
+
+def _pinned_env(contract, data_dir: Path) -> dict:
+    try:
+        recorded = contract.read_receipt(data_dir).get("env")
+    except contract.RuntimeRefusal:
+        return {}
+    if not isinstance(recorded, dict):
+        return {}
+    return {name: recorded[name] for name in PINNED_ENV_NAMES
+            if isinstance(recorded.get(name), str) and recorded[name]}
+
+
+def _process_is_selected(activation) -> bool:
+    """Is this process the selected interpreter, in isolated mode?
+
+    The executable alone is not enough: virtual environments can share a
+    base executable, so the environment prefix must match too.
+    """
+    if not sys.flags.isolated or not sys.executable:
+        return False
+    python = str(activation.python)
+    if os.path.abspath(sys.executable) != os.path.abspath(python):
+        try:
+            if not os.path.samefile(sys.executable, python):
+                return False
+        except OSError:
+            return False
+    venv = Path(python).parent.parent
+    if (venv / "pyvenv.cfg").is_file():
+        return os.path.realpath(sys.prefix) == os.path.realpath(venv)
+    return os.path.realpath(sys.prefix) == os.path.realpath(sys.base_prefix)
+
+
+def _child_env(contract, data_dir: Path) -> dict:
+    env = dict(os.environ)
+    for name in STRIPPED_ENV:
+        env.pop(name, None)
+    env["PYTHONNOUSERSITE"] = "1"
+    env["PLUGIN_DATA"] = str(data_dir)
+    for name, value in _pinned_env(contract, data_dir).items():
+        if not env.get(name):
+            env[name] = value
+    env.update(OFFLINE_ENV)
+    return env
+
+
+def _reexec(contract, activation, argv: list, data_dir: Path) -> None:
+    env = _child_env(contract, data_dir)
+    env[REEXEC_MARKER] = "1"
+    python = str(activation.python)
+    try:
+        os.execve(python, [python, "-I", str(BOOTSTRAP), *argv], env)
+    except OSError:
+        raise _Refused() from None
+
+
+def _enter_selected(data_dir: Path):
+    """In the selected interpreter: put only this bundle's `src` in front,
+    force offline, import the package and verify where it came from.
+    Returns the package's `runtime_contract` and the activation."""
+    src = str(BUNDLE_ROOT / "src")
+    sys.path[:] = [src] + [p for p in sys.path if p != src]
+    for name in STRIPPED_ENV:
+        os.environ.pop(name, None)
+    os.environ["PLUGIN_DATA"] = str(data_dir)
+    os.environ.update(OFFLINE_ENV)
+    try:
+        contract = importlib.import_module("privacy_hud.runtime_contract")
+    except Exception:
+        raise _Refused() from None
+    try:
+        contract.verify_import_origins(BUNDLE_ROOT)
+        for name, value in _pinned_env(contract, data_dir).items():
+            os.environ.setdefault(name, value)
+        activation = _select(contract, data_dir)
+        offline = importlib.import_module("privacy_hud.offline")
+        offline.prepare_process()
+        contract.verify_import_origins(BUNDLE_ROOT)
+    except _Refused:
+        raise
+    except Exception:
+        raise _Refused() from None
+    return contract, activation
+
+
+# --------------------------------------------------------------------- #
+# commands, run in the selected interpreter
+# --------------------------------------------------------------------- #
+
+def _probe(activation) -> int:
+    import privacy_hud
+    dependencies = {}
+    for name in PROBED_DEPENDENCIES:
+        try:
+            module = importlib.import_module(name)
+        except Exception:
+            dependencies[name] = None
+            continue
+        dependencies[name] = str(getattr(module, "__version__", "")
+                                 or "present")
+    print(json.dumps({
+        "release": activation.identity.release,
+        "build_id": activation.identity.build_id,
+        "activation_epoch": activation.epoch,
+        "python": sys.executable,
+        "isolated": bool(sys.flags.isolated),
+        "first_party_origin": str(Path(privacy_hud.__file__).resolve().parent),
+        "sys_path": list(sys.path),
+        "dependency_probe": dependencies,
+    }, sort_keys=True))
+    return 0
+
+
+def _load_mcp_server():
+    path = BUNDLE_ROOT / "mcp" / "server.py"
+    spec = importlib.util.spec_from_file_location("privacy_hud_mcp_server",
+                                                  path)
+    if spec is None or spec.loader is None:
+        raise _Refused()
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _dispatch(args, activation) -> int:
+    command = args.command
+    if command == "probe":
+        return _probe(activation)
+    if command == "doctor":
+        from privacy_hud import doctor
+        return doctor.main(["--check-model"] if args.load_model else [])
+    if command == "daemon":
+        from privacy_hud import daemon
+        return daemon.main([], activation=activation)
+    if command == "ambient":
+        from privacy_hud import ambient
+        return ambient.main(list(args.ambient_args))
+    if command == "ui":
+        from privacy_hud import local_ui_server
+        return local_ui_server.main([args.session_id] if args.session_id
+                                    else [])
+    raise _Refused()
+
+
+def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else list(argv)
+    try:
+        args = _parser().parse_args(argv)
+    except SystemExit as exc:
+        return int(exc.code or 0)
+    data_dir = Path(os.path.abspath(os.path.expanduser(args.plugin_data)))
+
+    if args.command == "repair":
+        print(REPAIR_COMMAND_OUTPUT.format(
+            repair_command=format_repair_command(BUNDLE_ROOT, data_dir)))
+        return 0
+
+    forged_or_reexecuted = os.environ.pop(REEXEC_MARKER, None) is not None
+    try:
+        standalone = _standalone_contract()
+        activation = _select(standalone, data_dir)
+        if not _process_is_selected(activation):
+            if forged_or_reexecuted:
+                raise _Refused()
+            _reexec(standalone, activation, argv, data_dir)
+        _contract, activation = _enter_selected(data_dir)
+        if args.command == "mcp":
+            server = _load_mcp_server()
+        else:
+            server = None
+    except _Refused:
+        return _refuse(args.command, data_dir)
+    except Exception:
+        return _refuse(args.command, data_dir)
+    if server is not None:
+        return server.serve()
+    return _dispatch(args, activation)
 
 
 if __name__ == "__main__":

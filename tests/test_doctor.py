@@ -1575,25 +1575,18 @@ def test_check_mcp_server_probe_does_not_write_ledger_rows(monkeypatch,
     """Against the real `mcp/server.py`: the probe passes, and every table
     holds exactly what it held before -- no session, policy, event or
     coverage row for the probe's synthetic session."""
-    import shutil
-
     from privacy_hud.ledger import Ledger
     from privacy_hud.matrix.loader import load_matrix
 
-    repo = Path(__file__).resolve().parents[1]
-    root = tmp_path / "plugin"
-    _write_fake_plugin(root, tools=list(doctor.MCP_TOOLS))
-    shutil.copy(repo / "mcp" / "server.py", root / "mcp" / "server.py")
+    from runtime_helpers import make_bundle, write_receipt_v2
+
+    root = make_bundle(tmp_path / "plugin")
     data = tmp_path / "data"
     data.mkdir()
     led = Ledger(data / "ledger.db", load_matrix())
     led.start_session("real", cwd="/r", model="gpt-5")
     led.conn.close()
-    receipt = data / "runtime.json"
-    receipt.write_text(json.dumps({
-        "v": 1, "python": sys.executable, "pythonpath": str(repo / "src"),
-        "plugin_data": str(data), "env": {}}), encoding="utf-8")
-    receipt.chmod(0o600)
+    write_receipt_v2(data, bundle=root, python=sys.executable)
 
     def counts() -> dict[str, int]:
         conn = sqlite3.connect(data / "ledger.db")
@@ -1608,7 +1601,7 @@ def test_check_mcp_server_probe_does_not_write_ledger_rows(monkeypatch,
     before = counts()
     monkeypatch.setattr(doctor, "_installed_plugin_root", lambda: root)
     monkeypatch.setattr(doctor, "_ledger_path", lambda: data / "ledger.db")
-    monkeypatch.delenv("PRIVACY_HUD_MCP_REEXEC", raising=False)
+    monkeypatch.delenv("PRIVACY_HUD_BOOTSTRAP_REEXEC", raising=False)
     monkeypatch.delenv("PYTHONPATH", raising=False)
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "no-codex-home"))
     check = doctor.check_mcp_server(timeout=60)
