@@ -250,7 +250,11 @@ def test_a_spawn_attempt_is_recorded_so_the_next_hook_does_not_repeat_it(
         run(INGRESS, {"PLUGIN_DATA": str(tmp_path)})
         latch = json.loads((tmp_path / "daemon.spawn-attempt").read_text())
         assert latch["pid"] > 0
-        marker.unlink(missing_ok=True)
+        deadline = time.monotonic() + 5.0
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert marker.exists(), "first daemon did not publish its marker"
+        marker.unlink()
 
         run(INGRESS, {"PLUGIN_DATA": str(tmp_path)})
         time.sleep(0.3)
