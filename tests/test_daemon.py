@@ -31,10 +31,12 @@ from privacy_hud.daemon import (
 )
 from privacy_hud.daemon import Daemon as _RealDaemon
 from privacy_hud.detect.base import Cost, DetectorProfile
-from privacy_hud.dispatch import dispatch, new_state
+from privacy_hud.dispatch import dispatch
 from privacy_hud.runtime import LATCH_NAME
 from privacy_hud.runtime_contract import load_activation
 from runtime_helpers import make_bundle, write_receipt_v2
+from runtime_helpers import writer_state
+from runtime_helpers import writer_ledger
 from runtime_helpers import activation as _activation
 
 CREDENTIAL = "sk-proj-Ab3xY9zQw1Er5Ty7Ui0OpAs2Df4Gh6Jk8Lm"
@@ -64,19 +66,19 @@ def _start(st, session_id="s1"):
 
 
 def test_session_start_creates_session(tmp_path):
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st)
     assert st.ledger.summary("s1").legacy_percent == 0
 
 
 def test_session_start_returns_empty_hook_output(tmp_path):
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     out = _start(st)
     assert out == {}
 
 
 def test_pretooluse_bash_to_external_host_is_denied(tmp_path):
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st)
     out = dispatch(st, {
         "hook_event_name": "PreToolUse", "session_id": "s1", "turn_id": "t1",
@@ -92,7 +94,7 @@ def test_pretooluse_bash_local_command_is_allowed(tmp_path):
     # "PreToolUse/local" taxonomy entry (only "PostToolUse/local" — see
     # dispatch.py's module docstring), so this must short-circuit to an
     # allow WITHOUT calling Engine.observe, rather than raising UnknownKey.
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st)
     out = dispatch(st, {
         "hook_event_name": "PreToolUse", "session_id": "s1", "turn_id": "t1",
@@ -102,7 +104,7 @@ def test_pretooluse_bash_local_command_is_allowed(tmp_path):
 
 
 def test_pretooluse_mcp_tool_classifies_as_mcp_destination(tmp_path):
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st)
     out = dispatch(st, {
         "hook_event_name": "PreToolUse", "session_id": "s1", "turn_id": "t1",
@@ -114,7 +116,7 @@ def test_pretooluse_mcp_tool_classifies_as_mcp_destination(tmp_path):
 
 
 def test_posttooluse_ingress_is_never_denied(tmp_path):
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st)
     out = dispatch(st, {"hook_event_name": "PostToolUse", "session_id": "s1",
                         "tool_name": "Read",
@@ -129,7 +131,7 @@ def test_posttooluse_records_an_exposure(tmp_path):
     # transformers/torch install is too old for the model to load, so
     # tier-3-only findings (e.g. a bare email) are NOT a safe thing to
     # assert on here; see new_state()'s docstring.
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st)
     dispatch(st, {"hook_event_name": "PostToolUse", "session_id": "s1",
                   "tool_name": "Read", "tool_response": f"key={CREDENTIAL}"})
@@ -137,7 +139,7 @@ def test_posttooluse_records_an_exposure(tmp_path):
 
 
 def test_userpromptsubmit_is_ingress_to_model_context(tmp_path):
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st)
     out = dispatch(st, {"hook_event_name": "UserPromptSubmit",
                         "session_id": "s1",
@@ -147,7 +149,7 @@ def test_userpromptsubmit_is_ingress_to_model_context(tmp_path):
 
 
 def test_subagentstart_propagates_without_denying(tmp_path):
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st)
     dispatch(st, {"hook_event_name": "PostToolUse", "session_id": "s1",
                   "tool_name": "Read", "tool_response": "jordan@acme.com"})
@@ -157,7 +159,7 @@ def test_subagentstart_propagates_without_denying(tmp_path):
 
 
 def test_session_end_nulls_hashes_and_returns_receipt(tmp_path):
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st)
     dispatch(st, {"hook_event_name": "PostToolUse", "session_id": "s1",
                   "tool_name": "Read", "tool_response": "jordan@acme.com"})
@@ -169,7 +171,7 @@ def test_session_end_nulls_hashes_and_returns_receipt(tmp_path):
 
 
 def test_session_end_discards_the_salt(tmp_path):
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st)
     dispatch(st, {"hook_event_name": "SessionEnd", "session_id": "s1",
                   "reason": "exit"})
@@ -178,14 +180,14 @@ def test_session_end_discards_the_salt(tmp_path):
 
 
 def test_two_sessions_never_share_a_salt(tmp_path):
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st, "s1")
     _start(st, "s2")
     assert st.salts["s1"] != st.salts["s2"]
 
 
 def test_unknown_hook_event_allows_and_does_nothing(tmp_path):
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st)
     out = dispatch(st, {"hook_event_name": "PreCompact", "session_id": "s1"})
     assert out == {}
@@ -213,7 +215,7 @@ def test_pretooluse_observation_carries_the_structured_tool_input(tmp_path, monk
 
     monkeypatch.setattr(dispatch_mod, "Engine", _SpyEngine)
 
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st)
     dispatch(st, {
         "hook_event_name": "PreToolUse", "session_id": "s1", "turn_id": "t1",
@@ -234,7 +236,7 @@ def test_pretooluse_observation_carries_the_structured_tool_input(tmp_path, monk
 # --------------------------------------------------------------------- #
 
 def test_a_session_the_daemon_saw_from_the_start_is_verified(tmp_path):
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st)
     assert st.ledger.coverage("s1").verified
 
@@ -243,7 +245,7 @@ def test_a_session_first_seen_mid_flight_is_marked_attached(tmp_path):
     """The daemon cold-started (or replaced a dead one) after the session was
     already running, so its first sight is an ordinary tool call. The session
     row it creates lazily must not look like one opened by a SessionStart."""
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     dispatch(st, {"hook_event_name": "PostToolUse", "session_id": "late",
                   "turn_id": "t1", "tool_name": "Read",
                   "tool_response": "nothing interesting"})
@@ -254,7 +256,7 @@ def test_a_session_first_seen_mid_flight_is_marked_attached(tmp_path):
 
 
 def test_the_receipt_for_an_attached_session_says_so(tmp_path):
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     dispatch(st, {"hook_event_name": "PostToolUse", "session_id": "late",
                   "turn_id": "t1", "tool_name": "Read", "tool_response": "x"})
     out = dispatch(st, {"hook_event_name": "SessionEnd",
@@ -264,7 +266,7 @@ def test_the_receipt_for_an_attached_session_says_so(tmp_path):
 
 
 def test_the_receipt_for_a_clean_session_carries_no_banner(tmp_path):
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st)
     out = dispatch(st, {"hook_event_name": "SessionEnd", "session_id": "s1",
                         "reason": "exit"})
@@ -284,7 +286,7 @@ def test_daemon_startup_records_hooks_that_reached_no_daemon(tmp_path):
     guess — see `dispatch._record_unobserved_hooks`."""
     _write_latch(tmp_path, pid=4242)
 
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     assert st.ledger.unattributed_gaps() == 1
 
 
@@ -293,13 +295,13 @@ def test_a_failed_spawn_attempt_counts_too(tmp_path):
     daemon was even launched. Same gap, differently caused."""
     _write_latch(tmp_path, error="FileNotFoundError")
 
-    assert new_state(tmp_path).ledger.unattributed_gaps() == 1
+    assert writer_state(tmp_path).ledger.unattributed_gaps() == 1
 
 
 def test_no_latch_means_no_recorded_gap(tmp_path):
     """A warm daemon must not manufacture a caveat. This is what keeps the I7
     self-audit's clean pass meaningful when it IS clean."""
-    assert new_state(tmp_path).ledger.unattributed_gaps() == 0
+    assert writer_state(tmp_path).ledger.unattributed_gaps() == 0
 
 
 @pytest.mark.parametrize("body", [
@@ -311,7 +313,7 @@ def test_no_latch_means_no_recorded_gap(tmp_path):
 def test_an_unusable_latch_is_silence_not_a_crash(tmp_path, body):
     (tmp_path / LATCH_NAME).write_text(body)
 
-    st = new_state(tmp_path)  # must not raise: a daemon never refuses to start
+    st = writer_state(tmp_path)  # must not raise: a daemon never refuses to start
     assert st.ledger.unattributed_gaps() == 0
 
 
@@ -330,7 +332,7 @@ def test_a_gap_recorded_at_startup_marks_the_session_running_through_it(
     never reaches `_handle_session_start` at all, and shows up as `attached`
     instead (the test above)."""
     _write_latch(tmp_path, pid=4242)
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     gap = st.ledger.conn.execute(
         "SELECT ts FROM coverage WHERE reason='unobserved_hooks'").fetchone()[0]
     with monkeypatch.context() as patch:
@@ -347,7 +349,7 @@ def test_a_session_starting_after_the_daemon_is_up_is_unaffected(
     around -- a caveat that fires on a healthy session is a caveat that gets
     trained away."""
     _write_latch(tmp_path, pid=4242)
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     gap = st.ledger.conn.execute(
         "SELECT ts FROM coverage WHERE reason='unobserved_hooks'").fetchone()[0]
     with monkeypatch.context() as patch:
@@ -705,9 +707,8 @@ def slow_scan_daemon(tmp_path):
     detection?" becomes a wall-clock question with an unambiguous answer."""
     from privacy_hud.detect.paths import PathDetector
     from privacy_hud.detect.secrets import SecretDetector
-    from privacy_hud.dispatch import new_state
 
-    state = new_state(tmp_path / "data")
+    state = writer_state(tmp_path / "data")
     # Keep the real tiers 0-2 (they are what makes an egress PreToolUse
     # deny) and swap only tier 3 for the slow stand-in — the same shape the
     # daemon has in production, with the one slow component made explicit.
@@ -874,9 +875,9 @@ def test_a_session_ending_mid_scan_does_not_reuse_the_discarded_salt(tmp_path):
     # ended state, retain the findings without a charge or matching hash,
     # and leave the retired session engine/salt absent.
     from privacy_hud import dispatch as dispatch_mod
-    from privacy_hud.dispatch import dispatch, new_state
+    from privacy_hud.dispatch import dispatch
 
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     dispatch(st, {"hook_event_name": "SessionStart", "session_id": "race",
                   "cwd": "/r", "model": "gpt-5"})
 
@@ -971,7 +972,10 @@ def startup_state(tmp_path_factory):
     ledger contents; the two tests that do drive a real round trip use their
     own session ids.
     """
-    return new_state(tmp_path_factory.mktemp("startup") / "data")
+    # `keep=True`: this state outlives the test that first asks for it, so
+    # its writer lease must survive the per-test lease cleanup too (#66).
+    return writer_state(tmp_path_factory.mktemp("startup") / "data",
+                        keep=True)
 
 
 def _spawn_lock_holder(lock_path: Path) -> subprocess.Popen:
@@ -1276,7 +1280,7 @@ def test_main_returns_failure_on_a_real_bind_failure(sock_dir, startup_state,
     (sock_dir / "daemon.sock").write_text("not a socket")
     # Inject the prebuilt state: main() builds one before it binds, and this
     # test is about the exit code, not about the detector stack.
-    monkeypatch.setattr(daemon_mod, "new_state", lambda data_dir: startup_state)
+    monkeypatch.setattr(daemon_mod, "new_state", lambda data_dir, **kw: startup_state)
 
     assert daemon_mod.main([], activation=_activation()) == EXIT_FAILURE
     assert "cannot start" in capsys.readouterr().err
@@ -1287,7 +1291,7 @@ def test_main_refuses_without_a_selected_runtime(sock_dir, monkeypatch,
     """#66: started without the bootstrap and without receipt v2, the daemon
     refuses before it builds any state or opens the ledger."""
     monkeypatch.setenv("PLUGIN_DATA", str(sock_dir))
-    monkeypatch.setattr(daemon_mod, "new_state", lambda data_dir: (
+    monkeypatch.setattr(daemon_mod, "new_state", lambda data_dir, **kw: (
         pytest.fail("state was built without a selected runtime")))
     assert daemon_mod.main([]) == EXIT_FAILURE
     assert capsys.readouterr().err == (
@@ -1741,7 +1745,7 @@ def test_events_that_record_nothing_still_count_as_liveness(tmp_path):
     credentials. `ls -la` short-circuits before any Observation is built and
     `PreCompact` is not even a known event — both must still hold the daemon
     open, or the well-behaved session is the one that loses its daemon."""
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     for event, extra in (
             ({"hook_event_name": "PreToolUse", "tool_name": "Bash",
               "tool_input": {"command": "ls -la"}}, "quiet1"),
@@ -1757,7 +1761,7 @@ def test_an_event_for_an_unknown_session_registers_it(tmp_path):
     """The mid-session daemon restart. A fresh daemon's first sight of an
     ongoing session is some ordinary hook, never `SessionStart` — it must
     treat that as a reason to stay up."""
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     dispatch(st, {"hook_event_name": "PostToolUse", "session_id": "midway",
                   "tool_name": "Read", "tool_response": "nothing special"})
     assert "midway" in st.live
@@ -1769,7 +1773,7 @@ def test_a_probe_with_no_session_id_registers_nothing(tmp_path):
     without sending a byte. A health check is an observer, not a session: it
     may reset the idle clock (someone did just look for this daemon) but it
     must never be a reason to stay up."""
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     dispatch(st, {"hook_event_name": "PreCompact"})
     dispatch(st, {"hook_event_name": "SessionStart", "session_id": ""})
     assert st.live == {}
@@ -1777,7 +1781,7 @@ def test_a_probe_with_no_session_id_registers_nothing(tmp_path):
 
 
 def test_session_end_releases_and_is_idempotent(tmp_path):
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st, "dup")
     assert "dup" in st.live
     dispatch(st, {"hook_event_name": "SessionEnd", "session_id": "dup",
@@ -1800,7 +1804,7 @@ def test_an_event_after_session_end_re_registers_the_session(tmp_path):
     and a new Engine — which means the daemon is being used again, and it
     must count as such. Bounded like any other reference by the staleness
     sweep."""
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st, "again")
     dispatch(st, {"hook_event_name": "SessionEnd", "session_id": "again",
                   "reason": "exit"})
@@ -1834,7 +1838,6 @@ from privacy_hud.daemon import (  # noqa: E402
     query_active_sessions,
 )
 from privacy_hud.dispatch import active_sessions  # noqa: E402
-from privacy_hud.ledger import Ledger  # noqa: E402
 from privacy_hud.matrix.loader import load_matrix  # noqa: E402
 from privacy_hud.mcp_tools import resolve_audit_session  # noqa: E402
 
@@ -1947,7 +1950,7 @@ def test_the_bug_active_beats_most_recently_started(sock_dir):
               selected=selected)
 
         # What the skill used to do, verbatim.
-        ledger = Ledger(sock_dir / "ledger.db", load_matrix())
+        ledger = writer_ledger(sock_dir / "ledger.db", load_matrix())
         old = ledger.conn.execute(
             "SELECT session_id FROM sessions ORDER BY started_at DESC LIMIT 1"
         ).fetchone()["session_id"]
@@ -1985,7 +1988,7 @@ def test_a_clean_session_with_no_events_still_resolves(sock_dir):
             time.sleep(0.01)
         _hook(sock_path, {"hook_event_name": "SessionStart",
                           "session_id": "clean", "cwd": "/r", "model": "gpt-5"})
-        ledger = Ledger(sock_dir / "ledger.db", load_matrix())
+        ledger = writer_ledger(sock_dir / "ledger.db", load_matrix())
         assert ledger.conn.execute(
             "SELECT COUNT(*) AS n FROM events_legacy_v1").fetchone()["n"] == 0
         assert resolve_audit_session(ledger, sock_dir).session_id == "clean"
@@ -2049,7 +2052,7 @@ def test_active_sessions_does_not_sweep_stale_references(tmp_path):
     """A query must not change the daemon's own lifetime accounting: deciding
     a session is dead is the accept loop's act (`live_session_count`), taken
     on its own schedule."""
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     note_session_live(st, "old")
     assert active_sessions(st, stale_after=0.0) == []
     assert "old" in st.live
@@ -2061,7 +2064,7 @@ def test_active_sessions_reports_ages_not_timestamps(tmp_path):
     """Monotonic timestamps mean nothing in another process; an age in
     seconds is comparable anywhere, which is what the client's
     concurrent-session window is measured in."""
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     note_session_live(st, "s")
     (_sid, age), = active_sessions(st, stale_after=3600)
     assert 0 <= age < 5

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from privacy_hud import dispatch, engine
+from privacy_hud import engine
 
 # `mcp/server.py` is a script, not a module in a package — deliberately, so a
 # top-level `mcp` package cannot shadow the real `mcp` distribution. Tests
@@ -41,8 +41,7 @@ def release_writer_leases():
 @pytest.fixture
 def state(tmp_path, monkeypatch):
     monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))
-    st = dispatch.new_state(
-        tmp_path, writer_lease=runtime_helpers.writer_lease(tmp_path))
+    st = runtime_helpers.writer_state(tmp_path)
     yield st
     st.ledger.conn.close()
 

@@ -66,13 +66,15 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import mcp_tools, runtime
-from .ledger import Ledger
+from .ledger import Ledger, writer_connection
 from .matrix.loader import load_matrix
 from .render import _ACRONYMS as _RENDER_ACRONYMS
 from .render import audit as render_audit
 from .render import coverage_banner as render_coverage_banner
 from .render import empty_message as render_empty_message
 from .render import detail as render_detail
+from .runtime_contract import RuntimeRefusal
+from .runtime_messages import POLICY_PREFLIGHT_REFUSAL
 
 _UI_DIR = Path(__file__).resolve().parent.parent.parent / "ui"
 
@@ -340,11 +342,28 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(
                     400, {"error": "session_id, rule_type, selector are required"})
                 return
+            server = self.server  # type: ignore[assignment]
             try:
-                mcp_tools.apply_policy(ledger, sid, rule_type=rule_type,
-                                        selector=selector)
+                # A write needs ownership, and this process is not the
+                # daemon (#66). The lease is taken for exactly this
+                # mutation and given back with it, so the daemon can start
+                # (or a repair can run) the moment the rule is written.
+                with writer_connection(
+                        server.ledger_path,  # type: ignore[attr-defined]
+                        ledger.matrix,
+                        data_dir=server.data_dir,  # type: ignore[attr-defined]
+                        check_same_thread=False) as writable:
+                    mcp_tools.apply_policy(writable, sid, rule_type=rule_type,
+                                           selector=selector)
             except ValueError as exc:
                 self._send_json(400, {"error": str(exc)})
+                return
+            except RuntimeRefusal as refusal:
+                # I5/§D: say what is known. Nothing was sent anywhere and
+                # nothing was written, so "no rule was saved" is a fact
+                # here, not a guess.
+                self._send_json(503, {"error": POLICY_PREFLIGHT_REFUSAL,
+                                      "code": refusal.code})
                 return
             # `saved`, not `applied`: the write happened, and that is the
             # only thing this response can honestly certify. `enforcement`
@@ -367,11 +386,19 @@ class UIServer(HTTPServer):
 
     allow_reuse_address = True
 
-    def __init__(self, ledger: Ledger):
+    def __init__(self, ledger: Ledger, ledger_path: Path,
+                 data_dir: Path | None = None):
         # Port 0: ask the OS for an ephemeral port. 127.0.0.1 only -- I2,
         # no network exposure beyond localhost.
         super().__init__(("127.0.0.1", 0), _Handler)
         self.ledger = ledger
+        #: The reader connection above is `mode=ro` (#66), so a policy
+        #: write opens its own short-lived writable one at this path.
+        self.ledger_path = Path(ledger_path)
+        #: Where the writer lock lives. Not `ledger_path.parent`, which
+        #: stops being `$PLUGIN_DATA` once the active store moves.
+        self.data_dir = (Path(data_dir) if data_dir is not None
+                         else resolve_data_dir())
 
 
 def serve(session_id: str | None = None, *, print_url: bool = True) -> UIServer:
@@ -395,7 +422,7 @@ def serve(session_id: str | None = None, *, print_url: bool = True) -> UIServer:
     matrix = load_matrix()
     ledger = Ledger(ledger_path, matrix, initialize=False,
                     check_same_thread=False)
-    server = UIServer(ledger)
+    server = UIServer(ledger, ledger_path, resolve_data_dir())
 
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

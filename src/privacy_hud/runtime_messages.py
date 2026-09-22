@@ -64,3 +64,11 @@ STARTING_EGRESS = (
     "Privacy HUD issued a denial because the daemon is still starting.\n"
     "Retry after startup completes."
 )
+
+#: A policy mutation refused before anything was sent or written: the MCP
+#: tool and the local browser's `/api/policy`. "No policy rule was saved"
+#: is a fact in this branch and only in this branch — the refusal happens
+#: before the write, so nothing about the outcome is unknown.
+POLICY_PREFLIGHT_REFUSAL = (
+    "Privacy HUD runtime mismatch. No policy rule was saved."
+)

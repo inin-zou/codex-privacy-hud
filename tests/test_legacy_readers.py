@@ -23,6 +23,7 @@ import pytest
 from privacy_hud import local_ui_server, mcp_tools
 from privacy_hud.ledger import Ledger
 from privacy_hud.matrix.loader import load_matrix
+from runtime_helpers import writer_ledger
 
 M = load_matrix()
 
@@ -48,7 +49,7 @@ EXPOSURE_KEYS = [
 
 @pytest.fixture
 def led(tmp_path):
-    ledger = Ledger(tmp_path / "ledger.db", M)
+    ledger = writer_ledger(tmp_path / "ledger.db", M)
     ledger.start_session("s1", cwd="/repo", model="gpt-5")
     yield ledger
     ledger.conn.close()
@@ -168,7 +169,7 @@ def test_detail_no_longer_queries_the_events_table_directly():
 
 def test_legacy_detail_routes_by_session_and_schema(tmp_path):
     path = tmp_path / "ledger.db"
-    led = Ledger(path, M)
+    led = writer_ledger(path, M)
     led.start_session("s1", cwd="/repo", model="gpt-5")
     _rec(led)
     [row] = led.list_events("s1", "exposed")
@@ -193,7 +194,7 @@ def test_schema_choice_is_read_per_transaction(tmp_path):
     """A long-lived reader spans the rebuild: the table it reads from is
     decided inside each read, never cached."""
     path = tmp_path / "ledger.db"
-    writer = Ledger(path, M)
+    writer = writer_ledger(path, M)
     writer.start_session("s1", cwd="/repo", model="gpt-5")
     _rec(writer)
     writer.conn.close()
@@ -210,7 +211,7 @@ def test_schema_choice_is_read_per_transaction(tmp_path):
 
 def test_a_read_transaction_is_stable_across_a_concurrent_rename(tmp_path):
     path = tmp_path / "ledger.db"
-    writer = Ledger(path, M)
+    writer = writer_ledger(path, M)
     writer.start_session("s1", cwd="/repo", model="gpt-5")
     _rec(writer)
     writer.conn.close()
@@ -273,12 +274,12 @@ def test_initializing_open_refuses_a_partial_rebuild(tmp_path):
     """A renamed legacy table with no schema marker is an incomplete rebuild
     (#54 Phase 2): the daemon refuses it rather than recreating `events`."""
     path = tmp_path / "ledger.db"
-    led = Ledger(path, M)
+    led = writer_ledger(path, M)
     led.start_session("s1", cwd="/repo", model="gpt-5")
     led.conn.close()
     _rename_to_legacy(path)
     with pytest.raises(Exception) as caught:
-        Ledger(path, M)
+        writer_ledger(path, M)
     assert type(caught.value).__name__ == "UnsupportedAccounting"
     raw = sqlite3.connect(path)
     try:
@@ -291,7 +292,7 @@ def test_initializing_open_refuses_a_partial_rebuild(tmp_path):
 
 def test_a_version_two_session_is_not_read_as_legacy(tmp_path):
     path = tmp_path / "ledger.db"
-    led = Ledger(path, M)
+    led = writer_ledger(path, M)
     led.start_session("s2", cwd="/repo", model="gpt-5")
     led.conn.close()
     _rename_to_legacy(path)

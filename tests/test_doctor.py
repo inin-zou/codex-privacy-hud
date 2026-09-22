@@ -55,8 +55,8 @@ from pathlib import Path
 import pytest
 
 from privacy_hud import doctor, runtime
-from privacy_hud.ledger import Ledger
 from privacy_hud.matrix.loader import load_matrix
+from runtime_helpers import writer_ledger
 
 M = load_matrix()
 
@@ -487,7 +487,7 @@ def test_missing_ledger_check_does_not_create_one(isolated_env):
 
 
 def test_populated_ledger_reports_counts(isolated_env):
-    led = Ledger(isolated_env / "ledger.db", M)
+    led = writer_ledger(isolated_env / "ledger.db", M)
     led.start_session("s1", cwd="/repo", model="gpt-5")
     led.record("s1", turn_id="t1", kind="exposed", data_type="email",
                source="support.log", destination="model_context",
@@ -503,7 +503,7 @@ def test_populated_ledger_reports_counts(isolated_env):
 
 
 def test_ledger_with_no_sessions_warns(isolated_env):
-    Ledger(isolated_env / "ledger.db", M).conn.close()
+    writer_ledger(isolated_env / "ledger.db", M).conn.close()
     check = doctor.check_ledger()
     assert check.status == doctor.WARN
     assert check.fixes
@@ -524,7 +524,7 @@ def test_ledger_check_never_prints_session_content(isolated_env):
     — a doctor that dumps the ledger is a privacy incident, and a masked
     exemplar is still a value.
     """
-    led = Ledger(isolated_env / "ledger.db", M)
+    led = writer_ledger(isolated_env / "ledger.db", M)
     led.start_session("session-abc123", cwd="/private/repo", model="gpt-5")
     led.record("session-abc123", turn_id="t1", kind="exposed",
                data_type="email", source="support.log",
@@ -1304,7 +1304,7 @@ def test_main_creates_nothing_in_plugin_data(isolated_env, capsys):
 def test_main_does_not_touch_an_existing_ledger(isolated_env, capsys):
     """Read-only against a real ledger: same bytes, same mtime, same rows."""
     path = isolated_env / "ledger.db"
-    led = Ledger(path, M)
+    led = writer_ledger(path, M)
     led.start_session("s1", cwd="/repo", model="gpt-5")
     led.conn.close()
     before_stat = path.stat()
@@ -1332,7 +1332,7 @@ def test_healthy_setup_reports_healthy_and_exits_zero(isolated_env, monkeypatch,
         "codex-privacy-hud-codex-privacy-hud"
     assigned.mkdir(parents=True)
     monkeypatch.setenv("PLUGIN_DATA", str(assigned))
-    led = Ledger(assigned / "ledger.db", M)
+    led = writer_ledger(assigned / "ledger.db", M)
     led.start_session("s1", cwd="/repo", model="gpt-5")
     led.conn.close()
     _pin_runtime(assigned, monkeypatch)
@@ -1575,7 +1575,6 @@ def test_check_mcp_server_probe_does_not_write_ledger_rows(monkeypatch,
     """Against the real `mcp/server.py`: the probe passes, and every table
     holds exactly what it held before -- no session, policy, event or
     coverage row for the probe's synthetic session."""
-    from privacy_hud.ledger import Ledger
     from privacy_hud.matrix.loader import load_matrix
 
     from runtime_helpers import make_bundle, write_receipt_v2
@@ -1583,7 +1582,7 @@ def test_check_mcp_server_probe_does_not_write_ledger_rows(monkeypatch,
     root = make_bundle(tmp_path / "plugin")
     data = tmp_path / "data"
     data.mkdir()
-    led = Ledger(data / "ledger.db", load_matrix())
+    led = writer_ledger(data / "ledger.db", load_matrix())
     led.start_session("real", cwd="/r", model="gpt-5")
     led.conn.close()
     write_receipt_v2(data, bundle=root, python=sys.executable)

@@ -109,6 +109,7 @@ from .runtime_contract import (
     verify_import_origins,
 )
 from .runtime_messages import DAEMON_STARTUP_REFUSAL
+from .runtime_owner import WriterLease, acquire_writer, running_activation
 
 _log = logging.getLogger(__name__)
 
@@ -932,23 +933,43 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
         # deleting it on the way out of a failed startup would be the very
         # clobber this fix exists to prevent.
         self._bound = False
+        #: The writer lease this daemon took, or `None` when its state (and
+        #: therefore its lease) was handed to it.
+        self._lease: WriterLease | None = None
 
         # First thing, before the expensive part: a would-be second daemon
         # must find out it is redundant BEFORE it loads a ~2.8 GB model, not
         # after.
         self._acquire_startup_lock()
         try:
-            self.state = state if state is not None else new_state(data_dir)
             self.idle_timeout = idle_timeout
             self.linger_grace = linger_grace
             self.session_stale_after = session_stale_after
             self.drain_timeout = drain_timeout
             self.heartbeat_interval = heartbeat_interval
 
-            # Under the lock: decide whether the socket path is free, and
-            # take it. See the class docstring for why doing this under the
-            # lock is what makes the unlink safe.
-            self._claim_socket_path()
+            # Startup order (#66). Everything that can refuse comes before
+            # anything expensive or writable:
+            #
+            #   1. the startup lock, above;
+            #   2. writer exclusion -- ledger ownership, taken before a
+            #      writable connection exists;
+            #   3. socket-path ownership -- a foreign listener answering on
+            #      our path is a refusal, and finding that out after
+            #      `new_state` means a model load and a ledger open for a
+            #      daemon that will never serve a request;
+            #   4. `new_state`, which validates the existing schema on a
+            #      read-only connection, opens the guarded ledger and then
+            #      builds the detectors;
+            #   5. bind, chmod, serve.
+            if state is not None:
+                self._claim_socket_path()
+                self.state = state
+            else:
+                lease = self._acquire_writer_lease(data_dir)
+                self._lease = lease
+                self._claim_socket_path()
+                self.state = new_state(data_dir, writer_lease=lease)
 
             # Global constraint: the socket file must be 0600.
             #
@@ -1025,7 +1046,42 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
             except OSError:
                 pass
             self._bound = False
+        self._release_writer_lease()
         self._release_startup_lock()
+
+    def _acquire_writer_lease(self, data_dir) -> WriterLease:
+        """Take exclusive ledger ownership for the runtime this daemon
+        serves.
+
+        `AlreadyRunning`, not the raw refusal, when somebody else holds it:
+        from `main`'s point of view that is the same answer the startup
+        lock gives, and it maps to `EXIT_ALREADY_RUNNING` rather than to a
+        failure. A `runtime_mismatch` is a different answer and propagates
+        — this daemon is not the selected runtime, and starting anyway is
+        what #66 exists to stop.
+
+        A daemon handed its `state` was handed the lease with it; it must
+        not take a second one, since `flock` refuses a second descriptor on
+        the same file even within one process.
+        """
+        activation = self.activation
+        if activation is None:
+            activation = running_activation(Path(data_dir))
+        try:
+            return acquire_writer(Path(data_dir), activation=activation)
+        except RuntimeRefusal as exc:
+            if exc.code == "holder_unknown":
+                raise AlreadyRunning(
+                    self.socket_path,
+                    "another process owns the ledger") from exc
+            raise
+
+    def _release_writer_lease(self) -> None:
+        """Give the writer lease back. Idempotent, and a no-op for a daemon
+        that never took one."""
+        lease, self._lease = self._lease, None
+        if lease is not None:
+            lease.close()
 
     def _acquire_startup_lock(self) -> None:
         """Take the exclusive, non-blocking `flock` that makes this process
@@ -1333,6 +1389,12 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
                     pass
                 self._bound = False
             finally:
+                # Ownership goes back in the same order it was taken, and
+                # after our socket file is gone: while that file exists a
+                # client can still reach us, and a daemon answering
+                # requests it may no longer write would be worse than one
+                # that is simply not there.
+                self._release_writer_lease()
                 self._release_startup_lock()
 
 

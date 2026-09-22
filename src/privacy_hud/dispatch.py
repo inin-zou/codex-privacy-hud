@@ -124,6 +124,7 @@ from .matrix.loader import Matrix, load_matrix
 from .origin import OriginKind, extract_origin
 from .render import receipt as render_receipt
 from .runtime import latch_path
+from .runtime_owner import WriterLease
 from .settings import Settings
 
 # Every HUD failure below is logged through this at DEBUG and nowhere else.
@@ -201,7 +202,7 @@ class State:
     live_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
-def new_state(data_dir, *, writer_lease=None) -> State:
+def new_state(data_dir, *, writer_lease: WriterLease) -> State:
     """Build the daemon's one-time-cost state: Matrix, Ledger (one sqlite
     connection for the daemon's life), and the detector stack (tiers 0-3).
 
@@ -210,11 +211,18 @@ def new_state(data_dir, *, writer_lease=None) -> State:
     `transformers`) rather than raising — see detect/model.py. Building it
     here, once, per daemon lifetime, is the entire point of Task 10: this
     is the expensive step a per-hook-invocation client could never afford.
+
+    `writer_lease` is required and has no default (#66). This function
+    opens the one writable ledger connection in the system, so the caller
+    has to have taken ownership before calling it — and taken it *first*,
+    because the alternative is loading a ~2.8 GB model on behalf of a
+    daemon that then discovers it may not write.
     """
     data_dir = Path(data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
     matrix = load_matrix()
-    ledger = Ledger(codex.ledger_path(data_dir), matrix)
+    ledger = Ledger(codex.ledger_path(data_dir), matrix,
+                    writer_lease=writer_lease)
     _allow_cross_thread_access(ledger, codex.ledger_path(data_dir))
     _record_unobserved_hooks(ledger, data_dir)
     detectors = [PathDetector(), SecretDetector(), ModelDetector()]

@@ -43,6 +43,7 @@ import pytest
 from privacy_hud import dispatch as dispatch_mod
 from privacy_hud import local_ui_server
 from privacy_hud.detect.model import StubModelDetector
+from runtime_helpers import writer_state
 
 SID = "0199e2e0-b10c-4000-8000-00000000b10c"
 SECRET = "sk-proj-Ab3xY9zQw1Er5Ty7Ui0OpAs2Df4Gh6Jk8Lm"
@@ -75,7 +76,7 @@ def state(tmp_path, monkeypatch):
     monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))
     # Tier 3 without the 2.8 GB model: same declared profile, no findings.
     monkeypatch.setattr(dispatch_mod, "ModelDetector", lambda: StubModelDetector([]))
-    st = dispatch_mod.new_state(tmp_path)
+    st = writer_state(tmp_path)
     yield st
     st.ledger.conn.close()
 

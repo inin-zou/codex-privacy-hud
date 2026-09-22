@@ -6,10 +6,11 @@ from pathlib import Path
 
 import pytest
 from privacy_hud.matrix.loader import load_matrix
-from privacy_hud.ledger import (SCHEMA, Ledger, LegacyEventRow,
+from privacy_hud.ledger import (SCHEMA, LegacyEventRow,
                                 LegacyExposureRow, LegacySessionSummary,
                                 SessionCoverage, UnrecordedSessionSummary)
 from privacy_hud.mcp_tools import _POLICY_RULE_TYPES
+from runtime_helpers import writer_ledger
 
 REPO = Path(__file__).resolve().parents[1]
 M = load_matrix()
@@ -17,7 +18,7 @@ M = load_matrix()
 
 @pytest.fixture
 def led(tmp_path):
-    ledger = Ledger(tmp_path / "ledger.db", M)
+    ledger = writer_ledger(tmp_path / "ledger.db", M)
     ledger.start_session("s1", cwd="/repo", model="gpt-5")
     return ledger
 
@@ -208,7 +209,7 @@ def test_session_start_wins_over_a_later_lazy_resolution(led):
 def test_a_second_observer_means_nobody_was_watching_in_between(led, tmp_path):
     """A daemon replaced mid-session leaves a gap that neither daemon can see
     on its own -- but two observer rows against one session can."""
-    other = Ledger(tmp_path / "ledger.db", M)
+    other = writer_ledger(tmp_path / "ledger.db", M)
     assert other.observer != led.observer
     other.start_session("s1", cwd="/repo", model="gpt-5", observed_start=False)
 
@@ -303,11 +304,11 @@ def test_coverage_holds_no_content(led):
 def test_observer_ids_are_opaque_and_per_instance(tmp_path):
     """Not a pid, not a hostname (I1) -- and distinct per Ledger, which is what
     makes "a second daemon touched this session" observable at all."""
-    a = Ledger(tmp_path / "l.db", M)
-    b = Ledger(tmp_path / "l.db", M)
+    a = writer_ledger(tmp_path / "l.db", M)
+    b = writer_ledger(tmp_path / "l.db", M)
     assert a.observer != b.observer
     assert a.observer.isalnum() and len(a.observer) == 16
-    assert Ledger(tmp_path / "l.db", M, observer="pinned").observer == "pinned"
+    assert writer_ledger(tmp_path / "l.db", M, observer="pinned").observer == "pinned"
 
 
 def test_coverage_is_append_only(led):
@@ -447,7 +448,7 @@ def test_tokens_work_in_a_ledger_that_still_has_the_consumed_column(tmp_path):
         " NULL, expires_at INTEGER NOT NULL, consumed INTEGER NOT NULL DEFAULT 0)")
     conn.commit()
     conn.close()
-    old = Ledger(path, M)
+    old = writer_ledger(path, M)
     _mint(old)
     assert old.consume_token("s1", tool_name="Bash", args_hash=ARGS) == "allow_once"
 
@@ -522,7 +523,6 @@ def test_an_older_ledger_keeps_its_layout_and_still_records(tmp_path):
     and the legacy writer omits it."""
     import sqlite3
 
-    from privacy_hud.ledger import Ledger
     from privacy_hud.matrix.loader import load_matrix
 
     path = tmp_path / "old.db"
@@ -550,7 +550,7 @@ def test_an_older_ledger_keeps_its_layout_and_still_records(tmp_path):
     conn.commit()
     conn.close()
 
-    led = Ledger(path, load_matrix())
+    led = writer_ledger(path, load_matrix())
     columns = {r["name"] for r in led.conn.execute("PRAGMA table_info(events)")}
     assert "source_kind" not in columns
     assert led.list_events("s1", "exposed")[0].source_kind is None
@@ -563,12 +563,11 @@ def test_an_older_ledger_keeps_its_layout_and_still_records(tmp_path):
 
 
 def test_migrating_twice_is_a_no_op(tmp_path):
-    from privacy_hud.ledger import Ledger
     from privacy_hud.matrix.loader import load_matrix
 
     path = tmp_path / "twice.db"
-    Ledger(path, load_matrix()).conn.close()
-    led = Ledger(path, load_matrix())
+    writer_ledger(path, load_matrix()).conn.close()
+    led = writer_ledger(path, load_matrix())
     columns = [r["name"] for r in led.conn.execute("PRAGMA table_info(events)")]
     assert columns.count("source_kind") == 1
     led.conn.close()
@@ -670,7 +669,7 @@ def test_default_connection_retains_thread_affinity(tmp_path):
     import sqlite3
     import threading
 
-    led = Ledger(tmp_path / "affinity.db", M)
+    led = writer_ledger(tmp_path / "affinity.db", M)
     errors: list[BaseException] = []
 
     def elsewhere():

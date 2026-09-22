@@ -134,28 +134,41 @@ def plant_old_distribution(directory: Path, sentinel: Path) -> None:
 # --------------------------------------------------------------------- #
 
 #: Every lease handed out below, so `conftest`'s autouse fixture can give
-#: the file descriptors back even when a test abandons its ledger. A test
-#: root is private to one test, so nothing here contends; the list exists
-#: to bound descriptors across a whole suite run, not to serialize.
+#: the descriptors back even when a test abandons its ledger. Two handles
+#: on one directory are fine — `acquire_writer` reference counts ownership
+#: within a process — and cross-process exclusion is unaffected, which is
+#: what `test_runtime_ownership` proves with a real second process.
 _OPEN_LEASES: list = []
 
 
-def writer_lease(data_dir, *, selected=None):
+def writer_lease(data_dir, *, selected=None, keep: bool = False):
     """A real `WriterLease` on a temporary data root.
 
     Real, not a stand-in: it takes the same `flock` on the same
     `runtime-writer.lock` that the daemon takes, under the test's own
     directory. No argument and no environment variable turns the ledger's
     ownership checks off, so this is how a test becomes a writer.
-    """
-    from privacy_hud.runtime_owner import acquire_writer
 
-    lease = acquire_writer(Path(data_dir), activation=selected or activation())
-    _OPEN_LEASES.append(lease)
+    `keep=True` withholds the lease from the per-test cleanup, for a
+    fixture that outlives one test (a module-scoped `State`, say). Its
+    descriptor then lives for the run, which is why it is opt-in.
+    """
+    from privacy_hud.runtime_owner import acquire_writer, running_activation
+
+    # Whatever `data_dir` selects, or an unselected activation when it
+    # selects nothing. Not the synthetic `activation()` above: a root that
+    # already holds a receipt selects a real build, and a lease offered
+    # another one is correctly refused.
+    lease = acquire_writer(
+        Path(data_dir),
+        activation=selected or running_activation(Path(data_dir)))
+    if not keep:
+        _OPEN_LEASES.append(lease)
     return lease
 
 
-def writer_ledger(path, matrix, *, data_dir=None, selected=None, **kwargs):
+def writer_ledger(path, matrix, *, data_dir=None, selected=None,
+                  keep: bool = False, **kwargs):
     """An initializing `Ledger` at `path`, holding a real lease.
 
     The lease is taken in `data_dir`, defaulting to the database's own
@@ -164,12 +177,48 @@ def writer_ledger(path, matrix, *, data_dir=None, selected=None, **kwargs):
     """
     from privacy_hud.ledger import Ledger
 
-    lease = writer_lease(data_dir if data_dir is not None else Path(path).parent,
-                         selected=selected)
-    return Ledger(path, matrix, writer_lease=lease, **kwargs)
+    kwargs.setdefault(
+        "writer_lease",
+        writer_lease(data_dir if data_dir is not None else Path(path).parent,
+                     selected=selected, keep=keep))
+    return Ledger(path, matrix, **kwargs)
+
+
+def close_writer(ledger) -> None:
+    """Close a `writer_ledger` and give its lease back straight away.
+
+    Plain `ledger.conn.close()` leaves the lease held until the test ends,
+    which is fine until the test then starts a *second process* that needs
+    it — an MCP server over stdio, a daemon, a repair. Ownership is real
+    and cross-process, so a test that seeds a ledger and then hands the
+    data root to another process has to stop owning it first.
+    """
+    try:
+        ledger.conn.close()
+    finally:
+        lease = getattr(ledger, "_lease", None)
+        if lease is not None:
+            lease.close()
+            if lease in _OPEN_LEASES:
+                _OPEN_LEASES.remove(lease)
 
 
 def release_leases() -> None:
     """Close every lease `writer_lease` handed out. Idempotent."""
     while _OPEN_LEASES:
         _OPEN_LEASES.pop().close()
+
+
+def writer_state(data_dir, *, selected=None, keep: bool = False):
+    """`dispatch.new_state` under a real lease, the way the daemon builds
+    it.
+
+    `new_state` has no lease default (#66): whoever opens the daemon's
+    writable ledger has to have taken ownership first. This is that step,
+    spelled once instead of in every test that needs a daemon's state.
+    """
+    from privacy_hud.dispatch import new_state
+
+    return new_state(
+        data_dir,
+        writer_lease=writer_lease(data_dir, selected=selected, keep=keep))

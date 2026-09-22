@@ -4,7 +4,6 @@ import time
 import pytest
 
 from privacy_hud.matrix.loader import load_matrix
-from privacy_hud.ledger import Ledger
 from privacy_hud.mask import new_salt, pseudonym
 from privacy_hud.detect.base import Finding
 from privacy_hud.detect.paths import PathDetector
@@ -17,6 +16,7 @@ from privacy_hud.minimize import (
     TOKEN_TTL_SECONDS,
     canonical_json,
 )
+from runtime_helpers import writer_ledger
 
 M = load_matrix()
 SALT = new_salt()
@@ -24,7 +24,7 @@ SALT = new_salt()
 
 @pytest.fixture
 def led(tmp_path):
-    ledger = Ledger(tmp_path / "l.db", M)
+    ledger = writer_ledger(tmp_path / "l.db", M)
     ledger.start_session("s1", cwd="/r", model="gpt-5")
     return ledger
 

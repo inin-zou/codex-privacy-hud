@@ -237,17 +237,22 @@ def _launch_through_bootstrap() -> int:
     return bootstrap.main(["--plugin-data", data_dir, "mcp"])
 
 
-def _ledger_path() -> Path:
-    """`$PLUGIN_DATA/ledger.db`, resolved the same way every other reader
-    does (`local_ui_server.resolve_data_dir`). No `/tmp` default (spec §6):
-    a server with nowhere to read from exits with a message rather than
+def _data_dir() -> Path:
+    """`$PLUGIN_DATA`, resolved the same way every other reader does
+    (`local_ui_server.resolve_data_dir`). No `/tmp` default (spec §6): a
+    server with nowhere to read from exits with a message rather than
     inventing an empty ledger in a shared directory."""
     from privacy_hud.local_ui_server import resolve_data_dir
     data_dir = resolve_data_dir()
     if data_dir is None:
         raise SystemExit("privacy-hud mcp: PLUGIN_DATA is not set and no "
                           "Codex plugin-data directory was found")
-    return data_dir / "ledger.db"
+    return data_dir
+
+
+def _ledger_path() -> Path:
+    """`$PLUGIN_DATA/ledger.db`."""
+    return _data_dir() / "ledger.db"
 
 
 def _open_ledger() -> "Ledger":
@@ -497,9 +502,29 @@ def build_app():
         hard-blocked data type is also refused. Data already disclosed stays
         disclosed.
         """
+        from privacy_hud.ledger import writer_connection
+        from privacy_hud.matrix.loader import load_matrix
+        from privacy_hud.runtime_contract import RuntimeRefusal
+        from privacy_hud.runtime_messages import POLICY_PREFLIGHT_REFUSAL
+
         with tool_access():
-            mcp_tools.apply_policy(ledger(), session_id, rule_type=rule_type,
-                                   selector=selector)
+            # The server's own connection is `mode=ro` (#66): the daemon
+            # owns ledger writes, and this process is not it. A rule is
+            # written under a lease taken for this one mutation, inside the
+            # same `tool_access()` lock as every other ledger use here, so
+            # the worker-thread serialization this server depends on is
+            # unchanged.
+            try:
+                with writer_connection(_ledger_path(), load_matrix(),
+                                       data_dir=_data_dir(),
+                                       check_same_thread=False) as writable:
+                    mcp_tools.apply_policy(writable, session_id,
+                                           rule_type=rule_type,
+                                           selector=selector)
+            except RuntimeRefusal:
+                # Refused before the write. Nothing was saved, and saying so
+                # is a fact rather than a guess (§D).
+                raise ToolError(POLICY_PREFLIGHT_REFUSAL) from None
         # `saved`, not `applied`. The rule is in the policy table; whether it
         # ever fires depends on a later call producing a finding it matches.
         # For every type outside `mcp_tools.CHEAP_DATA_TYPES`, matching

@@ -21,7 +21,6 @@ import pytest
 from legacy_fakes import legacy_summary
 
 from privacy_hud import hud_snapshot as hs
-from privacy_hud.ledger import Ledger
 from privacy_hud.matrix.loader import load_matrix
 from privacy_hud.mcp_tools import (
     allow_once,
@@ -34,6 +33,7 @@ from privacy_hud.mcp_tools import (
     read_guard_status,
     list_exposures,
 )
+from runtime_helpers import writer_ledger
 
 M = load_matrix()
 
@@ -44,7 +44,7 @@ RAW_SECRET = "sk-live-abcdef0123456789"
 
 @pytest.fixture
 def led(tmp_path):
-    ledger = Ledger(tmp_path / "l.db", M)
+    ledger = writer_ledger(tmp_path / "l.db", M)
     ledger.start_session("s1", cwd="/r", model="gpt-5")
     ledger.record("s1", turn_id="t1", kind="exposed", data_type="email",
                    source="support.log", destination="model_context",
@@ -289,7 +289,7 @@ from privacy_hud.mcp_tools import CONCURRENT_WITHIN, resolve_audit_session  # no
 def two_sessions(tmp_path):
     """A ledger where "most recently started" and "most recently active" are
     different sessions — the shape of the real report."""
-    led = Ledger(tmp_path / "two.db", M)
+    led = writer_ledger(tmp_path / "two.db", M)
     led.start_session("older", cwd="/r", model="gpt-5")
     led.conn.execute(
         "UPDATE sessions SET started_at = started_at - 600 "
@@ -333,7 +333,7 @@ def test_the_bug_the_active_session_beats_the_last_started_one(
 def test_a_session_with_no_events_is_still_resolvable(tmp_path, monkeypatch):
     """The `MAX(events.ts)` trap, stated as a test: the cleanest possible
     session has nothing in `events` and must still be the answer."""
-    led = Ledger(tmp_path / "clean.db", M)
+    led = writer_ledger(tmp_path / "clean.db", M)
     led.start_session("spotless", cwd="/r", model="gpt-5")
     _daemon_says(monkeypatch, [{"session_id": "spotless", "age": 0.01}])
     assert led.conn.execute("SELECT COUNT(*) AS n FROM events"
@@ -398,7 +398,7 @@ def test_a_daemon_with_no_live_session_is_a_different_answer(two_sessions,
 
 
 def test_an_empty_ledger_resolves_to_nothing(tmp_path, monkeypatch):
-    led = Ledger(tmp_path / "empty.db", M)
+    led = writer_ledger(tmp_path / "empty.db", M)
     _daemon_says(monkeypatch, None)
     r = resolve_audit_session(led, "/nowhere")
     assert (r.session_id, r.basis) == (None, "none")
@@ -427,7 +427,7 @@ def test_every_note_obeys_the_copy_rules(two_sessions, tmp_path, monkeypatch):
     # ... and the fourth basis, "none": an empty ledger with no daemon.
     _daemon_says(monkeypatch, None)
     notes.append(resolve_audit_session(
-        Ledger(tmp_path / "nothing.db", M), "/nowhere").note)
+        writer_ledger(tmp_path / "nothing.db", M), "/nowhere").note)
     assert len(set(notes)) == 4, "a basis is sharing another's copy"
     for note in notes:
         assert note

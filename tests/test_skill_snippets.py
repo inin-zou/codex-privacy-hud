@@ -24,9 +24,9 @@ from pathlib import Path
 
 import pytest
 
-from privacy_hud.ledger import Ledger
 from privacy_hud.matrix.loader import load_matrix
 from privacy_hud.origin import OriginKind, origin_phrase
+from runtime_helpers import writer_ledger
 
 REPO = Path(__file__).resolve().parents[1]
 SKILL_MD = REPO / "skills" / "privacy" / "SKILL.md"
@@ -58,7 +58,7 @@ def _block(name: str) -> str:
 def env(tmp_path):
     data = tmp_path / "data"
     data.mkdir()
-    ledger = Ledger(data / "ledger.db", load_matrix())
+    ledger = writer_ledger(data / "ledger.db", load_matrix())
     ledger.start_session("s1", cwd="/r", model="gpt-5")
     ledger.record("s1", turn_id="t1", kind="exposed", data_type="email",
                   source="support.log", destination="model_context",

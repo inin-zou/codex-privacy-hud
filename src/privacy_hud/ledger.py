@@ -62,6 +62,7 @@ from typing import Literal
 from . import ledger_schema
 from .budget import contribution, percent
 from .matrix.loader import Matrix
+from .runtime_contract import RuntimeRefusal
 from .runtime_owner import WriterLease
 
 #: The legacy schema; see `ledger_schema` for all three generations.
@@ -77,15 +78,30 @@ def open_connection(path: Path, *, initialize: bool,
     access by name, foreign keys enforced, a one-second busy wait and full
     synchronous writes. Only the initializing daemon connection sets WAL,
     which persists in the file. `initialize=False` opens an existing file
-    read-write and fails on a missing one rather than creating it; no
-    connection-level setting here changes the file.
+    and fails on a missing one rather than creating it.
+
+    `read_only=True` opens `mode=ro`: SQLite itself then refuses every
+    INSERT, UPDATE, DELETE and ALTER on this connection, which is the whole
+    point — a reader that merely *intends* not to write is one stray
+    `_migrate()` away from adding a column to the daemon's prepared schema
+    (#66). It is deliberately **not** `immutable=1`: that would also
+    produce an unwritable connection and would additionally ignore the
+    write-ahead log, so every row committed since the last checkpoint would
+    be invisible on a live database. `mode=ro` reads the WAL.
+
+    `initialize=True, read_only=True` is a contradiction and raises
+    `ValueError` rather than quietly preferring one of the two.
     """
+    if initialize and read_only:
+        raise ValueError(
+            "an initializing connection cannot be read-only")
     if initialize:
         conn = sqlite3.connect(path, isolation_level=None,
                                check_same_thread=check_same_thread)
     else:
+        mode = "ro" if read_only else "rw"
         conn = sqlite3.connect(
-            f"{Path(path).resolve().as_uri()}?mode=rw", uri=True,
+            f"{Path(path).resolve().as_uri()}?mode={mode}", uri=True,
             isolation_level=None, check_same_thread=check_same_thread)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
@@ -94,6 +110,52 @@ def open_connection(path: Path, *, initialize: bool,
     if initialize:
         conn.execute("PRAGMA journal_mode=WAL")
     return conn
+
+
+@contextmanager
+def writer_connection(path: Path, matrix: Matrix, *, data_dir: Path,
+                      check_same_thread: bool = True) -> Iterator["Ledger"]:
+    """A short-lived writable `Ledger` at `path`, under a real writer lease
+    taken in `data_dir`, closed on the way out.
+
+    For the surfaces that still write the ledger directly — the MCP
+    `update_policy` tool and the local browser's `/api/policy` — while the
+    daemon-side policy RPC is not yet in place. Refuses with
+    `RuntimeRefusal("holder_unknown")` while another process owns the
+    ledger, which is what happens whenever the daemon is running, and with
+    `runtime_mismatch` when the runtime selected on disk is not the one
+    running here.
+    """
+    from .runtime_owner import acquire_writer, running_activation
+
+    with acquire_writer(data_dir,
+                        activation=running_activation(data_dir)) as lease:
+        ledger = Ledger(path, matrix, initialize=False, writer_lease=lease,
+                        check_same_thread=check_same_thread)
+        try:
+            yield ledger
+        finally:
+            ledger.conn.close()
+
+
+def _refuse_unsupported(path: Path, check_same_thread: bool) -> None:
+    """Validate an existing ledger's schema on a read-only connection.
+
+    Raises whatever `ledger_schema.validate_schema` raises, plus
+    `UnsupportedAccounting` for activated accounting. Nothing about the
+    file changes either way — that is the point of doing it here rather
+    than after the writable open.
+    """
+    probe = open_connection(path, initialize=False, read_only=True,
+                            check_same_thread=check_same_thread)
+    try:
+        version = ledger_schema.validate_schema(probe)
+    finally:
+        probe.close()
+    if version == ledger_schema.ACTIVATED_VERSION:
+        raise UnsupportedAccounting(
+            "this ledger uses activated accounting; this version of "
+            "Privacy HUD cannot write it")
 
 
 #: `coverage.reason` values. Three, and the list is closed on purpose: each one
@@ -491,43 +553,73 @@ class Ledger:
         connection.
 
         `initialize=False` is the reader's open (MCP, the local UI, ambient,
-        the skill). It opens an existing database read-write, without
-        `SCHEMA`, a journal-mode change or a chmod, and fails
-        on a missing file rather than creating one. It permits the existing
-        policy writes; it is not a read-only connection. Only the daemon
-        initializes, so a reader never changes the structure of the ledger
-        it is reading, including across #54's rebuild.
+        the skill). It opens an existing database, without `SCHEMA`, a
+        journal-mode change or a chmod, and fails on a missing file rather
+        than creating one. Only the daemon initializes, so a reader never
+        changes the structure of the ledger it is reading, including across
+        #54's rebuild.
+
+        **`writer_lease` is what makes this instance a writer** (#66).
+        Without one, `initialize=False` opens `mode=ro` and every mutator
+        below refuses; SQLite refuses too, so a caller that reaches around
+        these methods with its own SQL gets the same answer. Initializing
+        requires a lease, since applying `SCHEMA` and switching the file to
+        WAL are writes. A noninitializing writer must pass its lease
+        explicitly: nothing acquires one on a caller's behalf, and no
+        argument, environment variable or configuration turns ownership
+        off.
+
+        An unsupported schema is refused *before* any of that. The check
+        runs on its own `mode=ro` connection, so a ledger this build cannot
+        write is neither opened read-write nor switched to WAL — a
+        journal-mode change is a write to a file we have just decided we do
+        not understand.
         """
         self.matrix = matrix
         self.observer = observer or uuid.uuid4().hex[:16]
         #: The lease authorizing this instance to write, or `None` for a
-        #: reader. Pair 3 scaffolding: stored, not yet enforced.
+        #: reader.
         self._lease = writer_lease
         #: Depth of the write transaction this instance owns; 0 when none.
         self._write_depth = 0
         #: Test-only hook called after each migration statement executes.
         #: Not settable from any configuration, environment or tool input.
         self._migration_failpoint: Callable[[str], None] | None = None
+        if writer_lease is None:
+            if initialize:
+                raise RuntimeRefusal("runtime_mismatch")
+        else:
+            writer_lease.assert_current()
+        if initialize and Path(path).exists():
+            # Read-only, and before any writable connection exists. A
+            # failure here propagates: the daemon must not come up against a
+            # schema it cannot describe. I6 covers what the hooks do when no
+            # daemon answers (open on ingress, closed on egress).
+            _refuse_unsupported(path, check_same_thread)
         self.conn = open_connection(path, initialize=initialize,
-                                    check_same_thread=check_same_thread)
+                                    check_same_thread=check_same_thread,
+                                    read_only=writer_lease is None
+                                    and not initialize)
         if not initialize:
             return
-        # A failure here propagates: the daemon must not come up against a
-        # schema it cannot describe. I6 covers what the hooks do when no
-        # daemon answers (open on ingress, closed on egress).
-        version = ledger_schema.validate_schema(self.conn)
-        if version == ledger_schema.ACTIVATED_VERSION:
-            raise UnsupportedAccounting(
-                "this ledger uses activated accounting; this version of "
-                "Privacy HUD cannot write it")
-        if version == 0:
-            # A new file gets the legacy schema; an existing legacy ledger
-            # gains only a table it lacks. No column is added to an existing
-            # table: a historical `events` without `source_kind` keeps its
-            # layout, and the legacy writer omits the column.
-            with self._write_transaction():
+        with self._write_transaction():
+            # Validated again inside the transaction that may change it:
+            # between the read-only check above and `BEGIN IMMEDIATE`,
+            # another writer could have prepared this ledger.
+            version = ledger_schema.validate_schema(self.conn)
+            if version == ledger_schema.ACTIVATED_VERSION:
+                raise UnsupportedAccounting(
+                    "this ledger uses activated accounting; this version of "
+                    "Privacy HUD cannot write it")
+            if version == 0:
+                # A new file gets the legacy schema; an existing legacy
+                # ledger gains only a table it lacks. No column is added to
+                # an existing table: a historical `events` without
+                # `source_kind` keeps its layout, and the legacy writer
+                # omits the column.
                 for statement in ledger_schema.legacy_statements():
                     self.conn.execute(statement)
+                ledger_schema.validate_schema(self.conn)
         Path(path).chmod(0o600)
 
     def _table_exists(self, name: str) -> bool:
@@ -560,12 +652,31 @@ class Ledger:
     def _write_transaction(self) -> Iterator[None]:
         """A `BEGIN IMMEDIATE` write transaction this instance owns.
 
+        **Every write in this class goes through here**, which is what makes
+        the lease check one check rather than one per mutator. A reader has
+        no lease, so it refuses before touching the connection at all.
+
+        The lease is checked three times, and each one covers a different
+        window (#66):
+
+        * before `BEGIN IMMEDIATE`, so a runtime that is no longer selected
+          never takes the database's write lock;
+        * once the transaction is held, because acquiring it can block on
+          another writer for up to `busy_timeout`, and the selection can
+          move during that wait;
+        * before the outer `COMMIT`, so a repair that activates a
+          replacement while this transaction was open loses the write
+          instead of committing it.
+
         Joins a write transaction this instance already owns. Refuses to
         run inside a read transaction rather than silently promoting it.
         Ends only the transaction it began: commit on success, rollback on
-        any exception.
+        any exception, including a refused lease.
         """
+        if self._lease is None:
+            raise RuntimeRefusal("runtime_mismatch")
         if self._write_depth:
+            self._lease.assert_current()
             self._write_depth += 1
             try:
                 yield
@@ -574,10 +685,13 @@ class Ledger:
             return
         if self.conn.in_transaction:
             raise RuntimeError("a read transaction is already open")
+        self._lease.assert_current()
         self.conn.execute("BEGIN IMMEDIATE")
         self._write_depth = 1
         try:
+            self._lease.assert_current()
             yield
+            self._lease.assert_current()
             self.conn.execute("COMMIT")
         except BaseException:
             if self.conn.in_transaction:
@@ -725,11 +839,12 @@ class Ledger:
         one row per daemon instance, so a long-lived machine accumulates one row
         per cold start rather than one per read.
         """
-        self.conn.execute(
-            "INSERT OR IGNORE INTO coverage(session_id,ts,observer,reason)"
-            " VALUES(?,?,?,?)",
-            (UNATTRIBUTED_SESSION, int(ts), self.observer,
-             COVERAGE_UNOBSERVED_HOOKS))
+        with self._write_transaction():
+            self.conn.execute(
+                "INSERT OR IGNORE INTO coverage(session_id,ts,observer,reason)"
+                " VALUES(?,?,?,?)",
+                (UNATTRIBUTED_SESSION, int(ts), self.observer,
+                 COVERAGE_UNOBSERVED_HOOKS))
 
     def unattributed_gaps(self) -> int:
         """How many `unobserved_hooks` records this ledger holds in total.
@@ -771,11 +886,12 @@ class Ledger:
         that was running or had completed, so a scan gap is not proof the
         payload was unread.
         """
-        self.conn.execute(
-            "INSERT INTO scan_gaps(session_id,ts,boundary,reason)"
-            " VALUES(?,?,?,?)",
-            (session_id, int(time.time() if ts is None else ts), boundary,
-             reason))
+        with self._write_transaction():
+            self.conn.execute(
+                "INSERT INTO scan_gaps(session_id,ts,boundary,reason)"
+                " VALUES(?,?,?,?)",
+                (session_id, int(time.time() if ts is None else ts), boundary,
+                 reason))
 
     def scan_gaps(self, session_id: str) -> int:
         """How many observations in `session_id` had a scan gap."""
@@ -1056,10 +1172,12 @@ class Ledger:
         made at a time, so there is no update path and no retroactive effect.
         Data disclosed before the rule was written stays disclosed (P4).
         """
-        self.conn.execute(
-            "INSERT INTO policy(scope, rule_type, selector, created_at)"
-            " VALUES(?,?,?,?)",
-            (_session_scope(session_id), rule_type, selector, int(time.time())))
+        with self._write_transaction():
+            self.conn.execute(
+                "INSERT INTO policy(scope, rule_type, selector, created_at)"
+                " VALUES(?,?,?,?)",
+                (_session_scope(session_id), rule_type, selector,
+                 int(time.time())))
 
     def policy_selectors(self, session_id: str, rule_type: str) -> set[str]:
         """Every `selector` of `rule_type` written for `session_id`.
@@ -1109,17 +1227,21 @@ class Ledger:
         would authorize a call the user never saw.
         """
         token = os.urandom(16).hex()
-        # A second consent for the same call replaces the first rather than
-        # stacking with it: two rows would let a retried call through twice,
-        # and "once" is the whole grant.
-        self.conn.execute(
-            "DELETE FROM policy_tokens WHERE session_id=? AND tool_name=?"
-            " AND args_hash=?", (session_id, tool_name, args_hash))
-        self.conn.execute(
-            "INSERT INTO policy_tokens(token,session_id,tool_name,args_hash,mode,"
-            "expires_at) VALUES(?,?,?,?,?,?)",
-            (token, session_id, tool_name, args_hash, mode,
-             int(time.time()) + ttl_seconds))
+        with self._write_transaction():
+            # A second consent for the same call replaces the first rather
+            # than stacking with it: two rows would let a retried call
+            # through twice, and "once" is the whole grant. The replacement
+            # and the insert share one transaction, so a failure between
+            # them cannot leave the earlier grant deleted and no new one in
+            # its place.
+            self.conn.execute(
+                "DELETE FROM policy_tokens WHERE session_id=? AND tool_name=?"
+                " AND args_hash=?", (session_id, tool_name, args_hash))
+            self.conn.execute(
+                "INSERT INTO policy_tokens(token,session_id,tool_name,"
+                "args_hash,mode,expires_at) VALUES(?,?,?,?,?,?)",
+                (token, session_id, tool_name, args_hash, mode,
+                 int(time.time()) + ttl_seconds))
         return token
 
     def consume_token(self, session_id: str, *, tool_name: str,
@@ -1154,12 +1276,17 @@ class Ledger:
         front of it and asks whether consent exists for *that*. A caller who
         could present a token id would be authorizing a call by name.
         """
-        row = self.conn.execute(
-            "SELECT token, mode FROM policy_tokens WHERE session_id=? AND tool_name=?"
-            " AND args_hash=? AND expires_at>? ORDER BY expires_at DESC LIMIT 1",
-            (session_id, tool_name, args_hash, int(time.time()))).fetchone()
-        if row is None:
-            return None
-        self.conn.execute("DELETE FROM policy_tokens WHERE token=?",
-                          (row["token"],))
-        return row["mode"]
+        with self._write_transaction():
+            # The lookup is inside the transaction with the DELETE: two
+            # callers racing the same token would otherwise both read it and
+            # both spend it, which is the one thing "once" has to mean.
+            row = self.conn.execute(
+                "SELECT token, mode FROM policy_tokens WHERE session_id=?"
+                " AND tool_name=? AND args_hash=? AND expires_at>?"
+                " ORDER BY expires_at DESC LIMIT 1",
+                (session_id, tool_name, args_hash, int(time.time()))).fetchone()
+            if row is None:
+                return None
+            self.conn.execute("DELETE FROM policy_tokens WHERE token=?",
+                              (row["token"],))
+            return row["mode"]

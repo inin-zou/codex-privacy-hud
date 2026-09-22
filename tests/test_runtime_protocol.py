@@ -33,8 +33,8 @@ from pathlib import Path
 import pytest
 
 from privacy_hud.daemon import Daemon
-from privacy_hud.dispatch import new_state
 from runtime_helpers import REPO, TEST_EPOCH, activation, write_receipt_v2
+from runtime_helpers import writer_state
 
 HANDLER = REPO / "hooks" / "handler.py"
 REPO_BUILD = json.loads((REPO / "runtime-build.json").read_text())["build_id"]
@@ -166,7 +166,7 @@ def real_daemon(tmp_path):
     started = []
 
     def start(data_dir: Path, *, build=REPO_BUILD, epoch=TEST_EPOCH):
-        state = new_state(tmp_path / "state")
+        state = writer_state(tmp_path / "state")
         daemon = Daemon(data_dir / "daemon.sock", tmp_path / "state",
                         idle_timeout=3600, poll_interval=0.05, state=state,
                         activation=activation(build_id=build, epoch=epoch))

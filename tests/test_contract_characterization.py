@@ -41,11 +41,13 @@ from pathlib import Path
 import pytest
 
 from privacy_hud import local_ui_server, mcp_tools, render
-from privacy_hud.dispatch import dispatch, new_state
+from privacy_hud.dispatch import dispatch
 from privacy_hud.ledger import Ledger
 from privacy_hud.matrix.loader import load_matrix
 
 from legacy_fakes import legacy_line
+from runtime_helpers import writer_ledger
+from runtime_helpers import writer_state
 
 M = load_matrix()
 
@@ -117,7 +119,7 @@ def _hhmmss(ts: int) -> str:
 
 @pytest.fixture
 def led(tmp_path):
-    ledger = Ledger(tmp_path / "l.db", M)
+    ledger = writer_ledger(tmp_path / "l.db", M)
     _fill(ledger)
     return ledger
 
@@ -709,7 +711,7 @@ def test_every_mcp_payload_survives_a_real_json_dumps(led):
 @pytest.fixture
 def ui(tmp_path, monkeypatch):
     monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))
-    ledger = Ledger(Path(tmp_path) / "ledger.db", M)
+    ledger = writer_ledger(Path(tmp_path) / "ledger.db", M)
     _fill(ledger)
     ledger.conn.close()
 
@@ -810,7 +812,7 @@ DISPATCH_RECEIPT = RECEIPT.replace("· 41 min", "· 0 min")
 
 
 def test_session_end_hook_output_receipt_is_byte_identical(tmp_path):
-    state = new_state(tmp_path)
+    state = writer_state(tmp_path)
     dispatch(state, {"hook_event_name": "SessionStart", "session_id": SESSION,
                      "cwd": "/repo", "model": "gpt-5"})
     for i, spec in enumerate(_ROWS):

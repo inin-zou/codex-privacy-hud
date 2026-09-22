@@ -29,6 +29,7 @@ from privacy_hud.ledger import Ledger
 from privacy_hud.matrix.loader import load_matrix
 from privacy_hud import render
 from legacy_fakes import legacy_line, legacy_summary
+from runtime_helpers import writer_ledger
 
 M = load_matrix()
 
@@ -89,7 +90,7 @@ def daemon_says(monkeypatch):
 
 
 def _ledger(data_dir) -> Ledger:
-    return Ledger(data_dir / "ledger.db", M)
+    return writer_ledger(data_dir / "ledger.db", M)
 
 
 def _expose(led, session_id, value_hash, *, data_type="email",

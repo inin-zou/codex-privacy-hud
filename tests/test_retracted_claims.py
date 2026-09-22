@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from runtime_helpers import writer_ledger
 
 REPO = Path(__file__).resolve().parents[1]
 SELF = Path(__file__).resolve()
@@ -506,10 +507,9 @@ def _registered_tools(app):
 def mcp_app(tmp_path, monkeypatch):
     sys.path.insert(0, str(REPO / "mcp"))
     import server
-    from privacy_hud.ledger import Ledger
     from privacy_hud.matrix.loader import load_matrix
 
-    led = Ledger(tmp_path / "ledger.db", load_matrix())
+    led = writer_ledger(tmp_path / "ledger.db", load_matrix())
     led.start_session("s1", cwd="/r", model="gpt-5")
     led.conn.close()
     monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))

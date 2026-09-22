@@ -19,8 +19,8 @@ import pytest
 
 from privacy_hud import ambient, hud_snapshot, render
 from privacy_hud.hud_snapshot import HudPublisher, read_snapshot
-from privacy_hud.ledger import Ledger
 from privacy_hud.matrix.loader import load_matrix
+from runtime_helpers import writer_ledger
 
 MATRIX = Path(__file__).parent / "matrix"
 GOLDEN = json.loads((MATRIX / "hud_reading_golden.json").read_text(
@@ -39,7 +39,7 @@ def data_dir(tmp_path):
 
 @pytest.fixture
 def led(tmp_path):
-    ledger = Ledger(tmp_path / "ledger.db", load_matrix())
+    ledger = writer_ledger(tmp_path / "ledger.db", load_matrix())
     yield ledger
     ledger.conn.close()
 

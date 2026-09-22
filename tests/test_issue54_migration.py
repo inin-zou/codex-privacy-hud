@@ -23,6 +23,8 @@ import pytest
 from privacy_hud import dispatch as dispatch_mod
 from privacy_hud.ledger import Ledger
 from privacy_hud.matrix.loader import load_matrix
+from runtime_helpers import writer_ledger
+from runtime_helpers import writer_state
 
 M = load_matrix()
 REPO = Path(__file__).resolve().parents[1]
@@ -34,7 +36,7 @@ NEW_TABLES = {"scoring_profiles", "observations", "subjects", "recipients",
 
 def _legacy_ledger(path: Path) -> None:
     """A pre-#54 ledger with rows in every table, written the old way."""
-    led = Ledger(path, M)
+    led = writer_ledger(path, M)
     led.start_session("old1", cwd="/r", model="m")
     led.start_session("old2", cwd="/r", model="m", observed_start=False)
     for i, (kind, dest, prot) in enumerate([
@@ -96,7 +98,7 @@ def _version(conn) -> int:
 
 def _boundary(path: Path, sid: str = "new1") -> None:
     """A genuine SessionStart for an absent session, through the daemon."""
-    state = dispatch_mod.new_state(path.parent)
+    state = writer_state(path.parent)
     try:
         dispatch_mod.dispatch(state, {
             "hook_event_name": "SessionStart", "session_id": sid,
@@ -188,7 +190,7 @@ def test_migration_preserves_missing_source_kind(tmp_path):
     """)
     raw.close()
 
-    led = Ledger(path, M)
+    led = writer_ledger(path, M)
     cols = {r[1] for r in led.conn.execute("PRAGMA table_info(events)")}
     assert "source_kind" not in cols, "initializing open must not migrate"
     with led._write_transaction():
@@ -210,7 +212,7 @@ def test_migration_preserves_missing_source_kind(tmp_path):
 # -- the boundary transaction -----------------------------------------------
 
 def test_boundary_creation_and_rebuild_commit_together(legacy):
-    led = Ledger(legacy, M)
+    led = writer_ledger(legacy, M)
     calls = []
 
     def failpoint(statement):
@@ -235,7 +237,7 @@ def test_boundary_creation_and_rebuild_commit_together(legacy):
 
 
 def test_lazy_attachment_never_migrates(legacy):
-    state = dispatch_mod.new_state(legacy.parent)
+    state = writer_state(legacy.parent)
     try:
         dispatch_mod.dispatch(state, {
             "hook_event_name": "UserPromptSubmit", "session_id": "lazy",
@@ -261,7 +263,7 @@ def test_a_replayed_start_does_not_migrate(legacy):
 
 def test_migration_rerun_has_no_writes(legacy):
     _boundary(legacy, "new1")
-    led = Ledger(legacy, M)
+    led = writer_ledger(legacy, M)
     statements = []
     led.conn.set_trace_callback(statements.append)
     with led._write_transaction():
@@ -280,7 +282,7 @@ def test_migration_rerun_has_no_writes(legacy):
 
 def test_running_legacy_writer_uses_renamed_table(legacy):
     _boundary(legacy)
-    led = Ledger(legacy, M)
+    led = writer_ledger(legacy, M)
     before = led.summary("old1")
     delta = led.record("old1", turn_id="t10", kind="exposed",
                        data_type="phone", source="b.log",
@@ -306,7 +308,7 @@ def test_running_legacy_writer_uses_renamed_table(legacy):
 
 def test_legacy_end_uses_renamed_table(legacy):
     _boundary(legacy)
-    led = Ledger(legacy, M)
+    led = writer_ledger(legacy, M)
     led.start_session("old3", cwd="/r", model="m")
     led.record("old3", turn_id="t", kind="exposed", data_type="email",
                source="a", destination="model_context",
@@ -322,7 +324,7 @@ def test_legacy_end_uses_renamed_table(legacy):
 
 
 def test_legacy_record_is_one_write_transaction(legacy):
-    led = Ledger(legacy, M)
+    led = writer_ledger(legacy, M)
     statements = []
     led.conn.set_trace_callback(statements.append)
     led.record("old1", turn_id="t", kind="exposed", data_type="phone",
@@ -339,7 +341,7 @@ def test_legacy_record_is_one_write_transaction(legacy):
 
 
 def test_commit_failure_rolls_back_and_releases_write_ownership(legacy):
-    led = Ledger(legacy, M)
+    led = writer_ledger(legacy, M)
 
     def authorizer(action, arg1, arg2, database, trigger):
         if action == sqlite3.SQLITE_TRANSACTION and arg1 == "COMMIT":
@@ -369,7 +371,7 @@ def test_commit_failure_rolls_back_and_releases_write_ownership(legacy):
 
 
 def test_failed_boundary_does_not_install_session_state(legacy):
-    state = dispatch_mod.new_state(legacy.parent)
+    state = writer_state(legacy.parent)
 
     def failpoint(statement):
         raise RuntimeError("injected")
@@ -397,8 +399,15 @@ _CHILD = textwrap.dedent("""
     sys.path.insert(0, {src!r})
     from privacy_hud.ledger import Ledger
     from privacy_hud.matrix.loader import load_matrix
+    from privacy_hud.runtime_owner import acquire_writer, unselected_activation
     stop = int(sys.argv[2])
-    led = Ledger(sys.argv[1], load_matrix())
+    # A real lease, in this crash's own data root: the parent process holds
+    # one on the shared temporary directory for the whole test, and #66's
+    # exclusion is between processes, not a convention this child could
+    # opt out of.
+    lease = acquire_writer(sys.argv[1] + ".owner",
+                           activation=unselected_activation())
+    led = Ledger(sys.argv[1], load_matrix(), writer_lease=lease)
     n = [0]
     def failpoint(statement):
         n[0] += 1
@@ -449,8 +458,8 @@ def test_migration_crash_after_each_statement(tmp_path):
         finally:
             raw.close()
         # And the next genuine start completes the migration.
-        Ledger(path, M).conn.close()
-        led = Ledger(path, M)
+        writer_ledger(path, M).conn.close()
+        led = writer_ledger(path, M)
         with led._write_transaction():
             led.prepare_session_boundary("new1")
             led.start_session("new1", cwd="/w", model="m")
@@ -465,7 +474,7 @@ def test_malformed_or_future_schema_is_rejected(legacy, tmp_path):
     raw.execute("PRAGMA user_version=9999")
     raw.close()
     with pytest.raises(Exception) as caught:
-        Ledger(legacy, M)
+        writer_ledger(legacy, M)
     assert type(caught.value).__name__ == "UnsupportedAccounting"
 
     half = tmp_path / "half.db"
@@ -475,7 +484,7 @@ def test_malformed_or_future_schema_is_rejected(legacy, tmp_path):
     raw.execute("PRAGMA user_version=5401")
     raw.close()
     with pytest.raises(Exception) as caught:
-        Ledger(half, M)
+        writer_ledger(half, M)
     assert type(caught.value).__name__ == "UnsupportedAccounting"
     raw = _raw(half)
     assert "observations" not in _tables(raw), "no repair"
@@ -488,7 +497,7 @@ def test_phase2_rejects_activated_writer_downgrade(legacy):
     raw.execute("PRAGMA user_version=5402")
     raw.close()
     with pytest.raises(Exception) as caught:
-        Ledger(legacy, M)
+        writer_ledger(legacy, M)
     assert type(caught.value).__name__ == "UnsupportedAccounting"
 
 
@@ -526,7 +535,7 @@ def test_a_late_legacy_record_is_kept_without_a_charge(legacy, prepared):
     they were, on both schema generations."""
     if prepared:
         _boundary(legacy)
-    led = Ledger(legacy, M)
+    led = writer_ledger(legacy, M)
     led.start_session("late", cwd="/r", model="m")
     first = led.record("late", turn_id="t", kind="exposed", data_type="email",
                        source="a", destination="model_context",

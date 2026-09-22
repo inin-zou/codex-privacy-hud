@@ -32,9 +32,9 @@ from privacy_hud.detect.model import StubModelDetector
 from privacy_hud.detect.paths import PathDetector
 from privacy_hud.detect.secrets import SecretDetector
 from privacy_hud.engine import MAX_TIER3_CHARS, Engine, Observation
-from privacy_hud.ledger import Ledger
 from privacy_hud.mask import new_salt
 from privacy_hud.matrix.loader import load_matrix
+from runtime_helpers import writer_ledger
 
 M = load_matrix()
 
@@ -72,7 +72,7 @@ class _SlowStub(StubModelDetector):
 
 
 def _engine(tmp_path, detectors, name="l"):
-    led = Ledger(tmp_path / f"{name}.db", M)
+    led = writer_ledger(tmp_path / f"{name}.db", M)
     led.start_session("s1", cwd="/r", model="gpt-5")
     return Engine(ledger=led, matrix=M, salt=new_salt(), detectors=detectors)
 

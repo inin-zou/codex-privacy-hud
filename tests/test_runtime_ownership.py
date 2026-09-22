@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import socket
 import sqlite3
+import subprocess
 import sys
 import tempfile
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -22,7 +24,7 @@ from privacy_hud.ledger import Ledger, open_connection
 from privacy_hud.matrix.loader import load_matrix
 from privacy_hud.runtime_contract import RuntimeRefusal, load_activation
 from privacy_hud.runtime_owner import acquire_writer
-from runtime_helpers import make_bundle, write_receipt_v2, writer_lease
+from runtime_helpers import REPO, make_bundle, write_receipt_v2, writer_lease
 
 M = load_matrix()
 
@@ -39,6 +41,34 @@ def _seed(tmp_path, session_id="s1"):
     led.conn.close()
     lease.close()
     return path
+
+
+def _other_process_lease(data_dir) -> str:
+    """Ask a real second process to take the writer lease. Returns
+    `"acquired"` or the refusal code it met.
+
+    A subprocess rather than a second `acquire_writer` here: ownership is
+    reference counted within one process, so an in-process second call
+    would (correctly) share this process's own lease and prove nothing
+    about exclusion.
+    """
+    out = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent("""
+            import sys
+            sys.path.insert(0, sys.argv[1])
+            from privacy_hud.runtime_contract import RuntimeRefusal
+            from privacy_hud.runtime_owner import (
+                acquire_writer, unselected_activation)
+            try:
+                acquire_writer(sys.argv[2],
+                               activation=unselected_activation())
+            except RuntimeRefusal as refusal:
+                print(refusal.code)
+            else:
+                print("acquired")
+        """), str(REPO / "src"), str(data_dir)],
+        capture_output=True, text=True, timeout=60, check=True)
+    return out.stdout.strip()
 
 
 def _sessions(path) -> set[str]:
@@ -118,14 +148,13 @@ def test_writable_open_requires_current_lease(tmp_path):
         Ledger(path, M, writer_lease=closed)
     assert not path.exists()
 
-    # A second writer cannot hold the ledger while the first does.
+    # Another *process* cannot hold the ledger while this one does.
     held = writer_lease(tmp_path)
     led = Ledger(path, M, writer_lease=held)
-    with pytest.raises(RuntimeRefusal) as busy:
-        acquire_writer(tmp_path, activation=held.activation)
-    assert busy.value.code == "holder_unknown"
+    assert _other_process_lease(tmp_path) == "holder_unknown"
     led.conn.close()
     held.close()
+    assert _other_process_lease(tmp_path) == "acquired"
 
     # A noninitializing open with no lease is a reader; it refuses to write.
     reader = Ledger(path, M, initialize=False)
