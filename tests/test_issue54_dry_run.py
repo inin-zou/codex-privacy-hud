@@ -59,8 +59,15 @@ def _bytes(path: Path) -> dict[str, bytes]:
     """The database and its WAL. The `-shm` file is SQLite's shared-memory
     index, which any reader, even a read-only one, may rewrite; it holds no
     ledger data."""
-    return {p.name: p.read_bytes() for p in path.parent.iterdir()
-            if p.name in (path.name, path.name + "-wal")}
+    # An absent WAL and an empty WAL contain the same committed data.
+    # Never delete SQLite's source-side bookkeeping to satisfy this check.
+    out = {}
+    for p in path.parent.iterdir():
+        if p.name in (path.name, path.name + "-wal"):
+            data = p.read_bytes()
+            if p.name == path.name or data:
+                out[p.name] = data
+    return out
 
 
 def test_rehearsal_passes_and_leaves_the_source_unchanged(tmp_path):
@@ -414,3 +421,52 @@ def test_phase3_rehearsal_never_prints_planted_values_on_failure(
     assert name in FIXED_CHECKS
     if expected is not None:
         assert name == expected
+
+
+def test_phase3_does_not_unlink_sidecars_held_by_another_connection(
+        tmp_path, monkeypatch):
+    module = _module()
+    source = _prepared_source(tmp_path)
+    wal = Path(str(source) + "-wal")
+    shm = Path(str(source) + "-shm")
+    assert not wal.exists() and not shm.exists()
+    real_copy = module._copy
+    holders = []
+
+    def copy_then_open_writer(src, dest):
+        real_copy(src, dest)
+        holder = sqlite3.connect(src)
+        holders.append(holder)
+        holder.execute("BEGIN IMMEDIATE")
+        assert wal.exists() and wal.stat().st_size == 0
+        assert shm.exists()
+
+    def stop_after_backup(path):
+        raise module.CheckFailed("phase3-source-version")
+
+    monkeypatch.setattr(module, "_copy", copy_then_open_writer)
+    monkeypatch.setattr(module, "_generation", stop_after_backup)
+    try:
+        with pytest.raises(module.CheckFailed, match="phase3-source-version"):
+            module.phase3(source, _work(tmp_path))
+        assert wal.exists()
+        assert shm.exists()
+    finally:
+        for holder in holders:
+            holder.rollback()
+            holder.close()
+
+
+@pytest.mark.parametrize("column", ["source", "masked_example"])
+def test_phase3_crash_signature_detects_changed_original_cells(
+        tmp_path, column):
+    module = _module()
+    source = _prepared_source(tmp_path)
+    raw = sqlite3.connect(source)
+    try:
+        before = module._signature(raw, f"sess-{PLANTED}")
+        raw.execute(
+            f"UPDATE events_legacy_v1 SET {column}=?", ("changed-cell",))
+        assert module._signature(raw, f"sess-{PLANTED}") != before
+    finally:
+        raw.close()

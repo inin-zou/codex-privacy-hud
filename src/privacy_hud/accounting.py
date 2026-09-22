@@ -545,6 +545,12 @@ def _partition_unresolved(observations: Sequence[OutcomeObservation],
     `resolution_scope`; conflicts stay unresolved and subtract nothing."""
     crossing: set[tuple[str, str]] = set()
     rewrites: set[tuple[str, str]] = set()
+    denied_pairs: set[tuple[str, str]] = set()
+    executed_pairs: set[tuple[str, str]] = set()
+    crossing_facts: set[tuple[str, str]] = set()
+    stop_facts: set[tuple[str, str]] = set()
+    removal_facts: set[tuple[str, str]] = set()
+    deny_unidentified = False
     unmatchable = deny_pending = rewrite_unidentified = executed = False
     crossed: set[tuple[str, str]] = set()
     stopped: set[tuple[str, str]] = set()
@@ -554,6 +560,19 @@ def _partition_unresolved(observations: Sequence[OutcomeObservation],
     for observation in observations:
         record = observation.record
         events = events_of.get(observation.observation_id, [])
+        # Scope controls resolution, not whether contradictory facts exist.
+        for event in events:
+            pair = _pair(event)
+            if pair is None:
+                continue
+            if event.evidence & _EXECUTED:
+                executed_pairs.add(pair)
+            if Evidence.CROSSING_CONFIRMED in event.evidence:
+                crossing_facts.add(pair)
+            if event.evidence & _STOPPED:
+                stop_facts.add(pair)
+            if Evidence.REWRITE_ENFORCED in event.evidence:
+                removal_facts.add(pair)
         if record.evidence & _EXECUTED:
             executed = True
         if record.potential_crossing:
@@ -567,6 +586,14 @@ def _partition_unresolved(observations: Sequence[OutcomeObservation],
                     crossing.add(pair)
         if Evidence.DENY_ISSUED in record.evidence:
             deny_pending = True
+            if not events:
+                deny_unidentified = True
+            for event in events:
+                pair = _pair(event)
+                if pair is None:
+                    deny_unidentified = True
+                else:
+                    denied_pairs.add(pair)
         if Evidence.REWRITE_ISSUED in record.evidence:
             named = [e for e in events if Evidence.REWRITE_ISSUED in e.evidence]
             if not named:
@@ -594,7 +621,8 @@ def _partition_unresolved(observations: Sequence[OutcomeObservation],
             if Evidence.CROSSING_CONFIRMED in record.evidence and not events:
                 zero_receipt = True
 
-    if crossed & (stopped | removed):
+    if (executed_pairs & stop_facts
+            or crossing_facts & removal_facts):
         return True
     if boundary_stopped and executed:
         return True
@@ -607,8 +635,9 @@ def _partition_unresolved(observations: Sequence[OutcomeObservation],
         elif not (boundary_stopped or pair in crossed | stopped | removed):
             return True
     if deny_pending:
-        pairs = crossing - {_ZERO_FINDING}
-        pair_stopped = (bool(pairs) and _ZERO_FINDING not in crossing
+        pairs = (crossing | denied_pairs) - {_ZERO_FINDING}
+        pair_stopped = (bool(pairs) and not deny_unidentified
+                        and _ZERO_FINDING not in crossing
                         and pairs <= stopped)
         if executed or not (boundary_stopped or pair_stopped):
             return True

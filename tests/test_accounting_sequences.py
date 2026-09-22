@@ -341,3 +341,81 @@ def test_occurrences_are_fixed_and_not_disclosure_volume(led):
     (row,) = led.list_events(sid, "exposed")
     assert row.occurrences == 12
     assert row.budget_delta == pytest.approx(EMAIL_B3)
+
+
+@pytest.mark.parametrize("stop_bit", [
+    E.DENY_ENFORCED, E.REJECTED_BEFORE_CROSSING,
+])
+@pytest.mark.parametrize("terminal,scope", [
+    ("execution", "none"), ("crossing", "none"), ("crossing", "pairs"),
+])
+def test_pair_stop_conflicts_with_same_pair_facts(
+        led, stop_bit, terminal, scope):
+    sid, action = start_v2(led), hex_id()
+    subject, to = value_subject("pair@example.test"), recipient()
+    led.record_observation(pre(sid, action_id=action),
+                           [detected(subject, to)])
+    led.record_observation(
+        _post(sid, action, evidence=stop_bit, resolution_scope="pairs"),
+        [prevented(subject, to, evidence=stop_bit)])
+    if terminal == "execution":
+        bits = E.LOCAL_DETECTION | E.EXECUTION_OBSERVED
+        led.record_observation(
+            _post(sid, action, evidence=bits),
+            [detected(subject, to, evidence=bits)])
+    else:
+        led.record_observation(
+            crossed(sid, action_id=action, resolution_scope=scope),
+            [event(subject, to)])
+    summary = led.summary(sid)
+    assert summary.unresolved_actions == 1
+    assert summary.percent is None
+    assert summary.percentage_unavailable_reasons == ("unresolved_actions",)
+    expected = EMAIL_B3 if terminal == "crossing" else 0.0
+    assert summary.confirmed_points == pytest.approx(expected)
+    assert summary.distinct_disclosures == int(terminal == "crossing")
+
+
+def test_denial_scope_includes_nonpotential_pairs(led):
+    sid, action = start_v2(led), hex_id()
+    a, b = value_subject("a@example.test"), value_subject("b@example.test")
+    to = recipient()
+    led.record_observation(pre(sid, action_id=action), [detected(a, to)])
+    led.record_observation(
+        pre(sid, action_id=action, potential_crossing=False,
+            decision="deny", evidence=E.DENY_ISSUED | E.LOCAL_DETECTION),
+        [detected(b, to)])
+    led.record_observation(
+        _post(sid, action, evidence=E.REJECTED_BEFORE_CROSSING,
+              resolution_scope="pairs"),
+        [prevented(a, to, evidence=E.REJECTED_BEFORE_CROSSING)])
+    assert led.summary(sid).unresolved_actions == 1
+    assert led.summary(sid).percent is None
+    led.record_observation(
+        _post(sid, action, evidence=E.REJECTED_BEFORE_CROSSING,
+              resolution_scope="pairs"),
+        [prevented(b, to, evidence=E.REJECTED_BEFORE_CROSSING)])
+    summary = led.summary(sid)
+    assert summary.unresolved_actions == 0
+    assert summary.confirmed_points == 0.0
+
+
+def test_unscoped_crossing_conflicts_with_pair_rewrite(led):
+    sid, action = start_v2(led), hex_id()
+    subject, to = value_subject("rewrite@example.test"), recipient()
+    bits = E.LOCAL_DETECTION | E.REWRITE_ISSUED
+    led.record_observation(
+        pre(sid, action_id=action, decision="rewrite", evidence=bits),
+        [detected(subject, to, evidence=bits)])
+    led.record_observation(
+        _post(sid, action, evidence=E.REWRITE_ENFORCED,
+              resolution_scope="pairs"),
+        [prevented(subject, to, evidence=E.REWRITE_ENFORCED)])
+    led.record_observation(
+        crossed(sid, action_id=action, resolution_scope="none"),
+        [event(subject, to)])
+    summary = led.summary(sid)
+    assert summary.unresolved_actions == 1
+    assert summary.percent is None
+    assert summary.confirmed_points == pytest.approx(EMAIL_B3)
+    assert summary.distinct_disclosures == 1

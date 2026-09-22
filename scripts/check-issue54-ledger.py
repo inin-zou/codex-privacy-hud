@@ -469,6 +469,22 @@ class Proxy:
 
 
 led = Ledger(path, load_matrix())
+
+# Only this rehearsal child uses repeatable generated metadata, so the
+# complete committed rows can be compared across fresh baseline clones.
+import uuid
+import privacy_hud.ledger as ledger_module
+sequence = 0
+def repeatable_uuid():
+    global sequence
+    sequence += 1
+    return uuid.uuid5(uuid.NAMESPACE_OID, f"{delivery}:{sequence}")
+fixed_time = led.conn.execute(
+    "SELECT started_at FROM sessions WHERE session_id=?", (sid,)
+).fetchone()[0] + 1
+ledger_module.uuid.uuid4 = repeatable_uuid
+ledger_module.time.time = lambda: fixed_time
+
 proxy = Proxy(led.conn)
 led.conn = proxy
 if op == "observe":
@@ -554,18 +570,10 @@ def phase3(source: Path, work: Path) -> None:
     inspect = work / "inspect"
     _mkdir(inspect)
     backup = inspect / "backup.db"
-    # A read-only open of a WAL database with no WAL file may leave an
-    # empty one beside the source. Remove only what this open created, and
-    # only while it is still empty.
-    created = [Path(str(source) + suffix) for suffix in ("-wal", "-shm")
-               if not Path(str(source) + suffix).exists()]
+    # SQLite may create WAL/SHM bookkeeping during a read-only backup.
+    # Their prior absence does not give us ownership: another connection
+    # may already be using them. Leave source-side cleanup to SQLite.
     _copy(source, backup)
-    wal, shm = (Path(str(source) + suffix) for suffix in ("-wal", "-shm"))
-    if wal in created and wal.is_file() and not wal.is_symlink() \
-            and wal.stat().st_size == 0:
-        wal.unlink()
-        if shm in created and shm.is_file() and not shm.is_symlink():
-            shm.unlink()
     version = _generation(backup)
     _check(version in (0, ledger_schema.PREPARED_VERSION),
            "phase3-source-version")
@@ -1043,17 +1051,9 @@ def _run_child(args: list[str]) -> subprocess.CompletedProcess[str]:
 
 
 def _signature(raw: sqlite3.Connection, sid: str) -> tuple:
-    counts = tuple(raw.execute(f"SELECT COUNT(*) FROM {_quote(t)}"
-                               ).fetchone()[0] for t in _tables(raw))
-    session = raw.execute(
-        "SELECT budget_score, ended_at IS NOT NULL, accounting_status"
-        " FROM sessions WHERE session_id=?", (sid,)).fetchone()
-    hashes = raw.execute(
-        "SELECT (SELECT COUNT(*) FROM subjects WHERE session_id=?"
-        " AND identity_hash IS NOT NULL),"
-        " (SELECT COUNT(*) FROM recipients WHERE session_id=?"
-        " AND identity_hash IS NOT NULL)", (sid, sid)).fetchone()
-    return counts, tuple(session), tuple(hashes)
+    """Complete typed rows, including original sessions and legacy data."""
+    return tuple((table, tuple(_cells(raw, table)))
+                 for table in _tables(raw))
 
 
 def _check_v2_crash_atomicity(

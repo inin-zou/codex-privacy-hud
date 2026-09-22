@@ -258,8 +258,9 @@ class _Handler(BaseHTTPRequestHandler):
 
         if parsed.path in _ACCOUNTING_ENDPOINTS:
             sid = self._session_id(query)
-            if sid and mcp_tools.get_session_summary(
-                    ledger, sid).accounting_version == 2:
+            with ledger._read_transaction():
+                version = ledger._accounting_version(sid) if sid else 0
+            if version == 2:
                 # #54 Phase 3: the browser renders legacy and unrecorded
                 # sessions only. A version-2 session gets the fixed refusal
                 # and no partial data.

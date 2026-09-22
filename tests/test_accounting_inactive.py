@@ -284,3 +284,33 @@ def test_unknown_session_remains_unrecorded(state, tmp_path):
             reader.get_event("nope", 1)
         if reader is not state.ledger:
             reader.conn.close()
+
+
+def test_phase3_browser_refuses_malformed_v2_before_projection(tmp_path):
+    from types import SimpleNamespace
+    from accounting_fakes import PROFILE
+
+    led = prepared_ledger(tmp_path / "ledger.db")
+    bad = "0" * 64
+    led.conn.execute(
+        "INSERT INTO scoring_profiles(profile_id,format_version,"
+        "matrix_version,created_at,budget_cap,parameters_json)"
+        " VALUES(?,1,'1',1,120.0,?)", (bad, PROFILE.as_canonical_json()))
+    led.conn.execute(
+        "INSERT INTO sessions(session_id,started_at,budget_cap,"
+        "accounting_version,accounting_status,profile_id)"
+        " VALUES('corrupt',1,120.0,2,'available',?)", (bad,))
+    try:
+        with pytest.raises(UnsupportedAccounting):
+            led.summary("corrupt")
+        for endpoint in ("/api/summary", "/api/exposures", "/api/detail"):
+            replies = []
+            handler = object.__new__(local_ui_server._Handler)
+            handler.server = SimpleNamespace(ledger=led)
+            handler.path = endpoint + "?session_id=corrupt&id=1"
+            handler._send_json = lambda status, body: replies.append(
+                (status, body))
+            handler.do_GET()
+            assert replies == [(409, {"error": PHASE3_SURFACE_UNSUPPORTED})]
+    finally:
+        led.conn.close()
