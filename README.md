@@ -18,6 +18,8 @@ A local-first Codex plugin that records hook observations in a session ledger an
 
 The HUD currently shows a legacy permitted-crossing score. Historical accounting includes permitted crossings and may collapse different outcomes; it does not establish confirmed disclosure. The badge counts legacy prevented rows, not denied calls or confirmed host-enforced interventions. An unrecorded session shows “No session on record” with no percentage or numeric counts.
 
+Version 0.7.9 prepares the new ledger schema at a new-session boundary. Sessions still use legacy accounting. Historical records and stored scores are unchanged; collapsed outcomes are not reconstructed.
+
 A denial or rewritten input returned by Privacy HUD is not confirmation that the host applied it. Current hooks do not establish that a denied call did not run or that rewritten input reached its intended recipient.
 
 Boundary, not recipient: a second MCP server is not a second destination today, and what a subagent inherited is not recorded at all (limits 19 and 20).

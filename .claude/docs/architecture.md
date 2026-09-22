@@ -2,9 +2,9 @@
 
 **Status:** Draft v0.1 · **Date:** 2026-09-03 · **Companion to:** `PRD.md`, `design.md`
 
-**Current contract — #54 Phase 1 (0.7.8).**
+**Current contract — #54 Phase 2 (0.7.9).**
 
-Phase 1 of #54 prepares readers and labels existing accounting. Recorded sessions still use the legacy writer, deduplication, and score arithmetic. Their displayed number is a legacy permitted-crossing score, not a confirmed-disclosure percentage. An unrecorded session has no percentage or numeric counts. The new observation, evidence, recipient, and distinct-disclosure accounting has not been activated. #43, #44, and the related #47 accounting limitations remain unresolved.
+The daemon prepares the new accounting schema at a new-session boundary. Production sessions still use legacy accounting. Migration preserves every stored legacy value and performs no backfill or rescoring. Readers do not migrate the ledger. The new observations, identities, evidence, and disclosure charges are not active. #43, #44, and the related #47 accounting limitations remain unresolved.
 
 ---
 
@@ -324,7 +324,243 @@ CREATE TABLE policy_tokens (              -- one-shot consent, §8
 
 **What is deliberately absent:** no `content`, no `prompt`, no `raw_value`, no `file_snippet` column anywhere. The schema is the privacy guarantee — a column that does not exist cannot leak.
 
-At `SessionEnd`: `UPDATE events SET value_hash = NULL WHERE session_id = ?` and the in-memory salt is destroyed.
+At `SessionEnd`: `UPDATE events SET value_hash = NULL WHERE session_id = ?` and the in-memory salt is destroyed. After the Phase 2 rebuild the same update targets `events_legacy_v1`.
+
+### 5.1 Prepared storage (#54 Phase 2, 0.7.9)
+
+Prepared storage: these tables exist from the first genuine new-session boundary after upgrading, and no production writer uses them yet. `PRAGMA user_version` records the generation: `0` legacy, `5401` prepared, `5402` activated (#54 Phase 4). The exact DDL, including every guard trigger, is `src/privacy_hud/ledger_schema.py`; its structural statements are:
+
+```sql
+ALTER TABLE events RENAME TO events_legacy_v1;
+
+CREATE TABLE scoring_profiles (
+    profile_id TEXT NOT NULL PRIMARY KEY
+        CHECK (
+            length(profile_id) = 64
+            AND profile_id NOT GLOB '*[^0-9a-f]*'
+        ),
+    format_version INTEGER NOT NULL CHECK (format_version = 1),
+    matrix_version TEXT NOT NULL,
+    created_at INTEGER NOT NULL CHECK (typeof(created_at) = 'integer'),
+    budget_cap REAL NOT NULL
+        CHECK (budget_cap > 0 AND budget_cap < 1.0e100),
+    parameters_json TEXT NOT NULL
+        CHECK (
+            json_valid(parameters_json)
+            AND json_type(parameters_json) = 'object'
+        )
+);
+
+ALTER TABLE sessions
+    ADD COLUMN accounting_version INTEGER NOT NULL DEFAULT 1
+        CHECK (accounting_version IN (1, 2));
+
+ALTER TABLE sessions
+    ADD COLUMN accounting_status TEXT NOT NULL DEFAULT 'legacy'
+        CHECK (accounting_status IN ('legacy', 'available', 'unavailable'));
+
+ALTER TABLE sessions
+    ADD COLUMN profile_id TEXT REFERENCES scoring_profiles(profile_id);
+
+CREATE TABLE observations (
+    observation_id TEXT NOT NULL PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(session_id),
+    delivery_key TEXT NOT NULL,
+    action_id TEXT NOT NULL,
+    turn_id TEXT,
+    ts INTEGER NOT NULL CHECK (typeof(ts) = 'integer'),
+    hook_event TEXT NOT NULL CHECK (hook_event IN (
+        'SessionStart', 'SessionEnd', 'UserPromptSubmit',
+        'PreToolUse', 'PostToolUse', 'SubagentStart',
+        'SubagentStop', 'PreCompact'
+    )),
+    phase TEXT NOT NULL CHECK (phase IN ('pre', 'post', 'lifecycle')),
+    action_kind TEXT NOT NULL CHECK (action_kind IN (
+        'read', 'tool', 'prompt', 'subagent', 'lifecycle', 'other'
+    )),
+    boundary TEXT NOT NULL CHECK (boundary IN ('B0', 'B1', 'B2', 'B3', 'B4')),
+    decision TEXT NOT NULL CHECK (decision IN ('none', 'allow', 'deny', 'rewrite')),
+    evidence INTEGER NOT NULL
+        CHECK (typeof(evidence) = 'integer' AND evidence BETWEEN 0 AND 2047),
+    resolution_scope TEXT NOT NULL DEFAULT 'none'
+        CHECK (resolution_scope IN ('none', 'pairs', 'boundary')),
+    potential_crossing INTEGER NOT NULL
+        CHECK (potential_crossing IN (0, 1)),
+    scan_gap TEXT CHECK (scan_gap IN ('oversize', 'unavailable', 'busy', 'timeout')),
+    UNIQUE (session_id, delivery_key),
+    UNIQUE (session_id, observation_id),
+    CHECK ((evidence & 2) = 0 OR decision = 'deny'),
+    CHECK ((evidence & 8) = 0 OR decision = 'rewrite'),
+    CHECK ((evidence & 1) = 0 OR decision IN ('allow', 'rewrite')),
+    CHECK (resolution_scope = 'none' OR (evidence & 212) <> 0),
+    CHECK (scan_gap IS NULL OR phase <> 'lifecycle')
+);
+
+CREATE INDEX observations_action
+    ON observations(session_id, action_id, boundary, ts, observation_id);
+
+CREATE TABLE subjects (
+    subject_id TEXT NOT NULL PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(session_id),
+    subject_kind TEXT NOT NULL CHECK (subject_kind IN ('value', 'file')),
+    resolution TEXT NOT NULL CHECK (resolution IN ('resolved', 'unresolved')),
+    identity_hash BLOB CHECK (
+        identity_hash IS NULL
+        OR (typeof(identity_hash) = 'blob' AND length(identity_hash) = 32)
+    ),
+    label TEXT NOT NULL,
+    unresolved_observation_id TEXT,
+    UNIQUE (session_id, subject_id),
+    FOREIGN KEY (session_id, unresolved_observation_id)
+        REFERENCES observations(session_id, observation_id),
+    CHECK (
+        (resolution = 'resolved' AND unresolved_observation_id IS NULL)
+        OR
+        (resolution = 'unresolved'
+         AND identity_hash IS NULL
+         AND unresolved_observation_id IS NOT NULL)
+    )
+);
+
+CREATE UNIQUE INDEX subjects_identity
+    ON subjects(session_id, subject_kind, identity_hash)
+    WHERE identity_hash IS NOT NULL;
+
+CREATE TABLE recipients (
+    recipient_id TEXT NOT NULL PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(session_id),
+    destination_kind TEXT NOT NULL CHECK (destination_kind IN (
+        'local', 'model_context', 'subagent', 'mcp_tool', 'external_net'
+    )),
+    resolution TEXT NOT NULL CHECK (resolution IN ('resolved', 'unresolved')),
+    identity_hash BLOB CHECK (
+        identity_hash IS NULL
+        OR (typeof(identity_hash) = 'blob' AND length(identity_hash) = 32)
+    ),
+    label TEXT NOT NULL,
+    unresolved_observation_id TEXT,
+    UNIQUE (session_id, recipient_id),
+    FOREIGN KEY (session_id, unresolved_observation_id)
+        REFERENCES observations(session_id, observation_id),
+    CHECK (
+        (resolution = 'resolved' AND unresolved_observation_id IS NULL)
+        OR
+        (resolution = 'unresolved'
+         AND identity_hash IS NULL
+         AND unresolved_observation_id IS NOT NULL)
+    )
+);
+
+CREATE UNIQUE INDEX recipients_identity
+    ON recipients(session_id, destination_kind, identity_hash)
+    WHERE identity_hash IS NOT NULL;
+
+CREATE TABLE events (
+    id INTEGER PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(session_id),
+    observation_id TEXT NOT NULL,
+    subject_id TEXT NOT NULL,
+    recipient_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN (
+        'detected', 'local_access', 'permitted',
+        'exposed', 'prevented', 'retention'
+    )),
+    evidence INTEGER NOT NULL
+        CHECK (typeof(evidence) = 'integer' AND evidence BETWEEN 0 AND 2047),
+    data_type TEXT NOT NULL CHECK (data_type IN (
+        'credential', 'financial', 'health', 'email', 'phone',
+        'person', 'address', 'ssn', 'account', 'url', 'date',
+        'hostname', 'path', 'ip', 'repo'
+    )),
+    rule_id TEXT,
+    occurrences INTEGER NOT NULL DEFAULT 1
+        CHECK (typeof(occurrences) = 'integer' AND occurrences >= 1),
+    source_label TEXT NOT NULL,
+    source_kind TEXT CHECK (source_kind IN ('path', 'command')),
+    boundary TEXT NOT NULL CHECK (boundary IN ('B0', 'B1', 'B2', 'B3', 'B4')),
+    masked_example TEXT,
+    FOREIGN KEY (session_id, observation_id)
+        REFERENCES observations(session_id, observation_id),
+    FOREIGN KEY (session_id, subject_id)
+        REFERENCES subjects(session_id, subject_id),
+    FOREIGN KEY (session_id, recipient_id)
+        REFERENCES recipients(session_id, recipient_id),
+    UNIQUE (observation_id, subject_id, recipient_id, kind),
+    UNIQUE (session_id, id, subject_id, recipient_id),
+    CHECK (kind <> 'exposed' OR (boundary <> 'B0' AND (evidence & 64) <> 0)),
+    CHECK (kind <> 'permitted' OR (evidence & 1) <> 0),
+    CHECK (kind <> 'prevented' OR (evidence & 150) <> 0),
+    CHECK (kind <> 'local_access' OR (boundary = 'B0' AND (evidence & 32) <> 0)),
+    CHECK (kind <> 'detected' OR (evidence & 256) <> 0),
+    CHECK (kind <> 'retention' OR (evidence & 512) <> 0),
+    CHECK (data_type NOT IN ('credential', 'path') OR masked_example IS NULL)
+);
+
+CREATE INDEX events_session_kind
+    ON events(session_id, kind, id);
+
+CREATE INDEX events_session_subject_recipient
+    ON events(session_id, subject_id, recipient_id, id);
+
+CREATE TABLE disclosures (
+    disclosure_id INTEGER PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(session_id),
+    subject_id TEXT NOT NULL,
+    recipient_id TEXT NOT NULL,
+    first_event_id INTEGER NOT NULL,
+    charged_data_type TEXT NOT NULL CHECK (charged_data_type IN (
+        'credential', 'financial', 'health', 'email', 'phone',
+        'person', 'address', 'ssn', 'account', 'url', 'date',
+        'hostname', 'path', 'ip', 'repo'
+    )),
+    profile_id TEXT NOT NULL REFERENCES scoring_profiles(profile_id),
+    group_n INTEGER NOT NULL
+        CHECK (typeof(group_n) = 'integer' AND group_n >= 1),
+    budget_delta REAL NOT NULL
+        CHECK (budget_delta >= 0 AND budget_delta < 1.0e100),
+    FOREIGN KEY (session_id, subject_id)
+        REFERENCES subjects(session_id, subject_id),
+    FOREIGN KEY (session_id, recipient_id)
+        REFERENCES recipients(session_id, recipient_id),
+    FOREIGN KEY (session_id, first_event_id, subject_id, recipient_id)
+        REFERENCES events(session_id, id, subject_id, recipient_id),
+    UNIQUE (session_id, subject_id, recipient_id),
+    UNIQUE (session_id, charged_data_type, recipient_id, group_n),
+    UNIQUE (first_event_id)
+);
+```
+
+Guards: scoring profiles are immutable; a session's accounting version, profile, cap and start time are frozen and its score is monotonic; `observations`, `events`, `disclosures`, `coverage` and `scan_gaps` are append-only; identity metadata is immutable, and an identity hash can only be erased, and only after its session ended.
+
+**Genuine-start procedure.**
+
+1. Acquire `State.lock`.
+2. `BEGIN IMMEDIATE`.
+3. Re-read the session ID and schema marker.
+4. If the ID exists, preserve it; do not rebuild merely because its start was replayed.
+5. For an absent ID and legacy schema, execute the Phase 2 migration.
+6. Insert the triggering session as version 1 and insert its coverage row.
+7. Commit.
+8. Create/use its legacy engine state and publish its legacy snapshot.
+
+Any error rolls back the complete boundary operation. The triggering session is not left half-created.
+
+**Legacy writes after migration.**
+
+Keep the public `Ledger.record(...) -> float` signature. It checks the session version and dispatches only version 1 to `_record_legacy`.
+
+Within one write transaction:
+
+- Discover the legacy table.
+- Select its actual columns.
+- Preserve the existing dedupe key and `contribution(..., 1, ...)` arithmetic.
+- Omit `source_kind` from inserts if the historical table lacks it.
+- Commit insertion/count increment and score increment together.
+
+`record` refuses any session that is not legacy-accounted. A late record for an ended session is kept with a NULL value hash and zero contribution; the ended session's score stays frozen, and dispatch enforces the call with a temporary engine whose salt never becomes session state.
+
+Readers open with `initialize=False` and never run the rebuild. `scripts/check-issue54-ledger.py` rehearses it on a private copy of a real ledger.
+
 
 ---
 
