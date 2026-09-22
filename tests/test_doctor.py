@@ -234,6 +234,36 @@ def _by_name(checks, name):
     return next(c for c in checks if c.name == name)
 
 
+def _select_runtime(data_dir, monkeypatch=None):
+    """Give `data_dir` a receipt v2 over the shared test bundle and return
+    the activation it selects.
+
+    Protocol 2 has no anonymous healthy answer: the doctor's daemon probe
+    is a hello, and the only reply that counts as responsive is one naming
+    the selected build and activation epoch. So a test with a daemon in it
+    needs a selection, which is what this is. With a `monkeypatch`, the
+    running first-party code is also pointed at that bundle, so the
+    Runtime source check agrees with the receipt.
+    """
+    from privacy_hud import runtime_contract
+    from runtime_helpers import shared_bundle, write_receipt_v2
+
+    bundle = shared_bundle()
+    write_receipt_v2(Path(data_dir), bundle=bundle, python=sys.executable)
+    if monkeypatch is not None:
+        monkeypatch.setattr(doctor, "_first_party_origin",
+                            lambda: bundle / "src" / "privacy_hud")
+    return runtime_contract.load_activation(Path(data_dir))
+
+
+def _hello_bytes(activation, schema_version: int = 0) -> bytes:
+    """The frame a matching daemon answers a hello with."""
+    from privacy_hud import runtime_client
+
+    return runtime_client.encode_frame(
+        runtime_client.hello_reply(activation, schema_version))
+
+
 def _pin_runtime(data_dir, monkeypatch, *, python=None, transformers="5.16.1",
                  torch="2.5.1", package="present", **overrides):
     """Write a runtime receipt and stub the probe of the interpreter it names.
@@ -749,9 +779,10 @@ def test_stale_socket_with_a_pin_warns_because_it_self_heals(
 
 
 def test_responsive_daemon_is_ok(isolated_env, monkeypatch, short_sockdir):
+    activation = _select_runtime(isolated_env)
     sock_path = short_sockdir / "d.sock"
     monkeypatch.setattr(doctor, "_socket_path", lambda _d: sock_path)
-    server, thread = _serve(sock_path, b"{}\n")
+    server, thread = _serve(sock_path, _hello_bytes(activation))
     try:
         check = doctor.check_daemon(timeout=2.0)
     finally:
@@ -760,32 +791,34 @@ def test_responsive_daemon_is_ok(isolated_env, monkeypatch, short_sockdir):
     assert check.status == doctor.OK
 
 
-def test_probe_sends_the_documented_protocol_and_a_harmless_event(
+def test_probe_sends_the_documented_protocol_and_no_event_at_all(
         isolated_env, monkeypatch, short_sockdir):
-    """The probe must be the wire format `hooks/handler.py` owns, and must
-    carry an event that cannot record anything.
+    """The probe must be the wire format `hooks/handler.py` owns, and it
+    must carry nothing a daemon could record.
 
-    `PreCompact` is named in `dispatch.py`'s own mapping table as an event
-    with no `Observation` defined, so `dispatch()` returns an empty allow
-    *before* it touches the ledger, starts a session, builds an `Engine` or
-    runs a detector. No `session_id` is sent either, so there is nothing for
-    a future mapping to attribute the probe to. If someone ever swaps this
-    for a real event, a diagnostic starts writing to the thing it diagnoses —
-    hence the assertion.
+    Protocol 1's probe sent a `PreCompact` event, chosen because
+    `dispatch()` returns an empty allow for it before touching the ledger.
+    Protocol 2 needs no such argument: a hello establishes liveness by
+    itself, so the diagnostic sends no event to the thing it diagnoses. If
+    someone ever puts one back, a diagnostic starts writing to the thing
+    it diagnoses — hence the assertion.
     """
+    from privacy_hud import runtime_client
+
+    activation = _select_runtime(isolated_env)
     sock_path = short_sockdir / "d.sock"
     monkeypatch.setattr(doctor, "_socket_path", lambda _d: sock_path)
-    server, thread = _serve(sock_path, b"{}\n")
+    server, thread = _serve(sock_path, _hello_bytes(activation))
     try:
         doctor.check_daemon(timeout=2.0)
     finally:
         _stop(server, thread)
 
-    assert server.seen == [{"v": 1, "op": "event",
-                            "payload": {"hook_event_name": "PreCompact"}}]
-    assert doctor.PROBE_EVENT not in {"SessionStart", "SessionEnd",
-                                      "UserPromptSubmit", "PostToolUse",
-                                      "PreToolUse", "SubagentStart"}
+    assert len(server.seen) == 1
+    assert runtime_client.is_valid_hello(server.seen[0])
+    assert server.seen[0]["build_id"] == activation.identity.build_id
+    assert server.seen[0]["activation_epoch"] == activation.epoch
+    assert all(message.get("op") != "event" for message in server.seen)
 
 
 def test_stale_socket_that_outlived_its_process_fails(isolated_env, monkeypatch,
@@ -858,9 +891,10 @@ def test_world_readable_socket_warns_without_failing(isolated_env, monkeypatch,
     any local user can inject hook events into the disclosure ledger. It is a
     warning, not a failure — the daemon works, and the exit code is reserved
     for setups that cannot work at all."""
+    activation = _select_runtime(isolated_env)
     sock_path = short_sockdir / "d.sock"
     monkeypatch.setattr(doctor, "_socket_path", lambda _d: sock_path)
-    server, thread = _serve(sock_path, b"{}\n")
+    server, thread = _serve(sock_path, _hello_bytes(activation))
     os.chmod(sock_path, 0o666)
     try:
         check = doctor.check_daemon(timeout=2.0)
@@ -1251,7 +1285,7 @@ def test_a_check_that_raises_becomes_a_failure_not_a_traceback(monkeypatch,
     assert "RuntimeError" in ledger.summary
     text = doctor.format_report(checks)
     assert "something private" not in text
-    assert len(checks) == 10
+    assert len(checks) == 13
 
 
 def test_report_is_plain_text_with_no_escape_sequences(isolated_env):
@@ -1336,10 +1370,13 @@ def test_healthy_setup_reports_healthy_and_exits_zero(isolated_env, monkeypatch,
     led.start_session("s1", cwd="/repo", model="gpt-5")
     led.conn.close()
     _pin_runtime(assigned, monkeypatch)
+    # A healthy setup now also means a selected bundle the running code
+    # came out of, and a daemon that answers as that build (#66).
+    activation = _select_runtime(assigned, monkeypatch)
 
     sock_path = short_sockdir / "d.sock"
     monkeypatch.setattr(doctor, "_socket_path", lambda _d: sock_path)
-    server, thread = _serve(sock_path, b"{}\n")
+    server, thread = _serve(sock_path, _hello_bytes(activation))
 
     _pin_versions(monkeypatch, transformers="5.16.1", torch="2.5.1")
     _seed_weights(tmp_path, doctor.MODEL_FILES)
@@ -1599,7 +1636,7 @@ def test_check_mcp_server_probe_does_not_write_ledger_rows(monkeypatch,
 
     before = counts()
     monkeypatch.setattr(doctor, "_installed_plugin_root", lambda: root)
-    monkeypatch.setattr(doctor, "_ledger_path", lambda: data / "ledger.db")
+    monkeypatch.setenv("PLUGIN_DATA", str(data))
     monkeypatch.delenv("PRIVACY_HUD_BOOTSTRAP_REEXEC", raising=False)
     monkeypatch.delenv("PYTHONPATH", raising=False)
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "no-codex-home"))

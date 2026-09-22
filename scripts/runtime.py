@@ -116,6 +116,7 @@ DAEMON_STARTUP_REFUSAL = (
     "Run the repair command reported by the current plugin's doctor."
 )
 AMBIENT_RUNTIME_MISMATCH = "Privacy — runtime mismatch"
+AMBIENT_NARROW_FALLBACK = "Privacy unverified"
 
 
 class _Refused(Exception):
@@ -382,7 +383,7 @@ def _dispatch(args, activation) -> int:
         return daemon.main([], activation=activation)
     if command == "ambient":
         from privacy_hud import ambient
-        return ambient.main(list(args.ambient_args))
+        return ambient.main(list(args.ambient_args), activation=activation)
     if command == "ui":
         from privacy_hud import local_ui_server
         return local_ui_server.main([args.session_id] if args.session_id

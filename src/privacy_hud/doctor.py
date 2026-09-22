@@ -129,7 +129,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import codex, offline, runtime
+from . import (codex, offline, runtime, runtime_client,
+               runtime_contract, runtime_messages, runtime_repair)
 from .runtime import ledger_path as _ledger_path
 
 # `runtime` is imported at module level, unlike `daemon` (see `_socket_path`
@@ -242,7 +243,7 @@ _MARKERS = {OK: "[ OK ]", WARN: "[WARN]", FAIL: "[FAIL]", SKIP: "[SKIP]"}
 
 #: Label column width. Wide enough for the longest check name below, so the
 #: statuses and summaries line up into scannable columns.
-_LABEL_WIDTH = 20
+_LABEL_WIDTH = 24
 
 
 @dataclass
@@ -639,6 +640,45 @@ def _setup_fixes() -> list[str]:
     ]
 
 
+def _pin_receipt(data_dir) -> tuple[dict | None, str]:
+    """The recorded selection, in the shape the pin check below reads.
+
+    Receipt v2 records a *bundle* as well as an interpreter (#66), and the
+    interpreter no longer supplies first-party code: the bundle does. So
+    the `pythonpath` this hands the probe is the selected bundle's `src`,
+    which is exactly what the bootstrap puts in front of `sys.path` before
+    importing the package, and the probe's `privacy_hud` answer is
+    therefore an answer about the code that would really run.
+
+    Receipt v1 is passed through to `runtime.load_receipt` unchanged: a
+    historical receipt is still readable, is still repair input, and still
+    names an interpreter a hook would spawn. The three unusable states are
+    named rather than collapsed into absence, because a receipt nobody can
+    read must never read as "no receipt" (the #66 interim review).
+    """
+    root = Path(data_dir)
+    state = runtime_contract.classify_receipt(root)
+    if state == "absent":
+        return None, "absent"
+    if state in ("unreadable", "malformed"):
+        return None, state
+    if state == "v1":
+        return runtime.load_receipt(root)
+    try:
+        receipt = runtime_contract.read_receipt(root)
+    except runtime_contract.RuntimeRefusal:
+        return None, "unreadable"
+    probe = receipt.get("dependency_probe")
+    return {
+        "python": receipt["python"],
+        "pythonpath": str(Path(str(receipt["selected_bundle_root"])) / "src"),
+        "plugin_data": str(root),
+        "recorded_at": receipt.get("recorded_at"),
+        "recorded": dict(probe) if isinstance(probe, dict) else {},
+        "env": receipt.get("env") or {},
+    }, ""
+
+
 def _probe_pinned_interpreter(receipt: dict, timeout: float
                               ) -> tuple[dict | None, float, str]:
     """Run `runtime.probe_interpreter` for a receipt.
@@ -665,7 +705,7 @@ def _auto_spawn_configured(data_dir: Path) -> bool:
     daemon check reports the absence as expected, which is exactly the pair of
     statements the situation deserves.
     """
-    receipt, problem = runtime.load_receipt(data_dir)
+    receipt, problem = _pin_receipt(data_dir)
     if receipt is None or problem:
         return False
     python = receipt["python"]
@@ -713,7 +753,37 @@ def check_runtime_pin(timeout: float = runtime.PROBE_TIMEOUT) -> Check:
     # store is `$PLUGIN_DATA/ledger/active.db`, so that parent is the
     # `ledger/` directory and the receipt is not in it.
     data_dir = runtime.plugin_data_dir() or ledger_path.parent
-    receipt, problem = runtime.load_receipt(data_dir)
+
+    # Before the receipt is read, and not after: a receipt anyone can write
+    # is a program anyone can choose for a hook to execute, so the client
+    # declines to spawn from one -- and `runtime_contract.classify_receipt`
+    # refuses to read it at all, which is the right refusal with the wrong
+    # remedy attached. There is no `/tmp` fallback any more (spec §6) --
+    # an unset `PLUGIN_DATA` already returned a FAIL above -- but a receipt
+    # in a directory another local user can write to (a shared scratch
+    # directory someone explicitly exported) is still possible, and silence
+    # here would leave the user with a daemon that never starts and no line
+    # saying why.
+    receipt_file = runtime.receipt_path(data_dir)
+    try:
+        info = receipt_file.stat()
+        insecure = info.st_uid != os.getuid() or bool(info.st_mode & 0o022)
+    except OSError:
+        insecure = False
+    if insecure:
+        return Check(
+            "Runtime pin", FAIL,
+            f"{_display_path(receipt_file)} is writable by other users",
+            details=["It names an interpreter a hook process executes, so "
+                     "the hook client refuses to spawn from it and no daemon "
+                     "will start.",
+                     "A directory other local users can write to is what "
+                     "produces this -- for example PLUGIN_DATA exported to "
+                     "a shared scratch directory."],
+            fixes=[f"chmod 600 {_shell_path(receipt_file)}"] + _setup_fixes(),
+        )
+
+    receipt, problem = _pin_receipt(data_dir)
 
     if receipt is None and problem == "absent":
         return Check(
@@ -741,34 +811,6 @@ def check_runtime_pin(timeout: float = runtime.PROBE_TIMEOUT) -> Check:
     python = receipt["python"]
     shown = _display_path(python)
     details: list[str] = []
-
-    # Same refusal `hooks/handler.py` makes, reported before anything else it
-    # would mask: a receipt anyone can write is a program anyone can choose
-    # for a hook to execute, so the client declines to spawn from one. There
-    # is no `/tmp` fallback any more (spec §6) -- an unset `PLUGIN_DATA`
-    # already returned a FAIL above, before `data_dir` could even be
-    # resolved -- but a receipt in a directory another local user can write
-    # to (a shared scratch directory someone explicitly exported) is still
-    # possible, and silence here would leave the user with a daemon that
-    # never starts and no line saying why.
-    receipt_file = runtime.receipt_path(data_dir)
-    try:
-        info = receipt_file.stat()
-        insecure = info.st_uid != os.getuid() or bool(info.st_mode & 0o022)
-    except OSError:
-        insecure = False
-    if insecure:
-        return Check(
-            "Runtime pin", FAIL,
-            f"{_display_path(receipt_file)} is writable by other users",
-            details=["It names an interpreter a hook process executes, so "
-                     "the hook client refuses to spawn from it and no daemon "
-                     "will start.",
-                     "A directory other local users can write to is what "
-                     "produces this -- for example PLUGIN_DATA exported to "
-                     "a shared scratch directory."],
-            fixes=[f"chmod 600 {_shell_path(receipt_file)}"] + _setup_fixes(),
-        )
 
     recorded_at = receipt.get("recorded_at")
     if isinstance(recorded_at, (int, float)):
@@ -874,30 +916,52 @@ def check_runtime_pin(timeout: float = runtime.PROBE_TIMEOUT) -> Check:
     return check
 
 
-def _probe_daemon(sock_path: Path, timeout: float) -> tuple[str, float, str]:
-    """One round trip over the protocol `hooks/handler.py` owns.
+def _probe_daemon(sock_path: Path, timeout: float,
+                  activation=None) -> tuple[str, float, str, str]:
+    """One protocol-2 hello over the socket `hooks/handler.py` owns.
 
-    Returns `(outcome, elapsed_ms, extra)`. The outcomes are the ones that
-    are actually distinguishable from a client, and each maps to a different
-    remedy: `responsive`, `refused` (a stale socket file that outlived its
-    process — the failure this whole check exists for), `timeout` (accepted
-    but wedged), `no_reply` (accepted, then closed without answering — what
-    `daemon._Handler.handle()` does for a malformed request), `bad_reply`
-    (something is listening on this socket, but it is not this daemon), and
-    `error` for everything else, notably the `OSError` from an AF_UNIX path
-    over the kernel's ~104-byte `sockaddr_un` limit.
+    Returns `(outcome, elapsed_ms, extra, daemon_release)`. The outcomes
+    are the ones that are actually distinguishable from a client, and each
+    maps to a different remedy: `responsive` (a hello naming the selected
+    build and activation epoch came back), `mismatch` (something answered
+    in this protocol and it is not the selected runtime), `refused` (a
+    stale socket file that outlived its process), `timeout` (accepted but
+    wedged), `no_reply` (accepted, then closed without answering — what
+    `daemon._Handler.handle()` does for a request it will not serve),
+    `bad_reply` (something is listening and it is not speaking this
+    protocol at all), and `error` for everything else, notably the
+    `OSError` from an AF_UNIX path over the kernel's ~104-byte
+    `sockaddr_un` limit.
 
-    The payload is `PROBE_EVENT` with no `session_id`; see the module
-    docstring for why that cannot record or change anything.
+    **No event is sent.** Protocol 1's probe carried a `PreCompact` event
+    chosen because `dispatch()` returns an empty allow for it before
+    touching the ledger; protocol 2 establishes liveness with the hello
+    itself, so a diagnostic no longer sends anything to the thing it
+    diagnoses at all. The daemon dispatches nothing on a connection whose
+    hello did not match, so an unselected probe cannot record either.
+
+    **Any JSON object used to count as healthy here.** It no longer does:
+    a reply is `responsive` only when it is a structurally valid hello
+    reply naming this build and this epoch, which is the same test
+    `runtime_client` applies before it will send a hook payload. A release
+    string is reported only out of such a reply — a release named by an
+    unvalidated peer is a string that peer chose (I1).
     """
-    request = json.dumps({"v": 1, "op": "event",
-                          "payload": {"hook_event_name": PROBE_EVENT}})
+    unknown = runtime_messages.UNKNOWN_DAEMON_RELEASE
+    if activation is None:
+        # Nothing selected: the only hello that can be sent is one no
+        # daemon will match, which still tells liveness from silence.
+        probe_activation = _unselected_probe_activation()
+    else:
+        probe_activation = activation
+    request = runtime_client.encode_frame(
+        runtime_client.hello_request(probe_activation))
     started = time.perf_counter()
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(timeout)
     try:
         sock.connect(str(sock_path))
-        sock.sendall((request + "\n").encode("utf-8"))
+        sock.sendall(request)
         buf = b""
         while not buf.endswith(b"\n"):
             chunk = sock.recv(65536)
@@ -905,12 +969,12 @@ def _probe_daemon(sock_path: Path, timeout: float) -> tuple[str, float, str]:
                 break
             buf += chunk
     except ConnectionRefusedError:
-        return "refused", (time.perf_counter() - started) * 1000, ""
+        return "refused", (time.perf_counter() - started) * 1000, "", unknown
     except socket.timeout:
-        return "timeout", (time.perf_counter() - started) * 1000, ""
+        return "timeout", (time.perf_counter() - started) * 1000, "", unknown
     except OSError as exc:
-        return "error", (time.perf_counter() - started) * 1000, \
-            type(exc).__name__
+        return ("error", (time.perf_counter() - started) * 1000,
+                type(exc).__name__, unknown)
     finally:
         try:
             sock.close()
@@ -919,14 +983,53 @@ def _probe_daemon(sock_path: Path, timeout: float) -> tuple[str, float, str]:
 
     elapsed = (time.perf_counter() - started) * 1000
     if not buf.strip():
-        return "no_reply", elapsed, ""
+        return "no_reply", elapsed, "", unknown
     try:
-        reply = json.loads(buf.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return "bad_reply", elapsed, "reply was not JSON"
-    if not isinstance(reply, dict):
-        return "bad_reply", elapsed, "reply was not a JSON object"
-    return "responsive", elapsed, ""
+        reply = runtime_client.decode_frame(buf.rstrip(b"\n"))
+    except runtime_client.FrameError:
+        return "bad_reply", elapsed, "reply was not a JSON object", unknown
+    if activation is not None and runtime_client.is_matching_hello_reply(
+            reply, activation):
+        return "responsive", elapsed, "", str(reply["release"])
+    if _is_protocol_two_hello_response(reply):
+        return "mismatch", elapsed, "", unknown
+    return "bad_reply", elapsed, "not a protocol-2 hello", unknown
+
+
+def _is_protocol_two_hello_response(reply) -> bool:
+    """Did *this daemon's* protocol answer, even though it did not match?
+
+    Deliberately structural and deliberately narrow: version 2, the hello
+    op, and a boolean `ok`. It decides which remedy the user is given —
+    "repair the runtime" rather than "something else owns this socket
+    path" — and nothing else. No field of it is ever printed.
+    """
+    return (isinstance(reply, dict)
+            and runtime_contract.is_int(reply.get("v"))
+            and reply.get("v") == runtime_contract.PROTOCOL_VERSION
+            and reply.get("op") == runtime_client.OP_HELLO
+            and isinstance(reply.get("ok"), bool))
+
+
+def _unselected_probe_activation():
+    """A hello no daemon can match, for a data directory that selects
+    nothing.
+
+    Sending one is how "a daemon is listening" is told from "the socket
+    file outlived its process" when there is no receipt to authenticate
+    with. It cannot be mistaken for authorization: the daemon refuses it
+    and dispatches nothing.
+    """
+    identity = runtime_contract.RuntimeIdentity(
+        release=runtime_contract.RELEASE, build_id="0" * 64,
+        protocol=runtime_contract.PROTOCOL_VERSION,
+        storage_generation=runtime_contract.STORAGE_GENERATION,
+        readable_schemas=runtime_contract.READABLE_SCHEMAS,
+        writable_schemas=runtime_contract.WRITABLE_SCHEMAS,
+        snapshot_versions=runtime_contract.SNAPSHOT_VERSIONS)
+    return runtime_contract.Activation(
+        identity=identity, epoch="0" * 32,
+        bundle_root=_bundle_root(), python=Path(sys.executable))
 
 
 def check_daemon(timeout: float = DAEMON_TIMEOUT, *,
@@ -1039,15 +1142,16 @@ def check_daemon(timeout: float = DAEMON_TIMEOUT, *,
             fixes=[f"rm {quoted}"] + start_fix,
         )
 
-    outcome, elapsed, extra = _probe_daemon(sock_path, timeout)
+    outcome, elapsed, extra, _release = _probe_daemon(
+        sock_path, timeout, _selected_activation(data_dir))
     took = f"{elapsed:.0f} ms"
 
     if outcome == "responsive":
         check = Check(
             "Daemon", OK, f"responsive ({took} round trip)",
-            details=[f"Probed with a {PROBE_EVENT} event, which the daemon "
-                     "answers without recording anything or touching the "
-                     "ledger."],
+            details=["Probed with a protocol-2 hello and nothing else: no "
+                     "event is sent, so this cannot record anything or "
+                     "touch the ledger."],
         )
         perms = stat.S_IMODE(mode)
         if perms != 0o600:
@@ -1106,6 +1210,19 @@ def check_daemon(timeout: float = DAEMON_TIMEOUT, *,
             fixes=["Stop the daemon process and start it again:"] + start_fix,
         )
 
+    if outcome == "mismatch":
+        return Check(
+            "Daemon", FAIL,
+            f"answering ({took}), but not as the selected runtime",
+            details=["A Privacy HUD daemon is listening and it is not the "
+                     "build this plugin selected, so it will refuse every "
+                     "hook payload this installation sends.",
+                     "See the Runtime alignment check for the recovery "
+                     "command."] + mismatch,
+            fixes=["Run the command the Runtime alignment check prints, in "
+                   "another terminal."],
+        )
+
     if outcome == "bad_reply":
         return Check(
             "Daemon", FAIL, f"unexpected reply — {extra}",
@@ -1155,10 +1272,13 @@ def _pinned_interpreter_note() -> list[str]:
     interpreter is the Runtime pin check's probe of it.
     """
     try:
-        ledger = _ledger_path()
-        if ledger is None:
+        # The plugin-data directory, not the ledger's parent: after #66's
+        # storage transition the active store lives one level down and the
+        # receipt is not beside it.
+        data_dir = runtime.plugin_data_dir()
+        if data_dir is None:
             return []
-        receipt, problem = runtime.load_receipt(ledger.parent)
+        receipt, problem = _pin_receipt(data_dir)
         if receipt is None or problem:
             return []
         python = receipt["python"]
@@ -2037,11 +2157,15 @@ def check_mcp_server(timeout: float = MCP_TIMEOUT) -> Check:
                      "first would report on something else entirely."],
             fixes=["Reinstall: ./install.sh"])
     command = [declared.get("command", "python3"), *declared.get("args", [])]
-    data_dir = _ledger_path()
+    # The plugin-data directory, not the ledger's parent: once the storage
+    # transition has run, that parent is `$PLUGIN_DATA/ledger/` and holds
+    # no receipt, socket or settings file at all, so a server launched
+    # against it would report on a directory nothing writes to.
+    data_dir = runtime.plugin_data_dir()
     env = dict(os.environ)
     env["PLUGIN_ROOT"] = str(root)
     if data_dir is not None:
-        env["PLUGIN_DATA"] = str(data_dir.parent)
+        env["PLUGIN_DATA"] = str(data_dir)
     try:
         names, read_ok = _mcp_probe(command, root, env, timeout)
     except (OSError, ValueError, TimeoutError) as exc:
@@ -2089,39 +2213,267 @@ def _first_party_origin() -> Path:
     """The directory the running `privacy_hud` package was imported from.
 
     A separate function so tests can substitute it, for the same reason
-    `_module_version` is one: in-process, the real answer is always this
+    `_module_version` is one: in-process the real answer is always this
     checkout, and a test asserting that would prove nothing about a
-    machine with an installed bundle.
+    machine with an installed bundle and an older distribution beside it.
     """
     import privacy_hud
 
     return Path(privacy_hud.__file__).resolve().parent
 
 
+def _bundle_root() -> Path:
+    """The bundle the running first-party code came out of: two
+    directories above the package (`<bundle>/src/privacy_hud`)."""
+    return _first_party_origin().parents[1]
+
+
 def _installed_distribution() -> tuple[str, Path] | None:
     """An installed `privacy-hud` distribution in the dependency
     environment, as `(version, location)`, or `None`.
 
-    Substituted in tests. Nothing is claimed about a distribution that was
-    not found: saying an absent package is being bypassed would be a
-    statement about a machine nobody looked at.
+    This is the package #66 exists to stop being trusted: before the
+    bundle was the source of first-party code, whichever distribution the
+    daemon's interpreter found first is what ran. Reporting it is not the
+    same as using it, and the sentence saying it is unused is printed only
+    where one was actually found — asserting it blind would be a claim
+    about a machine nobody looked at.
     """
+    try:
+        from importlib import metadata
+    except ImportError:  # pragma: no cover - stdlib since 3.8
+        return None
+    try:
+        distributions = list(metadata.distributions())
+    except Exception:
+        return None
+    for dist in distributions:
+        try:
+            name = (dist.metadata["Name"] or "").replace("_", "-").lower()
+        except Exception:
+            continue
+        if name != "privacy-hud":
+            continue
+        try:
+            version = str(dist.version)
+            location = Path(str(dist.locate_file("privacy_hud"))).resolve()
+        except Exception:
+            continue
+        return version, location
     return None
 
 
+def _selected_activation(data_dir: Path | None = None):
+    """The selected runtime for `data_dir`, or `None`.
+
+    `None` covers every reason there is no selection to report on: no
+    resolvable plugin-data directory, no receipt, a receipt that is not a
+    v2 receipt, or a bundle whose files no longer hash to the recorded
+    build. Each of those is a different remedy in `check_runtime_source`;
+    none of them is a runtime this doctor may describe as selected.
+    """
+    root = runtime.plugin_data_dir() if data_dir is None else Path(data_dir)
+    if root is None:
+        return None
+    try:
+        return runtime_contract.load_activation(root)
+    except (runtime_contract.RuntimeRefusal, OSError, ValueError):
+        return None
+
+
+def _repair_command(data_dir: Path) -> str:
+    """The recovery command, over the selected bundle when there is one
+    and this bundle otherwise. Never a placeholder path (§D)."""
+    activation = _selected_activation(data_dir)
+    root = (Path(activation.bundle_root) if activation is not None
+            else _bundle_root())
+    return runtime_repair.format_repair_command(root, Path(data_dir))
+
+
+def _runtime_setup_fail(name: str, data_dir: Path, details=()) -> Check:
+    """§D's missing/unusable-setup block, as a check.
+
+    Its last two lines are the remedy, which is where this file's report
+    format already puts a sentence and the command that follows it.
+    """
+    body = runtime_messages.RUNTIME_SETUP_FAIL.format(
+        repair_command=_repair_command(data_dir)).split("\n")
+    return Check(name, FAIL, body[1], details=list(details),
+                 fixes=[body[2], body[3], body[4]])
+
+
 def check_runtime_source() -> Check:
-    """Scaffolding (#66 Pair 7)."""
-    return Check("Runtime source", SKIP, "")
+    """Which tree is the running first-party code actually from?
+
+    The question #66 exists to answer. Before it, an installed
+    `privacy-hud` distribution in the daemon's interpreter decided what
+    ran, so a plugin update could leave older code live with every other
+    check reporting a healthy setup. Now the selected bundle supplies the
+    code and the recorded environment supplies only dependencies, and this
+    check states which bundle that is — provenance, not a version string
+    read out of package metadata.
+
+    An installed distribution is reported where one exists, with the
+    sentence saying it is not used. Where none was found, nothing is said
+    about one: §D appends that line "only when established".
+    """
+    data_dir = runtime.plugin_data_dir()
+    if data_dir is None:
+        return _plugin_data_unset_check("Runtime source")
+
+    activation = _selected_activation(data_dir)
+    if activation is None:
+        state = runtime_contract.classify_receipt(Path(data_dir))
+        return _runtime_setup_fail(
+            "Runtime setup", data_dir,
+            details=[f"The runtime receipt in {_display_path(data_dir)} is "
+                     f"{state}.",
+                     "Until a bundle is selected, nothing establishes which "
+                     "copy of this plugin's code would run."])
+
+    selected = Path(activation.bundle_root)
+    running = _bundle_root()
+    if os.path.realpath(running) != os.path.realpath(selected):
+        return _runtime_setup_fail(
+            "Runtime setup", data_dir,
+            details=["This command is running code from "
+                     f"{_display_path(running)}, and the selected bundle is "
+                     f"{_display_path(selected)}.",
+                     "Two trees, so what this report says about one of them "
+                     "is not a statement about the other."])
+
+    body = runtime_messages.DOCTOR_RUNTIME_SOURCE_OK.format(
+        release=activation.identity.release).split("\n")
+    details = [f"Bundle: {_display_path(selected)}",
+               f"Build: {activation.identity.build_id[:16]}…, activation "
+               f"epoch {activation.epoch[:8]}…"]
+    installed = _installed_distribution()
+    if installed is not None:
+        version, location = installed
+        details.append(runtime_messages.DOCTOR_OLD_DISTRIBUTION_UNUSED)
+        details.append(f"That distribution is {version}, in "
+                       f"{_display_path(location.parent)}.")
+    return Check("Runtime source", OK, body[1], details=details)
 
 
 def check_runtime_alignment(timeout: float = DAEMON_TIMEOUT) -> Check:
-    """Scaffolding (#66 Pair 7)."""
-    return Check("Runtime alignment", SKIP, "")
+    """Is the daemon that is listening the build this plugin selected?
+
+    Separate from the Daemon check on purpose, and separate from the
+    detector and storage checks too: one of them passing has never
+    established the others (§C). A daemon can answer promptly, hold a
+    valid ledger, and still be an older build that will refuse every hook
+    payload this installation sends.
+
+    A release is printed only when it arrived inside a hello this client
+    validated. Anything else is `unknown`: a version string from a peer
+    that failed validation is a string that peer chose, and a diagnostic
+    in a privacy tool does not print those (I1).
+    """
+    data_dir = runtime.plugin_data_dir()
+    if data_dir is None:
+        return _plugin_data_unset_check("Runtime alignment")
+    activation = _selected_activation(data_dir)
+    if activation is None:
+        return Check(
+            "Runtime alignment", SKIP,
+            "no selected runtime to compare a daemon against",
+            details=["See the Runtime source check: without a selection "
+                     "there is nothing for a daemon to match."])
+
+    sock_path = _socket_path(data_dir)
+    if not sock_path.exists():
+        return Check(
+            "Runtime alignment", WARN, "no daemon is answering",
+            details=["Alignment is unverified rather than wrong: nothing is "
+                     "listening to compare against (see the Daemon check).",
+                     "Monitoring is unverified while that is true."],
+            fixes=["Nothing to fix if you are between sessions — the next "
+                   "hook starts one, and it starts from the selected "
+                   "bundle."],
+        )
+
+    outcome, _elapsed, _extra, release = _probe_daemon(sock_path, timeout,
+                                                       activation)
+    if outcome == "responsive":
+        body = runtime_messages.DOCTOR_RUNTIME_ALIGNMENT_OK.split("\n")
+        return Check("Runtime alignment", OK, body[1],
+                     details=[f"Daemon release: {release}.",
+                              "Alignment is one fact. Detector availability "
+                              "and ledger validity are the checks above and "
+                              "below; this sentence does not speak for "
+                              "them."])
+    if outcome in ("refused", "no_reply"):
+        return Check(
+            "Runtime alignment", WARN, "no daemon is answering",
+            details=["Alignment is unverified rather than wrong: see the "
+                     "Daemon check for what is on that socket path."],
+            fixes=["Fix the Daemon check first; alignment cannot be "
+                   "established until something answers."],
+        )
+
+    body = runtime_messages.DOCTOR_RUNTIME_MISMATCH.format(
+        plugin_release=runtime_contract.RELEASE,
+        daemon_release_or_unknown=(
+            release if outcome == "responsive"
+            else runtime_messages.UNKNOWN_DAEMON_RELEASE),
+        repair_command=_repair_command(data_dir)).split("\n")
+    return Check("Runtime alignment", FAIL, body[1], details=body[2:5],
+                 fixes=body[5:])
+
+
+def _native_item_configured() -> bool:
+    """Is Codex configured to draw the plugin's native status item?
+
+    Read from `[tui].status_line` in Codex's own config, the same place
+    `install.sh` writes it. A machine whose HUD is the ambient pane has no
+    stake in which reader the installed binary contains, and warning it
+    about one would be a permanent warning about something that is not in
+    use — which is how a report teaches its reader to skip a line.
+    """
+    config = _codex_home() / "config.toml"
+    try:
+        import tomllib
+
+        data = tomllib.loads(config.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    tui = data.get("tui")
+    if not isinstance(tui, dict):
+        return False
+    items = tui.get("status_line")
+    return isinstance(items, list) and "privacy" in items
 
 
 def check_native_reader() -> Check:
-    """Scaffolding (#66 Pair 7)."""
-    return Check("Native HUD compatibility", SKIP, "")
+    """The Codex binary's own Privacy item, which this plugin does not
+    ship and does not replace.
+
+    There is no check that can pass here, and that is the finding. A
+    patched build's reader is compiled into the binary; installing or
+    repairing the plugin never touches it, and a matching Codex version
+    number is not evidence about which reader it contains (§A). So this
+    reports the state as unverified and names the surface that does not
+    depend on it.
+    """
+    if not _native_item_configured():
+        return Check(
+            "Native HUD compatibility", SKIP,
+            "the native Privacy item is not configured",
+            details=["Nothing here depends on the installed binary's "
+                     "reader: `[tui].status_line` in Codex's config does "
+                     "not list `privacy`."])
+    data_dir = runtime.plugin_data_dir()
+    if data_dir is None:
+        return _plugin_data_unset_check("Native HUD compatibility")
+    activation = _selected_activation(data_dir)
+    root = (Path(activation.bundle_root) if activation is not None
+            else _bundle_root())
+    body = runtime_messages.DOCTOR_NATIVE_UNVERIFIED.format(
+        ambient_command=runtime_repair.format_ambient_command(
+            root, Path(data_dir))).split("\n")
+    return Check("Native HUD compatibility", WARN, body[1],
+                 details=body[2:3], fixes=body[3:])
 
 
 # --------------------------------------------------------------------- #
@@ -2146,14 +2498,17 @@ def run_checks(*, load_model: bool = False,
     checks = [
         ("Python", check_python),
         ("PLUGIN_DATA", check_plugin_data),
+        ("Runtime source", check_runtime_source),
         ("Read guard", check_read_guard),
         ("Ledger", check_ledger),
         ("Runtime pin", lambda: check_runtime_pin(probe_timeout)),
         ("Daemon", lambda: check_daemon(timeout)),
+        ("Runtime alignment", lambda: check_runtime_alignment(timeout)),
         ("Detector deps", check_detector_deps),
         ("Tier 3 model", lambda: check_tier3(load_model)),
         ("Plugin install", check_plugin_install),
         ("MCP server", check_mcp_server),
+        ("Native HUD compatibility", check_native_reader),
     ]
     results = []
     for name, func in checks:

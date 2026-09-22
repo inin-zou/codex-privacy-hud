@@ -122,7 +122,7 @@ import time
 from .hud_snapshot import read_daemon_marker, read_snapshot
 from .local_ui_server import resolve_data_dir
 from .matrix.loader import Matrix, load_matrix
-from . import render
+from . import render, runtime_messages
 from .render import hud_line
 
 #: Default redraw interval for `--watch`, in seconds.
@@ -132,6 +132,21 @@ DEFAULT_INTERVAL = 2.0
 #: seconds. Argued in full in `_SessionPin`; the short version is that it is
 #: two orders of magnitude longer than the redraw interval on purpose.
 RESOLVE_INTERVAL = 30.0
+
+#: The runtime-refusal line, widest first, the same ladder `hud_line` uses.
+#: Neither candidate carries a number: a percentage from a runtime nothing
+#: verified is a reading whose producer is unknown, and drawing one would
+#: be worse than drawing nothing (§A, §D).
+_REFUSAL_CANDIDATES = (
+    runtime_messages.AMBIENT_RUNTIME_MISMATCH,
+    runtime_messages.AMBIENT_NARROW_FALLBACK,
+)
+
+#: How long a runtime refusal is held before the pane asks again, in
+#: seconds. The same cadence as session resolution and for the same
+#: reason: this is the one other question that costs a socket connection,
+#: and the redraw loop stays off that socket.
+ALIGNMENT_TIMEOUT = 2.0
 
 #: Floor for `--watch N`. A zero or negative interval would spin the loop as
 #: fast as the filesystem can answer, which is a busy-wait on the same disk
@@ -273,6 +288,8 @@ class _SessionPin:
             float(RESOLVE_INTERVAL if interval is None else interval), 0.0)
         self._session_id: str | None = None
         self._resolved_at: float | None = None
+        self._refused: bool = False
+        self._checked_at: float | None = None
 
     def current(self) -> str | None:
         """The id to render this frame. Cheap on all but ~1 call in 15."""
@@ -288,6 +305,57 @@ class _SessionPin:
         self._session_id = _resolve_session_id()
         self._resolved_at = now
         return self._session_id
+
+    def runtime_refused(self, activation) -> bool:
+        """Is something answering on the daemon socket that is not the
+        selected runtime?
+
+        Held on the same slow cadence as the id, for the same reason: the
+        answer costs a connection to the hook hot path, and a pane that
+        asked every two seconds would be back on that socket.
+
+        **Only a mismatch counts.** Nothing listening at all is the
+        ordinary state of a healthy setup between sessions — the daemon
+        idle-exits and the next hook starts it — and a pane that shouted
+        "runtime mismatch" at that would be wrong in the state users see
+        most often. `connect_runtime` separates the two: `runtime_mismatch`
+        means something answered and it was not this build, while
+        `request_failed` means nothing answered in time.
+        """
+        now = time.monotonic()
+        if (self._checked_at is not None
+                and now - self._checked_at < self._interval):
+            return self._refused
+        self._refused = _runtime_refused(activation)
+        self._checked_at = now
+        return self._refused
+
+
+def _runtime_refused(activation) -> bool:
+    """One hello. Never raises: a pane that crashed on a probe would be a
+    worse surface than one that draws nothing."""
+    from .runtime_client import connect_runtime
+    from .runtime_contract import RuntimeRefusal
+
+    try:
+        data_dir = resolve_data_dir()
+        if data_dir is None:
+            return False
+        connect_runtime(data_dir, activation=activation,
+                        timeout=ALIGNMENT_TIMEOUT).close()
+    except RuntimeRefusal as refusal:
+        return refusal.code == "runtime_mismatch"
+    except Exception:
+        return False
+    return False
+
+
+def _refusal_line(width: int) -> str | None:
+    """The widest refusal line that fits, or `None`."""
+    for line in _REFUSAL_CANDIDATES:
+        if len(line) <= width:
+            return line
+    return None
 
 
 def _line_for(session_id: str | None, width: int, *,
@@ -357,12 +425,15 @@ def safe_line(pin: _SessionPin | None = None,
     if width is None:
         width = shutil.get_terminal_size().columns
     try:
+        if activation is not None and pin.runtime_refused(activation):
+            return _refusal_line(width)
         return _line_for(pin.current(), width, explicit=bool(pin.explicit))
     except Exception:
         return None
 
 
-def run_once(session_id: str | None = None, *, out=None, err=None) -> int:
+def run_once(session_id: str | None = None, *, out=None, err=None,
+             activation=None) -> int:
     """Print exactly one HUD line and return 0.
 
     Nothing is written to stdout in the "Disabled" state, so this composes
@@ -376,7 +447,7 @@ def run_once(session_id: str | None = None, *, out=None, err=None) -> int:
     """
     out = sys.stdout if out is None else out
     err = sys.stderr if err is None else err
-    line = safe_line(_SessionPin(session_id))
+    line = safe_line(_SessionPin(session_id), activation=activation)
     if line is None:
         print("privacy-hud: no recorded session to report on yet.", file=err)
         return 0
@@ -385,7 +456,8 @@ def run_once(session_id: str | None = None, *, out=None, err=None) -> int:
 
 
 def run_watch(session_id: str | None = None,
-              interval: float = DEFAULT_INTERVAL, *, out=None) -> int:
+              interval: float = DEFAULT_INTERVAL, *, out=None,
+              activation=None) -> int:
     """Redraw the HUD line in place every `interval` seconds until Ctrl-C.
 
     In place, not appended: `\\r` returns to column 0 and `\\x1b[K` erases what
@@ -412,7 +484,7 @@ def run_watch(session_id: str | None = None,
     pin = _SessionPin(session_id)
     try:
         while True:
-            line = safe_line(pin)
+            line = safe_line(pin, activation=activation)
             out.write(_CLEAR_LINE + (line or ""))
             out.flush()
             time.sleep(interval)
@@ -446,7 +518,7 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, activation=None) -> int:
     """Entry point for `python -m privacy_hud.ambient` and the
     `privacy-hud-ambient` console script. Returns a process exit code.
 
@@ -463,8 +535,8 @@ def main(argv: list[str] | None = None) -> int:
         return int(exc.code or 0)
 
     if args.watch is not None:
-        return run_watch(args.session_id, args.watch)
-    return run_once(args.session_id)
+        return run_watch(args.session_id, args.watch, activation=activation)
+    return run_once(args.session_id, activation=activation)
 
 
 if __name__ == "__main__":
