@@ -5,7 +5,6 @@ import time
 import pytest
 
 from privacy_hud.matrix.loader import UnknownKey, load_matrix
-from privacy_hud.ledger import Ledger
 from privacy_hud.mask import new_salt
 from privacy_hud.detect.paths import PathDetector
 from privacy_hud.detect.secrets import SecretDetector
@@ -13,6 +12,7 @@ from privacy_hud.detect.model import StubModelDetector
 from privacy_hud.engine import Engine, Observation
 from privacy_hud.minimize import mint_token
 from privacy_hud.origin import Origin, OriginKind
+from runtime_helpers import writer_ledger
 
 M = load_matrix()
 
@@ -34,7 +34,7 @@ _SLOW_MODEL = _SlowModel([])
 
 @pytest.fixture
 def eng(tmp_path):
-    led = Ledger(tmp_path / "l.db", M)
+    led = writer_ledger(tmp_path / "l.db", M)
     led.start_session("s1", cwd="/r", model="gpt-5")
     return Engine(ledger=led, matrix=M, salt=new_salt(), detectors=[
         PathDetector(), SecretDetector(),
@@ -592,7 +592,7 @@ def test_observe_with_a_precomputed_scan_matches_observe_alone(tmp_path, monkeyp
                         types.SimpleNamespace(time=lambda: 1_700_000_000.0))
 
     def _fresh():
-        led = Ledger(tmp_path / f"l{_fresh.n}.db", M)
+        led = writer_ledger(tmp_path / f"l{_fresh.n}.db", M)
         _fresh.n += 1
         led.start_session("s1", cwd="/r", model="gpt-5")
         return Engine(ledger=led, matrix=M, salt=b"fixed-salt-for-comparison",

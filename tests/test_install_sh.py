@@ -345,12 +345,22 @@ def test_the_install_brings_the_mcp_extra():
     unbounded `mcp` let a 2026-09-20 install pull SDK 2.2.0 against code
     written for 1.x, and the server never started. The install runs before
     the model prompt, so a user who declines the model still gets the
-    server."""
+    server.
+
+    #66 moved *where* the extra comes from. The installer no longer
+    installs `privacy-hud[detectors,mcp] @ git+https://...` as a
+    distribution -- first-party code is loaded from the selected plugin
+    bundle, and that unpinned install is exactly the stale copy that would
+    be imported instead. It now installs the declared extras of the local
+    bundle, so the assertion moves with them: `mcp` must still be among
+    the extras `install_bundle_extras` selects, and it must still be
+    bounded in `pyproject.toml`.
+    """
     REPO = Path(__file__).resolve().parent.parent
     source = (REPO / "install.sh").read_text(encoding="utf-8")
-    assert "privacy-hud[detectors,mcp]" in source
-    # No `.replace(...)` first: `privacy-hud[detectors]` was never a
-    # substring of `privacy-hud[detectors,mcp]` (the character after
-    # `detectors` is `,`, not `]`), so guarding against that collision
-    # claimed a reach this assertion does not have.
-    assert "privacy-hud[detectors]" not in source
+    assert "install_bundle_extras" in source
+    assert 'for name in ("detectors", "mcp"):' in source
+    assert "git+https://github.com/$REPO" not in source
+
+    pyproject = (REPO / "pyproject.toml").read_text(encoding="utf-8")
+    assert "mcp>=2" in pyproject

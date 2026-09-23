@@ -13,8 +13,8 @@ import sqlite3
 
 import pytest
 
-from privacy_hud.ledger import Ledger
 from privacy_hud.matrix.loader import load_matrix
+from runtime_helpers import writer_ledger
 
 M = load_matrix()
 PROFILE = "a" * 64
@@ -23,7 +23,7 @@ PROFILE = "a" * 64
 @pytest.fixture
 def conn(tmp_path):
     path = tmp_path / "ledger.db"
-    led = Ledger(path, M)
+    led = writer_ledger(path, M)
     with led._write_transaction():
         led.prepare_session_boundary("s1")
         led.start_session("s1", cwd="/w", model="m")

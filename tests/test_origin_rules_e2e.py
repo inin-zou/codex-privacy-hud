@@ -34,6 +34,7 @@ label, and reviving the name would revive the confusion, not the feature.
 from __future__ import annotations
 
 import json
+import shutil
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -43,6 +44,12 @@ import pytest
 from privacy_hud import dispatch as dispatch_mod
 from privacy_hud import local_ui_server
 from privacy_hud.detect.model import StubModelDetector
+from runtime_helpers import (
+    policy_daemon,
+    select_runtime,
+    short_data_dir,
+    writer_state,
+)
 
 SID = "0199e2e0-b10c-4000-8000-00000000b10c"
 SECRET = "sk-proj-Ab3xY9zQw1Er5Ty7Ui0OpAs2Df4Gh6Jk8Lm"
@@ -71,24 +78,38 @@ REAL_ROW_SOURCES = ["tool input", "Bash", "Read", "user prompt", "main agent", "
 # --------------------------------------------------------------------- #
 
 @pytest.fixture
-def state(tmp_path, monkeypatch):
-    monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))
+def state(monkeypatch):
+    # A short `$PLUGIN_DATA`, because `ui` below starts a real daemon on a
+    # unix socket beside it and `AF_UNIX` paths are capped at ~104 bytes
+    # (#66 Pair 6). The receipt is written before the lease is taken: a
+    # lease records the selection it was granted under, and one appearing
+    # afterwards is correctly a mismatch.
+    data_dir = short_data_dir(prefix="phe")
+    select_runtime(data_dir)
+    monkeypatch.setenv("PLUGIN_DATA", str(data_dir))
     # Tier 3 without the 2.8 GB model: same declared profile, no findings.
     monkeypatch.setattr(dispatch_mod, "ModelDetector", lambda: StubModelDetector([]))
-    st = dispatch_mod.new_state(tmp_path)
-    yield st
-    st.ledger.conn.close()
+    st = writer_state(data_dir)
+    try:
+        yield st
+    finally:
+        st.ledger.conn.close()
+        shutil.rmtree(data_dir, ignore_errors=True)
 
 
 @pytest.fixture
 def ui(state):
-    server = local_ui_server.serve(SID, print_url=False)
-    host, port = server.socket.getsockname()[:2]
-    try:
-        yield f"http://{host}:{port}"
-    finally:
-        server.shutdown()
-        server.server_close()
+    # The policy endpoint sends its mutation to the daemon that owns the
+    # ledger (#66 Pair 6); this process's own connection is read-only, so
+    # without a daemon there is nothing for `/api/policy` to reach.
+    with policy_daemon(state.data_dir):
+        server = local_ui_server.serve(SID, print_url=False)
+        host, port = server.socket.getsockname()[:2]
+        try:
+            yield f"http://{host}:{port}"
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 def _hook(state, event, **fields):
@@ -329,7 +350,7 @@ def test_the_page_escapes_the_origin_it_prints_on_a_button(ui):
 # #36: the read guard, through the real hook path.
 # --------------------------------------------------------------------- #
 
-def test_a_sensitive_read_is_stopped_once_the_guard_is_on(state, tmp_path):
+def test_a_sensitive_read_is_stopped_once_the_guard_is_on(state):
     from privacy_hud.settings import Settings
 
     _hook(state, "SessionStart")
@@ -337,7 +358,7 @@ def test_a_sensitive_read_is_stopped_once_the_guard_is_on(state, tmp_path):
                     tool_input={"command": "cat .env"})
     assert allowed == {} or not _is_deny(allowed)
 
-    Settings(tmp_path).set_deny_read(True)
+    Settings(state.data_dir).set_deny_read(True)
 
     denied = _hook(state, "PreToolUse", tool_name="Bash",
                    tool_input={"command": "cat .env"})

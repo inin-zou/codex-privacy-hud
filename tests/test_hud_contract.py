@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from privacy_hud import codex, doctor, hud_snapshot
+from runtime_helpers import writer_ledger
 
 MATRIX = Path(__file__).parent / "matrix"
 SCHEMA = json.loads((MATRIX / "hud_snapshot.schema.json").read_text())
@@ -180,9 +181,8 @@ def test_rust_legacy_version_and_count_ceiling_match_the_python_reader():
 
 
 def test_published_snapshots_satisfy_the_schema(tmp_path):
-    from privacy_hud.ledger import Ledger
     from privacy_hud.matrix.loader import load_matrix
-    led = Ledger(tmp_path / "ledger.db", load_matrix())
+    led = writer_ledger(tmp_path / "ledger.db", load_matrix())
     led.start_session("s1", cwd="/w", model="m")
     pub = hud_snapshot.HudPublisher(tmp_path)
     for sid, summary in (("s1", led.summary("s1")),

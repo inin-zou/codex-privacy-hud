@@ -2,9 +2,9 @@
 
 **Status:** Draft v0.1 · **Date:** 2026-09-03 · **Companion to:** `PRD.md`, `design.md`
 
-**Current contract — #54 Phase 2 (0.7.9).**
+**Current contract — #66 runtime consistency (0.8.0), retaining #54 Phase 2.**
 
-The daemon prepares the new accounting schema at a new-session boundary. Production sessions still use legacy accounting. Migration preserves every stored legacy value and performs no backfill or rescoring. Readers do not migrate the ledger. The new observations, identities, evidence, and disclosure charges are not active. #43, #44, and the related #47 accounting limitations remain unresolved.
+First-party runtime code loads from the selected plugin bundle. Clients establish matching runtime identity before sending hook payloads or policy mutations. The compatible daemon owns ledger writes. Readers open the ledger read-only. Explicit repair preserves stored values and fences the historical ledger pathname; it does not rebuild accounting. The daemon retains the genuine new-session preparation boundary. Production sessions still use legacy accounting. No historical rows are backfilled or rescored. Snapshot version remains 2. The native HUD does not authenticate runtime alignment. #43, #44, and the related #47 accounting limitations remain unresolved.
 
 ---
 
@@ -560,6 +560,29 @@ Within one write transaction:
 `record` refuses any session that is not legacy-accounted. A late record for an ended session is kept with a NULL value hash and zero contribution; the ended session's score stays frozen, and dispatch enforces the call with a temporary engine whose salt never becomes session state.
 
 Readers open with `initialize=False` and never run the rebuild. `scripts/check-issue54-ledger.py` rehearses it on a private copy of a real ledger.
+
+### 5.2 Storage layout (#66, 0.8.0)
+
+Storage layout is a separate contract from the accounting generation above. `PRAGMA user_version` still records `0` legacy, `5401` prepared, `5402` activated; the layout version records where those bytes live and who may open them. Layout 1 is:
+
+```text
+$PLUGIN_DATA/ledger/active.db          the ledger every surface opens
+$PLUGIN_DATA/ledger.db/                a directory: the historical pathname, fenced
+$PLUGIN_DATA/legacy-retired/<id>/      the retained original and its sidecars
+$PLUGIN_DATA/runtime-transition.json   the transition journal
+$PLUGIN_DATA/runtime-transition.lock   transition exclusion
+$PLUGIN_DATA/runtime-writer.lock       writer exclusion
+```
+
+`codex.ledger_path` answers which of the two states an installation is in: the active store once the historical pathname is a directory, and the historical pathname until then. The two never coexist — the transition retires one as it publishes the other — so this is a question about state, not a search. Nothing else spells the historical basename out; `tests/test_issue66_contract.py` asserts that.
+
+The transition is performed only by explicit repair, never by a hook, and it is journalled stage by stage so an interrupted one can be finished rather than restarted: `validated`, `quiesced`, `backup_verified`, `retirement_started`, `legacy_retired`, `legacy_fenced`, `active_published`. A crash at any of them leaves either the complete old state or the complete new one, and the values in both are the values that were there.
+
+What the fence is and is not: it stops supported legacy entry points opening the historical pathname, because a directory is not a database. It does not revoke a connection something already holds, and it is not a boundary against same-user code that deliberately opens `ledger/active.db`. Before the transition runs, every process holding the database or a sidecar must be gone — asked of the operating system, unknown processes included, and a host that cannot be asked refuses rather than proceeds.
+
+Writes go through the compatible daemon, which holds an exclusive lease on `runtime-writer.lock` for as long as it owns the ledger; every other surface opens `mode=ro`. An unsupported or altered schema is preserved and refused before any writable open, and no downgrade migration exists.
+
+`scripts/check-issue66-runtime.py` rehearses the whole transition on a private copy of a real ledger, including a crash at every durable stage and the actual historical initializer against the fence.
 
 
 ---

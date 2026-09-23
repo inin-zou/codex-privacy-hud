@@ -47,9 +47,9 @@ from privacy_hud.detect.model import ModelDetector, StubModelDetector
 from privacy_hud.detect.paths import PathDetector
 from privacy_hud.detect.secrets import SecretDetector
 from privacy_hud.engine import MAX_TIER3_CHARS, Engine, Observation
-from privacy_hud.ledger import Ledger
 from privacy_hud.mask import new_salt
 from privacy_hud.matrix.loader import load_matrix
+from runtime_helpers import writer_ledger
 
 M = load_matrix()
 
@@ -57,7 +57,7 @@ TEXT = "contact jordan@acme.com .env sk-proj-Ab3xY9zQw1Er5Ty7Ui0OpAs2Df4Gh6Jk8Lm
 
 
 def _engine(tmp_path, detectors, name="l"):
-    led = Ledger(tmp_path / f"{name}.db", M)
+    led = writer_ledger(tmp_path / f"{name}.db", M)
     led.start_session("s1", cwd="/r", model="gpt-5")
     return Engine(ledger=led, matrix=M, salt=new_salt(), detectors=detectors)
 
@@ -204,7 +204,7 @@ def test_expensive_detector_without_available_still_runs_where_it_should(tmp_pat
 # ---------------------------------------------------------------------------
 
 def test_detector_with_no_declared_profile_is_rejected_at_engine_construction(tmp_path):
-    led = Ledger(tmp_path / "l.db", M)
+    led = writer_ledger(tmp_path / "l.db", M)
     led.start_session("s1", cwd="/r", model="gpt-5")
     with pytest.raises(UndeclaredDetector) as exc:
         Engine(ledger=led, matrix=M, salt=new_salt(),
@@ -226,7 +226,7 @@ def test_a_profile_lookalike_is_rejected_rather_than_duck_typed(tmp_path):
         def scan(self, text, ctx):
             return []
 
-    led = Ledger(tmp_path / "l.db", M)
+    led = writer_ledger(tmp_path / "l.db", M)
     led.start_session("s1", cwd="/r", model="gpt-5")
     with pytest.raises(UndeclaredDetector):
         Engine(ledger=led, matrix=M, salt=new_salt(), detectors=[_Lookalike()])

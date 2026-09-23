@@ -15,6 +15,7 @@ import pytest
 import server  # `mcp/` is on sys.path via conftest
 
 from privacy_hud import doctor
+from runtime_helpers import writer_ledger
 
 DESCRIPTIONS = {
     'privacy.get_session_summary': (
@@ -79,9 +80,8 @@ def _tools(app):
 def test_tool_descriptions_are_the_approved_text(monkeypatch, tmp_path, name):
     monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))
     (tmp_path / "ledger.db").touch()
-    from privacy_hud.ledger import Ledger
     from privacy_hud.matrix.loader import load_matrix
-    Ledger(tmp_path / "ledger.db", load_matrix()).conn.close()
+    writer_ledger(tmp_path / "ledger.db", load_matrix()).conn.close()
     tool = _tools(server.build_app())[name]
     assert _norm(tool.description) == _norm(DESCRIPTIONS[name])
 
@@ -153,7 +153,6 @@ def test_server_starts_before_the_ledger_exists(monkeypatch, tmp_path):
     succeeds."""
     import asyncio
 
-    from privacy_hud.ledger import Ledger
     from privacy_hud.matrix.loader import load_matrix
 
     monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))
@@ -165,7 +164,7 @@ def test_server_starts_before_the_ledger_exists(monkeypatch, tmp_path):
     assert server.LEDGER_ERROR in str(caught.value)
     assert not (tmp_path / "ledger.db").exists()
 
-    Ledger(tmp_path / "ledger.db", load_matrix()).conn.close()
+    writer_ledger(tmp_path / "ledger.db", load_matrix()).conn.close()
     result = asyncio.run(app.call_tool("privacy.get_session_summary",
                                        {"session_id": "s1"}))
     text = json.dumps(result, default=lambda o: getattr(o, "__dict__", str(o)))

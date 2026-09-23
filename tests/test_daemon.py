@@ -28,13 +28,31 @@ from privacy_hud.daemon import (
     EXIT_ALREADY_RUNNING,
     EXIT_FAILURE,
     AlreadyRunning,
-    Daemon,
 )
+from privacy_hud.daemon import Daemon as _RealDaemon
 from privacy_hud.detect.base import Cost, DetectorProfile
-from privacy_hud.dispatch import dispatch, new_state
+from privacy_hud.dispatch import dispatch
 from privacy_hud.runtime import LATCH_NAME
+from privacy_hud.runtime_contract import load_activation
+from runtime_helpers import make_bundle, write_receipt_v2
+from runtime_helpers import writer_state
+from runtime_helpers import writer_ledger
+from runtime_helpers import activation as _activation
 
 CREDENTIAL = "sk-proj-Ab3xY9zQw1Er5Ty7Ui0OpAs2Df4Gh6Jk8Lm"
+
+
+class Daemon(_RealDaemon):
+    """The real daemon, serving the one test activation (#66).
+
+    Every daemon in this file stands in for an installed, selected runtime,
+    so each would otherwise repeat the same `activation=` argument. A test
+    that needs a different selected build passes its own.
+    """
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("activation", _activation())
+        super().__init__(*args, **kwargs)
 
 
 # --------------------------------------------------------------------- #
@@ -48,19 +66,19 @@ def _start(st, session_id="s1"):
 
 
 def test_session_start_creates_session(tmp_path):
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st)
     assert st.ledger.summary("s1").legacy_percent == 0
 
 
 def test_session_start_returns_empty_hook_output(tmp_path):
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     out = _start(st)
     assert out == {}
 
 
 def test_pretooluse_bash_to_external_host_is_denied(tmp_path):
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st)
     out = dispatch(st, {
         "hook_event_name": "PreToolUse", "session_id": "s1", "turn_id": "t1",
@@ -76,7 +94,7 @@ def test_pretooluse_bash_local_command_is_allowed(tmp_path):
     # "PreToolUse/local" taxonomy entry (only "PostToolUse/local" — see
     # dispatch.py's module docstring), so this must short-circuit to an
     # allow WITHOUT calling Engine.observe, rather than raising UnknownKey.
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st)
     out = dispatch(st, {
         "hook_event_name": "PreToolUse", "session_id": "s1", "turn_id": "t1",
@@ -86,7 +104,7 @@ def test_pretooluse_bash_local_command_is_allowed(tmp_path):
 
 
 def test_pretooluse_mcp_tool_classifies_as_mcp_destination(tmp_path):
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st)
     out = dispatch(st, {
         "hook_event_name": "PreToolUse", "session_id": "s1", "turn_id": "t1",
@@ -98,7 +116,7 @@ def test_pretooluse_mcp_tool_classifies_as_mcp_destination(tmp_path):
 
 
 def test_posttooluse_ingress_is_never_denied(tmp_path):
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st)
     out = dispatch(st, {"hook_event_name": "PostToolUse", "session_id": "s1",
                         "tool_name": "Read",
@@ -113,7 +131,7 @@ def test_posttooluse_records_an_exposure(tmp_path):
     # transformers/torch install is too old for the model to load, so
     # tier-3-only findings (e.g. a bare email) are NOT a safe thing to
     # assert on here; see new_state()'s docstring.
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st)
     dispatch(st, {"hook_event_name": "PostToolUse", "session_id": "s1",
                   "tool_name": "Read", "tool_response": f"key={CREDENTIAL}"})
@@ -121,7 +139,7 @@ def test_posttooluse_records_an_exposure(tmp_path):
 
 
 def test_userpromptsubmit_is_ingress_to_model_context(tmp_path):
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st)
     out = dispatch(st, {"hook_event_name": "UserPromptSubmit",
                         "session_id": "s1",
@@ -131,7 +149,7 @@ def test_userpromptsubmit_is_ingress_to_model_context(tmp_path):
 
 
 def test_subagentstart_propagates_without_denying(tmp_path):
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st)
     dispatch(st, {"hook_event_name": "PostToolUse", "session_id": "s1",
                   "tool_name": "Read", "tool_response": "jordan@acme.com"})
@@ -141,7 +159,7 @@ def test_subagentstart_propagates_without_denying(tmp_path):
 
 
 def test_session_end_nulls_hashes_and_returns_receipt(tmp_path):
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st)
     dispatch(st, {"hook_event_name": "PostToolUse", "session_id": "s1",
                   "tool_name": "Read", "tool_response": "jordan@acme.com"})
@@ -153,7 +171,7 @@ def test_session_end_nulls_hashes_and_returns_receipt(tmp_path):
 
 
 def test_session_end_discards_the_salt(tmp_path):
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st)
     dispatch(st, {"hook_event_name": "SessionEnd", "session_id": "s1",
                   "reason": "exit"})
@@ -162,14 +180,14 @@ def test_session_end_discards_the_salt(tmp_path):
 
 
 def test_two_sessions_never_share_a_salt(tmp_path):
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st, "s1")
     _start(st, "s2")
     assert st.salts["s1"] != st.salts["s2"]
 
 
 def test_unknown_hook_event_allows_and_does_nothing(tmp_path):
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st)
     out = dispatch(st, {"hook_event_name": "PreCompact", "session_id": "s1"})
     assert out == {}
@@ -197,7 +215,7 @@ def test_pretooluse_observation_carries_the_structured_tool_input(tmp_path, monk
 
     monkeypatch.setattr(dispatch_mod, "Engine", _SpyEngine)
 
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st)
     dispatch(st, {
         "hook_event_name": "PreToolUse", "session_id": "s1", "turn_id": "t1",
@@ -218,7 +236,7 @@ def test_pretooluse_observation_carries_the_structured_tool_input(tmp_path, monk
 # --------------------------------------------------------------------- #
 
 def test_a_session_the_daemon_saw_from_the_start_is_verified(tmp_path):
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st)
     assert st.ledger.coverage("s1").verified
 
@@ -227,7 +245,7 @@ def test_a_session_first_seen_mid_flight_is_marked_attached(tmp_path):
     """The daemon cold-started (or replaced a dead one) after the session was
     already running, so its first sight is an ordinary tool call. The session
     row it creates lazily must not look like one opened by a SessionStart."""
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     dispatch(st, {"hook_event_name": "PostToolUse", "session_id": "late",
                   "turn_id": "t1", "tool_name": "Read",
                   "tool_response": "nothing interesting"})
@@ -238,7 +256,7 @@ def test_a_session_first_seen_mid_flight_is_marked_attached(tmp_path):
 
 
 def test_the_receipt_for_an_attached_session_says_so(tmp_path):
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     dispatch(st, {"hook_event_name": "PostToolUse", "session_id": "late",
                   "turn_id": "t1", "tool_name": "Read", "tool_response": "x"})
     out = dispatch(st, {"hook_event_name": "SessionEnd",
@@ -248,7 +266,7 @@ def test_the_receipt_for_an_attached_session_says_so(tmp_path):
 
 
 def test_the_receipt_for_a_clean_session_carries_no_banner(tmp_path):
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st)
     out = dispatch(st, {"hook_event_name": "SessionEnd", "session_id": "s1",
                         "reason": "exit"})
@@ -268,7 +286,7 @@ def test_daemon_startup_records_hooks_that_reached_no_daemon(tmp_path):
     guess — see `dispatch._record_unobserved_hooks`."""
     _write_latch(tmp_path, pid=4242)
 
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     assert st.ledger.unattributed_gaps() == 1
 
 
@@ -277,13 +295,13 @@ def test_a_failed_spawn_attempt_counts_too(tmp_path):
     daemon was even launched. Same gap, differently caused."""
     _write_latch(tmp_path, error="FileNotFoundError")
 
-    assert new_state(tmp_path).ledger.unattributed_gaps() == 1
+    assert writer_state(tmp_path).ledger.unattributed_gaps() == 1
 
 
 def test_no_latch_means_no_recorded_gap(tmp_path):
     """A warm daemon must not manufacture a caveat. This is what keeps the I7
     self-audit's clean pass meaningful when it IS clean."""
-    assert new_state(tmp_path).ledger.unattributed_gaps() == 0
+    assert writer_state(tmp_path).ledger.unattributed_gaps() == 0
 
 
 @pytest.mark.parametrize("body", [
@@ -295,7 +313,7 @@ def test_no_latch_means_no_recorded_gap(tmp_path):
 def test_an_unusable_latch_is_silence_not_a_crash(tmp_path, body):
     (tmp_path / LATCH_NAME).write_text(body)
 
-    st = new_state(tmp_path)  # must not raise: a daemon never refuses to start
+    st = writer_state(tmp_path)  # must not raise: a daemon never refuses to start
     assert st.ledger.unattributed_gaps() == 0
 
 
@@ -314,7 +332,7 @@ def test_a_gap_recorded_at_startup_marks_the_session_running_through_it(
     never reaches `_handle_session_start` at all, and shows up as `attached`
     instead (the test above)."""
     _write_latch(tmp_path, pid=4242)
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     gap = st.ledger.conn.execute(
         "SELECT ts FROM coverage WHERE reason='unobserved_hooks'").fetchone()[0]
     with monkeypatch.context() as patch:
@@ -331,7 +349,7 @@ def test_a_session_starting_after_the_daemon_is_up_is_unaffected(
     around -- a caveat that fires on a healthy session is a caveat that gets
     trained away."""
     _write_latch(tmp_path, pid=4242)
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     gap = st.ledger.conn.execute(
         "SELECT ts FROM coverage WHERE reason='unobserved_hooks'").fetchone()[0]
     with monkeypatch.context() as patch:
@@ -343,8 +361,8 @@ def test_a_session_starting_after_the_daemon_is_up_is_unaffected(
 
 # --------------------------------------------------------------------- #
 # Socket-level harness — a real Daemon on a temp unix socket, driven by a
-# raw client the same way hooks/handler.py drives it: connect, write one
-# newline-delimited JSON line, read one line back.
+# raw client the same way hooks/handler.py drives it: connect, hello, then
+# one request, all on one connection, newline-delimited JSON (#66).
 # --------------------------------------------------------------------- #
 
 @pytest.fixture
@@ -373,19 +391,58 @@ def running_daemon(tmp_path):
     thread.join(timeout=2.0)
 
 
-def _raw_call(sock_path, payload: dict, timeout: float = 2.0) -> dict:
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(timeout)
-    s.connect(str(sock_path))
-    s.sendall((json.dumps({"v": 1, "op": "event", "payload": payload}) + "\n").encode())
+def _envelope(selected=None, **fields) -> dict:
+    """A protocol-2 request in the selected runtime's identity envelope,
+    `_activation()`'s unless a test names another."""
+    selected = selected or _activation()
+    return {"v": 2, "build_id": selected.identity.build_id,
+            "activation_epoch": selected.epoch, **fields}
+
+
+def _hello(selected=None) -> dict:
+    return _envelope(selected, op="hello", storage_generation=1)
+
+
+def _readline(s) -> bytes:
     buf = b""
     while not buf.endswith(b"\n"):
         chunk = s.recv(65536)
         if not chunk:
             break
         buf += chunk
-    s.close()
-    return json.loads(buf.decode())
+    return buf
+
+
+def _after_hello(sock_path, request: dict, timeout: float = 5.0,
+                 selected=None):
+    """Hello, then one request, on one connection — what every client of
+    this socket does (#66). Returns the parsed reply, or `None` when the
+    daemon answered with silence (a defined outcome: see `_Handler.handle`).
+    """
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    s.connect(str(sock_path))
+    try:
+        s.sendall((json.dumps(_hello(selected)) + "\n").encode())
+        hello = _readline(s)
+        assert hello, "the daemon did not answer the hello"
+        assert json.loads(hello)["ok"] is True
+        s.sendall((json.dumps(request) + "\n").encode())
+        buf = _readline(s)
+    finally:
+        s.close()
+    return json.loads(buf.decode()) if buf else None
+
+
+def _raw_call(sock_path, payload: dict, timeout: float = 2.0,
+              selected=None) -> dict:
+    """One hook event, and the hook output the daemon wrapped in its reply."""
+    reply = _after_hello(sock_path,
+                         _envelope(selected, op="event", payload=payload),
+                         timeout=timeout, selected=selected)
+    assert reply is not None, f"the daemon dispatched nothing for {payload}"
+    assert reply["ok"] is True
+    return reply["output"]
 
 
 def test_socket_file_is_created_with_mode_0600(running_daemon):
@@ -650,9 +707,8 @@ def slow_scan_daemon(tmp_path):
     detection?" becomes a wall-clock question with an unambiguous answer."""
     from privacy_hud.detect.paths import PathDetector
     from privacy_hud.detect.secrets import SecretDetector
-    from privacy_hud.dispatch import new_state
 
-    state = new_state(tmp_path / "data")
+    state = writer_state(tmp_path / "data")
     # Keep the real tiers 0-2 (they are what makes an egress PreToolUse
     # deny) and swap only tier 3 for the slow stand-in — the same shape the
     # daemon has in production, with the one slow component made explicit.
@@ -819,9 +875,9 @@ def test_a_session_ending_mid_scan_does_not_reuse_the_discarded_salt(tmp_path):
     # ended state, retain the findings without a charge or matching hash,
     # and leave the retired session engine/salt absent.
     from privacy_hud import dispatch as dispatch_mod
-    from privacy_hud.dispatch import dispatch, new_state
+    from privacy_hud.dispatch import dispatch
 
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     dispatch(st, {"hook_event_name": "SessionStart", "session_id": "race",
                   "cwd": "/r", "model": "gpt-5"})
 
@@ -916,7 +972,10 @@ def startup_state(tmp_path_factory):
     ledger contents; the two tests that do drive a real round trip use their
     own session ids.
     """
-    return new_state(tmp_path_factory.mktemp("startup") / "data")
+    # `keep=True`: this state outlives the test that first asks for it, so
+    # its writer lease must survive the per-test lease cleanup too (#66).
+    return writer_state(tmp_path_factory.mktemp("startup") / "data",
+                        keep=True)
 
 
 def _spawn_lock_holder(lock_path: Path) -> subprocess.Popen:
@@ -1201,7 +1260,8 @@ def test_main_returns_already_running_when_a_daemon_owns_the_socket(
     thread.start()
     try:
         before = sock_path.stat().st_ino
-        assert daemon_mod.main([]) == EXIT_ALREADY_RUNNING
+        assert daemon_mod.main([], activation=_activation()) \
+            == EXIT_ALREADY_RUNNING
         assert EXIT_ALREADY_RUNNING not in (0, EXIT_FAILURE)
         assert "already owns" in capsys.readouterr().err
         # The incumbent is untouched and still serving.
@@ -1220,10 +1280,26 @@ def test_main_returns_failure_on_a_real_bind_failure(sock_dir, startup_state,
     (sock_dir / "daemon.sock").write_text("not a socket")
     # Inject the prebuilt state: main() builds one before it binds, and this
     # test is about the exit code, not about the detector stack.
-    monkeypatch.setattr(daemon_mod, "new_state", lambda data_dir: startup_state)
+    monkeypatch.setattr(daemon_mod, "new_state", lambda data_dir, **kw: startup_state)
 
-    assert daemon_mod.main([]) == EXIT_FAILURE
+    assert daemon_mod.main([], activation=_activation()) == EXIT_FAILURE
     assert "cannot start" in capsys.readouterr().err
+
+
+def test_main_refuses_without_a_selected_runtime(sock_dir, monkeypatch,
+                                                 capsys):
+    """#66: started without the bootstrap and without receipt v2, the daemon
+    refuses before it builds any state or opens the ledger."""
+    monkeypatch.setenv("PLUGIN_DATA", str(sock_dir))
+    monkeypatch.setattr(daemon_mod, "new_state", lambda data_dir, **kw: (
+        pytest.fail("state was built without a selected runtime")))
+    assert daemon_mod.main([]) == EXIT_FAILURE
+    assert capsys.readouterr().err == (
+        "privacy-hud daemon: runtime identity or ledger compatibility check "
+        "failed; no writable ledger was opened.\n"
+        "Run the repair command reported by the current plugin's doctor.\n")
+    assert not (sock_dir / "ledger.db").exists()
+    assert not (sock_dir / "daemon.sock").exists()
 
 
 def test_the_cli_reports_already_running_with_its_own_exit_code(sock_dir,
@@ -1241,11 +1317,16 @@ def test_the_cli_reports_already_running_with_its_own_exit_code(sock_dir,
     thread = threading.Thread(target=incumbent.serve_forever, daemon=True)
     thread.start()
     try:
-        src = str(Path(daemon_mod.__file__).resolve().parents[1])   # .../src
-        env = {**os.environ, "PLUGIN_DATA": str(sock_dir), "PYTHONPATH": src}
-        proc = subprocess.run([sys.executable, "-m", "privacy_hud.daemon"],
-                              env=env, capture_output=True, text=True,
-                              timeout=120)
+        # The real spawn path (#66): the bundled bootstrap, in the receipt's
+        # interpreter, in isolated mode.
+        bundle = make_bundle(Path(tempfile.mkdtemp(prefix="phb")) / "bundle")
+        write_receipt_v2(sock_dir, bundle=bundle, python=sys.executable)
+        env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+        env["PLUGIN_DATA"] = str(sock_dir)
+        proc = subprocess.run(
+            [sys.executable, "-I", str(bundle / "scripts" / "runtime.py"),
+             "--plugin-data", str(sock_dir), "daemon"],
+            env=env, capture_output=True, text=True, timeout=120)
         assert proc.returncode == EXIT_ALREADY_RUNNING, proc.stderr
         assert "already owns" in proc.stderr
         # The incumbent survived the spawn attempt.
@@ -1664,7 +1745,7 @@ def test_events_that_record_nothing_still_count_as_liveness(tmp_path):
     credentials. `ls -la` short-circuits before any Observation is built and
     `PreCompact` is not even a known event — both must still hold the daemon
     open, or the well-behaved session is the one that loses its daemon."""
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     for event, extra in (
             ({"hook_event_name": "PreToolUse", "tool_name": "Bash",
               "tool_input": {"command": "ls -la"}}, "quiet1"),
@@ -1680,7 +1761,7 @@ def test_an_event_for_an_unknown_session_registers_it(tmp_path):
     """The mid-session daemon restart. A fresh daemon's first sight of an
     ongoing session is some ordinary hook, never `SessionStart` — it must
     treat that as a reason to stay up."""
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     dispatch(st, {"hook_event_name": "PostToolUse", "session_id": "midway",
                   "tool_name": "Read", "tool_response": "nothing special"})
     assert "midway" in st.live
@@ -1692,7 +1773,7 @@ def test_a_probe_with_no_session_id_registers_nothing(tmp_path):
     without sending a byte. A health check is an observer, not a session: it
     may reset the idle clock (someone did just look for this daemon) but it
     must never be a reason to stay up."""
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     dispatch(st, {"hook_event_name": "PreCompact"})
     dispatch(st, {"hook_event_name": "SessionStart", "session_id": ""})
     assert st.live == {}
@@ -1700,7 +1781,7 @@ def test_a_probe_with_no_session_id_registers_nothing(tmp_path):
 
 
 def test_session_end_releases_and_is_idempotent(tmp_path):
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st, "dup")
     assert "dup" in st.live
     dispatch(st, {"hook_event_name": "SessionEnd", "session_id": "dup",
@@ -1723,7 +1804,7 @@ def test_an_event_after_session_end_re_registers_the_session(tmp_path):
     and a new Engine — which means the daemon is being used again, and it
     must count as such. Bounded like any other reference by the staleness
     sweep."""
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     _start(st, "again")
     dispatch(st, {"hook_event_name": "SessionEnd", "session_id": "again",
                   "reason": "exit"})
@@ -1757,7 +1838,6 @@ from privacy_hud.daemon import (  # noqa: E402
     query_active_sessions,
 )
 from privacy_hud.dispatch import active_sessions  # noqa: E402
-from privacy_hud.ledger import Ledger  # noqa: E402
 from privacy_hud.matrix.loader import load_matrix  # noqa: E402
 from privacy_hud.mcp_tools import resolve_audit_session  # noqa: E402
 
@@ -1782,15 +1862,15 @@ def _raw_request(sock_path, request: dict, timeout: float = 5.0):
     return json.loads(buf.decode())
 
 
-def _hook(sock_path, payload: dict):
-    return _raw_call(sock_path, payload)
+def _hook(sock_path, payload: dict, selected=None):
+    return _raw_call(sock_path, payload, selected=selected)
 
 
 def test_active_sessions_op_lists_a_live_session(running_daemon):
     _daemon, sock_path = running_daemon
     _hook(sock_path, {"hook_event_name": "SessionStart", "session_id": "solo",
                       "cwd": "/r", "model": "gpt-5"})
-    reply = _raw_request(sock_path, {"v": 1, "op": OP_ACTIVE_SESSIONS})
+    reply = _after_hello(sock_path, _envelope(op=OP_ACTIVE_SESSIONS))
     assert reply["op"] == OP_ACTIVE_SESSIONS
     assert [s["session_id"] for s in reply["sessions"]] == ["solo"]
     assert reply["sessions"][0]["age"] >= 0
@@ -1801,7 +1881,7 @@ def test_active_sessions_op_is_empty_before_any_session(running_daemon):
     client's `None` ("could not ask") — the two must not be conflated, or
     "I do not know" starts reading as "there is no session"."""
     _daemon, sock_path = running_daemon
-    reply = _raw_request(sock_path, {"v": 1, "op": OP_ACTIVE_SESSIONS})
+    reply = _after_hello(sock_path, _envelope(op=OP_ACTIVE_SESSIONS))
     assert reply["sessions"] == []
 
 
@@ -1816,7 +1896,7 @@ def test_active_sessions_op_orders_most_recently_active_first(running_daemon):
     _hook(sock_path, {"hook_event_name": "PreToolUse", "session_id": "first",
                       "turn_id": "t1", "tool_name": "Bash",
                       "tool_input": {"command": "ls -la"}})
-    reply = _raw_request(sock_path, {"v": 1, "op": OP_ACTIVE_SESSIONS})
+    reply = _after_hello(sock_path, _envelope(op=OP_ACTIVE_SESSIONS))
     assert [s["session_id"] for s in reply["sessions"]] == ["first", "second"]
 
 
@@ -1826,9 +1906,20 @@ def test_the_bug_active_beats_most_recently_started(sock_dir):
     Session A starts, session B starts, then A fires a hook — the user who
     opened a second window and went back to the first one. The old
     resolution names B; the new one names A.
+
+    #66: `resolve_audit_session` asks the daemon over protocol 2, so this
+    data root carries the receipt an installed one has — without a selected
+    runtime there is no hello to send, and the answer would silently fall
+    back to the ledger, which is the bug this test exists to catch.
     """
     sock_path = sock_dir / "daemon.sock"
-    daemon = Daemon(sock_path, sock_dir, idle_timeout=3600, poll_interval=0.05)
+    write_receipt_v2(sock_dir,
+                     bundle=make_bundle(Path(tempfile.mkdtemp(prefix="phb"))
+                                        / "bundle"),
+                     python=sys.executable)
+    selected = load_activation(sock_dir)
+    daemon = Daemon(sock_path, sock_dir, idle_timeout=3600, poll_interval=0.05,
+                    activation=selected)
     thread = threading.Thread(target=daemon.serve_forever, daemon=True)
     thread.start()
     try:
@@ -1837,7 +1928,8 @@ def test_the_bug_active_beats_most_recently_started(sock_dir):
             time.sleep(0.01)
 
         _hook(sock_path, {"hook_event_name": "SessionStart",
-                          "session_id": "A", "cwd": "/r", "model": "gpt-5"})
+                          "session_id": "A", "cwd": "/r", "model": "gpt-5"},
+              selected=selected)
         # `sessions.started_at` is whole seconds, and two rows in the same
         # second make the old query's answer arbitrary rather than wrong —
         # which is its own indictment, but not the reported bug. Sleep past
@@ -1845,7 +1937,8 @@ def test_the_bug_active_beats_most_recently_started(sock_dir):
         # STARTED session, exactly as it was in the real ledger.
         time.sleep(1.05)
         _hook(sock_path, {"hook_event_name": "SessionStart",
-                          "session_id": "B", "cwd": "/r", "model": "gpt-5"})
+                          "session_id": "B", "cwd": "/r", "model": "gpt-5"},
+              selected=selected)
         # Then the user goes back to the first window and runs `$privacy`,
         # whose own bash is this PreToolUse. The gap matters: B has to stop
         # being the most recently *active* session, which is the whole
@@ -1853,10 +1946,11 @@ def test_the_bug_active_beats_most_recently_started(sock_dir):
         time.sleep(0.3)
         _hook(sock_path, {"hook_event_name": "PreToolUse", "session_id": "A",
                           "turn_id": "t1", "tool_name": "Bash",
-                          "tool_input": {"command": "ls"}})
+                          "tool_input": {"command": "ls"}},
+              selected=selected)
 
         # What the skill used to do, verbatim.
-        ledger = Ledger(sock_dir / "ledger.db", load_matrix())
+        ledger = writer_ledger(sock_dir / "ledger.db", load_matrix())
         old = ledger.conn.execute(
             "SELECT session_id FROM sessions ORDER BY started_at DESC LIMIT 1"
         ).fetchone()["session_id"]
@@ -1894,7 +1988,7 @@ def test_a_clean_session_with_no_events_still_resolves(sock_dir):
             time.sleep(0.01)
         _hook(sock_path, {"hook_event_name": "SessionStart",
                           "session_id": "clean", "cwd": "/r", "model": "gpt-5"})
-        ledger = Ledger(sock_dir / "ledger.db", load_matrix())
+        ledger = writer_ledger(sock_dir / "ledger.db", load_matrix())
         assert ledger.conn.execute(
             "SELECT COUNT(*) AS n FROM events_legacy_v1").fetchone()["n"] == 0
         assert resolve_audit_session(ledger, sock_dir).session_id == "clean"
@@ -1912,29 +2006,37 @@ def test_query_active_sessions_round_trips_against_a_real_daemon(running_daemon)
     _daemon, sock_path = running_daemon
     _hook(sock_path, {"hook_event_name": "SessionStart", "session_id": "rt",
                       "cwd": "/r", "model": "gpt-5"})
-    sessions = query_active_sessions(sock_path)
+    sessions = query_active_sessions(sock_path, activation=_activation())
     assert [s["session_id"] for s in sessions] == ["rt"]
 
 
 def test_an_unknown_op_gets_silence_not_an_error_object(running_daemon):
     """Silence is the degradation every client on this socket already
     handles. An error dict would travel back through `hooks/handler.py` and
-    reach Codex as hook output (I6)."""
+    reach Codex as hook output (I6). #66 keeps that for an unknown op both
+    before the hello and after one."""
     _daemon, sock_path = running_daemon
     assert _raw_request(sock_path, {"v": 1, "op": "no-such-op",
                                     "payload": {"hook_event_name": "SessionStart",
                                                 "session_id": "x"}}) is None
+    assert _after_hello(sock_path, _envelope(
+        op="no-such-op",
+        payload={"hook_event_name": "SessionStart",
+                 "session_id": "x"})) is None
 
 
-def test_a_request_with_no_op_is_still_dispatched_as_an_event(running_daemon):
-    """Backward compatibility with any client that predates the second op —
-    `op` has always defaulted to "event"."""
-    _daemon, sock_path = running_daemon
-    reply = _raw_request(sock_path, {"v": 1, "payload": {
+def test_a_request_with_no_op_is_no_longer_dispatched(running_daemon):
+    """`op` used to default to "event", so a client that predated the
+    second op still worked. #66 ends that: a frame with no `op` is not a
+    protocol-2 hello, so it reaches no dispatch at all — deliberately, since
+    a client too old to send `op` is also too old to prove which runtime it
+    belongs to.
+    """
+    daemon, sock_path = running_daemon
+    assert _raw_request(sock_path, {"v": 1, "payload": {
         "hook_event_name": "SessionStart", "session_id": "noop",
-        "cwd": "/r", "model": "gpt-5"}})
-    assert reply == {}
-    assert "noop" in _daemon.state.live
+        "cwd": "/r", "model": "gpt-5"}}) is None
+    assert "noop" not in daemon.state.live
 
 
 def test_the_hook_client_still_sends_the_event_op_literally():
@@ -1950,7 +2052,7 @@ def test_active_sessions_does_not_sweep_stale_references(tmp_path):
     """A query must not change the daemon's own lifetime accounting: deciding
     a session is dead is the accept loop's act (`live_session_count`), taken
     on its own schedule."""
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     note_session_live(st, "old")
     assert active_sessions(st, stale_after=0.0) == []
     assert "old" in st.live
@@ -1962,7 +2064,7 @@ def test_active_sessions_reports_ages_not_timestamps(tmp_path):
     """Monotonic timestamps mean nothing in another process; an age in
     seconds is comparable anywhere, which is what the client's
     concurrent-session window is measured in."""
-    st = new_state(tmp_path)
+    st = writer_state(tmp_path)
     note_session_live(st, "s")
     (_sid, age), = active_sessions(st, stale_after=3600)
     assert 0 <= age < 5

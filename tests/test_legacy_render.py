@@ -9,8 +9,8 @@ from __future__ import annotations
 import pytest
 
 from privacy_hud import mcp_tools, render
-from privacy_hud.ledger import Ledger
 from privacy_hud.matrix.loader import load_matrix
+from runtime_helpers import writer_ledger
 
 M = load_matrix()
 
@@ -25,7 +25,7 @@ UNRECORDED_EMPTY = ("No events can be shown for an unrecorded session. This "
 
 @pytest.fixture
 def led(tmp_path):
-    ledger = Ledger(tmp_path / "ledger.db", M)
+    ledger = writer_ledger(tmp_path / "ledger.db", M)
     ledger.start_session("s1", cwd="/repo", model="gpt-5")
     yield ledger
     ledger.conn.close()

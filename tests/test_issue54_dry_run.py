@@ -15,8 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from privacy_hud.ledger import Ledger
 from privacy_hud.matrix.loader import load_matrix
+from runtime_helpers import writer_ledger
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "scripts" / "check-issue54-ledger.py"
@@ -26,7 +26,7 @@ PLANTED = "planted-7c1e9a-value"
 def _source(tmp_path: Path):
     path = tmp_path / "src" / "ledger.db"
     path.parent.mkdir()
-    led = Ledger(path, load_matrix())
+    led = writer_ledger(path, load_matrix())
     led.start_session(f"sess-{PLANTED}", cwd=f"/{PLANTED}", model="m")
     led.record(f"sess-{PLANTED}", turn_id="t", kind="exposed",
                data_type="email", source=f"{PLANTED}.log",

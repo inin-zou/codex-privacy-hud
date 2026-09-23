@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from runtime_helpers import writer_ledger
 
 REPO = Path(__file__).resolve().parents[1]
 SELF = Path(__file__).resolve()
@@ -358,10 +359,25 @@ def violations_in(path: str, text: str) -> list[Hit]:
     return scan_text(path, _without_allowed_claims(path, text))
 
 
+#: Trees this scan does not read, and the only kind there may be: a
+#: byte-exact archive of code that shipped, vendored unmodified so a test
+#: can run the real thing (`tests/fixtures/runtime_071`, #66 Pair 4).
+#:
+#: It is excluded rather than allowlisted because the allowlist works by
+#: inserting a notice into the file, and a notice would make the copy no
+#: longer the bytes that shipped — which is the whole reason it is here.
+#: Its retracted claims are 0.7.1's, in 0.7.1's own words; they are not
+#: this release's copy, they reach no user, and nothing imports them into
+#: the product. `test_runtime_storage.py` pins the tree to recorded
+#: checksums, so "unmodified" is asserted rather than assumed.
+VENDORED = ("tests/fixtures/runtime_071/",)
+
+
 def tracked_files() -> list[str]:
     listed = subprocess.run(["git", "ls-files", "-z"], cwd=REPO,
                             capture_output=True, check=True).stdout
-    files = [p for p in listed.decode().split("\0") if p]
+    files = [p for p in listed.decode().split("\0")
+             if p and not p.startswith(VENDORED)]
     own = str(SELF.relative_to(REPO))
     if own not in files:
         files.append(own)
@@ -503,13 +519,24 @@ def _registered_tools(app):
 
 
 @pytest.fixture
-def mcp_app(tmp_path, monkeypatch):
+def mcp_app(monkeypatch):
+    """The MCP app over a seeded ledger, with the daemon that owns it.
+
+    A short `$PLUGIN_DATA` and a real daemon, because `update_policy`
+    sends its mutation over the socket since #66 Pair 6; the receipt is
+    written before anything takes a writer lease against it.
+    """
+    import shutil
+
+    from runtime_helpers import policy_daemon, select_runtime, short_data_dir
+
     sys.path.insert(0, str(REPO / "mcp"))
     import server
-    from privacy_hud.ledger import Ledger
     from privacy_hud.matrix.loader import load_matrix
 
-    led = Ledger(tmp_path / "ledger.db", load_matrix())
+    tmp_path = short_data_dir(prefix="phr")
+    select_runtime(tmp_path)
+    led = writer_ledger(tmp_path / "ledger.db", load_matrix())
     led.start_session("s1", cwd="/r", model="gpt-5")
     led.conn.close()
     monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))
@@ -524,10 +551,12 @@ def mcp_app(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "_open_ledger", capture)
     app = server.build_app()
     try:
-        yield app
+        with policy_daemon(tmp_path):
+            yield app
     finally:
         for ledger in opened:
             ledger.conn.close()
+        shutil.rmtree(tmp_path, ignore_errors=True)
 
 
 def test_policy_tool_registered_description_is_conditional(mcp_app):

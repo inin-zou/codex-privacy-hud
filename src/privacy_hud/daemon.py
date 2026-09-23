@@ -3,29 +3,39 @@
 per daemon lifetime instead of once per hook invocation (architecture.md
 §2's "Process model").
 
-Wire protocol (owned by `hooks/handler.py`, stdlib-only and already
-Codex-verified — read that file, not architecture.md §2's illustrative
-example, which no code actually parses): newline-delimited JSON over a
-unix socket.
+Wire protocol 2 (#66): newline-delimited JSON over a unix socket, one
+exchange per connection. The client half is `runtime_client.py`, restated
+by the stdlib-only `hooks/handler.py`.
 
-    -> {"v": 1, "op": "event", "payload": <verbatim Codex hook JSON>}
-    <- <hook-output JSON, written back to Codex's stdout as-is>
+    -> {"v":2,"op":"hello","build_id":…,"activation_epoch":…,
+        "storage_generation":1}
+    <- {"v":2,"op":"hello","ok":true,"release":…,"build_id":…,
+        "activation_epoch":…,"storage_generation":1,"schema_version":…,
+        "ready":true}
+    -> {"v":2,"op":"event","build_id":…,"activation_epoch":…,
+        "payload":<verbatim Codex hook JSON>}
+    <- {"v":2,"op":"event","ok":true,"output":<hook-output JSON>}
 
-`op` was a discriminator from the start, and there is now a second one, used
-by the `$privacy` skill and by nothing on the hook path:
-
-    -> {"v": 1, "op": "active_sessions"}
-    <- {"v": 1, "op": "active_sessions",
+    -> (after hello) {"v":2,"op":"active_sessions","build_id":…,
+                      "activation_epoch":…}
+    <- {"v":2,"op":"active_sessions","ok":true,
         "sessions": [{"session_id": ..., "age": <seconds since its last
                       hook event>}, ...]}   # most recently active first
 
-It exists because the daemon is the only process that knows which Codex
-session is live *right now* — Codex exposes no session id to a skill, and the
-ledger can only say which session started last or disclosed last, both of
-which are the wrong answer (`dispatch.active_sessions`). `hooks/handler.py`
-is deliberately not taught this op: it is stdlib-only, on the hot path, and
-has no reason to ask. Server side is `_Handler.handle`; client side is
-`query_active_sessions` in this module, so the two halves cannot drift.
+Nothing is dispatched on a connection until a hello naming this daemon's
+build and activation epoch has been answered on that same connection. A
+hello from another build or epoch is answered `ok: false` with a fixed
+code and the connection ends. Anything else -- protocol 1, a missing `op`,
+a request without a hello, an oversized frame, a boolean where a version
+number belongs -- gets silence: an older hook client relays any JSON it
+receives to Codex as hook output, so an error object must never reach one.
+
+`active_sessions` exists because the daemon is the only process that knows
+which Codex session is live *right now* — Codex exposes no session id to a
+skill, and the ledger can only say which session started last or disclosed
+last, both of which are the wrong answer (`dispatch.active_sessions`).
+Server side is `_Handler.handle`; client side is `query_active_sessions` in
+this module, over `runtime_client`, so the two halves cannot drift.
 
 `dispatch.dispatch()` builds the reply; this module is only the socket
 plumbing: accept a connection, read one line, hand the payload to
@@ -56,7 +66,6 @@ from __future__ import annotations
 
 import errno
 import fcntl
-import json
 import logging
 import os
 import socket
@@ -77,6 +86,31 @@ from .dispatch import (
     new_state,
 )
 from .hud_snapshot import HEARTBEAT_INTERVAL
+from .runtime_client import (
+    EVENT_FRAME_LIMIT,
+    HELLO_FRAME_LIMIT,
+    OP_HELLO,
+    OP_POLICY_UPDATE,
+    connect_socket,
+    decode_frame,
+    encode_frame,
+    hello_matches,
+    hello_reply,
+    is_request_envelope,
+    is_valid_hello,
+)
+from .runtime_client import (
+    FrameError as _FrameError,
+)
+from .runtime_contract import (
+    PROTOCOL_VERSION,
+    Activation,
+    RuntimeRefusal,
+    load_activation,
+    verify_import_origins,
+)
+from .runtime_messages import DAEMON_STARTUP_REFUSAL
+from .runtime_owner import WriterLease, acquire_writer, running_activation
 
 _log = logging.getLogger(__name__)
 
@@ -290,59 +324,95 @@ class _Handler(socketserver.StreamRequestHandler):
         finally:
             self.server._request_finished()
 
-    def handle(self) -> None:
+    def _read_frame(self, limit: int) -> dict | None:
+        """One newline-terminated JSON object of at most `limit` bytes, or
+        `None` for EOF, an oversized or truncated frame, or anything that is
+        not a JSON object."""
         try:
-            line = self.rfile.readline()
+            line = self.rfile.readline(limit + 2)
+        except OSError:
+            return None
+        if not line.endswith(b"\n") or len(line) > limit + 1:
+            return None
+        try:
+            return decode_frame(line[:-1])
+        except _FrameError:
+            return None
+
+    def _schema_version(self) -> int | None:
+        """The ledger's `PRAGMA user_version`, read under the state lock."""
+        state = self.server.state
+        try:
+            with state.lock:
+                row = state.ledger.conn.execute(
+                    "PRAGMA user_version").fetchone()
+            return int(row[0])
+        except Exception:
+            return None
+
+    def handle(self) -> None:
+        # -- hello: nothing is dispatched on a connection without one ----
+        request = self._read_frame(HELLO_FRAME_LIMIT)
+        if request is None or not is_valid_hello(request):
+            # Protocol 1, a missing `op`, a request without a hello, an
+            # oversized or malformed frame: silence. An older hook client
+            # relays whatever JSON it receives as hook output, so an error
+            # object must never be sent to one (I6).
+            return
+        activation: Activation | None = getattr(self.server, "activation",
+                                                None)
+        if activation is None or not hello_matches(request, activation):
+            self._write({"v": PROTOCOL_VERSION, "op": OP_HELLO, "ok": False,
+                         "code": "runtime_mismatch"})
+            return
+        schema_version = self._schema_version()
+        if (schema_version is None or schema_version
+                not in activation.identity.readable_schemas):
+            self._write({"v": PROTOCOL_VERSION, "op": OP_HELLO, "ok": False,
+                         "code": "ledger_unsupported"})
+            return
+        self._write(hello_reply(activation, schema_version))
+        try:
+            self.wfile.flush()
         except OSError:
             return
-        if not line:
-            return
-        try:
-            request = json.loads(line.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            return
-        if not isinstance(request, dict):
-            return
 
-        # `op` has always been the protocol's discriminator; until the
-        # `$privacy` skill needed to ask who was live, "event" was the only
-        # value anyone sent. A missing/empty `op` still means "event", so
-        # every client that predates this branch is unaffected.
-        op = request.get("op") or OP_EVENT
+        # -- the one request, on this same connection ------------------
+        request = self._read_frame(EVENT_FRAME_LIMIT)
+        if request is None or not is_request_envelope(request, activation):
+            return
+        op = request["op"]
+        body = {k: v for k, v in request.items()
+                if k not in ("v", "op", "build_id", "activation_epoch")}
 
         if op == OP_ACTIVE_SESSIONS:
+            if body:
+                return
             try:
                 reply = self._active_sessions_reply()
             except Exception:
-                # No reply, deliberately: see the unknown-op case below.
-                # This op cannot affect a tool call, so there is no egress
-                # to fail closed on — the caller's own fallback is the
-                # correct degradation.
+                # No reply, deliberately: this op cannot affect a tool call,
+                # so there is no egress to fail closed on — the caller's own
+                # fallback is the correct degradation.
                 return
             self._write(reply)
             return
 
-        if op != OP_EVENT:
-            # An op this daemon does not know is a version mismatch between
-            # a client and a daemon, and it gets silence rather than an
-            # error object. Two reasons. (1) Silence is a degradation every
-            # client on this socket already implements — `hooks/handler.py`
-            # treats "the daemon gave me nothing useful" as its
-            # fail-open/fail-closed trigger, and `query_active_sessions`
-            # treats it as "no answer, use the fallback". (2) An error dict
-            # would travel back through the hook client and reach Codex as
-            # *hook output* if a hook ever sent an unknown op, and inventing
-            # new keys in that channel to report our own confusion is
-            # exactly the way I6 ("never block Codex because of our own
-            # crash") gets violated by accident.
+        if op == OP_POLICY_UPDATE:
+            saved = self._policy_update_reply(body)
+            if saved is not None:
+                self._write(saved)
             return
 
-        payload = request.get("payload")
-        if not isinstance(payload, dict):
+        if op != OP_EVENT:
+            return
+
+        payload = body.get("payload")
+        if set(body) != {"payload"} or not isinstance(payload, dict):
             return
 
         try:
-            reply = dispatch(self.server.state, payload)
+            output = dispatch(self.server.state, payload)
         except Exception:
             # A bug in one event must not take the daemon down for every
             # other session -- this per-request exception boundary stays.
@@ -362,11 +432,55 @@ class _Handler(socketserver.StreamRequestHandler):
             # `codex.EGRESS_EVENTS` -- the same set `hooks/handler.py`
             # restates as a literal for its own client-side gate.
             if payload.get("hook_event_name") in codex.EGRESS_EVENTS:
-                reply = _deny_for_internal_failure(payload)
+                output = _deny_for_internal_failure(payload)
             else:
-                reply = {}
+                output = {}
 
-        self._write(reply)
+        self._write({"v": PROTOCOL_VERSION, "op": OP_EVENT, "ok": True,
+                     "output": output})
+
+    def _policy_update_reply(self, body: dict) -> dict | None:
+        """Save one policy rule, under this daemon's own serialized ledger
+        access, and answer with the result shape the surfaces already
+        return.
+
+        `None` means silence, and silence is the honest answer to a
+        request this daemon could not complete: the client hands its
+        socket away as it transmits, so it reports an unknown outcome
+        rather than inventing one (#66 Pair 6). A *validation* failure
+        cannot reach here — `runtime_commands.update_policy` refuses a
+        malformed rule before it is sent, and `mcp_tools.apply_policy`
+        checks again below — so there is no error string to relay, which
+        is also what keeps peer-chosen text off this wire (I1).
+        """
+        from . import mcp_tools
+
+        required = ("session_id", "rule_type", "selector")
+        if set(body) != set(required) or not all(
+                isinstance(body[name], str) and body[name]
+                for name in required):
+            return None
+        session_id = body["session_id"]
+        rule_type = body["rule_type"]
+        selector = body["selector"]
+        state = self.server.state
+        try:
+            with state.lock:
+                mcp_tools.apply_policy(state.ledger, session_id,
+                                       rule_type=rule_type,
+                                       selector=selector)
+        except Exception:
+            return None
+        return {
+            "v": PROTOCOL_VERSION, "op": OP_POLICY_UPDATE, "ok": True,
+            # `saved`, not `applied`: the rule is in the policy table;
+            # whether it ever fires depends on a later call producing a
+            # finding it matches.
+            "saved": True, "enforcement": "conditional",
+            "rule_type": rule_type, "selector": selector,
+            "conditions": mcp_tools.rule_enforcement_note(
+                rule_type, selector).strip(),
+        }
 
     def _write(self, reply: dict) -> None:
         """One newline-delimited JSON reply, or nothing if the peer is gone.
@@ -377,8 +491,8 @@ class _Handler(socketserver.StreamRequestHandler):
         useful to say and nobody left to say it to.
         """
         try:
-            self.wfile.write((json.dumps(reply) + "\n").encode("utf-8"))
-        except OSError:
+            self.wfile.write(encode_frame(reply))
+        except (OSError, TypeError, ValueError):
             pass
 
     def _active_sessions_reply(self) -> dict:
@@ -405,8 +519,9 @@ class _Handler(socketserver.StreamRequestHandler):
                               SESSION_STALE_AFTER)
         sessions = active_sessions(server.state, stale_after=stale_after)
         return {
-            "v": 1,
+            "v": PROTOCOL_VERSION,
             "op": OP_ACTIVE_SESSIONS,
+            "ok": True,
             # Rounded because the wire value is compared against a
             # several-second window, and a full float here would suggest a
             # precision the measurement (one poll of a dict of monotonic
@@ -834,7 +949,8 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
                  linger_grace: float = LINGER_GRACE,
                  session_stale_after: float = SESSION_STALE_AFTER,
                  drain_timeout: float = DRAIN_TIMEOUT,
-                 heartbeat_interval: float = HEARTBEAT_INTERVAL):
+                 heartbeat_interval: float = HEARTBEAT_INTERVAL,
+                 activation: Activation | None = None):
         """Raises `AlreadyRunning` if another daemon owns `socket_path`, and
         `OSError` for a real startup failure. Either way nothing is left
         behind: the startup lock is released on every failing path, and a
@@ -850,7 +966,10 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
         rather than the whole rule: with a live session it is the only thing
         that can end the daemon, and with none, `linger_grace` gets there
         first.
+
+        `activation` is the selected runtime this daemon serves (#66).
         """
+        self.activation = activation
         self.socket_path = Path(socket_path)
         self.socket_path.parent.mkdir(parents=True, exist_ok=True)
         self.lock_path = self.socket_path.with_name(
@@ -863,23 +982,43 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
         # deleting it on the way out of a failed startup would be the very
         # clobber this fix exists to prevent.
         self._bound = False
+        #: The writer lease this daemon took, or `None` when its state (and
+        #: therefore its lease) was handed to it.
+        self._lease: WriterLease | None = None
 
         # First thing, before the expensive part: a would-be second daemon
         # must find out it is redundant BEFORE it loads a ~2.8 GB model, not
         # after.
         self._acquire_startup_lock()
         try:
-            self.state = state if state is not None else new_state(data_dir)
             self.idle_timeout = idle_timeout
             self.linger_grace = linger_grace
             self.session_stale_after = session_stale_after
             self.drain_timeout = drain_timeout
             self.heartbeat_interval = heartbeat_interval
 
-            # Under the lock: decide whether the socket path is free, and
-            # take it. See the class docstring for why doing this under the
-            # lock is what makes the unlink safe.
-            self._claim_socket_path()
+            # Startup order (#66). Everything that can refuse comes before
+            # anything expensive or writable:
+            #
+            #   1. the startup lock, above;
+            #   2. writer exclusion -- ledger ownership, taken before a
+            #      writable connection exists;
+            #   3. socket-path ownership -- a foreign listener answering on
+            #      our path is a refusal, and finding that out after
+            #      `new_state` means a model load and a ledger open for a
+            #      daemon that will never serve a request;
+            #   4. `new_state`, which validates the existing schema on a
+            #      read-only connection, opens the guarded ledger and then
+            #      builds the detectors;
+            #   5. bind, chmod, serve.
+            if state is not None:
+                self._claim_socket_path()
+                self.state = state
+            else:
+                lease = self._acquire_writer_lease(data_dir)
+                self._lease = lease
+                self._claim_socket_path()
+                self.state = new_state(data_dir, writer_lease=lease)
 
             # Global constraint: the socket file must be 0600.
             #
@@ -956,7 +1095,42 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
             except OSError:
                 pass
             self._bound = False
+        self._release_writer_lease()
         self._release_startup_lock()
+
+    def _acquire_writer_lease(self, data_dir) -> WriterLease:
+        """Take exclusive ledger ownership for the runtime this daemon
+        serves.
+
+        `AlreadyRunning`, not the raw refusal, when somebody else holds it:
+        from `main`'s point of view that is the same answer the startup
+        lock gives, and it maps to `EXIT_ALREADY_RUNNING` rather than to a
+        failure. A `runtime_mismatch` is a different answer and propagates
+        — this daemon is not the selected runtime, and starting anyway is
+        what #66 exists to stop.
+
+        A daemon handed its `state` was handed the lease with it; it must
+        not take a second one, since `flock` refuses a second descriptor on
+        the same file even within one process.
+        """
+        activation = self.activation
+        if activation is None:
+            activation = running_activation(Path(data_dir))
+        try:
+            return acquire_writer(Path(data_dir), activation=activation)
+        except RuntimeRefusal as exc:
+            if exc.code == "holder_unknown":
+                raise AlreadyRunning(
+                    self.socket_path,
+                    "another process owns the ledger") from exc
+            raise
+
+    def _release_writer_lease(self) -> None:
+        """Give the writer lease back. Idempotent, and a no-op for a daemon
+        that never took one."""
+        lease, self._lease = self._lease, None
+        if lease is not None:
+            lease.close()
 
     def _acquire_startup_lock(self) -> None:
         """Take the exclusive, non-blocking `flock` that makes this process
@@ -1264,6 +1438,12 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
                     pass
                 self._bound = False
             finally:
+                # Ownership goes back in the same order it was taken, and
+                # after our socket file is gone: while that file exists a
+                # client can still reach us, and a daemon answering
+                # requests it may no longer write would be worse than one
+                # that is simply not there.
+                self._release_writer_lease()
                 self._release_startup_lock()
 
 
@@ -1274,59 +1454,35 @@ def _default_socket_path(data_dir: Path) -> Path:
     return codex.socket_path(data_dir)
 
 
-def query_active_sessions(socket_path, *, timeout: float = QUERY_TIMEOUT
+def query_active_sessions(socket_path, *, timeout: float = QUERY_TIMEOUT,
+                          activation: Activation | None = None
                           ) -> list[dict] | None:
     """Ask the daemon at `socket_path` which sessions are alive right now.
 
     Returns the reply's `sessions` list — dicts of `session_id` and `age`
     (seconds since that session's last hook event), most recently active
-    first — or `None` when there was **no usable answer**: nothing listening,
-    a socket file with no daemon behind it, a timeout, a truncated or
-    unparseable reply, a reply for a different op. `None` and `[]` are
-    different facts and callers must keep them apart: `[]` is a daemon that
-    is up and believes no session is live, while `None` is not knowing.
+    first — or `None` when there was **no usable answer**: no selected
+    runtime, nothing listening, a daemon of another build or epoch, a
+    timeout, a truncated or unparseable reply, a reply for a different op.
+    `None` and `[]` are different facts and callers must keep them apart:
+    `[]` is a daemon that is up and believes no session is live, while
+    `None` is not knowing.
 
-    The client half of the op lives here, next to the server half, because
-    the failure mode this whole file guards against is two ends of a protocol
-    drifting apart (see the module docstring on why architecture.md's
-    illustrative example is not what any code parses). `hooks/handler.py`
-    stays untouched: it is stdlib-only, on the hot path, and never needs to
-    ask this.
+    `activation` defaults to the one receipt v2 records in the socket's own
+    directory (`$PLUGIN_DATA`).
 
     Never raises. Every caller of this is a surface that must still work with
     no daemon at all — the honest fallback is the caller's business, but it
     has to be reachable, so a broken socket cannot arrive here as an
     exception.
     """
-    sock = None
     try:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        sock.connect(str(socket_path))
-        request = json.dumps({"v": 1, "op": OP_ACTIVE_SESSIONS}) + "\n"
-        sock.sendall(request.encode("utf-8"))
-        buf = b""
-        while not buf.endswith(b"\n"):
-            chunk = sock.recv(65536)
-            if not chunk:
-                break
-            buf += chunk
-        reply = json.loads(buf.decode("utf-8"))
+        if activation is None:
+            activation = load_activation(Path(socket_path).parent)
+        with connect_socket(Path(socket_path), activation=activation,
+                            timeout=timeout) as connection:
+            reply = connection.request(OP_ACTIVE_SESSIONS, {})
     except Exception:
-        return None
-    finally:
-        if sock is not None:
-            try:
-                sock.close()
-            except OSError:
-                pass
-
-    # The op is echoed and checked, not assumed. A daemon old enough not to
-    # know this op answers with silence (see `_Handler.handle`), which lands
-    # in the `except` above — but a *hook* reply arriving here would be a
-    # plain dict too, and mistaking one for an empty session list would turn
-    # "I could not ask" into the confident, wrong "no session is live".
-    if not isinstance(reply, dict) or reply.get("op") != OP_ACTIVE_SESSIONS:
         return None
     sessions = reply.get("sessions")
     if not isinstance(sessions, list):
@@ -1336,10 +1492,19 @@ def query_active_sessions(socket_path, *, timeout: float = QUERY_TIMEOUT
             and s["session_id"] and isinstance(s.get("age"), (int, float))]
 
 
-def main(argv: list[str] | None = None) -> int:
-    """CLI entrypoint: `python -m privacy_hud.daemon` (or spawned detached
-    by a lazy-start caller). Reads `PLUGIN_DATA` for the data directory,
-    same env var `hooks/handler.py` reads for the socket path.
+def main(argv: list[str] | None = None, *,
+         activation: Activation | None = None) -> int:
+    """CLI entrypoint: `scripts/runtime.py --plugin-data DIR daemon` (which
+    the hook client spawns), or `python -m privacy_hud.daemon`. Reads
+    `PLUGIN_DATA` for the data directory, same env var `hooks/handler.py`
+    reads for the socket path.
+
+    The bootstrap passes the `activation` it verified. Started any other
+    way, this loads and verifies it itself -- receipt v2, the selected
+    bundle's build digest, and that every imported `privacy_hud` module came
+    from that bundle -- and refuses before anything is opened otherwise
+    (#66: a stale package in the dependency environment must never become
+    the daemon).
 
     Exit-code contract, which an auto-spawning hook client can rely on:
 
@@ -1353,8 +1518,9 @@ def main(argv: list[str] | None = None) -> int:
             loaded. `EXIT_ALREADY_RUNNING`.
     1       Real startup failure: `PLUGIN_DATA` unset (no `/tmp` default
             any more -- spec §6) or unwritable, `bind()` refused, an
-            `AF_UNIX` path over the kernel's ~104-byte limit, and so
-            on. One line on stderr says which. `EXIT_FAILURE`.
+            `AF_UNIX` path over the kernel's ~104-byte limit, a
+            runtime identity check that failed, and so on. Fixed text
+            on stderr says which. `EXIT_FAILURE`.
     ======  ======================================================
 
     Keeping 3 distinct from 1 is the whole point: a spawner that cannot
@@ -1372,9 +1538,16 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return EXIT_FAILURE
     data_dir = Path(raw)
+    if activation is None:
+        try:
+            activation = load_activation(data_dir)
+            verify_import_origins(activation.bundle_root)
+        except RuntimeRefusal:
+            print(DAEMON_STARTUP_REFUSAL, file=sys.stderr)
+            return EXIT_FAILURE
     socket_path = _default_socket_path(data_dir)
     try:
-        daemon = Daemon(socket_path, data_dir)
+        daemon = Daemon(socket_path, data_dir, activation=activation)
     except AlreadyRunning as exc:
         print(f"privacy-hud daemon: {exc}", file=sys.stderr)
         return EXIT_ALREADY_RUNNING

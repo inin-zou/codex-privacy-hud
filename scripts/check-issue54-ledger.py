@@ -42,6 +42,10 @@ from privacy_hud import ledger_schema  # noqa: E402
 from privacy_hud.budget import contribution  # noqa: E402
 from privacy_hud.ledger import Ledger  # noqa: E402
 from privacy_hud.matrix.loader import load_matrix  # noqa: E402
+from privacy_hud.runtime_owner import (  # noqa: E402
+    acquire_writer,
+    unselected_activation,
+)
 
 PASS = "Phase {phase} private-ledger checks: PASS. No ledger values were printed."
 FAIL = "Private-ledger check failed. No ledger values were printed."
@@ -51,8 +55,11 @@ import os, sys
 sys.path.insert(0, sys.argv[3])
 from privacy_hud.ledger import Ledger
 from privacy_hud.matrix.loader import load_matrix
+from privacy_hud.runtime_owner import acquire_writer, unselected_activation
 stop = int(sys.argv[2])
-led = Ledger(sys.argv[1], load_matrix())
+lease = acquire_writer(sys.argv[1] + ".owner",
+                       activation=unselected_activation())
+led = Ledger(sys.argv[1], load_matrix(), writer_lease=lease)
 n = [0]
 def failpoint(statement):
     n[0] += 1
@@ -66,6 +73,22 @@ with led._write_transaction():
         os._exit(4)
 os._exit(5)
 """
+
+
+#: Writer leases taken for the private copies, kept alive for the run.
+#: Each copy owns its own lock directory beside it, inside the private work
+#: directory, so a rehearsal never contends with — or waits for — the real
+#: installation's ledger owner (#66).
+_LEASES: list = []
+
+
+def _lease(path: Path):
+    """A real writer lease for one private copy. Not a bypass: the same
+    `acquire_writer` the daemon uses, on a lock this rehearsal owns."""
+    lease = acquire_writer(Path(str(path) + ".owner"),
+                           activation=unselected_activation())
+    _LEASES.append(lease)
+    return lease
 
 
 class CheckFailed(Exception):
@@ -166,7 +189,7 @@ def _readings(led: Ledger) -> dict:
 
 
 def _boundary(path: Path, session_id: str) -> None:
-    led = Ledger(path, load_matrix())
+    led = Ledger(path, load_matrix(), writer_lease=_lease(path))
     try:
         with led._write_transaction():
             led.prepare_session_boundary(session_id)
@@ -183,7 +206,7 @@ def phase2(source: Path, work: Path) -> None:
     # legacy ledger from an older release gains the legacy tables it lacks
     # (for example `scan_gaps`). The rebuild is checked against that state,
     # which is also what every crash copy returns to.
-    Ledger(copy, matrix).conn.close()
+    Ledger(copy, matrix, writer_lease=_lease(copy)).conn.close()
     baseline = work / "baseline.db"
     _copy(copy, baseline)
 
@@ -212,7 +235,7 @@ def phase2(source: Path, work: Path) -> None:
     # A continuing legacy session, on the copy only, started before the
     # rebuild and written after it.
     continuing = f"privacy-hud-dry-run-{uuid.uuid4().hex}"
-    led = Ledger(copy, matrix)
+    led = Ledger(copy, matrix, writer_lease=_lease(copy))
     led.start_session(continuing, cwd="", model="")
     led.conn.close()
 
@@ -269,7 +292,7 @@ def phase2(source: Path, work: Path) -> None:
         _check(after.get(sid) == reading, "legacy-readings")
     reader.conn.close()
 
-    led = Ledger(copy, matrix)
+    led = Ledger(copy, matrix, writer_lease=_lease(copy))
     try:
         before_score = led.summary(continuing).legacy_score
         delta = led.record(continuing, turn_id=None, kind="exposed",
@@ -287,7 +310,7 @@ def phase2(source: Path, work: Path) -> None:
         led.conn.close()
 
     statements: list[str] = []
-    led = Ledger(copy, matrix)
+    led = Ledger(copy, matrix, writer_lease=_lease(copy))
     try:
         led.conn.set_trace_callback(statements.append)
         with led._write_transaction():

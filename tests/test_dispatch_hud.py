@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from privacy_hud import dispatch, hud_snapshot as hs
+from runtime_helpers import writer_state
 
 SID = "0199abcd-1111-2222-3333-444455556666"
 
@@ -66,7 +67,7 @@ def test_new_state_marks_the_daemon_and_sweeps(tmp_path, monkeypatch):
     monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))
     hs.hud_dir(tmp_path).mkdir()
     (hs.hud_dir(tmp_path) / "stray.json.tmp").write_text("{")
-    st = dispatch.new_state(tmp_path)
+    st = writer_state(tmp_path)
     try:
         assert hs.read_daemon_marker(tmp_path) in (True, False)
         assert not (hs.hud_dir(tmp_path) / "stray.json.tmp").exists()

@@ -112,9 +112,9 @@ from privacy_hud.detect.model import ModelDetector, StubModelDetector
 from privacy_hud.detect.paths import PathDetector
 from privacy_hud.detect.secrets import SecretDetector
 from privacy_hud.engine import Engine, Observation
-from privacy_hud.ledger import Ledger
 from privacy_hud.mask import new_salt
 from privacy_hud.matrix.loader import load_matrix
+from runtime_helpers import writer_ledger
 
 REPO = Path(__file__).resolve().parent.parent
 SRC = REPO / "src"
@@ -698,7 +698,7 @@ def test_engine_full_pipeline_attempts_no_connection(network_guard, tmp_path):
     plausibly be added to (the deny path, where something went "wrong").
     """
     matrix = load_matrix()
-    ledger = Ledger(tmp_path / "l.db", matrix)
+    ledger = writer_ledger(tmp_path / "l.db", matrix)
     ledger.start_session("s1", cwd="/r", model="gpt-5")
     engine = Engine(
         ledger=ledger, matrix=matrix, salt=new_salt(),
@@ -762,12 +762,11 @@ def test_local_ui_server_binds_loopback_only(network_guard, tmp_path, monkeypatc
     """
     from privacy_hud import local_ui_server
 
-    from privacy_hud.ledger import Ledger
     from privacy_hud.matrix.loader import load_matrix
 
     monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))
     # The daemon creates the ledger; the UI server only opens one.
-    Ledger(tmp_path / "ledger.db", load_matrix()).conn.close()
+    writer_ledger(tmp_path / "ledger.db", load_matrix()).conn.close()
     server = local_ui_server.serve(print_url=False)
     try:
         host, port = server.server_address[0], server.server_address[1]

@@ -167,6 +167,14 @@ class HudPublisher:
         # a "record incomplete" banner on a complete session, or take one
         # off an incomplete one.
         self._unattributed_gaps: bool | None = None
+        # The sessions *this* publisher has written a reading for. A
+        # snapshot carries no producer identity (#66 §A), so this is the
+        # only thing that can tell a reading this process derived from one
+        # a previous daemon left behind, and `heartbeat` re-stamps nothing
+        # that is not in here. Deliberately per-instance and never
+        # persisted: a file that said who wrote it would be a file anyone
+        # could write that claim into.
+        self._published: set[str] = set()
 
     # -- writing -----------------------------------------------------------
 
@@ -224,6 +232,11 @@ class HudPublisher:
         if _parse(doc) is None:
             raise ValueError("snapshot does not satisfy contract A")
         self._write(snapshot_path(self.data_dir, session_id), doc)
+        # Only after the write succeeded, for the same reason
+        # `mark_daemon` records its bit last: claiming a reading we failed
+        # to publish would let a later heartbeat keep an older daemon's
+        # file alive under this publisher's name.
+        self._published.add(session_id)
 
     def set_hidden(self, session_id: str, hidden: bool) -> None:
         """Contract B. Flips `hidden`, refreshes `updated_at`, keeps every
@@ -237,6 +250,7 @@ class HudPublisher:
                     snap.doc(hidden=bool(hidden), updated_at=time.time()))
 
     def retire(self, session_id: str) -> None:
+        self._published.discard(session_id)
         try:
             snapshot_path(self.data_dir, session_id).unlink()
         except (FileNotFoundError, ValueError):
@@ -275,8 +289,20 @@ class HudPublisher:
         not understand. Individual write failures are skipped rather than
         raised: a heartbeat is housekeeping for a display surface (I6), and
         one unwritable snapshot must not cost the others theirs.
+
+        **And nothing for a reading this publisher did not write** (#66).
+        A daemon restarted in a data directory that still holds an older
+        daemon's snapshots would otherwise keep those readings alive
+        forever: `updated_at` is what both readers use to decide a reading
+        is still current, so re-stamping an inherited file is a claim that
+        numbers this process never derived describe the runtime running
+        now. Explicit repair retires the old publisher's files before the
+        replacement starts; this is what holds when a daemon comes up
+        without one.
         """
         for session_id in session_ids:
+            if session_id not in self._published:
+                continue
             try:
                 path = snapshot_path(self.data_dir, session_id)
             except ValueError:

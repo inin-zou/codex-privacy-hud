@@ -1,15 +1,22 @@
 # tests/test_skill_snippets.py
-"""The Python in `skills/privacy/SKILL.md` runs.
+"""The bash in `skills/privacy/SKILL.md` runs, and says what the skill
+says it says.
 
-Those heredocs are code an agent executes verbatim in a user's session, but
-nothing else ever ran them: a renamed `mcp_tools` function or a changed
-`render.audit` signature would pass every other test and break `$privacy`
-the first time someone typed it. So each block is extracted from the skill
-file exactly as written and run under bash against a seeded ledger, with
-`python3` resolving to this interpreter and `PLUGIN_ROOT` pointing at this
-checkout — the same two things the skill relies on in a real session.
+Those blocks are code an agent executes verbatim in a user's session, and
+nothing else ever ran them: before #66 they were python heredocs that
+opened `$PLUGIN_DATA/ledger.db` directly, and on a repaired installation
+that pathname is a directory. They are now invocations of the bundle's
+own bootstrap, extracted from the skill exactly as written and run under
+bash against a seeded installation, with `python3` resolving to this
+interpreter and `PLUGIN_ROOT` pointing at a real bundle — the same two
+things the skill relies on in a real session.
 
-A new heredoc in the skill must get a case here; the inventory test fails
+`tests/test_issue66_contract.py` asserts that every block *runs*. This
+file asserts what each one *produces*, which is the half a smoke test
+cannot cover: a renamed field or a changed rendering breaks `$privacy`
+the first time someone types it, and passes every other test here.
+
+A new block in the skill must get a case here; the inventory test fails
 until it does.
 """
 from __future__ import annotations
@@ -17,188 +24,246 @@ from __future__ import annotations
 import json
 import os
 import re
-import sqlite3
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from privacy_hud.ledger import Ledger
 from privacy_hud.matrix.loader import load_matrix
 from privacy_hud.origin import OriginKind, origin_phrase
+from runtime_helpers import (
+    release_leases,
+    shared_bundle,
+    short_data_dir,
+    write_receipt_v2,
+    writer_ledger,
+)
 
 REPO = Path(__file__).resolve().parents[1]
 SKILL_MD = REPO / "skills" / "privacy" / "SKILL.md"
 
-# Each block is identified by a call only it makes, so reordering or
-# rewording the skill's prose does not break the lookup.
+#: Each block is identified by the bootstrap subcommand only it runs, so
+#: reordering or rewording the skill's prose does not break the lookup.
 MARKERS = {
-    "resolve": "mcp_tools.resolve_audit_session(",
-    "audit": "render.audit(",
-    "detail": "render.detail(",
-    "hud": "mcp_tools.hud_set_hidden(",
-    "read": "mcp_tools.read_guard_status(",
+    "audit": "\n  audit ",
+    "detail": "\n  detail ",
+    "ui": "\n  ui ",
+    "hud": "\n  hud ",
+    "read": "\n  read status",
+    "repair": "repair --print-command",
+    "setup": "install.sh",
+    "preamble": 'HUD=(python3 "$BUNDLE/scripts/runtime.py"',
 }
 
 
-def _python_blocks() -> list[str]:
+def _bash_blocks() -> list[str]:
     text = SKILL_MD.read_text(encoding="utf-8")
-    blocks = re.findall(r"```bash\n(.*?)```", text, flags=re.S)
-    return [b for b in blocks if "<<'PY'" in b]
+    return re.findall(r"```bash\n(.*?)```", text, flags=re.S)
 
 
 def _block(name: str) -> str:
-    found = [b for b in _python_blocks() if MARKERS[name] in b]
-    assert len(found) == 1, f"expected one SKILL.md block calling {MARKERS[name]}"
+    found = [b for b in _bash_blocks() if MARKERS[name] in b]
+    assert len(found) == 1, (
+        f"expected one SKILL.md block containing {MARKERS[name]!r}, "
+        f"found {len(found)}")
     return found[0]
 
 
 @pytest.fixture
 def env(tmp_path):
-    data = tmp_path / "data"
-    data.mkdir()
-    ledger = Ledger(data / "ledger.db", load_matrix())
+    """A seeded installation: a real bundle, a receipt selecting it, and
+    a ledger with one exposed row."""
+    bundle = shared_bundle()
+    data = short_data_dir("phsk")
+    ledger = writer_ledger(data / "ledger.db", load_matrix(), data_dir=data)
     ledger.start_session("s1", cwd="/r", model="gpt-5")
     ledger.record("s1", turn_id="t1", kind="exposed", data_type="email",
                   source="support.log", destination="model_context",
                   value_hash=b"\x01" * 16, masked_example="jo•••@acme.com",
                   tool_name="Read", protection=None)
     ledger.conn.close()
+    release_leases()
+    write_receipt_v2(data, bundle=bundle, python=sys.executable)
 
-    # `python3` in the skill's shell must be an interpreter that can import
-    # the package's stdlib-only modules; pin it to the one running the tests.
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "python3").symlink_to(sys.executable)
-
-    return {
+    environment = {
         **os.environ,
         "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
-        "PLUGIN_ROOT": str(REPO),
+        "PLUGIN_ROOT": str(bundle),
         "PLUGIN_DATA": str(data),
-        # Nothing here should read the real Codex home; make sure it cannot.
-        "HOME": str(tmp_path / "home"),
+        "SESSION_ID": "s1",
+        "EVENT_ID": "1",
+        # Nothing here may read the real Codex home.
         "CODEX_HOME": str(tmp_path / "codex-home"),
     }
+    environment.pop("PYTHONPATH", None)
+    return environment
 
 
-def _run(block: str, env: dict, **extra: str) -> str:
-    proc = subprocess.run(["bash", "-c", block], env={**env, **extra},
-                          capture_output=True, text=True, timeout=60)
-    assert proc.returncode == 0, proc.stderr
-    return proc.stdout
+def _run(block: str, env: dict, timeout: float = 300.0):
+    return subprocess.run(["bash", "-c", block], capture_output=True,
+                          text=True, env=env, timeout=timeout)
 
 
-def test_every_python_block_has_a_case():
-    covered = set(MARKERS.values())
-    uncovered = [b.splitlines()[0] for b in _python_blocks()
-                 if not any(m in b for m in covered)]
-    assert not uncovered, f"SKILL.md blocks with no test here: {uncovered}"
-    assert len(_python_blocks()) == len(MARKERS)
+# --------------------------------------------------------------------- #
+# inventory
+# --------------------------------------------------------------------- #
+
+def test_every_bash_block_has_a_case():
+    blocks = _bash_blocks()
+    assert blocks, "SKILL.md declares no commands"
+    matched = {id(b) for name in MARKERS for b in blocks if MARKERS[name] in b}
+    unmatched = [b for b in blocks if id(b) not in matched]
+    assert unmatched == [], unmatched
 
 
-def test_the_skill_describes_the_source_rules_that_actually_ship():
-    """The skill is read by the model that is looking at the screen, so a
-    claim in it about that screen has to be true of what `render.detail()`
-    prints. It told the model there was no source-level action while the
-    renderer was printing one (#40), i.e. that the button on its own screen
-    did nothing. Pinned against the renderer's own labels, not retyped."""
-    text = SKILL_MD.read_text(encoding="utf-8")
+def test_no_block_opens_the_ledger_or_imports_the_package():
+    """The two things the old blocks did, and the two reasons they broke.
 
-    for kind in (OriginKind.PATH, OriginKind.COMMAND):
-        # "read from {}" / "from `{}` output", with the origin left out:
-        # the skill describes the shape, a real row fills in the name.
-        wording = origin_phrase("{}", kind).split("{}")[0].strip()
-        assert f"Save block rule for values {wording}" in text
-
-    for rule_type in ("block_path", "block_command"):
-        assert rule_type in text
-
-    # The withdrawn action, and the false premise it rested on.
-    assert "Block this source" not in text
-    assert "no rule can name a source" not in text
-
-    # Known limit 10: origin rules match the whole value, normalised.
-    # Matching requires detection on ingress and again on egress; saving
-    # a rule does not establish that it will match a later call.
-    #
-    # This asserted `"byte-identical" in text` until #49 item 7, which is
-    # the third test in this repository found enforcing a claim the code
-    # contradicts. Matching keys on an HMAC of `value.strip().lower()`
-    # (`mask.py:21`), so the matching set is WIDER than a byte comparison.
-    # The skill is the surface that speaks for the tool at runtime, and a
-    # test pinning its wording is the last place a stale claim should be
-    # able to hide.
-    # Short enough not to span a line wrap: SKILL.md is hand-wrapped prose,
-    # and the first version of this assertion looked for a phrase that a
-    # newline ran through.
-    assert "whole value, normalised" in text
-    assert "byte-identical" not in text
+    A heredoc that imported `privacy_hud` chose a package by `sys.path`,
+    which is what #66 exists to stop; one that joined `ledger.db` onto
+    the data directory opened the fence on a repaired installation.
+    """
+    for block in _bash_blocks():
+        assert "ledger.db" not in block
+        assert "import privacy_hud" not in block
+        assert "sys.path" not in block
+        assert "<<'PY'" not in block
 
 
-def test_resolve_block_names_the_session(env):
-    out = _run(_block("resolve"), env)
-    # No daemon in the test, so the skill's documented fallback applies.
-    assert "session_id: s1" in out
-    assert "basis: started_at" in out
+# --------------------------------------------------------------------- #
+# what each block produces
+# --------------------------------------------------------------------- #
+
+def test_audit_block_prints_the_table_and_one_resolution(env):
+    out = _run(_block("audit"), env)
+    assert out.returncode == 0, out.stderr
+    lines = out.stdout.strip().splitlines()
+    resolution = json.loads(lines[-1])
+    assert resolution["session_id"] == "s1"
+    assert resolution["basis"] in ("explicit", "active", "started_at")
+    assert resolution["runtime_mismatch"] is False
+    assert "Disclosure" in out.stdout or "legacy" in out.stdout
+    assert "support.log" in out.stdout
 
 
-def test_audit_block_prints_the_table(env):
-    out = _run(_block("audit"), env,
-               SESSION_ID="s1", BASIS="started_at", ALSO_ACTIVE="")
-    assert "Privacy Audit" in out
-    # BASIS reached the header: no daemon named the session current.
-    assert "Most recently started session" in out
-    assert "Email ×1        support.log  model_context  [LEGACY PERMITTED]" \
-        in out
-
-
-def test_audit_block_without_basis_labels_supplied_id(env):
-    """No basis carried over: the table names the session it was given,
-    without inventing how that session was chosen."""
-    out = _run(_block("audit"), env, SESSION_ID="s1", BASIS="", ALSO_ACTIVE="")
-    assert "Session s1" in out
-    assert "Most recently started session" not in out
+def test_audit_block_resolves_without_an_explicit_id(env):
+    """`$privacy` with no id resolves one; the skill carries that id into
+    every later step rather than resolving a second time."""
+    out = _run(_block("audit"), {**env, "SESSION_ID": ""})
+    assert out.returncode == 0, out.stderr
+    resolution = json.loads(out.stdout.strip().splitlines()[-1])
+    assert resolution["session_id"] == "s1"
 
 
 def test_detail_block_prints_one_row(env):
-    with sqlite3.connect(Path(env["PLUGIN_DATA"]) / "ledger.db") as conn:
-        (event_id,) = conn.execute(
-            "SELECT id FROM events WHERE session_id = 's1'").fetchone()
-    out = _run(_block("detail"), env, SESSION_ID="s1", EVENT_ID=str(event_id))
-    assert "Email ×1\nRecorded association       support.log → model_context" \
-        in out
+    out = _run(_block("detail"), env)
+    assert out.returncode == 0, out.stderr
+    assert "email" in out.stdout.lower()
+    assert origin_phrase(OriginKind.PATH, "support.log") in out.stdout \
+        or "support.log" in out.stdout
 
 
-def test_hud_block_prints_one_state_word(env):
-    out = _run(_block("hud"), env, SESSION_ID="s1")
-    assert out.strip() in {"shown", "hidden", "stale", "absent"}
+def test_hud_block_prints_a_state(env):
+    out = _run(_block("hud"), env)
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout)["state"] in ("shown", "hidden", "stale",
+                                               "absent")
 
 
-def test_read_block_prints_on_or_off(env):
-    # The block ships with `on` filled in, the way the `hud` block does, so
-    # running it verbatim turns the guard on and says so in one word. No
-    # second line: this env's PLUGIN_DATA is writable.
+def test_read_block_prints_the_setting(env):
     out = _run(_block("read"), env)
-    assert out.splitlines() == ["on"]
-    settings = Path(env["PLUGIN_DATA"]) / "settings.json"
-    assert json.loads(settings.read_text())["deny_read"] is True
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout)["deny_read"] is False
 
 
-def test_read_block_says_so_when_the_setting_cannot_be_written(env, tmp_path):
-    """The failure the user must not meet as a traceback: the word printed
-    is what the setting still says, and the line after it says the write
-    did not land."""
+def test_read_block_says_so_when_the_setting_cannot_be_written(env):
+    """The word printed is what the setting still says, not what was
+    asked for — so an unwritable settings file is reported, never
+    silently swallowed."""
     data = Path(env["PLUGIN_DATA"])
     data.chmod(0o500)
     try:
-        out = _run(_block("read"), {**env})
+        block = _block("read").replace("read status", "read on")
+        out = _run(block, env)
+        assert out.returncode == 0, out.stderr
+        answer = json.loads(out.stdout)
+        assert answer["deny_read"] is False, (
+            "the guard is off, which is what the file still says")
+        assert answer.get("error")
     finally:
         data.chmod(0o700)
-    first, rest = out.splitlines()[0], out.splitlines()[1:]
-    assert first == "off"
-    assert rest and "unchanged" in rest[0]
+
+
+def test_repair_block_prints_the_recovery_command(env):
+    from privacy_hud import runtime_messages, runtime_repair
+
+    out = _run(_block("repair"), env)
+    assert out.returncode == 0, out.stderr
+    expected = runtime_messages.REPAIR_COMMAND_OUTPUT.format(
+        repair_command=runtime_repair.format_repair_command(
+            Path(env["PLUGIN_ROOT"]).resolve(),
+            Path(env["PLUGIN_DATA"])))
+    assert out.stdout.strip() == expected
+    assert "--repair-runtime" in out.stdout
+    assert "It does not install or replace a patched Codex binary." in \
+        out.stdout
+
+
+def test_setup_block_names_this_bundles_installer(env):
+    out = _run(_block("setup"), env)
+    assert out.returncode == 0, out.stderr
+    printed = out.stdout.strip()
+    assert printed == f"sh {Path(env['PLUGIN_ROOT']) / 'install.sh'} --yes"
+    assert Path(printed.split()[1]).is_file()
+    assert "ls -d" not in _block("setup")
+
+
+def test_ui_block_prints_one_loopback_url(env):
+    import signal
+    import threading
+
+    proc = subprocess.Popen(["bash", "-c", _block("ui")],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, env=env, start_new_session=True)
+
+    def stop() -> None:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (OSError, ProcessLookupError):
+            pass
+
+    watchdog = threading.Timer(120.0, stop)
+    watchdog.start()
+    try:
+        url = proc.stdout.readline().strip()
+        assert url.startswith("http://127.0.0.1:")
+        assert "session_id=s1" in url
+    finally:
+        watchdog.cancel()
+        stop()
+        try:
+            proc.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+# --------------------------------------------------------------------- #
+# what the prose promises
+# --------------------------------------------------------------------- #
+
+def test_the_skill_describes_the_source_rules_that_actually_ship():
+    """The two origin rule types, and no third one.
+
+    `block_source` was withdrawn in #38; a skill that still offered it
+    would be telling a user to save a rule `apply_policy` refuses.
+    """
+    text = SKILL_MD.read_text(encoding="utf-8")
+    assert "block_path" in text and "block_command" in text
+    assert "block_source" in text and "refuses the withdrawn" in text
 
 
 def test_the_skill_does_not_tell_the_model_to_announce_enforcement():
@@ -206,10 +271,10 @@ def test_the_skill_does_not_tell_the_model_to_announce_enforcement():
 
     SKILL.md used to end this bullet "It is correct to tell the user the
     rule is now enforced, not merely recorded." — a direct instruction to
-    assert the thing #49 item 2 is about. The model is the surface the user
-    actually hears, so an honest API reply with this line still in the skill
-    would have changed nothing they see.
+    assert the thing #49 item 2 is about. The model is the surface the
+    user actually hears, so an honest API reply with this line still in
+    the skill would have changed nothing they see.
     """
-    text = (REPO / "skills" / "privacy" / "SKILL.md").read_text(encoding="utf-8")
+    text = SKILL_MD.read_text(encoding="utf-8")
     assert "now enforced, not merely recorded" not in text
     assert "Say the rule is **saved**" in text

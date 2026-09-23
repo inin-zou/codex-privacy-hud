@@ -578,6 +578,24 @@ def apply_policy(ledger, session_id: str, *, rule_type: str, selector: str) -> N
     retroactively: data already disclosed before the rule was written stays
     disclosed (design.md P4).
     """
+    validate_policy_rule(rule_type=rule_type, selector=selector)
+    ledger.add_policy(session_id, rule_type=rule_type, selector=selector)
+
+
+def validate_policy_rule(*, rule_type: str, selector: str) -> None:
+    """Refuse a rule no engine could ever match, without a ledger.
+
+    Split out of `apply_policy` for #66 Pair 6: a policy mutation now
+    travels to the daemon, and a rule that is wrong on its face must be
+    refused *before* the request is transmitted. Otherwise the caller
+    learns about it from a reply — and a reply that never arrives is an
+    unknown outcome, which is a much worse thing to say about a request
+    that was never valid.
+
+    `apply_policy` still calls it, so the daemon validates again on its
+    own side: the client's check is about honest reporting, not about
+    being the only gate.
+    """
     if rule_type == "block_source":
         raise ValueError(_BLOCK_SOURCE_WITHDRAWN)
     if rule_type == "allow_dest":
@@ -588,7 +606,6 @@ def apply_policy(ledger, session_id: str, *, rule_type: str, selector: str) -> N
         raise ValueError(
             f"unknown rule_type {rule_type!r}; expected one of "
             f"{sorted(_POLICY_RULE_TYPES)}")
-    ledger.add_policy(session_id, rule_type=rule_type, selector=selector)
 
 
 def allow_once(ledger, session_id: str, *, tool_name: str, tool_input,

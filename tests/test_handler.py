@@ -5,7 +5,8 @@ tiny shell script that records the argv and environment it was given and then
 sleeps, which is what makes three separate claims checkable at once and
 without any model weights:
 
-* the client execs **the recorded interpreter**, with `-m privacy_hud.daemon`
+* the client execs **the recorded interpreter**, in isolated mode, on this
+  bundle's bootstrap (`-I scripts/runtime.py --plugin-data DIR daemon`, #66)
   — not `sys.executable`, and not a `python3` off `PATH`, which on a real
   Codex hook is a system interpreter with no `transformers` and would produce
   a daemon with tier 3 silently dead;
@@ -73,11 +74,24 @@ def _fake_interpreter(tmp_path, *, sleep: float = 20.0) -> tuple[Path, Path]:
     return script, marker
 
 
+REPO = HANDLER.parents[1]
+BOOTSTRAP = REPO / "scripts" / "runtime.py"
+
+
 def _write_receipt(data_dir: Path, python, **overrides) -> None:
-    receipt = {"v": 1, "python": str(python), "pythonpath": str(SRC),
-               "plugin_data": str(data_dir), "recorded_at": time.time(),
-               "recorded": {"transformers": "5.16.1", "torch": "2.14.0"},
-               "env": {"HF_HOME": str(data_dir / "hf")}}
+    """Receipt v2 selecting this checkout. The hook client compares the
+    selected build with this bundle's manifest; it does not hash the bundle
+    (the daemon's bootstrap does), so these tests do not depend on the
+    checkout's manifest being current."""
+    build_id = json.loads((REPO / "runtime-build.json").read_text())["build_id"]
+    receipt = {"v": 2, "python": str(python),
+               "env": {"HF_HOME": str(data_dir / "hf")},
+               "dependency_probe": {"transformers": "5.16.1",
+                                    "torch": "2.14.0"},
+               "selected_bundle_root": str(REPO),
+               "selected_build_id": build_id,
+               "activation_epoch": "0123456789abcdef0123456789abcdef",
+               "storage_generation": 1, "recorded_at": time.time()}
     receipt.update(overrides)
     (data_dir / "runtime.json").write_text(json.dumps(receipt))
 
@@ -114,18 +128,23 @@ def test_client_imports_only_stdlib():
 
 
 def test_spawn_only_imports_are_deferred():
-    """`subprocess` and `time` are paid on the spawn path only.
+    """`subprocess` is paid on the spawn path only.
 
     The daemon answers on the hot path of every tool call, and CLAUDE.md §4's
-    rule is about what that path costs — so the two modules auto-spawn needs
-    are imported inside the function that spawns, not at module scope.
+    rule is about what that path costs — so the module auto-spawn needs is
+    imported inside the function that spawns, not at module scope.
+
+    `time` moved to module scope in #66: the one monotonic deadline that
+    bounds connect, hello, request and reply is taken on every invocation,
+    before anything else happens, so deferring it would buy nothing. It is a
+    builtin extension module the interpreter has already loaded.
     """
     import ast
     tree = ast.parse(HANDLER.read_text())
     top_level = {alias.name
                  for node in tree.body if isinstance(node, ast.Import)
                  for alias in node.names}
-    assert top_level == {"json", "os", "socket", "sys"}
+    assert top_level == {"json", "os", "socket", "sys", "time"}
 
 
 def test_missing_daemon_on_ingress_fails_open(tmp_path):
@@ -176,10 +195,63 @@ def test_a_missing_daemon_is_started_from_the_recorded_interpreter(tmp_path):
     finally:
         _kill_marked(marker)
 
-    assert "argv:-m privacy_hud.daemon" in recorded
+    assert (f"argv:-I {BOOTSTRAP} --plugin-data {tmp_path} daemon"
+            in recorded.splitlines())
     assert f"PLUGIN_DATA={tmp_path}" in recorded
-    assert str(SRC) in recorded            # the recorded sys.path entry
+    # #66: no path entry reaches the daemon; the bootstrap selects the code.
+    assert "PYTHONPATH=" in recorded.splitlines()
     assert f"HF_HOME={tmp_path / 'hf'}" in recorded  # the weights location
+
+
+def test_a_v1_receipt_is_repair_input_only(tmp_path):
+    """Receipt v1 carries a `pythonpath` that selected application code.
+    #66: it is accepted only as repair input, so the hook starts nothing."""
+    script, marker = _fake_interpreter(tmp_path)
+    _write_receipt(tmp_path, script, v=1, pythonpath=str(SRC))
+    try:
+        run(INGRESS, {"PLUGIN_DATA": str(tmp_path)})
+        time.sleep(0.3)
+        assert not marker.exists()
+    finally:
+        _kill_marked(marker)
+
+
+def test_a_receipt_selecting_another_build_is_not_spawned(tmp_path):
+    """Hooks may start only the already-selected runtime of their own
+    bundle: another bundle root or another build id starts nothing.
+
+    #66: the selection is read before the socket, so a mismatch is decided
+    without connecting, without spawning and without a spawn attempt to
+    record — and the payload is never sent to whatever may be listening.
+    """
+    script, marker = _fake_interpreter(tmp_path)
+    for override in ({"selected_build_id": "f" * 64},
+                     {"selected_bundle_root": str(tmp_path / "other")}):
+        _write_receipt(tmp_path, script, **override)
+        try:
+            _code, out = run(INGRESS, {"PLUGIN_DATA": str(tmp_path)})
+            time.sleep(0.3)
+            assert not marker.exists(), override
+            assert not (tmp_path / "daemon.spawn-attempt").exists(), override
+            assert "runtime mismatch" in json.loads(out)["systemMessage"]
+        finally:
+            _kill_marked(marker)
+            (tmp_path / "daemon.spawn-attempt").unlink(missing_ok=True)
+
+
+def test_inherited_pythonpath_never_reaches_the_daemon(tmp_path):
+    script, marker = _fake_interpreter(tmp_path)
+    _write_receipt(tmp_path, script)
+    try:
+        run(INGRESS, {"PLUGIN_DATA": str(tmp_path),
+                      "PYTHONPATH": "/hostile/path"})
+        deadline = time.time() + 5.0
+        while not marker.exists() and time.time() < deadline:
+            time.sleep(0.02)
+        recorded = marker.read_text()
+    finally:
+        _kill_marked(marker)
+    assert "/hostile/path" not in recorded
 
 
 def test_spawn_daemon_forces_offline_flags(tmp_path):
@@ -425,8 +497,10 @@ def test_a_receipt_other_users_can_write_is_not_used(tmp_path):
         time.sleep(0.3)
         assert code == 0
         assert not marker.exists()
-        latch = json.loads((tmp_path / "daemon.spawn-attempt").read_text())
-        assert "writable" in latch["error"]
+        # #66: with no receipt it can trust, the client knows no selected
+        # build to name in a hello, so it neither connects nor spawns.
+        assert not (tmp_path / "daemon.spawn-attempt").exists()
+        assert "unverified" in json.loads(out)["systemMessage"]
     finally:
         _kill_marked(marker)
 
@@ -488,10 +562,26 @@ def test_a_daemon_that_answers_is_never_second_guessed(tmp_path):
     import tempfile
     import threading
 
+    build_id = json.loads((REPO / "runtime-build.json").read_text())["build_id"]
+    epoch = "0123456789abcdef0123456789abcdef"
+
     class _Handler(socketserver.StreamRequestHandler):
         def handle(self):
+            hello = json.loads(self.rfile.readline())
+            assert hello == {"v": 2, "op": "hello", "build_id": build_id,
+                             "activation_epoch": epoch,
+                             "storage_generation": 1}
+            self.wfile.write((json.dumps(
+                {"v": 2, "op": "hello", "ok": True, "release": "0.8.0",
+                 "build_id": build_id, "activation_epoch": epoch,
+                 "storage_generation": 1, "schema_version": 0,
+                 "ready": True}) + "\n").encode())
+            self.wfile.flush()
             self.rfile.readline()
-            self.wfile.write(b'{"systemMessage": "from the daemon"}\n')
+            self.wfile.write((json.dumps(
+                {"v": 2, "op": "event", "ok": True,
+                 "output": {"systemMessage": "from the daemon"}}) + "\n")
+                .encode())
 
     # AF_UNIX paths are capped at ~104 bytes and pytest's tmp_path exceeds it.
     short = Path(tempfile.mkdtemp(prefix="phh"))
