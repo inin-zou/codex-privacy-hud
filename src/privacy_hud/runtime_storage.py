@@ -553,7 +553,10 @@ def holder_paths(data_dir) -> list[Path]:
 
 
 def open_holders(data_dir) -> frozenset[int]:
-    """Every process with the ledger database or one of its sidecars open.
+    """Observable processes with the ledger database or a sidecar open.
+
+    This is an unprivileged holder check, not proof of global quiescence.
+    Linux EACCES blind spots are outside the scan's visibility.
 
     Unknown processes included: what matters is the descriptor, not
     whether the holder is recognizable as a Privacy HUD process. An idle
@@ -607,9 +610,11 @@ def _proc_holders(paths: list[Path]) -> frozenset[int]:
 
     Another user's processes are skipped rather than refused: this is a
     single-user layout, the files are 0600, and refusing because `root`
-    has processes would refuse on every machine. A process of *this*
-    user whose descriptors cannot be listed is a refusal — that is the
-    incomplete visibility the question is about.
+    has processes would refuse on every machine. EACCES listing an fd
+    directory, or on both stat and readlink of a descriptor, is outside
+    this unprivileged scan's visibility. Such a process may still hold a
+    target. Other inspection errors refuse; a readable filesystem link
+    still requires inode matching.
     """
     targets = set()
     for path in paths:
@@ -633,10 +638,17 @@ def _proc_holders(paths: list[Path]) -> frozenset[int]:
         try:
             if os.stat(f"/proc/{pid}").st_uid != uid:
                 continue
-            descriptors = os.listdir(f"/proc/{pid}/fd")
         except (FileNotFoundError, ProcessLookupError):
             continue
         except OSError:
+            raise RuntimeRefusal("holder_unknown") from None
+        try:
+            descriptors = os.listdir(f"/proc/{pid}/fd")
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except OSError as exc:
+            if exc.errno == errno.EACCES:
+                continue
             raise RuntimeRefusal("holder_unknown") from None
         for fd in descriptors:
             descriptor = f"/proc/{pid}/fd/{fd}"
@@ -644,12 +656,15 @@ def _proc_holders(paths: list[Path]) -> frozenset[int]:
                 info = os.stat(descriptor)
             except (FileNotFoundError, ProcessLookupError):
                 continue
-            except OSError:
+            except OSError as stat_error:
                 try:
                     target = os.readlink(descriptor)
                 except (FileNotFoundError, ProcessLookupError):
                     continue
-                except OSError:
+                except OSError as link_error:
+                    if (stat_error.errno == errno.EACCES
+                            and link_error.errno == errno.EACCES):
+                        continue
                     raise RuntimeRefusal("holder_unknown") from None
                 # Only kernel pseudo-objects are demonstrably unrelated.
                 # A different filesystem pathname can be a hard link or

@@ -2,6 +2,8 @@
 
 Stated up front, because a privacy tool that overclaims is worse than none:
 
+**Linux install/repair holder visibility.** The storage transition checks observable same-uid processes through `/proc`. It skips a process when listing its fd directory returns `EACCES`, and skips a descriptor when both stat and readlink return `EACCES`. These are inspection blind spots, not evidence that the process is unrelated to the ledger. An inaccessible process may still hold a ledger or sidecar; a successful scan does not prove that all ledger users have stopped. Close other ledger users before install or repair. A readable filesystem link whose inode cannot be checked still causes refusal, as do other inspection errors except vanished processes or descriptors. Linux remains supported within this visibility limit.
+
 A denial or rewritten input returned by Privacy HUD is not confirmation that the host applied it. Current hooks do not establish that a denied call did not run or that rewritten input reached its intended recipient.
 
 The historical headings retain their link anchors. References to blocking below describe plugin decisions or legacy classifications, not confirmed host enforcement.

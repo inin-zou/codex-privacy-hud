@@ -766,6 +766,89 @@ def test_proc_descriptor_visibility(monkeypatch, stat_error, link, expected):
         assert reads == ["/proc/123/fd/4"]
 
 
+@pytest.mark.parametrize("visible_holder", [False, True])
+@pytest.mark.parametrize(
+    "stage, stat_errno, link_errno, refuses",
+    [
+        ("fd_list", "EACCES", None, False),
+        ("fd_list", "EPERM", None, True),
+        ("fd_list", "EIO", None, True),
+        ("process", "EACCES", None, True),
+        ("proc", "EACCES", None, True),
+        ("target", "EACCES", None, True),
+        ("descriptor", "EACCES", "EACCES", False),
+        ("descriptor", "EACCES", "EPERM", True),
+        ("descriptor", "EPERM", "EACCES", True),
+        ("descriptor", "EIO", "EACCES", True),
+        ("descriptor", "EACCES", "EIO", True),
+    ],
+)
+def test_proc_eacces_visibility_boundary(
+    monkeypatch, visible_holder, stage, stat_errno, link_errno, refuses
+):
+    import errno
+    from types import SimpleNamespace
+
+    target = Path("/review/ledger.db")
+    uid = storage.os.getuid()
+
+    def fail():
+        raise OSError(getattr(errno, stat_errno), "synthetic inspection error")
+
+    def fake_stat(path, *args, **kwargs):
+        name = str(path)
+        if name == str(target):
+            if stage == "target":
+                fail()
+            return SimpleNamespace(st_dev=1, st_ino=2)
+        if name in ("/proc/123", "/proc/456"):
+            if name == "/proc/123" and stage == "process":
+                fail()
+            return SimpleNamespace(st_uid=uid)
+        if name == "/proc/123/fd/4":
+            if stage == "descriptor":
+                fail()
+            return SimpleNamespace(st_dev=1, st_ino=99)
+        if name == "/proc/456/fd/4":
+            return SimpleNamespace(
+                st_dev=1, st_ino=2 if visible_holder else 99
+            )
+        raise AssertionError(name)
+
+    def fake_listdir(path):
+        name = str(path)
+        if name == "/proc":
+            if stage == "proc":
+                fail()
+            return ["123", "456"]
+        if name == "/proc/123/fd":
+            if stage == "fd_list":
+                fail()
+            return ["4"]
+        if name == "/proc/456/fd":
+            return ["4"]
+        raise AssertionError(name)
+
+    def fake_readlink(path):
+        assert path == "/proc/123/fd/4"
+        assert link_errno is not None
+        raise OSError(
+            getattr(errno, link_errno), "synthetic inspection error"
+        )
+
+    with monkeypatch.context() as patch:
+        patch.setattr(storage.os, "stat", fake_stat)
+        patch.setattr(storage.os, "listdir", fake_listdir)
+        patch.setattr(storage.os, "readlink", fake_readlink)
+        if refuses:
+            with pytest.raises(RuntimeRefusal) as failure:
+                storage._proc_holders([target])
+            assert failure.value.code == "holder_unknown"
+        else:
+            expected = frozenset({456}) if visible_holder else frozenset()
+            assert storage._proc_holders([target]) == expected
+
+
 @pytest.mark.parametrize("failure_at", ["target", "descriptor"])
 def test_proc_inspection_permission_failure_refuses(monkeypatch, failure_at):
     from types import SimpleNamespace
