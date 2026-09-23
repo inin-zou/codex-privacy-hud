@@ -55,7 +55,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: anthropics/claude-code-action@v1
+      - id: claude
+        uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -130,6 +131,65 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: claude-execution-output-${{ github.event.pull_request.number }}
-          path: /home/runner/work/_temp/claude-execution-output.json
-          if-no-files-found: warn
+          path: ${{ steps.claude.outputs.execution_file }}
+          if-no-files-found: error
           retention-days: 3
+
+      # A review that ends without its comment used to leave a green check and
+      # nothing else: the last two pull requests went unreviewed and unnoticed.
+      # This reads the log the action wrote and says so on the pull request,
+      # naming only the counts and the refused tool names.
+      - name: Report a review that posted nothing
+        if: always() && steps.claude.outputs.execution_file != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          LOG: ${{ steps.claude.outputs.execution_file }}
+        run: |
+          python3 - "$LOG" > notice.md <<'PY'
+          import json, sys
+
+          messages = json.load(open(sys.argv[1]))
+          if isinstance(messages, dict):
+              messages = [messages]
+
+
+          def calls(message):
+              """The tool calls in one message, whatever else it holds.
+
+              A message, its inner message and its content are each a
+              dict, a bare string or absent, and a block is only a tool
+              call when it says so.
+              """
+              if not isinstance(message, dict):
+                  return
+              inner = message.get("message")
+              if not isinstance(inner, dict):
+                  return
+              content = inner.get("content")
+              if not isinstance(content, list):
+                  return
+              for block in content:
+                  if isinstance(block, dict) and block.get("type") == "tool_use":
+                      yield block
+
+
+          posted = any(
+              "gh pr comment" in str((call.get("input") or {}).get("command", ""))
+              for message in messages for call in calls(message))
+          result = next(
+              (m for m in messages
+               if isinstance(m, dict) and m.get("type") == "result"), {})
+          if posted:
+              sys.exit(0)
+          denied = sorted({
+              d.get("tool_name", "?")
+              for d in (result.get("permission_denials") or [])})
+          print("**This review posted no findings.**")
+          print()
+          print(f"It ran {result.get('num_turns', '?')} turns and "
+                f"{len(result.get('permission_denials') or [])} tool calls were "
+                f"refused ({', '.join(denied) or 'none'}). Read this pull "
+                "request yourself: nothing here says the diff is sound.")
+          PY
+          if [ -s notice.md ]; then gh pr comment "$PR" --body-file notice.md; fi
