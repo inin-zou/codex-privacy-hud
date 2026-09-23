@@ -127,7 +127,9 @@ jobs:
       # own reasoning about this repository's diff, nothing from a user's
       # machine, and it expires after three days.
       - name: Upload the review execution log
-        if: always()
+        # The same guard as the step below: a run cancelled by the next push
+        # never sets this output, and a superseded run is not a failure.
+        if: (success() || failure()) && steps.claude.outputs.execution_file != ''
         uses: actions/upload-artifact@v4
         with:
           name: claude-execution-output-${{ github.event.pull_request.number }}
