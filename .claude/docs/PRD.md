@@ -2,9 +2,9 @@
 
 **Status:** Draft v0.1 · **Date:** 2026-09-03 · **Track:** Agentic AI — Making Privacy Native to Personal Agents
 
-**Current contract — #66 runtime consistency (0.8.0), retaining #54 Phase 2.**
+**Current contract — #54 Phase 3 (0.8.1).**
 
-First-party runtime code loads from the selected plugin bundle. Clients establish matching runtime identity before sending hook payloads or policy mutations. The compatible daemon owns ledger writes. Readers open the ledger read-only. Explicit repair preserves stored values and fences the historical ledger pathname; it does not rebuild accounting. The daemon retains the genuine new-session preparation boundary. Production sessions still use legacy accounting. No historical rows are backfilled or rescored. Snapshot version remains 2. The native HUD does not authenticate runtime alignment. #43, #44, and the related #47 accounting limitations remain unresolved.
+The new accounting core is implemented and tested but is not active for production sessions. Production session creation still selects legacy accounting. Prepared-schema migration remains unchanged. No historical rows are backfilled or rescored. Runtime selection, writer ownership, and the fenced ledger layout introduced in 0.8.0 remain required. #43, #44, and the related #47 accounting limitations remain unresolved in production.
 
 ---
 

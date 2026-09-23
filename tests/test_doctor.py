@@ -1980,3 +1980,73 @@ def test_run_checks_gives_the_mcp_check_its_own_timeout_budget(
     monkeypatch.setattr(doctor, "check_mcp_server", fake_check_mcp_server)
     doctor.run_checks(timeout=0.2)
     assert seen == [doctor.MCP_TIMEOUT]
+
+
+# --------------------------------------------------------------------- #
+# #54 Phase 3: the structured version-2 summary
+# --------------------------------------------------------------------- #
+
+def test_doctor_validates_v2_summary_strictly(tmp_path):
+    from accounting_fakes import (
+        crossed, event, prepared_ledger, start_v2, unresolved_subject,
+    )
+
+    from privacy_hud.accounting import ACCOUNTING_NOTE, ACCOUNTING_SCORE_LABEL
+
+    led = prepared_ledger(tmp_path / "ledger.db")
+    try:
+        complete = start_v2(led)
+        led.record_observation(crossed(complete), [event()])
+        partial = start_v2(led)
+        led.record_observation(crossed(partial), [event(unresolved_subject())])
+        valid = json.loads(json.dumps(led.summary(complete).as_dict()))
+        nullable = json.loads(json.dumps(led.summary(partial).as_dict()))
+    finally:
+        led.conn.close()
+    assert valid["percent"] == 8 and valid["percentage_unavailable_reasons"] == []
+    assert nullable["percent"] is None
+    assert nullable["percentage_unavailable_reasons"] == ["unresolved_subjects"]
+    assert doctor._is_summary(valid)
+    assert doctor._is_summary(nullable)
+    assert doctor._V2_SUMMARY_LABEL == ACCOUNTING_SCORE_LABEL
+    assert doctor._V2_SUMMARY_NOTE == ACCOUNTING_NOTE
+
+    def broken(base, **changes):
+        out = dict(base)
+        for key, value in changes.items():
+            if value is KeyError:
+                del out[key]
+            else:
+                out[key] = value
+        return out
+
+    invalid = [
+        broken(valid, accounting_version=True),
+        broken(valid, observations=True),
+        broken(valid, event_rows=1.0),
+        broken(valid, denials_issued=-1),
+        broken(valid, confirmed_points=float("nan")),
+        broken(valid, confirmed_points=-1.0),
+        broken(valid, budget_cap=0.0),
+        broken(valid, percent=True),
+        broken(valid, percent=101),
+        broken(valid, percent=None),
+        broken(nullable, percent=0),
+        broken(valid, reads_stopped=KeyError),
+        broken(valid, extra=1),
+        broken(valid, score_label="legacy permitted-crossing score"),
+        broken(valid, accounting_note="Confirmed."),
+        broken(valid, accounting_status="legacy"),
+        broken(valid, profile_id="not-a-profile"),
+        broken(nullable, percentage_unavailable_reasons=["surprise"]),
+        broken(nullable, percentage_unavailable_reasons=[
+            "unresolved_subjects", "unresolved_subjects"]),
+        broken(nullable, percentage_unavailable_reasons=[
+            "unresolved_subjects", "unresolved_actions"]),
+        broken(nullable, percentage_unavailable_reasons="unresolved_subjects"),
+        broken(nullable, accounting_status="unavailable"),
+        broken(nullable, percentage_unavailable_reasons=[
+            "accounting_unavailable", "unresolved_subjects"]),
+    ]
+    for case in invalid:
+        assert not doctor._is_summary(case), case

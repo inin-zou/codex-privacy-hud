@@ -7,9 +7,10 @@ imports nothing from the package.
 Three generations, recorded in `PRAGMA user_version`:
 
 - 0: the legacy schema. `events` is the legacy table.
-- 5401: prepared. `events` was renamed to `events_legacy_v1`, byte-exact,
-  and the new accounting tables were created, empty. Every session is
-  still legacy-accounted.
+- 5401: prepared. The legacy events table is preserved as
+  `events_legacy_v1`. Production sessions remain legacy-accounted;
+  isolated synthetic tests and the private-copy rehearsal may exercise
+  version-2 accounting without activating production session creation.
 - 5402: activated (#54 Phase 4). A daemon of this version refuses it.
 
 The rebuild is the one structural change CLAUDE.md §4 permits. It runs

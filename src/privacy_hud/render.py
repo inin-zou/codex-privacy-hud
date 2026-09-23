@@ -53,15 +53,22 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from .accounting import (
+    PHASE3_SURFACE_UNSUPPORTED,
+    AccountingExposureRow,
+    AccountingSummary,
+)
 from .ledger import (
     LEGACY_ACCOUNTING_NOTE,
     LEGACY_SCORE_LABEL,
     UNRECORDED_ACCOUNTING_NOTE,
     UNRECORDED_SCORE_LABEL,
+    ExposureRow,
     LegacyExposureRow,
     LegacySessionSummary,
     SessionCoverage,
     SessionSummary,
+    UnsupportedAccounting,
 )
 from .matrix.loader import load_matrix
 
@@ -156,6 +163,23 @@ _EMPTY_UNRECORDED = (
 )
 
 
+def _refuse_v2(summary: SessionSummary | None = None,
+               rows: Sequence[ExposureRow] = ()) -> None:
+    """These terminal renderers describe legacy and unrecorded sessions only
+    (#54 Phase 3). A version-2 summary or row is refused with the fixed
+    Phase 3 error before any legacy field is read, never rendered through a
+    legacy or unrecorded branch."""
+    if isinstance(summary, AccountingSummary) or any(
+            isinstance(row, AccountingExposureRow) for row in rows):
+        raise UnsupportedAccounting(PHASE3_SURFACE_UNSUPPORTED)
+
+
+def _legacy_rows(rows: Sequence[ExposureRow]) -> list[LegacyExposureRow]:
+    """`rows`, after `_refuse_v2` has refused any version-2 row."""
+    _refuse_v2(rows=rows)
+    return [row for row in rows if isinstance(row, LegacyExposureRow)]
+
+
 def empty_message(tab: str, coverage: SessionCoverage | None, *,
                   summary: SessionSummary | None = None) -> str:
     """The one empty-state line for `tab` under `coverage`.
@@ -178,6 +202,7 @@ def empty_message(tab: str, coverage: SessionCoverage | None, *,
     - `None` → the tab's line alone, which is what a caller with no coverage
       reading is entitled to and no more.
     """
+    _refuse_v2(summary)
     if summary is not None and summary.accounting_version == 0:
         return _EMPTY_UNRECORDED
     if coverage is not None and not coverage.verified:
@@ -377,7 +402,8 @@ _LEGACY_CHIPS = {
 _LEGACY_CHIP_UNKNOWN = "LEGACY UNKNOWN"
 
 
-def _status_chip(row: LegacyExposureRow) -> str:
+def _status_chip(row: ExposureRow) -> str:
+    _refuse_v2(rows=(row,))
     return f"[{_LEGACY_CHIPS.get(row.kind, _LEGACY_CHIP_UNKNOWN)}]"
 
 
@@ -404,6 +430,7 @@ def _tiles_block(summary: SessionSummary) -> str:
     labels (#54): the score counts permitted crossings, and its rows may
     collapse different outcomes, so none of them is a confirmed-disclosure
     figure. An unrecorded summary has no numbers at all."""
+    _refuse_v2(summary)
     if isinstance(summary, LegacySessionSummary):
         pct = int(summary.legacy_percent)
         _check_band(pct)  # same fail-loud validation as hud_line
@@ -460,10 +487,10 @@ def _tab_bar(exposed_n: int | None, prevented_n: int | None,
     return line + "\n" + underline
 
 
-def _table(rows: Sequence[LegacyExposureRow]) -> str:
+def _table(rows: Sequence[ExposureRow]) -> str:
     headers = ["SENSITIVE DATA", "SOURCE", "DESTINATION", "STATUS"]
     data = []
-    for r in rows:
+    for r in _legacy_rows(rows):
         title = _title(r.data_type, r.count)
         source = _truncate_middle(r.source, 24)
         dest = r.destination
@@ -560,7 +587,7 @@ def _subtitle(resolved: "ResolvedSession | None", *,
     return _SUBTITLE_BY_BASIS.get(resolved.basis, "Session ID unknown")
 
 
-def audit(summary: SessionSummary, rows: Sequence[LegacyExposureRow],
+def audit(summary: SessionSummary, rows: Sequence[ExposureRow],
           tab: str, *,
           coverage: SessionCoverage | None = None,
           resolved: "ResolvedSession | None" = None,
@@ -595,6 +622,8 @@ def audit(summary: SessionSummary, rows: Sequence[LegacyExposureRow],
     `_subtitle`. Without `resolved`, a supplied `session_id` renders
     `Session <id>`; otherwise the subtitle is `Session ID unknown`.
     """
+    _refuse_v2(summary, rows)
+    legacy_rows = _legacy_rows(rows)
     legacy = isinstance(summary, LegacySessionSummary)
     exposed_n: int | None = None
     prevented_n: int | None = None
@@ -604,7 +633,7 @@ def audit(summary: SessionSummary, rows: Sequence[LegacyExposureRow],
         prevented_n = summary.legacy_prevented_rows
         all_n = len(rows) if tab == "All events" else all_events_count
 
-    ordered = list(rows) if legacy else []
+    ordered = legacy_rows if legacy else []
     if tab == "Exposed":
         ordered.sort(key=lambda r: r.budget_delta, reverse=True)
     elif tab == "Prevented":
@@ -681,7 +710,7 @@ def protection_display(protection: str | None) -> str:
     return _PROTECTION_DISPLAY.get(protection or "none", _PROTECTION_UNKNOWN)
 
 
-def detail(row: LegacyExposureRow) -> str:
+def detail(row: ExposureRow) -> str:
     """The L3 legacy row detail view (design.md §6).
 
     `Already disclosed data cannot be recalled from this session.` is
@@ -702,7 +731,11 @@ def detail(row: LegacyExposureRow) -> str:
     The "of {cap}" tail is included only when the row itself carries a
     `budget_cap`; fabricating a constant here would go stale the moment
     tables.toml's budget_cap is retuned.
+
+    A version-2 row is refused with the fixed Phase 3 error (#54).
     """
+    _refuse_v2(rows=(row,))
+    assert isinstance(row, LegacyExposureRow)
     lines = [_title(row.data_type, row.count)]
 
     flow = (" → ".join(row.hops) if row.hops
@@ -740,7 +773,7 @@ _RECEIPT_FINAL = ("This ledger stores metadata, not file contents, prompts, "
 
 
 def receipt(session_id: str, summary: SessionSummary,
-            rows: Sequence[LegacyExposureRow], minutes: int | None, *,
+            rows: Sequence[ExposureRow], minutes: int | None, *,
             coverage: SessionCoverage | None = None) -> str:
     """The end-of-session privacy receipt (design.md §10).
 
@@ -756,7 +789,12 @@ def receipt(session_id: str, summary: SessionSummary,
 
     `coverage` (a `ledger.SessionCoverage`, or `None` for "not asked") adds a
     banner at the top of a legacy receipt when the record is not verified.
+
+    A version-2 summary or row is refused with the fixed Phase 3 error
+    before the unrecorded branch, including for an empty session (#54).
     """
+    _refuse_v2(summary, rows)
+    legacy_rows = _legacy_rows(rows)
     if not isinstance(summary, LegacySessionSummary):
         return "\n".join([
             f"PRIVACY RECEIPT · {session_id}",
@@ -792,7 +830,7 @@ def receipt(session_id: str, summary: SessionSummary,
         "",
     ]
 
-    for r in rows:
+    for r in legacy_rows:
         title = _title(r.data_type, r.count)
         source = _truncate_middle(r.source, 20)
         lines.append(f"  {title:<22}{source:<18}→ {r.destination}")

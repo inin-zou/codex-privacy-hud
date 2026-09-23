@@ -1,5 +1,5 @@
 # tests/test_issue66_contract.py
-"""#66 Pair 9: what 0.8.0 declares, and what its documents say.
+"""#66 Pair 9: what this release declares, and what its documents say.
 
 Three kinds of claim are pinned here, because each has failed silently
 before. A version declared in two of three places leaves Codex running
@@ -33,7 +33,7 @@ from privacy_hud.matrix.loader import load_matrix
 from runtime_helpers import shared_bundle, short_data_dir, write_receipt_v2
 
 REPO = Path(__file__).resolve().parents[1]
-RELEASE = "0.8.0"
+RELEASE = "0.8.1"
 
 PLUGIN_JSON = REPO / ".codex-plugin" / "plugin.json"
 MARKETPLACE_JSON = REPO / ".agents" / "plugins" / "marketplace.json"
@@ -42,25 +42,21 @@ MANIFEST = REPO / contract.MANIFEST_NAME
 SKILL = REPO / "skills" / "privacy" / "SKILL.md"
 CHANGELOG = REPO / "CHANGELOG.md"
 
-#: The current-contract block, identical at the top of all three design
-#: documents.
-CURRENT_CONTRACT = """\
-**Current contract — #66 runtime consistency (0.8.0), retaining #54 Phase 2.**
-
-First-party runtime code loads from the selected plugin bundle. Clients \
-establish matching runtime identity before sending hook payloads or policy \
-mutations. The compatible daemon owns ledger writes. Readers open the ledger \
-read-only. Explicit repair preserves stored values and fences the historical \
-ledger pathname; it does not rebuild accounting. The daemon retains the \
-genuine new-session preparation boundary. Production sessions still use \
-legacy accounting. No historical rows are backfilled or rescored. Snapshot \
-version remains 2. The native HUD does not authenticate runtime alignment. \
-#43, #44, and the related #47 accounting limitations remain unresolved."""
+#: What the current-contract block at the top of all three design
+#: documents must still say about this release's runtime, whichever issue
+#: owns the block. There is one such block and each release replaces it:
+#: 0.8.1 publishes #54 Phase 3's, and this is the sentence that carries
+#: #66's contract into it. Deleting it is how a document comes to describe
+#: a release that no longer checks runtime alignment.
+CURRENT_CONTRACT_REQUIREMENT = (
+    "Runtime selection, writer ownership, and the fenced ledger layout "
+    "introduced in 0.8.0 remain required."
+)
 
 #: The replacement compatibility paragraphs, in order, for `README.md`,
 #: `docs/installing-by-hand.md` and `patches/README.md`.
 COMPATIBILITY = [
-    "Privacy HUD 0.8.0 retains snapshot version 2. Production sessions still "
+    "Privacy HUD 0.8.1 retains snapshot version 2. Production sessions still "
     "use legacy accounting. Snapshot-v2 readers accept version 1 as "
     "explicitly legacy and version 2 with nullable accounting fields. Older "
     "snapshot-v1-only readers reject version 2 and show no Privacy item. "
@@ -70,7 +66,7 @@ COMPATIBILITY = [
     "were re-released on 2026-09-22. An earlier installation of one of those "
     "versions may still contain the older reader. Updating the plugin does "
     "not replace that binary. No additional patched-Codex release is "
-    "required for Privacy HUD 0.8.0.",
+    "required for Privacy HUD 0.8.1.",
     "The native Privacy item displays accounting snapshots; it does not "
     "verify runtime alignment. Before repair, an old daemon may continue "
     "refreshing a legacy reading. Use doctor to check alignment. The bundled "
@@ -126,13 +122,13 @@ RELEASE_SENTENCE = (
 #: astra's Chinese text, published as written. It is not translated here
 #: and must not be paraphrased in review.
 COMPATIBILITY_ZH = [
-    "Privacy HUD 0.8.0 继续使用 snapshot v2，实际会话仍采用旧版记账。支持 v2 "
+    "Privacy HUD 0.8.1 继续使用 snapshot v2，实际会话仍采用旧版记账。支持 v2 "
     "的读取器会将 v1 明确标为旧版记账，并支持带可空记账字段的 v2。仅支持 v1 "
     "的旧读取器会拒绝 v2，不显示 Privacy 状态项。Codex 版本号相同并不代表快照"
     "兼容。",
     "支持 snapshot v2 的 Codex 0.154.0、0.155.0 和 0.155.1 补丁构建已于 "
     "2026-09-22 重新发布。如果此前安装过这些版本，本机二进制仍可能包含旧读取"
-    "器。更新插件不会替换该二进制；Privacy HUD 0.8.0 本身不需要再次发布 Codex "
+    "器。更新插件不会替换该二进制；Privacy HUD 0.8.1 本身不需要再次发布 Codex "
     "补丁构建。",
     "Codex 内的 Privacy 状态项只显示记账快照，不验证运行时是否一致。完成修复之"
     "前，旧守护进程可能仍在刷新旧版读数。请用 doctor 检查运行时一致性。插件内置"
@@ -192,7 +188,7 @@ def _flowed(text: str) -> str:
 # versions
 # --------------------------------------------------------------------- #
 
-def test_issue66_versions_are_0_8_0():
+def test_issue66_versions_are_0_8_1():
     """Four declarations, one release. Codex caches an installed plugin
     by version, so a bump that reaches three of them ships nothing."""
     assert json.loads(_text(PLUGIN_JSON))["version"] == RELEASE
@@ -242,8 +238,10 @@ def test_issue66_changelog_records_the_release():
 @pytest.mark.parametrize("name", ["PRD.md", "design.md", "architecture.md"])
 def test_issue66_current_contract_blocks_match(name):
     text = _text(REPO / ".claude" / "docs" / name)
-    assert _flowed(CURRENT_CONTRACT) in _flowed(text)
+    assert _flowed(CURRENT_CONTRACT_REQUIREMENT) in _flowed(text)
     assert "#54 Phase 2 (0.7.9)" not in text, (
+        "the superseded block is still at the top of this document")
+    assert "#66 runtime consistency (0.8.0)" not in text, (
         "the superseded block is still at the top of this document")
 
 

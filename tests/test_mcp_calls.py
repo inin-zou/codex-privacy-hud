@@ -509,3 +509,124 @@ def test_mcp_stdio_round_trip():
     finally:
         close_writer(direct)
     shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+# --------------------------------------------------------------------- #
+# #54 Phase 3: structured version-2 reads
+# --------------------------------------------------------------------- #
+
+def _v2_app(tmp_path, monkeypatch, record):
+    from accounting_fakes import prepared_ledger, start_v2
+
+    led = prepared_ledger(tmp_path / "ledger.db")
+    sid = start_v2(led)
+    record(led, sid)
+    close_writer(led)
+    monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))
+    opened: list[Ledger] = []
+    real_open = server._open_ledger
+
+    def capture():
+        opened.append(real_open())
+        return opened[-1]
+
+    monkeypatch.setattr(server, "_open_ledger", capture)
+    return server.build_app(), sid, opened
+
+
+def _close(opened):
+    for led in opened:
+        try:
+            led.conn.close()
+        except sqlite3.Error:
+            pass
+
+
+def test_mcp_returns_typed_v2_summary_list_and_detail(tmp_path, monkeypatch):
+    from accounting_fakes import crossed, denied, event, prevented, value_subject
+
+    from privacy_hud.accounting import AccountingExposureRow, AccountingSummary
+
+    def record(led, sid):
+        led.record_observation(crossed(sid), [event()])
+        led.record_observation(denied(sid), [
+            prevented(value_subject("b@example.com"))])
+
+    app, sid, opened = _v2_app(tmp_path, monkeypatch, record)
+    try:
+        direct = _direct(tmp_path)
+        try:
+            summary = mcp_tools.get_session_summary(direct, sid)
+            assert isinstance(summary, AccountingSummary)
+            exposed = mcp_tools.list_exposures(direct, sid, "Exposed")
+            assert [type(r) for r in exposed] == [AccountingExposureRow]
+            detail = mcp_tools.get_exposure_detail(direct, sid, exposed[0].id)
+            assert isinstance(detail, AccountingExposureRow)
+        finally:
+            close_writer(direct)
+
+        wire = _payload(_call(app, "privacy.get_session_summary",
+                              {"session_id": sid}))
+        assert wire == summary.as_dict()
+        assert list(wire) == list(summary.as_dict())
+        wire_rows = _payload(_call(app, "privacy.list_exposures",
+                                   {"session_id": sid, "tab": "Exposed"}))
+        assert wire_rows == exposed[0].as_dict()
+        wire_detail = _payload(_call(app, "privacy.get_exposure_detail",
+                                     {"session_id": sid,
+                                      "event_id": exposed[0].id}))
+        assert wire_detail == detail.as_dict()
+        assert wire_detail["accounting_version"] == 2
+        assert wire_detail["evidence"] == ["crossing_confirmed"]
+    finally:
+        _close(opened)
+
+
+def test_mcp_all_events_includes_permitted(tmp_path, monkeypatch):
+    from accounting_fakes import (
+        E, crossed, denied, detected, event, model_context, observation, pre,
+        prevented, recipient, value_subject,
+    )
+
+    def record(led, sid):
+        led.record_observation(pre(sid), [
+            event(kind="permitted", evidence=E.PERMISSION_ISSUED),
+            detected(value_subject("d@example.com"))])
+        led.record_observation(crossed(sid), [event()])
+        led.record_observation(denied(sid), [
+            prevented(value_subject("p@example.com"))])
+        led.record_observation(
+            observation(sid, boundary="B0", hook_event="PostToolUse",
+                        phase="post", action_kind="read", decision="none",
+                        evidence=E.EXECUTION_OBSERVED,
+                        potential_crossing=False),
+            [event(to=recipient("local", "local"), kind="local_access",
+                   evidence=E.EXECUTION_OBSERVED, boundary="B0")])
+        led.record_observation(
+            observation(sid, boundary="B1", hook_event="PreCompact",
+                        phase="lifecycle", action_kind="lifecycle",
+                        decision="none", evidence=E.PERSISTENCE_OBSERVED,
+                        potential_crossing=False),
+            [event(to=model_context(), kind="retention",
+                   evidence=E.PERSISTENCE_OBSERVED, boundary="B1",
+                   source_label="lifecycle")])
+
+    app, sid, opened = _v2_app(tmp_path, monkeypatch, record)
+    try:
+        rows = _payload(_call(app, "privacy.list_exposures",
+                              {"session_id": sid, "tab": "All events"}))
+        assert {r["kind"] for r in rows} == {
+            "detected", "local_access", "permitted", "exposed", "prevented",
+            "retention"}
+        assert len(rows) == 6
+        direct = _direct(tmp_path)
+        try:
+            assert [r.kind for r in mcp_tools.list_exposures(
+                direct, sid, "Prevented")] == ["prevented"]
+        finally:
+            close_writer(direct)
+    finally:
+        _close(opened)
+    # The legacy tab map is unchanged.
+    assert mcp_tools._TAB_KINDS["All events"] == (
+        "exposed", "prevented", "local_access", "detected", "retention")

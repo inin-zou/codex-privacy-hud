@@ -1036,3 +1036,35 @@ def test_real_model_scan_finds_pii_and_attempts_no_connection():
         "Global Constraint I2: loading and running the local model attempted "
         f"a connection: {payload['attempts']}"
     )
+
+
+def test_v2_accounting_and_mcp_projection_make_no_outbound_attempt(
+        tmp_path, network_guard):
+    from accounting_fakes import crossed, event, prepared_ledger, start_v2
+    from privacy_hud import mcp_tools
+
+    with socket.socket() as probe:
+        with pytest.raises(OutboundConnectionAttempted):
+            probe.connect(UNROUTABLE)
+    assert network_guard.outbound == [UNROUTABLE]
+    network_guard.attempts.clear()
+    network_guard.outbound.clear()
+
+    led = prepared_ledger(tmp_path / "ledger.db")
+    try:
+        sid = start_v2(led)
+        result = led.record_observation(crossed(sid), [event()])
+        summary = mcp_tools.get_session_summary(led, sid).as_dict()
+        rows = mcp_tools.list_exposures(led, sid, "All events")
+        detail = mcp_tools.get_exposure_detail(
+            led, sid, result.event_ids[0]).as_dict()
+        assert summary["accounting_version"] == 2
+        assert summary["distinct_disclosures"] == 1
+        assert summary["confirmed_points"] > 0
+        assert len(rows) == 1
+        assert rows[0].as_dict() == detail
+        assert detail["evidence"] == ["crossing_confirmed"]
+        network_guard.assert_no_outbound()
+        assert network_guard.attempts == []
+    finally:
+        led.conn.close()

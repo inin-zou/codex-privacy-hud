@@ -743,11 +743,13 @@ def test_installed_bundle_is_resolved_not_guessed(tmp_path, monkeypatch):
 
     cache = tmp_path / "codex" / "plugins" / "cache"
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
-    one = cache / codex.MARKETPLACE_NAME / codex.PLUGIN_NAME / "0.8.0"
+    one = (cache / codex.MARKETPLACE_NAME / codex.PLUGIN_NAME
+           / contract.RELEASE)
     make_bundle(one)
     assert repair.resolve_installed_bundle(contract.RELEASE) == one
 
-    two = cache / "another-marketplace" / codex.PLUGIN_NAME / "0.8.0"
+    two = (cache / "another-marketplace" / codex.PLUGIN_NAME
+           / contract.RELEASE)
     make_bundle(two)
     with pytest.raises(RuntimeRefusal) as refusal:
         repair.resolve_installed_bundle(contract.RELEASE)
@@ -765,7 +767,7 @@ def test_repair_reports_preservation_and_degradation_separately(install):
                         "--allow-degraded"], out=out)
     output = out.getvalue()
     assert code == 0, output
-    assert "Privacy HUD 0.8.0 is running from the selected plugin bundle." \
+    assert "Privacy HUD 0.8.1 is running from the selected plugin bundle." \
         in output
     assert "Existing ledger records were preserved." in output
     assert "Deep-scan detection is unavailable." in output
@@ -861,7 +863,7 @@ def test_offline_repair_cli_runs_without_installers(install):
         )
 
     assert completed.returncode == 0, completed.stderr
-    assert "Privacy HUD 0.8.0 is running" in completed.stdout
+    assert "Privacy HUD 0.8.1 is running" in completed.stdout
     assert "Traceback" not in completed.stderr
     assert stubs.calls() == []
     assert contract.classify_receipt(install.data) == "v2"
