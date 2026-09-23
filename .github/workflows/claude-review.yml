@@ -151,12 +151,17 @@ jobs:
           LOG: ${{ steps.claude.outputs.execution_file }}
         run: |
           python3 - "$LOG" > notice.md <<'PY'
-          import json, sys
+          import json, re, sys
 
           # The log this action writes is one JSON array; a stream-json
           # transcript is one object per line. Read either, and never let
           # the shape of the evidence decide whether a review is reported.
-          text = open(sys.argv[1]).read()
+          try:
+              text = open(sys.argv[1]).read()
+          except OSError:
+              # An unreadable log is itself an abnormal end. Report it with
+              # the counts unknown rather than failing without a word.
+              text = ""
 
 
           def parse(text):
@@ -223,11 +228,15 @@ jobs:
           # An attempt is not a result: a `gh pr comment` that failed on a
           # bad token or a closed pull request would otherwise count as
           # posted, and reproduce the silence this step exists to catch.
+          # `gh pr comment` at the start of a command, with an argument
+          # that is not `--help`: a command that merely mentions the phrase,
+          # such as a grep for it, posts nothing and must not count.
+          POSTS = re.compile(r"(?:^|[;&|]\s*)gh pr comment\s+(?!-)")
           attempted = {
               call.get("id")
               for message in messages for call in calls(message)
-              if "gh pr comment" in str(
-                  (call.get("input") or {}).get("command", ""))}
+              if POSTS.search(
+                  str((call.get("input") or {}).get("command", "")).strip())}
           posted = any(
               block.get("type") == "tool_result"
               and block.get("tool_use_id") in attempted
