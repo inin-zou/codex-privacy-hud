@@ -119,3 +119,17 @@ jobs:
           claude_args: |
             --max-turns 60
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*),Read,Grep,Glob"
+
+      # Temporary: the action prints only its first and last message, so a
+      # review that ends without its comment leaves no evidence of which tool
+      # call was refused. The execution log names every denial. It records the
+      # review's own reasoning about this repository's diff, nothing from a
+      # user's machine, and it is removed once the silence is diagnosed.
+      - name: Upload the review execution log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-execution-output-${{ github.event.pull_request.number }}
+          path: /home/runner/work/_temp/claude-execution-output.json
+          if-no-files-found: warn
+          retention-days: 3
