@@ -174,9 +174,34 @@ jobs:
                       yield block
 
 
+          def results(message):
+              """Every content block of one message, guarded the same way."""
+              if not isinstance(message, dict):
+                  return
+              inner = message.get("message")
+              if not isinstance(inner, dict):
+                  return
+              content = inner.get("content")
+              if isinstance(content, list):
+                  for block in content:
+                      if isinstance(block, dict):
+                          yield block
+
+
+          # An attempt is not a result: a `gh pr comment` that failed on a
+          # bad token or a closed pull request would otherwise count as
+          # posted, and reproduce the silence this step exists to catch.
+          attempted = {
+              call.get("id")
+              for message in messages for call in calls(message)
+              if "gh pr comment" in str(
+                  (call.get("input") or {}).get("command", ""))}
           posted = any(
-              "gh pr comment" in str((call.get("input") or {}).get("command", ""))
-              for message in messages for call in calls(message))
+              block.get("type") == "tool_result"
+              and block.get("tool_use_id") in attempted
+              and not block.get("is_error")
+              for message in messages
+              for block in results(message))
           result = next(
               (m for m in messages
                if isinstance(m, dict) and m.get("type") == "result"), {})
