@@ -155,10 +155,31 @@ jobs:
           # transcript is one object per line. Read either, and never let
           # the shape of the evidence decide whether a review is reported.
           text = open(sys.argv[1]).read()
-          try:
-              messages = json.loads(text)
-          except json.JSONDecodeError:
-              messages = [json.loads(line) for line in text.splitlines() if line.strip()]
+
+
+          def parse(text):
+              """Whatever of the log can be read.
+
+              A log truncated by a kill or a timeout is the abnormal end
+              this step exists to report, so an unreadable line is skipped
+              rather than allowed to abort the report.
+              """
+              try:
+                  return json.loads(text)
+              except json.JSONDecodeError:
+                  pass
+              messages = []
+              for line in text.splitlines():
+                  if not line.strip():
+                      continue
+                  try:
+                      messages.append(json.loads(line))
+                  except json.JSONDecodeError:
+                      continue
+              return messages
+
+
+          messages = parse(text)
           if isinstance(messages, dict):
               messages = [messages]
 
@@ -231,9 +252,10 @@ jobs:
           # own comment is sticky: a denial that repeats across pushes must not
           # bury the pull request in copies of the same sentence.
           printf '\n<!-- claude-review-silence -->\n' >> notice.md
-          existing=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" \
-            --jq 'map(select(.body | contains("<!-- claude-review-silence -->")))
-                  | last | .id // empty')
+          existing=$(gh api --paginate \
+            "repos/$GITHUB_REPOSITORY/issues/$PR/comments" \
+            --jq '.[] | select(.body | contains("<!-- claude-review-silence -->"))
+                  | .id' | tail -1)
           if [ -n "$existing" ]; then
             gh api --method PATCH \
               "repos/$GITHUB_REPOSITORY/issues/comments/$existing" \
