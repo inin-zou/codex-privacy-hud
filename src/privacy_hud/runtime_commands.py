@@ -169,8 +169,20 @@ def update_policy(data_dir: Path, *, activation: Activation,
         raise PolicyOutcomeUnknown() from None
     finally:
         connection.close()
-    return {name: reply[name] for name in POLICY_RESULT_FIELDS
-            if name in reply}
+    expected: JSONObject = {
+        "saved": True,
+        "enforcement": "conditional",
+        "rule_type": rule_type,
+        "selector": selector,
+        "conditions": mcp_tools.rule_enforcement_note(
+            rule_type, selector
+        ).strip(),
+    }
+    if (reply.get("saved") is not True
+            or any(reply.get(name) != value
+                   for name, value in expected.items())):
+        raise PolicyOutcomeUnknown()
+    return expected
 
 
 # --------------------------------------------------------------------- #

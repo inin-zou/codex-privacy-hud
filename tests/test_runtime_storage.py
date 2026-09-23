@@ -191,7 +191,8 @@ def test_historical_initializer_leaves_a_prepared_ledger_unchanged(tmp_path):
     historical initializer therefore changes no object and no cell. Pinned
     here because the fence's justification has to rest on what the code
     does, not on what a plan said it does: the hazard 0.7.1 still presents
-    is that it opens the ledger at all and writes legacy rows into it.
+    is that historical session and coverage writes can succeed even though
+    legacy event recording fails against the prepared events layout.
     """
     data_dir = tmp_path / "data"
     path = _write(data_dir, prepared=True)
@@ -649,3 +650,79 @@ def test_historical_session_start_mutates_a_prepared_ledger(tmp_path):
         ).fetchone()[0] == 1
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize("returncode", [0, 1])
+def test_lsof_incomplete_visibility_refuses(monkeypatch, returncode):
+    from types import SimpleNamespace
+
+    completed = SimpleNamespace(
+        returncode=returncode,
+        stdout="",
+        stderr="lsof: WARNING: can't stat() an inspected filesystem\n",
+    )
+    monkeypatch.setattr(storage.subprocess, "run", lambda *a, **k: completed)
+
+    with pytest.raises(RuntimeRefusal) as failure:
+        storage._lsof_holders("/usr/sbin/lsof", [Path("/review/ledger.db")])
+
+    assert failure.value.code == "holder_unknown"
+
+
+def test_unreadable_retirement_inventory_refuses(tmp_path, monkeypatch):
+    def denied(path):
+        raise PermissionError("private inspection error")
+
+    monkeypatch.setattr(Path, "iterdir", denied)
+
+    with pytest.raises(RuntimeRefusal) as failure:
+        storage.holder_paths(tmp_path)
+
+    assert failure.value.code == "holder_unknown"
+
+
+def test_unstatable_holder_path_refuses(tmp_path, monkeypatch):
+    def denied(path):
+        raise PermissionError("private inspection error")
+
+    monkeypatch.setattr(Path, "lstat", denied)
+
+    with pytest.raises(RuntimeRefusal) as failure:
+        storage.holder_paths(tmp_path)
+
+    assert failure.value.code == "holder_unknown"
+
+
+@pytest.mark.parametrize("failure_at", ["target", "descriptor"])
+def test_proc_inspection_permission_failure_refuses(monkeypatch, failure_at):
+    from types import SimpleNamespace
+
+    target = "/review/ledger.db"
+    uid = storage.os.getuid()
+
+    def fake_stat(path, *args, **kwargs):
+        name = str(path)
+        if name == target:
+            if failure_at == "target":
+                raise PermissionError("private target error")
+            return SimpleNamespace(st_dev=1, st_ino=2)
+        if name == "/proc/123":
+            return SimpleNamespace(st_uid=uid)
+        if name == "/proc/123/fd/4":
+            raise PermissionError("private descriptor error")
+        raise AssertionError(name)
+
+    def fake_listdir(path):
+        if str(path) == "/proc":
+            return ["123"]
+        if str(path) == "/proc/123/fd":
+            return ["4"]
+        raise AssertionError(path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(storage.os, "stat", fake_stat)
+        patch.setattr(storage.os, "listdir", fake_listdir)
+        with pytest.raises(RuntimeRefusal) as failure:
+            storage._proc_holders([Path(target)])
+
+    assert failure.value.code == "holder_unknown"

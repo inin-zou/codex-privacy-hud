@@ -789,3 +789,100 @@ def test_sqlite_is_not_left_holding_the_retired_database(install):
             "SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize("old_bundle_missing", [False, True])
+def test_repair_accepts_existing_v2_selection(install, old_bundle_missing):
+    seed_ledger(install.data)
+    before = storage._fingerprint(storage.legacy_path(install.data))
+    overrides = {}
+    if old_bundle_missing:
+        overrides["selected_bundle_root"] = str(install.root / "removed-bundle")
+    write_receipt_v2(
+        install.data,
+        bundle=install.bundle,
+        python=install.python,
+        build_id="f" * 64 if old_bundle_missing else None,
+        **overrides,
+    )
+    old_epoch = json.loads(install.receipt_bytes())["activation_epoch"]
+
+    with _no_installer_on_path(install.root / "offline-bin") as stubs:
+        result = repair.repair_runtime(
+            install.bundle, install.data, allow_degraded=True
+        )
+
+    assert stubs.calls() == []
+    assert result.activation.epoch != old_epoch
+    assert storage.is_fenced(install.data)
+    assert storage._fingerprint(storage.active_path(install.data)) == before
+    assert _await_daemon(install.data)["activation_epoch"] == result.activation.epoch
+
+
+def test_repair_resumes_after_receipt_publication_and_start_failure(
+    install, monkeypatch
+):
+    seed_ledger(install.data)
+    write_receipt_v1(install.data, python=install.python)
+    before = storage._fingerprint(storage.legacy_path(install.data))
+
+    def fail_start(*args, **kwargs):
+        raise RuntimeRefusal("runtime_starting")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(repair, "_start_daemon", fail_start)
+        with pytest.raises(RuntimeRefusal) as failure:
+            repair.repair_runtime(
+                install.bundle, install.data, allow_degraded=True
+            )
+
+    assert failure.value.code == "runtime_starting"
+    assert contract.classify_receipt(install.data) == "v2"
+    assert storage.read_journal(install.data)["stage"] == "receipt_published"
+    previous_epoch = json.loads(install.receipt_bytes())["activation_epoch"]
+
+    result = repair.repair_runtime(
+        install.bundle, install.data, allow_degraded=True
+    )
+
+    assert result.activation.epoch != previous_epoch
+    assert storage._fingerprint(storage.active_path(install.data)) == before
+    assert storage.read_journal(install.data)["stage"] == "ready"
+    assert _await_daemon(install.data)["activation_epoch"] == result.activation.epoch
+
+
+def test_offline_repair_cli_runs_without_installers(install):
+    seed_ledger(install.data)
+    write_receipt_v1(install.data, python=install.python)
+
+    with _no_installer_on_path(install.root / "offline-bin") as stubs:
+        completed = install.bootstrap(
+            "repair", "--offline", "--allow-degraded", timeout=240
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "Privacy HUD 0.8.0 is running" in completed.stdout
+    assert "Traceback" not in completed.stderr
+    assert stubs.calls() == []
+    assert contract.classify_receipt(install.data) == "v2"
+    assert storage.is_fenced(install.data)
+    assert _await_daemon(install.data)["ready"] is True
+
+
+@pytest.mark.parametrize(
+    "code", ["runtime_mismatch", "transition_incomplete", "runtime_starting"]
+)
+def test_incomplete_repair_copy_does_not_invent_a_holder(code):
+    bundle = Path("/review bundle")
+    data = Path("/review data")
+    out = io.StringIO()
+
+    repair._report_failure(code, bundle, data, out)
+
+    command = repair.format_repair_command(bundle, data)
+    assert out.getvalue() == (
+        "Privacy HUD runtime repair did not complete.\n"
+        "Existing ledger files were preserved. Activation may be incomplete.\n"
+        "Run this command in another terminal:\n"
+        f"  {command}\n"
+    )

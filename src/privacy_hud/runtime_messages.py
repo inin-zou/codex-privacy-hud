@@ -21,6 +21,13 @@ RUNTIME_SETUP_FAIL = (
     "Installation may download dependencies and model weights."
 )
 
+REPAIR_FAILED = (
+    "Privacy HUD runtime repair did not complete.\n"
+    "Existing ledger files were preserved. Activation may be incomplete.\n"
+    "Run this command in another terminal:\n"
+    "  {repair_command}"
+)
+
 #: `repair --print-command`, and `$privacy repair`.
 REPAIR_COMMAND_OUTPUT = (
     "Run this command in another terminal:\n"

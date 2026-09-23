@@ -434,3 +434,69 @@ def test_ambient_resolves_a_session_from_the_active_store(surface,
     assert storage.is_fenced(surface.data)
     assert not storage.legacy_path(surface.data).is_file()
     assert ambient._resolve_session_id() == "s1"
+
+
+@pytest.mark.parametrize(
+    "defect",
+    ["missing", "saved_integer", "enforcement", "rule_type", "selector", "conditions"],
+)
+def test_policy_invalid_acknowledgment_is_unknown_without_retry(
+    tmp_path, monkeypatch, defect
+):
+    from runtime_helpers import activation
+
+    reply = {
+        "v": 2,
+        "op": "policy_update",
+        "ok": True,
+        "saved": True,
+        "enforcement": "conditional",
+        "rule_type": "block_path",
+        "selector": "/private",
+        "conditions": mcp_tools.rule_enforcement_note(
+            "block_path", "/private"
+        ).strip(),
+    }
+    if defect == "missing":
+        reply = {"v": 2, "op": "policy_update", "ok": True}
+    elif defect == "saved_integer":
+        reply["saved"] = 1
+    elif defect == "conditions":
+        del reply["conditions"]
+    else:
+        reply[defect] = "incorrect"
+
+    calls = []
+
+    class Connection:
+        def request(self, op, body):
+            calls.append((op, body))
+            return reply
+
+        def close(self):
+            calls.append("closed")
+
+    monkeypatch.setattr(
+        runtime_commands, "connect_runtime", lambda *a, **k: Connection()
+    )
+
+    with pytest.raises(runtime_commands.PolicyOutcomeUnknown):
+        runtime_commands.update_policy(
+            tmp_path,
+            activation=activation(),
+            session_id="s",
+            rule_type="block_path",
+            selector="/private",
+        )
+
+    assert calls == [
+        (
+            "policy_update",
+            {
+                "session_id": "s",
+                "rule_type": "block_path",
+                "selector": "/private",
+            },
+        ),
+        "closed",
+    ]

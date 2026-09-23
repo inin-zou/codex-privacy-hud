@@ -183,6 +183,8 @@ def _parser() -> argparse.ArgumentParser:
     mode = repair.add_mutually_exclusive_group(required=True)
     mode.add_argument("--print-command", action="store_true")
     mode.add_argument("--stop-runtime", action="store_true")
+    mode.add_argument("--offline", action="store_true")
+    repair.add_argument("--allow-degraded", action="store_true")
     sub.add_parser("mcp")
     return parser
 
@@ -479,11 +481,12 @@ def main(argv=None) -> int:
             repair_module = _enter_bundle(data_dir)
         except _Refused:
             return _refuse(args.command, data_dir)
-        if args.command == "repair":
+        if args.command == "repair" and args.stop_runtime:
             return 0 if repair_module.stop_selected_runtime(data_dir) else 1
         argv_repair = ["--bundle-root", str(BUNDLE_ROOT),
-                       "--plugin-data", str(data_dir),
-                       "--python", args.python]
+                       "--plugin-data", str(data_dir)]
+        if args.command == "setup":
+            argv_repair.extend(["--python", args.python])
         if args.allow_degraded:
             argv_repair.append("--allow-degraded")
         return repair_module.main(argv_repair)

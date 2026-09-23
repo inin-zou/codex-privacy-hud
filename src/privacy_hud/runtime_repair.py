@@ -51,7 +51,7 @@ import signal
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import codex, hud_snapshot, offline, runtime_messages, runtime_storage
@@ -561,9 +561,10 @@ def repair_runtime(bundle_root: Path, data_dir: Path, *,
     """Select `bundle_root`, move the ledger behind the fence, and start a
     matching daemon. See the module docstring for the ordered steps.
 
-    Raises `RuntimeRefusal`. Nothing is published on any failing path:
-    the receipt that was there stays byte-for-byte, the ledger stays where
-    it was, and no success is reported.
+    A failed preflight preserves the existing receipt and ledger location.
+    A later failure may leave a fenced store or a published selection.
+    Retry resumes from the recorded selection and filesystem state.
+    No failing path reports repair success.
     """
     bundle = Path(bundle_root).resolve()
     root = Path(data_dir)
@@ -584,7 +585,19 @@ def repair_runtime(bundle_root: Path, data_dir: Path, *,
 
     with runtime_storage.acquire_transition(root):
         _quiesce(root, bundle)
-        with acquire_writer(root, activation=unselected_activation()) as lease:
+        lease_activation = unselected_activation()
+        if classify_receipt(root) == "v2":
+            receipt = read_receipt(root)
+            lease_activation = Activation(
+                identity=replace(
+                    identity,
+                    build_id=str(receipt["selected_build_id"]),
+                ),
+                epoch=str(receipt["activation_epoch"]),
+                bundle_root=bundle,
+                python=candidate,
+            )
+        with acquire_writer(root, activation=lease_activation) as lease:
             cutover = runtime_storage.prepare_storage(
                 root, activation=lease.activation)
             _retire_snapshots(root, cutover.transition_id)
@@ -631,7 +644,9 @@ def repair_runtime(bundle_root: Path, data_dir: Path, *,
 _REFUSAL_COPY = {
     "ledger_unsupported": runtime_messages.LEDGER_UNSUPPORTED,
     "holder_unknown": runtime_messages.UNKNOWN_HOLDER,
-    "transition_incomplete": runtime_messages.UNKNOWN_HOLDER,
+    "runtime_mismatch": runtime_messages.REPAIR_FAILED,
+    "transition_incomplete": runtime_messages.REPAIR_FAILED,
+    "runtime_starting": runtime_messages.REPAIR_FAILED,
 }
 
 
@@ -649,7 +664,9 @@ def _report_failure(code: str, bundle: Path, data_dir: Path, out) -> None:
     if message is None:
         message = runtime_messages.RUNTIME_SETUP_FAIL.format(
             repair_command=format_repair_command(bundle, data_dir))
-    print(message, file=out)
+    print(message.format(
+        repair_command=format_repair_command(bundle, data_dir)
+    ), file=out)
 
 
 def main(argv: list[str] | None = None, *, out=None) -> int:

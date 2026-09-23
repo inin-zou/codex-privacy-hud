@@ -517,8 +517,10 @@ def holder_paths(data_dir) -> list[Path]:
     retired_root = root / RETIRED_DIR_NAME
     try:
         entries = sorted(retired_root.iterdir())
-    except OSError:
+    except FileNotFoundError:
         entries = []
+    except OSError:
+        raise RuntimeRefusal("holder_unknown") from None
     for entry in entries:
         if entry.is_dir() and not entry.is_symlink():
             bases.append(entry / LEGACY_NAME)
@@ -527,7 +529,15 @@ def holder_paths(data_dir) -> list[Path]:
     for base in bases:
         for suffix in _SIDECARS:
             path = Path(str(base) + suffix)
-            if path.is_file() and not path.is_symlink():
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                raise RuntimeRefusal("holder_unknown") from None
+            if stat.S_ISLNK(info.st_mode):
+                raise RuntimeRefusal("holder_unknown")
+            if stat.S_ISREG(info.st_mode):
                 found.append(path)
     return found
 
@@ -569,7 +579,7 @@ def _lsof_holders(lsof: str, paths: list[Path]) -> frozenset[int]:
     # answer.
     if completed.returncode not in (0, 1):
         raise RuntimeRefusal("holder_unknown")
-    if "status error" in completed.stderr or "no pwd entry" in completed.stderr:
+    if completed.stderr.strip():
         raise RuntimeRefusal("holder_unknown")
     holders = set()
     for line in completed.stdout.splitlines():
@@ -596,7 +606,7 @@ def _proc_holders(paths: list[Path]) -> frozenset[int]:
         try:
             info = path.stat()
         except OSError:
-            continue
+            raise RuntimeRefusal("holder_unknown") from None
         targets.add((info.st_dev, info.st_ino))
     if not targets:
         return frozenset()
@@ -621,8 +631,10 @@ def _proc_holders(paths: list[Path]) -> frozenset[int]:
         for fd in descriptors:
             try:
                 info = os.stat(f"/proc/{pid}/fd/{fd}")
-            except OSError:
+            except (FileNotFoundError, ProcessLookupError):
                 continue
+            except OSError:
+                raise RuntimeRefusal("holder_unknown") from None
             if (info.st_dev, info.st_ino) in targets:
                 holders.add(pid)
                 break
