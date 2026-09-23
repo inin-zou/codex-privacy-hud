@@ -52,7 +52,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
-from privacy_hud import dispatch, ledger_schema  # noqa: E402
+from privacy_hud import codex, dispatch, ledger_schema  # noqa: E402
 from privacy_hud.accounting import (  # noqa: E402
     EventRecord, Evidence, ObservationRecord, RecipientInput, ScoringProfile,
     SubjectInput,
@@ -439,6 +439,7 @@ from privacy_hud.accounting import (
 from privacy_hud.identity import recipient_identity, value_identity
 from privacy_hud.ledger import Ledger
 from privacy_hud.matrix.loader import load_matrix
+from privacy_hud.runtime_owner import acquire_writer, unselected_activation
 op, stop, path, sid = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[5]
 key, delivery = bytes.fromhex(sys.argv[6]), sys.argv[7]
 
@@ -468,7 +469,8 @@ class Proxy:
         return cursor
 
 
-led = Ledger(path, load_matrix())
+led = Ledger(path, load_matrix(), writer_lease=acquire_writer(
+    path + ".owner", activation=unselected_activation()))
 
 # Only this rehearsal child uses repeatable generated metadata, so the
 # complete committed rows can be compared across fresh baseline clones.
@@ -595,7 +597,7 @@ def phase3(source: Path, work: Path) -> None:
 
     synthetic_dir = work / "synthetic"
     _mkdir(synthetic_dir)
-    synthetic = synthetic_dir / "ledger.db"
+    synthetic = codex.ledger_path(synthetic_dir)
     _copy(prepared, synthetic)
     _check_synthetic_v2(synthetic)
     _check_v2_crash_atomicity(prepared, work / "crash")
@@ -638,14 +640,14 @@ def _check_prepared_copy(
         finally:
             raw.close()
 
-    Ledger(copy, matrix).conn.close()
+    Ledger(copy, matrix, writer_lease=_lease(copy)).conn.close()
     unchanged(appended=False)
 
     reader = Ledger(copy, matrix, initialize=False)
     try:
         readings = _readings(reader)
         statements: list[str] = []
-        led = Ledger(copy, matrix)
+        led = Ledger(copy, matrix, writer_lease=_lease(copy))
         try:
             led.conn.set_trace_callback(statements.append)
             with led._write_transaction():
@@ -665,7 +667,7 @@ def _check_prepared_copy(
         reader.conn.close()
 
     continuing = f"privacy-hud-dry-run-{uuid.uuid4().hex}"
-    led = Ledger(copy, matrix)
+    led = Ledger(copy, matrix, writer_lease=_lease(copy))
     try:
         led.start_session(continuing, cwd="", model="")
         delta = led.record(continuing, turn_id=None, kind="exposed",
@@ -680,7 +682,7 @@ def _check_prepared_copy(
     finally:
         led.conn.close()
 
-    Ledger(copy, matrix).conn.close()
+    Ledger(copy, matrix, writer_lease=_lease(copy)).conn.close()
     unchanged(appended=True)
     return copy
 
@@ -785,7 +787,7 @@ def _check_synthetic_v2(path: Path) -> None:
     profile = ScoringProfile.from_matrix(matrix)
     email_b3 = group_score(profile, "email", "mcp_tool", 1)
 
-    led = Ledger(path, matrix)
+    led = Ledger(path, matrix, writer_lease=_lease(path))
     try:
         originals = {row[0]: tuple(row) for row in led.conn.execute(
             "SELECT * FROM sessions ORDER BY session_id")}
@@ -944,7 +946,8 @@ def _check_synthetic_v2(path: Path) -> None:
     # A genuine production start on this copy is still legacy.
     production = _PRODUCTION_PREFIX + uuid.uuid4().hex
     with _silenced():
-        state = dispatch.new_state(path.parent)
+        state = dispatch.new_state(path.parent,
+                                   writer_lease=_lease(path))
     try:
         with _silenced():
             dispatch.dispatch(state, {"hook_event_name": "SessionStart",
@@ -960,7 +963,7 @@ def _check_synthetic_v2(path: Path) -> None:
     finally:
         state.ledger.conn.close()
 
-    led = Ledger(path, matrix)
+    led = Ledger(path, matrix, writer_lease=_lease(path))
     try:
         for sid, row in originals.items():
             current = led.conn.execute(
@@ -986,7 +989,7 @@ def _check_synthetic_v2(path: Path) -> None:
     finally:
         reader.conn.close()
 
-    led = Ledger(path, matrix)
+    led = Ledger(path, matrix, writer_lease=_lease(path))
     try:
         b = _Records(led, profile)
         score = led.summary(s1).confirmed_points
@@ -1067,7 +1070,7 @@ def _check_v2_crash_atomicity(
     _mkdir(work)
     base = work / "base.db"
     _copy(baseline, base)
-    led = Ledger(base, matrix)
+    led = Ledger(base, matrix, writer_lease=_lease(base))
     try:
         records = _Records(led, ScoringProfile.from_matrix(matrix))
         sid = records.session()

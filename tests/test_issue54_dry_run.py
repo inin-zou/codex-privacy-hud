@@ -15,8 +15,9 @@ from pathlib import Path
 
 import pytest
 
+from privacy_hud.ledger import Ledger
 from privacy_hud.matrix.loader import load_matrix
-from runtime_helpers import writer_ledger
+from runtime_helpers import close_writer, writer_ledger
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "scripts" / "check-issue54-ledger.py"
@@ -375,11 +376,11 @@ def test_phase3_rehearsal_refuses_activated_or_original_v2_sources(tmp_path):
 
     from privacy_hud.accounting import ScoringProfile
     source = _prepared_source(tmp_path / "b")
-    led = Ledger(source, load_matrix())
+    led = writer_ledger(source, load_matrix())
     with led._write_transaction():
         led._start_v2_session(f"v2-{PLANTED}", cwd="", model="",
                               profile=ScoringProfile.from_matrix(led.matrix))
-    led.conn.close()
+    close_writer(led)
     proc = _run(source, _work(tmp_path / "b"), 3)
     assert proc.returncode == 1
     assert proc.stdout == FAIL
