@@ -140,7 +140,9 @@ jobs:
       # This reads the log the action wrote and says so on the pull request,
       # naming only the counts and the refused tool names.
       - name: Report a review that posted nothing
-        if: always() && steps.claude.outputs.execution_file != ''
+        # Not `always()`: this workflow cancels its own in-progress run on
+        # every new commit, and a superseded run is not a silent review.
+        if: (success() || failure()) && steps.claude.outputs.execution_file != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
@@ -224,4 +226,18 @@ jobs:
                 f"refused ({', '.join(denied) or 'none'}). Read this pull "
                 "request yourself: nothing here says the diff is sound.")
           PY
-          if [ -s notice.md ]; then gh pr comment "$PR" --body-file notice.md; fi
+          if [ ! -s notice.md ]; then exit 0; fi
+          # One notice per pull request, edited in place, the way the review's
+          # own comment is sticky: a denial that repeats across pushes must not
+          # bury the pull request in copies of the same sentence.
+          printf '\n<!-- claude-review-silence -->\n' >> notice.md
+          existing=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" \
+            --jq 'map(select(.body | contains("<!-- claude-review-silence -->")))
+                  | last | .id // empty')
+          if [ -n "$existing" ]; then
+            gh api --method PATCH \
+              "repos/$GITHUB_REPOSITORY/issues/comments/$existing" \
+              -F body=@notice.md > /dev/null
+          else
+            gh pr comment "$PR" --body-file notice.md
+          fi
