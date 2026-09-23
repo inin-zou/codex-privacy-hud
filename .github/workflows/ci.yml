@@ -61,6 +61,91 @@ jobs:
       - name: Run tests
         run: python -m pytest -q
 
+      - name: Temporary proc descriptor diagnostic
+        if: ${{ always() && runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import collections
+          import errno
+          import os
+          import re
+          import sys
+          import time
+
+          counts = collections.Counter()
+
+          def error_name(exc):
+              return errno.errorcode.get(exc.errno, "UNKNOWN_ERRNO")
+
+          def scan():
+              counts[("scans",)] += 1
+              try:
+                  entries = os.listdir("/proc")
+              except OSError as exc:
+                  counts[("proc_list_error", error_name(exc))] += 1
+                  return
+
+              uid = os.getuid()
+              for entry in entries:
+                  if not entry.isdigit():
+                      continue
+                  base = "/proc/" + entry
+                  try:
+                      owner = os.stat(base).st_uid
+                  except OSError as exc:
+                      counts[("process_stat_error", error_name(exc))] += 1
+                      continue
+                  if owner != uid:
+                      continue
+                  counts[("same_uid_process_observations",)] += 1
+                  try:
+                      descriptors = os.listdir(base + "/fd")
+                  except OSError as exc:
+                      counts[("fd_list_error", error_name(exc))] += 1
+                      continue
+                  counts[("fd_list_ok",)] += 1
+
+                  for fd in descriptors:
+                      descriptor = base + "/fd/" + fd
+                      try:
+                          os.stat(descriptor)
+                      except OSError as exc:
+                          stat_error = error_name(exc)
+                      else:
+                          counts[("descriptor_stat_ok",)] += 1
+                          continue
+
+                      try:
+                          target = os.readlink(descriptor)
+                      except OSError as exc:
+                          counts[("descriptor_stat_error", stat_error,
+                                  "readlink_error", error_name(exc))] += 1
+                      else:
+                          pseudo = (
+                              re.fullmatch(r"(?:socket|pipe):\[[0-9]+\]", target)
+                              is not None
+                              or target.startswith("anon_inode:")
+                          )
+                          category = "kernel_pseudo" if pseudo else "other"
+                          counts[("descriptor_stat_error", stat_error,
+                                  "readlink_ok", category)] += 1
+
+          status = 0
+          try:
+              for sample in range(3):
+                  scan()
+                  if sample < 2:
+                      time.sleep(0.2)
+          except BaseException:
+              counts[("diagnostic_incomplete",)] += 1
+              status = 1
+
+          for key, count in sorted(counts.items()):
+              print(" ".join(key), count)
+          sys.exit(status)
+          PY
+
   detector-stack:
     # I2 against the real model stack (#49 item 6): an inherited
     # HF_HUB_OFFLINE=0, an empty or incomplete weights cache, and a stack
