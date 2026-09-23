@@ -2,9 +2,9 @@
 
 **Status:** Draft v0.1 · **Date:** 2026-09-03 · **Companion to:** `PRD.md`, `architecture.md`
 
-**Current contract — #54 Phase 3 (0.7.10).**
+**Current contract — #54 Phase 3 (0.8.1).**
 
-The new accounting core is implemented and tested but is not active for production sessions. Production session creation still selects legacy accounting. Prepared-schema migration remains unchanged. No historical rows are backfilled or rescored. #43, #44, and the related #47 accounting limitations remain unresolved in production.
+The new accounting core is implemented and tested but is not active for production sessions. Production session creation still selects legacy accounting. Prepared-schema migration remains unchanged. No historical rows are backfilled or rescored. Runtime selection, writer ownership, and the fenced ledger layout introduced in 0.8.0 remain required. #43, #44, and the related #47 accounting limitations remain unresolved in production.
 
 This document covers product and interaction design: what the user sees, what they can do, and the rules governing how we talk about disclosure. Implementation lives in `architecture.md`.
 

@@ -1,8 +1,8 @@
-"""#54 Phase 3 (0.7.10): the inactive release contract and its exact copy.
+"""#54 Phase 3 (0.8.1): the inactive release contract and its exact copy.
 
 The documentation says the version-2 accounting core ships inactive, in the
 exact words the Phase 3 outline fixes; the release declarations move to
-0.7.10 together; and the wire and schema versions do not move.
+0.8.1 together; and the wire and schema versions do not move.
 
 `test_phase3_does_not_retire_production_limits`,
 `test_phase3_wire_and_schema_versions_are_unchanged` and
@@ -23,9 +23,9 @@ from privacy_hud.matrix.loader import load_matrix
 REPO = Path(__file__).resolve().parents[1]
 
 CONTRACT_BLOCK = (
-    '**Current contract — #54 Phase 3 (0.7.10).**\n'
+    '**Current contract — #54 Phase 3 (0.8.1).**\n'
     '\n'
-    'The new accounting core is implemented and tested but is not active for production sessions. Production session creation still selects legacy accounting. Prepared-schema migration remains unchanged. No historical rows are backfilled or rescored. #43, #44, and the related #47 accounting limitations remain unresolved in production.'
+    'The new accounting core is implemented and tested but is not active for production sessions. Production session creation still selects legacy accounting. Prepared-schema migration remains unchanged. No historical rows are backfilled or rescored. Runtime selection, writer ownership, and the fenced ledger layout introduced in 0.8.0 remain required. #43, #44, and the related #47 accounting limitations remain unresolved in production.'
 )
 
 README_INTRO = (
@@ -33,7 +33,9 @@ README_INTRO = (
     '\n'
     'The HUD currently shows a legacy permitted-crossing score. Historical accounting includes permitted crossings and may collapse different outcomes; it does not establish confirmed disclosure. The badge counts legacy prevented rows, not denied calls or confirmed host-enforced interventions. An unrecorded session shows “No session on record” with no percentage or numeric counts.\n'
     '\n'
-    'Version 0.7.10 includes the new accounting core, but production sessions still use legacy accounting. The new evidence, identity, and distinct-disclosure calculations are implemented and tested; they are not yet active.\n'
+    'Version 0.8.1 includes the new accounting core, but production sessions still use legacy accounting. The new evidence, identity, and distinct-disclosure calculations are implemented and tested; they are not yet active.\n'
+    '\n'
+    'Version 0.8.0 checks runtime alignment and fences the active ledger from historical entry points. The daemon still prepares the accounting schema at a genuine new-session boundary, and production sessions still use legacy accounting. Historical records and stored scores are not backfilled or rescored.\n'
     '\n'
     'A denial or rewritten input returned by Privacy HUD is not confirmation that the host applied it. Current hooks do not establish that a denied call did not run or that rewritten input reached its intended recipient.\n'
     '\n'
@@ -47,7 +49,9 @@ README_ZH_INTRO = (
     '\n'
     'HUD 当前显示旧版许可跨界评分（legacy permitted-crossing score）。旧版记账包含获准的跨界操作，也可能将不同结果合并到同一行；它不能证明数据已实际披露。计数标记统计旧版 prevented 行数，不是被拒绝的调用次数，也不是已确认由宿主执行的干预次数。未记录的会话显示“No session on record”，不显示百分比或数字计数。\n'
     '\n'
-    '0.7.10 已包含新的记账核心，但实际会话仍使用旧版记账。证据、主体身份和不同披露的计算已实现并经过测试，尚未用于实际会话。\n'
+    '0.8.1 已包含新的记账核心，但实际会话仍使用旧版记账。证据、主体身份和不同披露的计算已实现并经过测试，尚未用于实际会话。\n'
+    '\n'
+    '0.8.0 会检查运行时一致性，并阻止旧版入口通过原路径访问当前账本。守护进程仍只在真正的新会话开始时准备记账结构，实际会话仍采用旧版记账。历史记录和已存分数不会被回填或重新计算。\n'
     '\n'
     'Privacy HUD 返回拒绝决定或改写后的输入，并不能证明宿主实际应用了它。当前 hook 无法证明被拒绝的调用没有执行，也无法证明改写后的输入到达了预期接收方。\n'
     '\n'
@@ -56,16 +60,16 @@ README_ZH_INTRO = (
     '检测在本机执行；插件不会将提示词、文件或秘密信息发送到远程扫描服务。运行时通信仅使用 Unix 域套接字，以及绑定到 `127.0.0.1` 的本地浏览器界面。'
 )
 
+#: The version-bearing compatibility paragraph. #66 replaced the Phase 2
+#: wording wholesale; this release keeps that replacement and moves the
+#: release number onto it. The remaining #66 paragraphs beside it are
+#: pinned by `tests/test_issue66_contract.py`.
 COMPATIBILITY = (
-    'Privacy HUD 0.7.10 retains snapshot version 2. Production sessions still use legacy accounting. Updated readers accept version 1 as explicitly legacy and accept version 2 with nullable accounting fields. Older patched Codex readers reject version 2 and show no Privacy item. A matching Codex version alone does not establish snapshot compatibility. Use a snapshot-v2-compatible patched build, or run `privacy-hud-ambient --watch` in a separate terminal pane.\n'
-    '\n'
-    'Updating the plugin does not update an installed patched binary. The daemon rebuilds the ledger at a genuine new-session boundary; the installer does not migrate it. After the rebuild, do not run a pre-0.7.9 daemon against this ledger. Reinstall a compatible version; no downgrade migration is provided.'
+    'Privacy HUD 0.8.1 retains snapshot version 2. Production sessions still use legacy accounting. Snapshot-v2 readers accept version 1 as explicitly legacy and version 2 with nullable accounting fields. Older snapshot-v1-only readers reject version 2 and show no Privacy item. Matching Codex version numbers do not establish snapshot compatibility.'
 )
 
 COMPATIBILITY_ZH = (
-    'Privacy HUD 0.7.10 继续使用 snapshot v2。实际会话仍采用旧版记账。新版读取器将 v1 明确标为旧版记账，并支持带可空记账字段的 v2。旧补丁版 Codex 读取器会拒绝 v2，不显示 Privacy 状态项。Codex 版本相同并不代表快照兼容。请使用支持 snapshot v2 的补丁版构建，或在独立终端窗格运行 `privacy-hud-ambient --watch`。\n'
-    '\n'
-    '更新插件不会更新已安装的 Codex 补丁二进制。账本结构由守护进程在收到真正的新会话开始事件时迁移，安装脚本不执行迁移。迁移后，不要再用 0.7.9 之前的守护进程打开此账本。请重新安装兼容版本；本项目不提供降级迁移。'
+    'Privacy HUD 0.8.1 继续使用 snapshot v2，实际会话仍采用旧版记账。支持 v2 的读取器会将 v1 明确标为旧版记账，并支持带可空记账字段的 v2。仅支持 v1 的旧读取器会拒绝 v2，不显示 Privacy 状态项。Codex 版本号相同并不代表快照兼容。'
 )
 
 LEDGER_DOCSTRING = (
@@ -107,14 +111,14 @@ def _read(relative: str) -> str:
     return (REPO / relative).read_text(encoding="utf-8")
 
 
-def test_phase3_versions_are_0_7_10():
+def test_phase3_versions_are_0_8_1():
     plugin = json.loads(_read(".codex-plugin/plugin.json"))
     marketplace = json.loads(_read(".agents/plugins/marketplace.json"))
     project = tomllib.loads(_read("pyproject.toml"))
-    assert plugin["version"] == "0.7.10"
+    assert plugin["version"] == "0.8.1"
     assert [p["version"] for p in marketplace["plugins"]
-            if p["name"] == plugin["name"]] == ["0.7.10"]
-    assert project["project"]["version"] == "0.7.10"
+            if p["name"] == plugin["name"]] == ["0.8.1"]
+    assert project["project"]["version"] == "0.8.1"
 
 
 def test_phase3_contract_blocks_match_verbatim():
@@ -144,7 +148,7 @@ def test_phase3_install_notes_match_verbatim():
     chinese = _read("README.zh-CN.md")
     assert chinese.count(COMPATIBILITY_ZH) == 1
     assert "Privacy HUD 0.7.9 继续使用" not in chinese
-    assert "0.8.0" not in "".join(_read(r) for r in COMPATIBILITY_DOCS)
+    assert "0.7.10" not in "".join(_read(r) for r in COMPATIBILITY_DOCS)
 
 
 def test_phase3_does_not_retire_production_limits():
@@ -186,11 +190,11 @@ def test_phase3_summary_and_refusal_copy_is_exact():
         "disclosure or host enforcement.")
     assert accounting.PHASE3_SURFACE_UNSUPPORTED == (
         "This Privacy HUD surface does not support version-2 accounting "
-        "in 0.7.10.")
+        "in 0.8.1.")
     assert json.dumps({"error": accounting.PHASE3_SURFACE_UNSUPPORTED},
                       separators=(",", ":")) == (
         '{"error":"This Privacy HUD surface does not support version-2 '
-        'accounting in 0.7.10."}')
+        'accounting in 0.8.1."}')
 
 
 def test_phase3_source_module_documentation_matches_verbatim():

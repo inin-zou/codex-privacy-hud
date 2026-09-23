@@ -18,7 +18,7 @@ A local-first Codex plugin that records hook observations in a session ledger an
 
 The HUD currently shows a legacy permitted-crossing score. Historical accounting includes permitted crossings and may collapse different outcomes; it does not establish confirmed disclosure. The badge counts legacy prevented rows, not denied calls or confirmed host-enforced interventions. An unrecorded session shows “No session on record” with no percentage or numeric counts.
 
-Version 0.7.10 includes the new accounting core, but production sessions still use legacy accounting. The new evidence, identity, and distinct-disclosure calculations are implemented and tested; they are not yet active.
+Version 0.8.1 includes the new accounting core, but production sessions still use legacy accounting. The new evidence, identity, and distinct-disclosure calculations are implemented and tested; they are not yet active.
 
 Version 0.8.0 checks runtime alignment and fences the active ledger from historical entry points. The daemon still prepares the accounting schema at a genuine new-session boundary, and production sessions still use legacy accounting. Historical records and stored scores are not backfilled or rescored.
 
@@ -62,9 +62,9 @@ Design-intent illustration. It predates the explicit legacy labels; its bar and 
 
 ## Install
 
-Privacy HUD 0.8.0 retains snapshot version 2. Production sessions still use legacy accounting. Snapshot-v2 readers accept version 1 as explicitly legacy and version 2 with nullable accounting fields. Older snapshot-v1-only readers reject version 2 and show no Privacy item. Matching Codex version numbers do not establish snapshot compatibility.
+Privacy HUD 0.8.1 retains snapshot version 2. Production sessions still use legacy accounting. Snapshot-v2 readers accept version 1 as explicitly legacy and version 2 with nullable accounting fields. Older snapshot-v1-only readers reject version 2 and show no Privacy item. Matching Codex version numbers do not establish snapshot compatibility.
 
-The snapshot-v2 patched Codex builds for 0.154.0, 0.155.0, and 0.155.1 were re-released on 2026-09-22. An earlier installation of one of those versions may still contain the older reader. Updating the plugin does not replace that binary. No additional patched-Codex release is required for Privacy HUD 0.8.0.
+The snapshot-v2 patched Codex builds for 0.154.0, 0.155.0, and 0.155.1 were re-released on 2026-09-22. An earlier installation of one of those versions may still contain the older reader. Updating the plugin does not replace that binary. No additional patched-Codex release is required for Privacy HUD 0.8.1.
 
 The native Privacy item displays accounting snapshots; it does not verify runtime alignment. Before repair, an old daemon may continue refreshing a legacy reading. Use doctor to check alignment. The bundled ambient launcher reports runtime failure instead of displaying a percentage.
 

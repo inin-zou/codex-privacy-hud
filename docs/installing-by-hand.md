@@ -2,9 +2,9 @@
 
 The [one-command installer](../README.md#install) runs the steps below itself. Read this page to see or control each one — installing the plugin, recording the interpreter, or running only the fallback pane without a patched Codex build.
 
-Privacy HUD 0.8.0 retains snapshot version 2. Production sessions still use legacy accounting. Snapshot-v2 readers accept version 1 as explicitly legacy and version 2 with nullable accounting fields. Older snapshot-v1-only readers reject version 2 and show no Privacy item. Matching Codex version numbers do not establish snapshot compatibility.
+Privacy HUD 0.8.1 retains snapshot version 2. Production sessions still use legacy accounting. Snapshot-v2 readers accept version 1 as explicitly legacy and version 2 with nullable accounting fields. Older snapshot-v1-only readers reject version 2 and show no Privacy item. Matching Codex version numbers do not establish snapshot compatibility.
 
-The snapshot-v2 patched Codex builds for 0.154.0, 0.155.0, and 0.155.1 were re-released on 2026-09-22. An earlier installation of one of those versions may still contain the older reader. Updating the plugin does not replace that binary. No additional patched-Codex release is required for Privacy HUD 0.8.0.
+The snapshot-v2 patched Codex builds for 0.154.0, 0.155.0, and 0.155.1 were re-released on 2026-09-22. An earlier installation of one of those versions may still contain the older reader. Updating the plugin does not replace that binary. No additional patched-Codex release is required for Privacy HUD 0.8.1.
 
 The native Privacy item displays accounting snapshots; it does not verify runtime alignment. Before repair, an old daemon may continue refreshing a legacy reading. Use doctor to check alignment. The bundled ambient launcher reports runtime failure instead of displaying a percentage.
 

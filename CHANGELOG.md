@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.1
+
+- Implement the version-2 accounting core, inactive for production sessions.
+- Keep production session creation on legacy accounting and the prepared schema at generation 5401.
+- Refuse version-2 sessions explicitly on the legacy renderers, publisher and browser surfaces.
+- Rehearse the inactive core on private copies of a ledger, under real writer leases.
+- Retain #66's runtime selection, writer ownership and fenced ledger layout.
+- Retain snapshot version 2; backfill and rescore nothing.
+
+Refs #54.
+
 ## 0.8.0
 
 - Load first-party Python code from the selected plugin bundle.

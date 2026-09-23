@@ -484,7 +484,7 @@ ACCOUNTING_NOTE = (
 
 PHASE3_SURFACE_UNSUPPORTED = (
     "This Privacy HUD surface does not support version-2 accounting "
-    "in 0.7.10."
+    "in 0.8.1."
 )
 
 
