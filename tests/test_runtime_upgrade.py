@@ -591,6 +591,22 @@ def test_upgrade_refuses_altered_prepared_ledger(upgrade):
     assert not storage.active_path(data).exists()
 
 
+def test_altered_ledger_validation_precedes_holder_inspection(
+    upgrade, monkeypatch
+):
+    inspections = []
+
+    def unavailable(data_dir):
+        inspections.append(data_dir)
+        raise RuntimeRefusal("holder_unknown")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(storage, "open_holders", unavailable)
+        test_upgrade_refuses_altered_prepared_ledger(upgrade)
+
+    assert inspections == []
+
+
 def test_upgrade_without_receipt_uses_explicit_install(upgrade):
     """With no receipt at all there is no interpreter to inherit, and
     nothing is guessed: repair refuses until the installer names one.

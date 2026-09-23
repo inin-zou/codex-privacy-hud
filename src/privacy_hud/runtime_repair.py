@@ -584,6 +584,7 @@ def repair_runtime(bundle_root: Path, data_dir: Path, *,
         raise RuntimeRefusal("dependencies_unusable")
 
     with runtime_storage.acquire_transition(root):
+        runtime_storage.validate_existing_ledger(root)
         _quiesce(root, bundle)
         lease_activation = unselected_activation()
         if classify_receipt(root) == "v2":

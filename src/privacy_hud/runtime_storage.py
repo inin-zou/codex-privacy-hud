@@ -320,9 +320,7 @@ def prepare_storage(data_dir, *, activation: Activation) -> CutoverResult:
 
     preserved = (source is not None or retained.exists()
                  or bool(journal and journal.get("preserved_existing")))
-    probe = source or (active if active.is_file()
-                       else (staged if staged.is_file() else None))
-    version: Literal[0, 5401] = 0 if probe is None else _validated_version(probe)
+    version = validate_existing_ledger(root)
     _record(root, transition_id, "validated", preserved)
 
     if not _quiescent(root):
@@ -422,6 +420,18 @@ def _transition_id(journal: JSONObject | None) -> str:
         if isinstance(recorded, str) and _TRANSITION_ID.fullmatch(recorded):
             return recorded
     return secrets.token_hex(16)
+
+
+def validate_existing_ledger(data_dir) -> Literal[0, 5401]:
+    """Read-only preflight; prepare_storage repeats it under both locks."""
+    root = Path(data_dir)
+    source = _source(legacy_path(root))
+    active = active_path(root)
+    staged = (retired_dir(root, _transition_id(read_journal(root)))
+              / STAGED_DB_NAME)
+    probe = source or (active if active.is_file()
+                       else (staged if staged.is_file() else None))
+    return 0 if probe is None else _validated_version(probe)
 
 
 def _quiescent(root: Path) -> bool:
@@ -629,11 +639,24 @@ def _proc_holders(paths: list[Path]) -> frozenset[int]:
         except OSError:
             raise RuntimeRefusal("holder_unknown") from None
         for fd in descriptors:
+            descriptor = f"/proc/{pid}/fd/{fd}"
             try:
-                info = os.stat(f"/proc/{pid}/fd/{fd}")
+                info = os.stat(descriptor)
             except (FileNotFoundError, ProcessLookupError):
                 continue
             except OSError:
+                try:
+                    target = os.readlink(descriptor)
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+                except OSError:
+                    raise RuntimeRefusal("holder_unknown") from None
+                # Only kernel pseudo-objects are demonstrably unrelated.
+                # A different filesystem pathname can be a hard link or
+                # a mount alias of a target; it still needs inode matching.
+                if (re.fullmatch(r"(?:socket|pipe):\[[0-9]+\]", target)
+                        or target.startswith("anon_inode:")):
+                    continue
                 raise RuntimeRefusal("holder_unknown") from None
             if (info.st_dev, info.st_ino) in targets:
                 holders.add(pid)

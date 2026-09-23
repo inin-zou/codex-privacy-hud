@@ -693,6 +693,79 @@ def test_unstatable_holder_path_refuses(tmp_path, monkeypatch):
     assert failure.value.code == "holder_unknown"
 
 
+@pytest.mark.parametrize(
+    "stat_error, link, expected",
+    [
+        (PermissionError(), "socket:[123]", frozenset()),
+        (PermissionError(), "pipe:[123]", frozenset()),
+        (PermissionError(), "anon_inode:[eventpoll]", frozenset()),
+        (OSError(), "socket:[123]", frozenset()),
+        (PermissionError(), "/review/ledger.db", None),
+        (PermissionError(), "/alias/ledger.db", None),
+        (PermissionError(), "/review/ledger.db (deleted)", None),
+        (PermissionError(), "socket:[invalid]", None),
+        (PermissionError(), PermissionError(), None),
+        (OSError(), OSError(), None),
+        (PermissionError(), FileNotFoundError(), frozenset()),
+        (PermissionError(), ProcessLookupError(), frozenset()),
+        (FileNotFoundError(), None, frozenset()),
+        (ProcessLookupError(), None, frozenset()),
+        (None, "/alias/ledger.db", frozenset({123})),
+    ],
+)
+def test_proc_descriptor_visibility(monkeypatch, stat_error, link, expected):
+    from types import SimpleNamespace
+
+    target = Path("/review/ledger.db")
+    uid = storage.os.getuid()
+    reads = []
+
+    def fake_stat(path, *args, **kwargs):
+        name = str(path)
+        if name == str(target):
+            return SimpleNamespace(st_dev=1, st_ino=2)
+        if name == "/proc/123":
+            return SimpleNamespace(st_uid=uid)
+        if name == "/proc/123/fd/4":
+            if stat_error is not None:
+                raise stat_error
+            return SimpleNamespace(st_dev=1, st_ino=2)
+        raise AssertionError(name)
+
+    def fake_listdir(path):
+        if str(path) == "/proc":
+            return ["123"]
+        if str(path) == "/proc/123/fd":
+            return ["4"]
+        raise AssertionError(path)
+
+    def fake_readlink(path):
+        assert path == "/proc/123/fd/4"
+        reads.append(path)
+        if isinstance(link, OSError):
+            raise link
+        assert isinstance(link, str)
+        return link
+
+    with monkeypatch.context() as patch:
+        patch.setattr(storage.os, "stat", fake_stat)
+        patch.setattr(storage.os, "listdir", fake_listdir)
+        patch.setattr(storage.os, "readlink", fake_readlink)
+        if expected is None:
+            with pytest.raises(RuntimeRefusal) as refusal:
+                storage._proc_holders([target])
+            assert refusal.value.code == "holder_unknown"
+        else:
+            assert storage._proc_holders([target]) == expected
+
+    if stat_error is None or isinstance(
+        stat_error, (FileNotFoundError, ProcessLookupError)
+    ):
+        assert reads == []
+    else:
+        assert reads == ["/proc/123/fd/4"]
+
+
 @pytest.mark.parametrize("failure_at", ["target", "descriptor"])
 def test_proc_inspection_permission_failure_refuses(monkeypatch, failure_at):
     from types import SimpleNamespace
@@ -722,6 +795,7 @@ def test_proc_inspection_permission_failure_refuses(monkeypatch, failure_at):
     with monkeypatch.context() as patch:
         patch.setattr(storage.os, "stat", fake_stat)
         patch.setattr(storage.os, "listdir", fake_listdir)
+        patch.setattr(storage.os, "readlink", lambda path: target)
         with pytest.raises(RuntimeRefusal) as failure:
             storage._proc_holders([Path(target)])
 
