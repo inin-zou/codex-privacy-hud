@@ -73,7 +73,10 @@ def test_every_link_into_known_limits_resolves(readme):
 
 @pytest.mark.parametrize("readme", READMES, ids=lambda p: p.name)
 def test_the_readme_lists_exactly_the_limits_that_exist(readme):
-    listed = re.findall(r"^(\d+)\. \*\*", readme.read_text(encoding="utf-8"), re.M)
+    # Each summary line ends with its details link (#54 Phase 4 wrote 17,
+    # 18 and 20 without a bold lead, so the link is what marks a limit).
+    listed = re.findall(r"^(\d+)\. .*[(（]\[(?:details|详情)\]\(docs/known-limits\.md#",
+                        readme.read_text(encoding="utf-8"), re.M)
     assert [int(n) for n in listed] == list(range(1, len(_limit_headings()) + 1)), (
         f"{readme.name} summarises {len(listed)} limits; "
         f"known-limits.md has {len(_limit_headings())}")

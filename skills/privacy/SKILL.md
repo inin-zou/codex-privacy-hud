@@ -1,6 +1,6 @@
 ---
 name: privacy
-description: Open the Privacy HUD session audit — inspect legacy accounting and recorded event classifications for the selected session, with their evidence limits.
+description: Open the Privacy HUD session audit — inspect confirmed disclosure evidence, issued interventions, unresolved actions, and separately labelled legacy accounting for the selected session.
 ---
 
 ## What this does
@@ -76,6 +76,8 @@ python3 "$BUNDLE/scripts/runtime.py" --plugin-data "${PLUGIN_DATA:?}" \
   audit ${SESSION_ID:+"$SESSION_ID"}
 ```
 
+An argument after $privacy is a session ID. It is not a flow or event ID.
+
 It prints, in order:
 
 - a runtime banner, **only** when the daemon does not match this plugin.
@@ -100,7 +102,14 @@ If `session_id` is empty (`basis: none`), stop: there is no session to
 audit, and the steps below would render an empty table for an id that
 does not exist, which reads exactly like a clean session.
 
-The summary distinguishes a recorded legacy session from an unrecorded session. A legacy summary retains the existing score and row counts under explicit legacy labels. An unrecorded summary has percent=null and no numeric score or counts. Print the renderer's accounting note with either variant; never substitute zero for unavailable quantities.
+The summary distinguishes new accounting, legacy accounting, and an
+unrecorded session. New accounting shows confirmed points, distinct
+disclosures and recipients, issued interventions, and unresolved actions.
+Its percentage is unavailable when the required evidence is incomplete.
+Zero confirmed points with unresolved actions does not mean no disclosure
+occurred. Legacy accounting retains its explicit legacy labels. An
+unrecorded session has no numeric score or counts. Print the renderer's
+accounting note and unavailable reasons; never substitute zero.
 
 Coverage separately reports recorded observation gaps. It does not establish that every event was seen, that a crossing occurred, or that the host applied an intervention.
 
@@ -116,6 +125,10 @@ BUNDLE="${PLUGIN_ROOT:?}"
 python3 "$BUNDLE/scripts/runtime.py" --plugin-data "${PLUGIN_DATA:?}" \
   detail "${SESSION_ID:?}" "${EVENT_ID:?}"
 ```
+
+If the user asks for an event from the selected session, use that row's id
+as EVENT_ID in the detail command. $privacy <id> alone selects a session;
+it does not select an event.
 
 **3. Start the local audit UI and print its URL.**
 
@@ -214,19 +227,23 @@ the same process instead of starting a second one.
 and never installs or replaces a patched Codex binary. Do not describe
 either as doing the other's job.
 
-Privacy HUD 0.8.2 retains snapshot version 2. The snapshot-v2 patched
-Codex builds for 0.154.0, 0.155.0, and 0.155.1 were re-released on
-2026-09-22; an earlier installation of one of those versions may still
-contain the older reader. Updating the plugin does not replace that
-binary, and matching Codex version numbers do not establish snapshot
-compatibility.
+Privacy HUD 0.9.0 writes snapshot version 2. The native Privacy item requires
+a patched Codex build containing the snapshot-v2 reader. Matching Codex
+versions and successful plugin installation do not establish that
+compatibility. Until the installed build is verified, run the bundled
+ambient launcher in a separate terminal pane.
+
+```bash
+BUNDLE="${PLUGIN_ROOT:?}"
+python3 "$BUNDLE/scripts/runtime.py" --plugin-data "${PLUGIN_DATA:?}" \
+  ambient --watch
+```
 
 - `done. restart codex …`: tell the user to restart Codex to load the
   installed plugin and PATH changes. Do not promise a native Privacy item
   unless the installed patched build is verified to contain the
   snapshot-v2 reader. Until then, use the bundled ambient launcher in a
-  separate terminal pane:
-  `~/.local/share/codex-privacy-hud/bin/privacy-hud-ambient --watch`.
+  separate terminal pane with the command above.
 - `no patched build published for codex <ver> yet`: report that no patched
   build was installed for that version. This warning can precede the
   final `done` line; that line does not cancel it. Use the fallback pane.

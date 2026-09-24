@@ -115,17 +115,19 @@ The default records the read and mentions the guard once per session; it stops n
 
 ## 17. A blocked read can leave a record that says the opposite, in one sequence.
 
-The ledger dedupes on `(session_id, value_hash, destination)` (`ledger.py`'s `record`): if a row for that exact key already exists, the write only increments its `count` — the `kind` of the existing row does not change. So if the same path was already read with the guard off (recorded as `local_access`), turning the guard on and reading it again denies the call, but the ledger still shows only that one `local_access` row with its count incremented — no `prevented` row appears. What is left is not silence. `cat deploy/key1.pem` with the guard off, then `cat deploy/key2.pem` with it on, leaves one row reading `local_access`, `source=deploy/key1.pem`, `count=2`, `protection=NULL` — a record that says key1 was read twice and nothing was blocked. Both halves of that are wrong, and nothing in the audit contradicts them.
+This limitation remains for legacy-accounted sessions and historical rows. Legacy deduplication can merge a later denial into an earlier row with a different outcome. Those records are preserved without reconstruction or rescoring.
 
-The defect carries into the display. legacy_prevented_rows counts stored rows whose kind is prevented. If deduplication only increments an earlier row of another kind, this count does not increase when Privacy HUD issues a denial. Phase 1 labels that count honestly but does not repair the collapsed history or establish host enforcement.
+New-accounting sessions append independent observations and finding outcomes. An earlier permission or disclosure does not suppress a later denial, and a later denial does not subtract an earlier charge. The summary counts denials issued by action, including actions with no findings.
 
-The plugin issues a denial; current hooks do not confirm host enforcement. This is pre-existing on the egress side too: an allowed egress followed by a denied one for the same value and destination dedupes the same way. It matters here because the feature's own discovery path — read, see the notice, turn the guard on, read again — walks straight into it.
+A denial issued by Privacy HUD is not confirmation that the host enforced it. Current hooks leave that outcome unresolved.
 
 ## 18. A blocked read's row does not name the file.
 
-The finding behind a blocked read is the tier-0 pattern that matched the command text (`.pem`, `.env`, `id_rsa`, …), not the path itself, so its `value_hash` is a hash of that pattern text. `cat deploy/key1.pem` and `cat deploy/key2.pem` both record `.pem` at the same `destination` and dedupe into one row. The row records a legacy prevented classification; it does not identify a distinct file or confirm host enforcement.
+This limitation remains for legacy-accounted sessions and historical rows: files matching the same detector pattern may share one legacy row.
 
-Two denied reads matching the same pattern can still produce one prevented row with count=2. legacy_prevented_rows is then 1. The HUD labels this as one prevented row; it does not claim one denied call or one confirmed stopped read. Phase 1 does not separate the file subjects or repair this undercount.
+New accounting identifies an unambiguous literal file path evaluated by the guard independently of the detector pattern. Different identified files have different session-scoped subjects. Unsupported shell evaluation or an unresolved path leaves the subject unresolved. Persisted labels omit sensitive path components and may consist only of an opaque file ID and an allowlisted suffix.
+
+The HUD counts denials issued, not confirmed stopped reads. A stopped-read count requires enforcement evidence. File identity is lexical; symlinks and filesystem aliases are not resolved.
 
 ## 19. What a subagent inherited is not recorded.
 
@@ -135,9 +137,11 @@ This says nothing about what happens *inside* a subagent's own session, which ha
 
 ## 20. A destination is a boundary category, not a recipient.
 
-`destination` holds the kind of boundary crossed — `model_context`, `subagent`, `mcp_tool`, `external_net`, `local` — and not who was on the other side. `dispatch.py:489` collapses every MCP call to `mcp_tool` before the engine sees it, so sending the same value to a second MCP server adds no destination and no further contribution to the budget.
+Legacy accounting groups destinations by boundary category.
 
-The `legacy boundary kinds` tile (`legacy_boundary_kinds`) therefore counts boundary categories — a handful at most — not services. `architecture.md` specifies `subagent:<id>`, `mcp:<server>` and `net:<host>`; that detail is stripped today.
+New accounting separates boundary category from recipient identity. Supported, unambiguous MCP namespaces identify intended server configurations; multiple tools in one namespace share a recipient. A narrow parser identifies the intended endpoint of supported simple network commands. Ambiguous names, unsupported command forms, dynamic destinations, and unknown recipients remain unresolved.
+
+Intended identity does not prove transmission, backend identity, downstream forwarding, subagent inheritance, or continuity across unobserved configuration changes. Current hooks do not supply the crossing receipts needed to turn those intentions into confirmed disclosures.
 
 ## 21. On an outbound call, the deep scan is best-effort.
 
@@ -154,6 +158,8 @@ Completion at or before the deadline is necessary but not sufficient for accepti
 **What you see.** A scan gap means an applicable deep scan supplied no accepted result. Each observed scan gap is recorded per observation and counted per session, including observations with no event row, so `coverage` for that session stops reading as verified instead of showing a clean account. An accepted empty result is a clean scan, not a scan gap. The banner names one reason at a time and the scan-gap count is the last of them, so a session that *also* started unobserved or survived a daemon restart shows that instead — the account is still marked incomplete, but the line you read will not mention the scans. The no-event-row case is the one a per-event flag could not cover: an outbound call whose fast tiers found nothing and which had a scan gap writes no event row at all, and would otherwise be indistinguishable from a clean scan. The recorded histories (`engine.GAP_*`) are: a payload over `engine.MAX_TIER3_CHARS` (8192 characters), where inference is not attempted; no expensive detector supplying a successful available result, including weights that never loaded and a detector becoming unavailable during inference; a failed admission; and a timeout. `ModelDetector.scan()` catches inference exceptions and marks the detector unavailable instead of returning an empty result that counts as a clean scan. The unavailable history requires that no expensive detector supplies a successful available result. A false wait return yields `GAP_TIMEOUT`; after a true return, a worker error is re-raised, otherwise an unsuccessful outcome supplies its gap reason, or a rejected completion yields `GAP_TIMEOUT`.
 
 One consequence of that worth knowing: in the current single-model configuration, an inference exception caught by `ModelDetector.scan()` marks the detector unavailable for the life of the daemon, so a single transient failure takes the deep scan out until the daemon restarts (five minutes after your last session ends, or sooner if you restart it). In that configuration, every later observation *that the deep scan applies to* has a scan gap, recorded — a local read is not one, since the deep scan is out of scope there — so those sessions are marked rather than silently shallow.
+
+Legacy scan gaps remain session-level records without an event link. New accounting also records the gap on its observation, including observations with no findings; finding-event detail carries that observation's gap reason. A gap does not establish whether a particular value crossed a boundary.
 
 What is still missing is *which* calls: the gap count is per session, and no individual row is marked.
 

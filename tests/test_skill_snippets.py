@@ -54,6 +54,9 @@ MARKERS = {
     "repair": "repair --print-command",
     "setup": "install.sh",
     "preamble": 'HUD=(python3 "$BUNDLE/scripts/runtime.py"',
+    # #54 Phase 4: the bundled ambient launcher replaces the console
+    # script in the setup branch.
+    "ambient": "\n  ambient --watch",
 }
 
 
@@ -322,3 +325,12 @@ def test_skill_event_detail_requires_two_identifiers():
     assert "$privacy <event_id>" not in text
     assert "L3 deep link" not in text
     assert "`$privacy <id>` deep link" not in text
+
+
+def test_skill_ambient_block_runs_the_bundled_launcher(env):
+    """#54 Phase 4: the setup branch's fallback pane is the selected
+    bundle's launcher. Run once rather than watching."""
+    block = _block("ambient")
+    assert "scripts/runtime.py" in block
+    out = _run(block.replace("ambient --watch", "ambient --once"), env)
+    assert out.returncode == 0, out.stderr

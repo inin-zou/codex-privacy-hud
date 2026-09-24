@@ -2,9 +2,11 @@
 
 **Status:** Draft v0.1 · **Date:** 2026-09-03 · **Track:** Agentic AI — Making Privacy Native to Personal Agents
 
-**Current contract — #54 Phase 3 (0.8.1).**
+**Current contract — #54 Phase 4 (0.9.0).**
 
-The new accounting core is implemented and tested but is not active for production sessions. Production session creation still selects legacy accounting. Prepared-schema migration remains unchanged. No historical rows are backfilled or rescored. Runtime selection, writer ownership, and the fenced ledger layout introduced in 0.8.0 remain required. #43, #44, and the related #47 accounting limitations remain unresolved in production.
+New sessions observed from a genuine SessionStart use evidence-based accounting. Existing sessions and sessions attached after their start retain legacy accounting. Observations, finding outcomes, disclosure identities, and charges are separate. Current hooks do not confirm model-context admission, transmission, or host application of interventions; unresolved evidence withholds the percentage. Historical records remain unchanged. Recipient identity does not establish delivery, inherited subagent content, or causal multi-hop flows.
+
+Runtime selection, writer ownership, read-only readers, daemon policy RPC, and the fenced ledger layout remain required. Accounting activation runs under the daemon's current writer lease and does not change the runtime activation epoch. Generation 5402 requires the activated-accounting implementation introduced in Privacy HUD 0.9.0. A live client must also match the selected runtime build and activation epoch. Snapshot version remains 2; the native HUD does not authenticate runtime alignment.
 
 ---
 
@@ -332,7 +334,7 @@ On supported macOS installations, `install.sh` downloads a matching patched buil
 
 The browser binds to `127.0.0.1` on an OS-assigned port. The skill's audit path does not call the MCP server. The exposed MCP tools are a separate interface to the underlying audit and policy operations.
 
-The native status item displays accounting snapshots; it does not verify runtime alignment. Production sessions still use legacy accounting. No delivery surface establishes complete monitoring, confirmed disclosure or host enforcement.
+The native status item displays accounting snapshots; it does not verify runtime alignment. No delivery surface establishes complete monitoring, confirmed disclosure or host enforcement.
 
 ---
 
@@ -394,7 +396,7 @@ The original build sequence is historical, not an implementation plan for the cu
 5. Tool-argument rewriting and internal token primitives. No interactive consent workflow was delivered.
 6. Patched-Codex status item, companion pane and text receipt.
 
-Current production accounting remains legacy. The inactive accounting core and its activation work are governed by the current contract at the top of this document.
+Accounting activation is governed by the current contract at the top of this document.
 
 ---
 

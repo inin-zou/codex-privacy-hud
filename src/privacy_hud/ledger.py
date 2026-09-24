@@ -1,21 +1,19 @@
 """Versioned session accounting and legacy ledger access.
 
-Production sessions use legacy accounting. Phase 3 also implements an
-inactive version-2 core for isolated synthetic tests and the private-copy
-rehearsal.
+New sessions observed from a genuine SessionStart use version-2 accounting.
+Existing sessions and late attachments retain legacy accounting.
 
-Legacy records retain their stored scores, counts and classifications.
-Version-2 observations, events and disclosures are separate immutable
-records. Only a new chargeable disclosure increases a version-2 score.
+Observations, finding events and first disclosures are separate records.
+Only a new chargeable disclosure increases a version-2 score. Profiles
+and session caps are frozen; historical records are not rescored.
 
-Version-2 identity inputs are hashed before persistence. Labels and
-exemplars use explicit allowlists; the absence of a raw-content column
-alone does not establish that arbitrary metadata is safe.
+Identity inputs are hashed before persistence. Persisted metadata uses
+explicit allowlists and opaque labels. SessionEnd erases matching hashes
+while retaining opaque identities and accounting joins. Key destruction
+belongs to daemon lifecycle handling; this is logical erasure, not a
+secure-deletion guarantee.
 
-Readers select the session's accounting version inside a read transaction
-and never initialize, migrate or activate a ledger. SessionEnd erases
-matching hashes while retaining opaque identities and accounting joins;
-this is logical erasure, not a secure-deletion guarantee.
+Readers never initialize, migrate or activate a ledger.
 """
 from __future__ import annotations
 

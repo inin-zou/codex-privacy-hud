@@ -16,21 +16,19 @@ English | [简体中文](README.zh-CN.md)
 
 A local-first Codex plugin that records hook observations in a session ledger and can return denials or rewritten input before tool execution.
 
-The HUD currently shows a legacy permitted-crossing score. Historical accounting includes permitted crossings and may collapse different outcomes; it does not establish confirmed disclosure. The badge counts legacy prevented rows, not denied calls or confirmed host-enforced interventions. An unrecorded session shows “No session on record” with no percentage or numeric counts.
+New sessions observed from a genuine SessionStart use evidence-based accounting: confirmed points, distinct disclosures, confirmed recipients, and denials issued. A percentage is shown only when the recorded evidence supports it. Current hooks do not confirm model-context admission, transmission, or host application of a denial or rewrite, so a session may show zero confirmed points alongside unresolved actions and an unavailable percentage. Zero confirmed points does not mean no disclosure occurred.
 
-Version 0.8.1 includes the new accounting core, but production sessions still use legacy accounting. The new evidence, identity, and distinct-disclosure calculations are implemented and tested; they are not yet active.
+Existing sessions and sessions attached after their start retain their legacy permitted-crossing score and its limitations. Historical rows are preserved without backfill or rescoring. An unrecorded session has no percentage or numeric counts.
 
-Version 0.8.0 checks runtime alignment and fences the active ledger from historical entry points. The daemon still prepares the accounting schema at a genuine new-session boundary, and production sessions still use legacy accounting. Historical records and stored scores are not backfilled or rescored.
+Recipient identity is separate from boundary category. Supported, unambiguous MCP names and simple network commands can identify intended recipients; ambiguous identities remain unresolved. This does not establish delivery, downstream forwarding, or what a subagent inherited.
 
-A denial or rewritten input returned by Privacy HUD is not confirmation that the host applied it. Current hooks do not establish that a denied call did not run or that rewritten input reached its intended recipient.
+Detection runs locally; the plugin sends no prompt, file, or secret to a remote scanner. Runtime communication is limited to Unix-domain sockets and the local browser UI on 127.0.0.1.
 
-Boundary, not recipient: a second MCP server is not a second destination today, and what a subagent inherited is not recorded at all (limits 19 and 20).
-
-Detection runs locally; the plugin sends no prompt, file, or secret to a remote scanner. Runtime communication is limited to Unix-domain sockets and the local browser UI on `127.0.0.1`.
+Version 0.9.0 activates evidence-based accounting for new sessions observed from a genuine SessionStart, using the selected runtime and fenced ledger introduced in 0.8.0. Existing and late-attached sessions retain legacy accounting; historical records are not backfilled or rescored.
 
 ```text
 Token HUD:    How much context has been consumed?
-Privacy HUD:  What does this session's legacy accounting record?
+Privacy HUD:  What is confirmed, and what remains unresolved?
 ```
 
 ![The Codex Privacy HUD user journey — from the ambient disclosure bar through the session audit, exposure detail, and minimizing a payload before it reaches an external tool](docs/images/user-journey-mockup.png)
@@ -62,17 +60,33 @@ Design-intent illustration. It predates the explicit legacy labels; its bar and 
 
 ## Install
 
-Privacy HUD 0.8.2 retains snapshot version 2. Production sessions still use legacy accounting. Snapshot-v2 readers accept version 1 as explicitly legacy and version 2 with nullable accounting fields. Older snapshot-v1-only readers reject version 2 and show no Privacy item. Matching Codex version numbers do not establish snapshot compatibility.
+Privacy HUD 0.9.0 retains snapshot version 2. New sessions observed from a genuine SessionStart use version-2 accounting; existing sessions and late attachments retain legacy accounting. Snapshot-v2 readers accept version 1 as explicitly legacy and version 2 with nullable accounting fields. Older snapshot-v1-only readers reject version 2 and show no Privacy item. Matching Codex version numbers do not establish snapshot compatibility.
 
-The snapshot-v2 patched Codex builds for 0.154.0, 0.155.0, and 0.155.1 were re-released on 2026-09-22. An earlier installation of one of those versions may still contain the older reader. Updating the plugin does not replace that binary. No additional patched-Codex release is required for Privacy HUD 0.8.1.
+The snapshot-v2 patched Codex builds for 0.154.0, 0.155.0, and 0.155.1 were re-released on 2026-09-22. An earlier installation of one of those versions may still contain the older reader. Updating the plugin does not replace that binary. No additional patched-Codex release is required solely for Privacy HUD 0.9.0.
 
-The native Privacy item displays accounting snapshots; it does not verify runtime alignment. Before repair, an old daemon may continue refreshing a legacy reading. Use doctor to check alignment. The bundled ambient launcher reports runtime failure instead of displaying a percentage.
+The native Privacy item displays accounting snapshots; it does not verify runtime alignment. Before repair, an old daemon may continue refreshing a legacy reading. Use the bundled doctor command to check alignment. The bundled ambient launcher reports runtime failure instead of displaying a percentage.
 
-Privacy HUD loads its Python code from the selected plugin bundle. The recorded Python environment supplies dependencies. Run `$privacy repair` to obtain the exact recovery command for another terminal. Explicit installation may download dependencies and model weights; runtime checks and offline repair do not.
+Privacy HUD loads Python code from the selected plugin bundle. The recorded Python environment supplies dependencies. Run $privacy repair to obtain the exact recovery command for another terminal. Explicit installation may download dependencies and model weights; runtime checks and offline repair do not.
 
-Repair preserves recorded ledger values and moves the active store to `$PLUGIN_DATA/ledger/active.db`. `$PLUGIN_DATA/ledger.db` becomes a directory that fences the historical pathname. Do not replace it with a file or symlink. Repair does not perform the accounting rebuild; the compatible daemon retains the genuine new-session migration boundary. Unsupported or altered schemas are preserved and refused. No downgrade migration is provided.
+The active ledger is $PLUGIN_DATA/ledger/active.db after repair. $PLUGIN_DATA/ledger.db is a directory that fences the historical pathname. Do not replace it with a file or symlink. Repair preserves the accounting generation and recorded values; it does not activate version-2 accounting. The selected daemon activates accounting only when it receives a genuine SessionStart for an absent session.
 
-Runtime mismatches produce an unverified warning on ingress and a denial for outbound calls the hook cannot verify. These are plugin decisions, not confirmation of host enforcement. Monitoring gaps and lost in-memory detection state cannot be reconstructed.
+Generation 5402 requires the activated-accounting implementation introduced in Privacy HUD 0.9.0. A live client must also match the selected runtime build and activation epoch. Unsupported or altered schemas are preserved and refused. No downgrade migration is provided.
+
+Runtime mismatches produce an unverified warning on ingress and a denial for outbound calls the hook cannot verify. These are plugin decisions, not confirmation of host enforcement. Monitoring gaps and lost in-memory detection state cannot be reconstructed. Open version-2 sessions whose accounting keys were lost remain unavailable for the rest of those sessions.
+
+```bash
+PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.9.0/plugin'
+PRIVACY_HUD_DATA='/absolute/path/to/plugin/data'
+
+python3 "$PRIVACY_HUD_BUNDLE/scripts/runtime.py" \
+  --plugin-data "$PRIVACY_HUD_DATA" doctor
+
+python3 "$PRIVACY_HUD_BUNDLE/scripts/runtime.py" \
+  --plugin-data "$PRIVACY_HUD_DATA" repair --print-command
+
+python3 "$PRIVACY_HUD_BUNDLE/scripts/runtime.py" \
+  --plugin-data "$PRIVACY_HUD_DATA" ambient --watch
+```
 
 Privacy HUD 0.7.1 does not alter the schema of a valid prepared generation-5401 ledger during initialization: `events` already contains `source_kind`. It can nevertheless open the historical ledger pathname without participating in the selected runtime's handshake or writer lease. On a prepared ledger, historical session and coverage writes can succeed even though legacy event recording fails against the new `events` layout. On a generation-0 ledger, historical event writes remain possible, and initialization adds `source_kind` only when that column is absent. Explicit repair therefore quiesces legacy users, preserves the ledger at `$PLUGIN_DATA/ledger/active.db`, and replaces `$PLUGIN_DATA/ledger.db` with a directory fence that prevents subsequent historical-path opens. The fence does not revoke already-open connections or protect against same-user code deliberately opening the active pathname.
 
@@ -185,6 +199,20 @@ moment later, and that load window is unmonitored: see
 
 ## What you see
 
+For a new session whose outcomes remain unresolved:
+
+Privacy —% · 3 unresolved · 2 denials issued
+
+The native Privacy item is available only in a snapshot-v2-compatible patched Codex build. The ambient pane provides the fallback.
+
+The audit shows confirmed points, distinct disclosures, confirmed recipients, and denials issued. It also shows unresolved actions and why a percentage is unavailable. The compact HUD omits points; open $privacy for the full accounting explanation.
+
+Tabs are Confirmed crossings, Interventions, and All finding events. Rows describe evidence at one observation point. Repeated exposure events can share one charged disclosure. Actions without findings are included in the summary.
+
+Detail shows the subject, intended or evidenced recipient, outcome evidence, occurrences, and contribution charged at that event. Opaque file labels distinguish subjects without storing sensitive path components. They cannot be used as source-rule selectors.
+
+Legacy sessions retain their explicit legacy labels and tab meanings. Unrecorded sessions have no numeric accounting.
+
 **Level 1 — Ambient.** One item in Codex's own status line, under the composer:
 
 ```text
@@ -252,21 +280,18 @@ Secret scanners are pre-commit, not pre-inference. DLP products are server-side 
 
 The distinction the product is built on:
 
-| Event | Counts toward the disclosure budget |
+| Observation | V2 accounting |
 |---|---|
-| A local scanner detects an email in a file | **No** |
-| File content enters model context | **Yes** |
-| Data is passed to a subagent *through a tool call* | **Yes** — new destination |
-| What a subagent inherits at spawn | **No** — not observed at all (limit 19) |
-| Arguments sent to an MCP tool | **Yes** |
-| A shell command sends data to an external host | **Yes** |
-| Content redacted or blocked before send | **No** — counted as *prevented* |
+| Local scanner finding | Detection; zero points |
+| Permission to attempt a crossing | Permission; zero points |
+| Privacy HUD issues a denial | Denial issued; zero points |
+| Privacy HUD returns rewritten input | Rewrite issued; zero points; application unresolved |
+| Evidence identifies a subject crossing to a concrete recipient | First distinct disclosure is charged |
+| Evidence identifies a subject excluded by an applied rewrite | Prevention for that subject; zero points |
+| Observed persistence | Retention; zero points |
+| Subagent starts without inherited-content evidence | Observation only; inheritance unresolved |
 
-So the audit shows **crossings**, not findings — one row per value observed crossing a boundary, with the boundary's category as its destination. Not a multi-hop chain: the `flows` table exists and nothing writes it, and a `×N` count is N hits on one dedupe key, not N distinct values:
-
-```text
-support.log → main agent → GitHub MCP
-```
+The audit contains finding events with explicit outcome evidence. Observations also record actions with no findings. Disclosure identities and charges are separate from event rows. Source-to-recipient associations do not reconstruct causal multi-hop flows.
 
 ### The read guard
 
@@ -284,7 +309,7 @@ $privacy read status    # prints `on` or `off`
 
 The setting is written to `~/.codex/plugins/data/codex-privacy-hud-…/settings.json`, not `config.toml`. A change applies to a running session with no restart. That file is not one you see from inside Codex, so `$privacy read status` and `privacy-hud-doctor` are how you find out what it says.
 
-What it does not cover is limits 14–18 below: it acts only on shell commands, and only the reads it can recognise there (`cat .env`, but not `wc -l .env`); it never blocks a template file such as `.env.example`; and it writes an audit row naming the pattern that matched rather than the file.
+The guard remains limited to recognized shell reads and is off by default. Template-file exemptions remain. New accounting distinguishes the file subjects of denied reads, but stores opaque labels rather than sensitive path components. A denial request is not proof that the host stopped the read.
 
 ### The ledger
 
@@ -297,15 +322,15 @@ flowchart TD
     B --> F["Allow, rewrite, or block"]
 ```
 
-The ledger is **event-sourced from hook boundaries**, never by asking a model what is in context. Every byte that can enter model context from your machine passes through a small set of chokepoints — `UserPromptSubmit`, `PostToolUse`, `SubagentStart`, `PreToolUse` — which together form a cut of the data-flow graph. We observe the transactions and reconstruct the balance.
+The ledger records delivered local hooks; it does not reconstruct the model's complete context. Missing hooks, hosted tools, discarded results, and unconfirmed host outcomes remain outside what those observations establish. Accounting keeps that uncertainty explicit instead of charging an assumed crossing.
 
 There is **no second LLM call to audit the first one.** That would re-transmit the sensitive data being audited, cost a round trip per turn, and produce a non-deterministic ledger. See `architecture.md` §3.
 
 ### Privacy of the privacy tool
 
 - Detection runs **entirely locally**. No content is sent anywhere for classification.
-- The ledger stores **metadata only** — types, counts, sources, destinations, timestamps, masked exemplars. There is no `content` column, no `prompt` column, no `raw_value` column. The schema *is* the guarantee.
-- Value identity uses a session-scoped salted HMAC held in memory and destroyed at session end, so cross-session correlation is impossible by construction.
+- New accounting stores allowlisted metadata, opaque identities, and masked examples. Column names alone do not make arbitrary labels safe.
+- At session end, new-accounting identity hashes are nulled and the matching in-memory key is discarded. Opaque IDs and accounting joins remain. This is logical erasure, not secure overwriting of SQLite pages, WAL files, backups, swap, or Python memory; other metadata can still correlate records.
 - No telemetry or analytics. Plugin runtime makes no outbound network requests, regardless of inherited environment values.
 - The self-audit is a committed corpus with both controls, and it is a **requirement the tool does not yet meet**: four of its entries fail — two ordinary development strings the model reports personal data in, and two addresses it misses or fragments. Each is recorded rather than tolerated. [`docs/self-audit.md`](docs/self-audit.md) has them, and says what a passing run does not prove. The older, wider promise — that a development session yields zero exposures — was withdrawn when measurement contradicted it.
 
@@ -344,10 +369,10 @@ Stated up front, because a privacy tool that overclaims is worse than none:
 14. **Only a shell command whose read the extractor recognises is stopped.** The guard sees one tool — the shell — because that is how Codex reads a file; any other tool is allowed unexamined. Within the shell, `cat .env` is stopped; `wc -l .env`, `source .env`, `cp .env /tmp/x`, `strings id_rsa`, `head -5 .env` and `python -c "open('.env')"` are not — no deny, no notice, no row. Limit 11 holds the mechanism. ([details](docs/known-limits.md#14-only-a-shell-command-whose-read-the-extractor-recognises-is-stopped))
 15. **A template file is never blocked**, even one that really holds a key. Detection still flags it. ([details](docs/known-limits.md#15-a-template-file-is-never-blocked))
 16. **Nothing is blocked until you turn it on.** The default records the read and mentions the guard once per session; it stops nothing. ([details](docs/known-limits.md#16-nothing-is-blocked-until-you-turn-it-on))
-17. **A blocked read can leave a record that says the opposite, in one sequence.** Read with the guard off, turn it on, read again: the ledger dedupes on `(session_id, value_hash, destination)`, so the deny lands as a `count` increment on the earlier row. What stays is one `local_access` row saying the first file was read twice and nothing was blocked. No `prevented` row is written, so `legacy_prevented_rows` remains 0 after the plugin issues the denial. The HUD omits a zero secondary count. This does not establish host enforcement. ([details](docs/known-limits.md#17-a-blocked-read-can-leave-a-record-that-says-the-opposite-in-one-sequence))
-18. **A blocked read's row does not name the file.** It rides on the pattern that matched (`.pem`, `.env`, …), so two different files that match the same pattern dedupe into one row. The row records the plugin's prevented classification, not confirmed host enforcement or a distinct file. Two denied reads matching `.pem` can display `1 prevented row`. ([details](docs/known-limits.md#18-a-blocked-reads-row-does-not-name-the-file))
+17. Legacy rows can still collapse different outcomes. New accounting appends independent outcome evidence and counts denials issued by action. Historical rows are not reconstructed, and issued denials do not establish host enforcement. ([details](docs/known-limits.md#17-a-blocked-read-can-leave-a-record-that-says-the-opposite-in-one-sequence))
+18. Legacy rows can still merge files matching one pattern. New accounting uses separate file subjects where the evaluated path is unambiguous, and privacy-preserving opaque labels. The badge counts denials issued; confirmed stopped reads require enforcement evidence. ([details](docs/known-limits.md#18-a-blocked-reads-row-does-not-name-the-file))
 19. **What a subagent inherited is not recorded.** The `SubagentStart` observation carries no text, so no detector runs on it and no row results. "Did the subagent inherit the `.env`?" has no answer in the ledger. ([details](docs/known-limits.md#19-what-a-subagent-inherited-is-not-recorded))
-20. **A destination is a boundary category, not a recipient.** Every MCP call is `mcp_tool`; a second MCP server is not a second destination, and adds nothing further to the budget. The `legacy boundary kinds` tile (`legacy_boundary_kinds`) counts categories, not services. ([details](docs/known-limits.md#20-a-destination-is-a-boundary-category-not-a-recipient))
+20. Concrete recipients are identified only where the hook and supported parser provide an unambiguous identity. Other recipients remain unresolved. Identity alone does not establish delivery or forwarding. ([details](docs/known-limits.md#20-a-destination-is-a-boundary-category-not-a-recipient))
 21. **On an outbound call, the deep scan is best-effort.** The model is serial, and a missed hook deadline on an outbound call becomes a deny (I6). Egress uses a requested timeout based on the remaining budget and an inclusive completion cutoff; neither guarantees elapsed time. See `engine.TIER3_EGRESS_BUDGET`. Measured: a call under the 1.0 s budget returned at 1.25 s. At most one egress scan worker is admitted at a time. Admission is nonblocking; the worker retains its slot until it exits, including after caller abandonment. A scan gap means an applicable deep scan supplied no accepted result; the call then proceeds on the fast tiers, the same as every outbound call before this existed. A scan gap can omit findings that would otherwise cause blocking or masking. Each observed scan gap is recorded per observation and counted per session, including observations with no event row, so the session stops reading as fully verified — but the audit cannot tell you which calls they were. ([details](docs/known-limits.md#21-on-an-outbound-call-the-deep-scan-is-best-effort))
 
 ## Configuration
@@ -394,12 +419,12 @@ Stated up front, because a privacy tool that overclaims is worse than none:
 
 ## Uninstall
 
-Run the script from the exact installed 0.8.2 plugin bundle. Replace the
+Run the script from the exact installed 0.9.0 plugin bundle. Replace the
 placeholder below with that bundle's absolute directory, containing both
 `install.sh` and `scripts/runtime.py`.
 
 ```bash
-PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.8.2/plugin'
+PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.9.0/plugin'
 sh "$PRIVACY_HUD_BUNDLE/install.sh" --uninstall
 ```
 

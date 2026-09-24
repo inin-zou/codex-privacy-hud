@@ -17,14 +17,16 @@ from privacy_hud import accounting
 from privacy_hud import runtime_contract as contract
 
 REPO = Path(__file__).resolve().parent.parent
-RELEASE = "0.8.2"
+#: 0.8.2 is history since #54 Phase 4 (0.9.0): the declarations must agree
+#: on whatever release is current, and 0.8.2's CHANGELOG section survives.
+RELEASE = contract.RELEASE
 
 
 def _json(rel: str) -> dict:
     return json.loads((REPO / rel).read_text(encoding="utf-8"))
 
 
-def test_every_declaration_is_0_8_2():
+def test_every_declaration_names_the_current_release():
     plugin = _json(".codex-plugin/plugin.json")
     assert plugin["version"] == RELEASE
     entries = [p for p in _json(".agents/plugins/marketplace.json")["plugins"]
@@ -53,7 +55,8 @@ def test_surface_refusal_is_retired():
 
 def test_changelog_has_a_0_8_2_section_above_0_8_1():
     text = (REPO / "CHANGELOG.md").read_text(encoding="utf-8")
-    assert text.startswith("# Changelog\n\n## 0.8.2\n")
+    assert text.startswith("# Changelog\n\n## ")
+    assert "\n## 0.8.2\n" in text
     section = text.split("\n## 0.8.2\n", 1)[1].split("\n## 0.8.1\n", 1)[0]
     assert "\n## 0.8.1\n" in text
     assert re.search(r"^Refs #70, #71\.$", section, re.M)
