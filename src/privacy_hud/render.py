@@ -174,6 +174,30 @@ def _refuse_v2(summary: SessionSummary | None = None,
         raise UnsupportedAccounting(PHASE3_SURFACE_UNSUPPORTED)
 
 
+def accounting_percentage_line(summary: AccountingSummary) -> str:
+    # P4-C7 contract scaffolding: declared, not implemented.
+    raise UnsupportedAccounting(PHASE3_SURFACE_UNSUPPORTED)
+
+
+def accounting_reason_lines(
+    summary: AccountingSummary,
+) -> tuple[str, ...]:
+    # P4-C7 contract scaffolding: declared, not implemented.
+    raise UnsupportedAccounting(PHASE3_SURFACE_UNSUPPORTED)
+
+
+def accounting_event_chips(
+    row: AccountingExposureRow,
+) -> tuple[str, ...]:
+    # P4-C7 contract scaffolding: declared, not implemented.
+    raise UnsupportedAccounting(PHASE3_SURFACE_UNSUPPORTED)
+
+
+def accounting_copy() -> dict[str, str]:
+    # P4-C7 contract scaffolding: declared, not implemented.
+    raise UnsupportedAccounting(PHASE3_SURFACE_UNSUPPORTED)
+
+
 def _legacy_rows(rows: Sequence[ExposureRow]) -> list[LegacyExposureRow]:
     """`rows`, after `_refuse_v2` has refused any version-2 row."""
     _refuse_v2(rows=rows)
