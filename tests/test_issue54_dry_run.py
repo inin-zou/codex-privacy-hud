@@ -816,3 +816,38 @@ def test_phase4_preserves_phase2_and_phase3_contracts(tmp_path):
     proc = _run(_active(root), _work(tmp_path / "act"), 3)
     assert proc.returncode == 1
     assert proc.stderr == "check: phase3-source-version\n"
+
+
+def test_phase4_rehearsal_then_real_activation_of_the_source(tmp_path):
+    """P4-C13: a passing rehearsal leaves the fenced store exactly usable by
+    the real upgrade. The 0.9.0 daemon state then activates it on a genuine
+    start, and every legacy cell the rehearsal saw is still there."""
+    from privacy_hud import dispatch as dispatch_mod
+    from runtime_helpers import writer_state
+
+    root = _fenced_root(tmp_path)
+    source = _active(root)
+    _assert_pass4(_run(source, _work(tmp_path), 4))
+    raw = sqlite3.connect(f"{source.resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        legacy = raw.execute(
+            "SELECT * FROM events_legacy_v1 ORDER BY id").fetchall()
+    finally:
+        raw.close()
+    assert legacy
+    state = writer_state(root)
+    try:
+        dispatch_mod.dispatch(state, {"hook_event_name": "SessionStart",
+                                      "session_id": "after-rehearsal",
+                                      "cwd": "/w"})
+        conn = state.ledger.conn
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5402
+        assert conn.execute(
+            "SELECT accounting_version FROM sessions WHERE"
+            " session_id='after-rehearsal'").fetchone()[0] == 2
+        assert [tuple(r) for r in conn.execute(
+            "SELECT * FROM events_legacy_v1 ORDER BY id")] == \
+            [tuple(r) for r in legacy]
+    finally:
+        close_writer(state.ledger)
+    assert (root / "ledger.db").is_dir()
