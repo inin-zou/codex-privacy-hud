@@ -459,7 +459,12 @@ def _one_literal_operand(command: str, program: str,
         option = (name[:2] if _attached_short_value(name, value_options)
                   else name)
         if option in _MULTI_FILE_OPTIONS or (
-                program == "less" and option in {"-k", "-T"}):
+                program == "less" and option in {"-k", "-T"}) or (
+                program == "bat" and option == "--pager"):
+            return False
+        # The legacy display parser does not count attached patterns as
+        # pattern options, so its skipped positional may be another file.
+        if option in PATTERN_OPTIONS and option != name:
             return False
         if name not in known and not _attached_short_value(name,
                                                            value_options):
