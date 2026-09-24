@@ -372,4 +372,4 @@ Duration is omitted when unavailable. Unrecorded receipts show unavailable accou
 1. **Does L1 ship in v1?** The companion renderer needs a terminal pane we do not own. `systemMessage` + `$privacy` may carry the demo alone.
 2. **Row aggregation granularity.** Aggregating by `(type, source, destination)` hides per-occurrence timing. Does `All events` need an expandable row, or is the flat timeline enough?
 3. **Budget calibration.** 120 points is a guess. A normal 40-minute session should land in the 20–40% range; needs one real-session pass to tune.
-4. **Minimization preview length.** Long payloads need a diff view rather than before/after strings.
+4. **Unshipped minimization preview:** a future preview would need a design for long payloads. No preview or preview-and-retry action is available today.

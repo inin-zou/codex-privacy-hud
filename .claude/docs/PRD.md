@@ -241,22 +241,15 @@ Codex sets `PLUGIN_ROOT` and `PLUGIN_DATA` for plugin-bundled hooks; the ledger 
 
 Verified hook payload fields (stdin JSON): `session_id`, `transcript_path`, `cwd`, `hook_event_name`, `model`, `permission_mode`, plus `turn_id`, `prompt`, `tool_name`, `tool_use_id`, `tool_input`, `tool_response`, `agent_id`, `agent_type` depending on the event.
 
-### 7.3 Local privacy engine (two-tier, for latency)
+### 7.3 Local privacy engine
 
-```text
-Fast path  (<15 ms, always)
-├─ sensitive file path patterns  (.env, *.pem, id_rsa, credentials.json, ~/.aws)
-├─ secret / API-key regex + entropy check
-├─ shell command parser → destination extraction (curl/wget/scp/ssh/nc/git remote)
-└─ MCP destination policy lookup
+The shipped detector stack is `PathDetector`, `SecretDetector` and `ModelDetector`. Paths and credentials use cheap local checks. Shell destination classification is a separate heuristic step. Presidio and a separate contextual entity-resolution stage are not shipped.
 
-Deep scan  (only on fast-path hit or ambiguity)
-├─ Microsoft Presidio PII detection
-├─ contextual entity resolution
-└─ optional privacy-filter model
-```
+`ModelDetector` uses `openai/privacy-filter` through `transformers`. Installing its dependencies and weights is optional, but detection is reduced without them: the model-owned categories, including names, addresses and email addresses, are unavailable. Runtime loads only local weights and never downloads replacements.
 
-Fail-open vs fail-closed: the engine **fails open with a `systemMessage`** on timeout for reads, and **fails closed** for outbound egress (B3/B4). A privacy tool that hangs the agent gets uninstalled; a privacy tool that silently leaks is worse.
+Cheap detectors scan the observation text. Deep scanning applies to non-local destinations, including outbound B3/B4 calls, without requiring a cheap-detector hit or a PII-shaped prefilter. Payloads above 8192 characters skip the deep scan entirely. An applicable deep scan that supplies no accepted result records a scan gap; that is not a clean scan.
+
+Outbound deep scanning uses the admission and deadline rules in `architecture.md` §4. Those rules do not guarantee wall-clock completion. The hook client separately applies its shared request deadline: unchecked ingress receives an unverified warning, and unchecked outbound calls receive a denial. These are plugin responses, not confirmation of host enforcement.
 
 ### 7.4 Session disclosure ledger
 
@@ -373,7 +366,7 @@ Non-negotiable properties, and the first thing a judge will ask:
 - [ ] Codex plugin package (`plugin.json`, bundled `hooks/hooks.json`)
 - [ ] Hooks: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SubagentStart/Stop`, `SessionEnd`
 - [ ] Fast path: secret regex + entropy, sensitive path rules, shell destination parser
-- [ ] Deep scan: Presidio PII detection
+- [x] Local detector stack: path and credential checks, with `openai/privacy-filter` as the optional installed deep detector; missing dependencies or weights leave deep detection unavailable.
 - [ ] Metadata-only SQLite ledger + budget math with the §5.3 invariants tested
 - [ ] `$privacy` skill
 - [ ] Local interactive audit UI: `Exposed / Prevented / All events` + exposure detail
@@ -388,18 +381,20 @@ Non-negotiable properties, and the first thing a judge will ask:
 
 ### Won't (v1)
 
-- Hugging Face `privacy-filter` model, org policy presets, App Server native client, multi-user/team sync
+- Presidio integration, org policy presets, App Server native client, multi-user/team sync
 
-### Build order
+### Historical build order
 
-1. Ledger + budget math (pure, testable, no Codex needed)
-2. Detection engine (fast path first, Presidio behind an interface)
-3. Hook handler + plugin package — verify against a real Codex session early
-4. `$privacy` skill + audit UI
-5. Minimization/rewrite path + `allow_once` token loop
-6. Companion HUD, receipt, polish
+The original build sequence is historical, not an implementation plan for the current release:
 
-Risk note: step 3 is the only step with unknown platform behavior. Do it **third, not last** — a smoke test of one hook firing end-to-end should happen within the first two hours.
+1. Legacy ledger and budget functions.
+2. Cheap detectors and the local `openai/privacy-filter` detector.
+3. Hook client, plugin packaging and daemon integration.
+4. Session audit and conditional policy-writing surfaces.
+5. Tool-argument rewriting and internal token primitives. No interactive consent workflow was delivered.
+6. Patched-Codex status item, companion pane and text receipt.
+
+Current production accounting remains legacy. The inactive accounting core and its activation work are governed by the current contract at the top of this document.
 
 ---
 
@@ -419,7 +414,7 @@ Risk note: step 3 is the only step with unknown platform behavior. Do it **third
 
 ## 13. Open questions
 
-1. **Language:** Python (Presidio is native, hook startup cost ~200 ms) vs TypeScript (fast startup, Presidio via subprocess/port). Recommendation: **Python with a persistent daemon** — hooks become thin clients over a unix socket, avoiding per-hook interpreter startup.
+1. **Language decision:** Python with a persistent daemon and a stdlib-only hook client. The shipped deep detector is local `openai/privacy-filter` through `transformers`; Presidio is not part of the runtime.
 2. **Audit UI stack:** static HTML + vanilla JS served from a tiny local server (fast, zero build) vs a bundled framework. Recommendation: **static + vanilla**, matching the terminal aesthetic of the mockup.
 3. **Does the companion HUD ship in v1** or is `systemMessage` + `$privacy` enough for the demo?
 4. **Budget cap default (120)** — needs a calibration pass against a real session so a normal working session doesn't hit 100% in ten minutes.

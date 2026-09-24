@@ -156,40 +156,15 @@ sequenceDiagram
     D-->>C: budget=28
 ```
 
-### 3.3 Incremental update algorithm
+### 3.3 Incremental processing without a chunk cache
 
-Each event is processed in one pass:
+Each observation is scanned from its own text. There is no content-hash findings cache and no shared 64 MB LRU. Re-reading unchanged content can repeat detector work.
 
-```python
-def on_event(ev):
-    obs = normalize(ev)                    # → {turn_id, direction, boundary, source, text}
-    if cached := chunk_cache.get(hash(obs.text)):
-        findings = cached                  # re-read of an unchanged file costs nothing
-    else:
-        findings = engine.scan(obs.text)   # fast path, deep scan only if needed
-        chunk_cache.put(hash(obs.text), findings)
+Dispatch separates scanning from policy and ledger work. It computes one `ScanResult` outside the ledger lock and passes that result into `Engine.observe` while holding the lock. This avoids scanning the same observation twice; it does not reuse results from earlier observations or other sessions.
 
-    delta = 0
-    for f in findings:                     # f = {type, value_hash, masked_exemplar}
-        key = (f.value_hash, obs.destination)
-        if key in disclosed_set:           # same value, same destination
-            ledger.bump_count(key)         # count += 1, budget delta = 0
-        else:
-            disclosed_set.add(key)
-            ledger.append(DisclosureEvent(f, obs))
-            delta += severity(f.type) * volume(count) * dest_mult(obs.boundary)
+Production sessions still use legacy accounting. Legacy deduplication uses `(session_id, value_hash, destination)` and can increment an existing row's repetition count instead of adding a new contribution. That accounting deduplication happens after detection and is not a computational cache. It can also collapse different outcomes; this section does not resolve #47 items 3, 4 or 8.
 
-    return ledger.budget_add(delta)        # monotonic, never decreases
-```
-
-**Why this satisfies the PRD invariants:**
-
-- *Prevented events score zero* — a denied `PreToolUse` never produces an ingress observation, so no event is appended.
-- *Monotonic* — `budget_add` only ever adds; there is no removal path, because disclosure is irreversible.
-- *Same value + same destination does not double-count* — the `disclosed_set` membership check.
-- *New destination does count* — the key includes `destination`, so `support.log → subagent` is a distinct entry from `support.log → model_context`.
-
-**Cost.** `O(bytes crossing a boundary)`, not `O(context size × turns)`. Combined with the chunk cache, re-reading an unchanged file is `O(1)`.
+Processing is incremental over observed payloads rather than a rescan of the full conversation. There is no O(1) unchanged-file reread guarantee. Detection misses and recorded scan gaps remain possible.
 
 ### 3.4 Value identity without storing values
 
@@ -226,17 +201,18 @@ Where we are imprecise, we are deliberately imprecise **toward over-reporting ex
 
 ## 4. Detection engine
 
-```text
-scan(text) →
-  ┌─ Tier 0: path/context rules      ~0.1 ms   .env, *.pem, id_rsa, ~/.aws, credentials.json
-  ├─ Tier 1: regex + entropy          ~2 ms    API keys, tokens, JWTs, connection strings
-  ├─ Tier 2: structural parse         ~3 ms    shell AST → destination extraction
-  └─ Tier 3: Presidio NER            ~40 ms    names, addresses, phones, orgs  [conditional]
-```
+The shipped stack contains two cheap detectors and one expensive detector:
 
-Tier 3 runs only when Tier 1 hits, when the payload crosses B3/B4, or when the text contains PII-shaped tokens that Tier 1 could not classify. Roughly 10–15% of events in practice.
+| Component | Role |
+|---|---|
+| `PathDetector` | Tier 0: sensitive path patterns |
+| `SecretDetector` | Tier 1: credential patterns and entropy checks |
+| Shell destination classification | Tier 2: heuristics over command text, outside the detector list |
+| `ModelDetector` | Tier 3: local `openai/privacy-filter` token classification |
 
-**What ships, on the B3/B4 half of that sentence.** The engine did the opposite for most of this project's life — it excluded B3/B4 outright — so the types tier 3 owns (`person`, `address`, `email`, `phone`, `url`, `date`, `account`) could not appear on any outbound row (#47 item 1). The exclusion is gone, and the reason it could not simply be deleted is what the rest of this section has to account for: an outbound call is a `PreToolUse`, `hooks/handler.py` gives the daemon 2.0 s per socket operation, and I6 turns a missed deadline into a **deny** of a call that should have been allowed.
+Presidio is not shipped. Cheap detectors scan each observation's text. Deep scanning applies to non-local destinations, including B3/B4, without a cheap-hit or PII-shape prerequisite. It is skipped entirely above `MAX_TIER3_CHARS` (8192 characters). Missing weights or an unsuccessful applicable scan produce a scan gap, not evidence of a clean payload.
+
+**Outbound deep scanning.** Before #47 items 1 and 6, the engine excluded B3/B4 from deep scanning. It now attempts the applicable scan under the admission and acceptance rules below. The hook client separately uses one 2.0-second deadline across connection, hello, event transmission and reply; an outbound call that cannot be checked receives a denial.
 
 On B3/B4, `engine.TIER3_EGRESS_BUDGET` is a duration (1.0 s) used to construct an absolute monotonic deadline. Egress uses a requested timeout based on the remaining budget and an inclusive completion cutoff; neither guarantees elapsed time. See `engine.TIER3_EGRESS_BUDGET`, which states the exact acceptance condition; this summary must agree with it. At most one egress scan worker is admitted at a time. Admission is nonblocking; the worker retains its slot until it exits, including after caller abandonment. Ingress does not use the egress deadline.
 
@@ -256,7 +232,7 @@ pipes              → follow the chain; the last sink wins
 
 Anything unparseable crossing B4 is treated as an unknown external destination and fails closed.
 
-**Interfaces.** Each tier implements `Detector.scan(text, ctx) -> list[Finding]`. Presidio sits behind this interface so it can be swapped for a local privacy-filter model without touching the ledger, and stubbed in tests.
+**Interfaces.** Detectors implement `Detector.scan(text, ctx) -> list[Finding]` and declare a `DetectorProfile` containing tier and cost. The engine schedules cheap and expensive detectors by that declaration; availability is separate runtime state. `ModelDetector` implements the expensive local `openai/privacy-filter` detector, and tests can substitute a detector with the same declared profile.
 
 ---
 
@@ -721,7 +697,7 @@ The MCP tools return structured JSON regardless, so when Codex renders MCP UI th
 
 - **One daemon, many sessions.** State is keyed by `session_id` throughout; there is no global mutable session state.
 - **Writes serialized** through a single SQLite connection in WAL mode; the UI reads on a separate read-only connection.
-- **Chunk cache** is content-hash keyed and bounded (LRU, 64 MB), shared across sessions — safe because it maps content hash to *findings*, never to content.
+- **No chunk cache.** Findings are not reused across observations or sessions. Legacy ledger deduplication can avoid another score contribution, but it does not avoid scanning an unchanged payload again.
 
 **Latency budget** — the table below was a design-time estimate, never empirically verified until real weights actually loaded (every prior dev/CI environment had `ModelDetector.available == False`, so tier 3 silently never ran and this budget was never truly exercised):
 
@@ -749,7 +725,7 @@ it exists to catch (address, person, date, account number) — see engine.py's
 fix commit. That correctness fix is what makes this latency real rather
 than theoretical.
 
-**`PostToolUse` is synchronous, and that is the honest cost.** §7's platform note explains why: Codex CLI 0.145.0 does not implement `async: true` on hooks — an event marked async is silently never executed, not deferred. So `PostToolUse` sits on the same critical path as `PreToolUse`, and it is the hook that scans the *largest* payloads in the system: tool results, meaning file contents, command output, and MCP responses — the primary ingress chokepoint described in §3.2. An unbounded synchronous scan of a large `tool_response` (a multi-hundred-KB file read, say) run through tier 3 (Presidio NER, superlinear-ish in practice) could blow past both the 150 ms budget and the hook's own 5 s hard timeout (`hooks.json`'s `"timeout": 5`), and a timed-out `PostToolUse` fails open per §2's table — meaning the largest disclosures would be exactly the ones most likely to go unrecorded if scanning were left unbounded.
+**`PostToolUse` is synchronous.** The host behavior recorded in §7 is why these hooks are not configured as asynchronous. Tool results can contain large payloads, and an applicable `openai/privacy-filter` scan can exceed the hook client's waiting budget. A size cap limits the input offered to the model; it does not establish a latency guarantee. If the client cannot obtain a usable ingress reply, it reports the observation as unverified.
 
 **Mitigation (binding on Task 10's implementation): bounded tier 3 on `PostToolUse`.**
 
@@ -771,7 +747,7 @@ on PostToolUse(tool_response):
 
 **What ships, on truncation.** This section specified scanning the first 8 KB and marking the remainder. The engine skips the deep scan **entirely** above `MAX_TIER3_CHARS` (8192 characters) rather than scanning a prefix, and `Engine._scan` says why: a prefix scan reports a clean result for a payload it mostly did not read, and the resulting row looks the same as a fully scanned one. Skip-and-record was chosen over truncate-and-scan for that reason, and the paragraphs below are kept because the sizing argument is still the sizing argument.
 
-**Why 8 KB.** It is sized to keep tier 3's synchronous cost close to the ~40 ms figure this budget already assumes (§4's Tier 3 estimate), which was measured against a typical small-to-medium chunk, not a large file read — capping the input size is what keeps that estimate honest at any payload size, rather than letting cost scale with whatever the tool happened to return. It also comfortably clears the 150 ms target with room for tiers 0-2, the socket round trip, and the ledger write, while leaving wide margin below the 5 s hook timeout even under a slow/cold-cache tier 3 run. This is a starting point, not a tuned constant — Task 10 should treat it as adjustable pending a real measurement of tier 3 latency vs. input size on this machine, but it must ship with *some* concrete bound rather than an unbounded scan, because unbounded is the failure mode this section exists to rule out.
+**Why the current cap is stated in characters.** `MAX_TIER3_CHARS` is 8192 characters, not a byte limit. Above it, the entire deep scan is skipped and an applicable observation records an `oversize` scan gap. The cap does not establish a 40 ms scan time, a 150 ms completion bound or complete detection. Cheap detectors still inspect the full observation text.
 
 Tiers 0-2 are deliberately left unbounded (full payload, every time): they are cheap enough not to need a cap, and skipping them on the tail of a large payload would silently reintroduce the exact "large disclosure goes unrecorded" gap tier 3's bound is meant to close for the cheap, deterministic checks (credential patterns, path rules) that do not need a model to run.
 
@@ -815,15 +791,13 @@ Everything except the two `Yes` rows runs without Codex, which is what makes the
 
 ---
 
-## 13. Build order
+## 13. Historical build order
 
-1. **Budget engine + ledger** — pure, testable, no platform dependency.
-2. **Detection engine** — fast path first; Presidio behind the `Detector` interface.
-3. **Hook client + plugin package** — smoke-test one real hook firing end-to-end **within the first two hours**. This is the only step with unknown platform behavior; discovering a surprise here on hour seven is the project's biggest risk.
-4. **Daemon + socket** — once the client contract is proven.
-5. **`$privacy` skill + audit UI.**
-6. **Rewrite path + consent tokens** — the demo's centerpiece.
-7. **Companion HUD, receipt, polish.**
+The original implementation sequence was ledger and budget functions, detection, hooks and daemon integration, audit surfaces, tool-argument rewriting, and ambient displays.
+
+The shipped deep detector is local `openai/privacy-filter`, not Presidio. Internal consent-token primitives exist, but no shipped surface issues consent tokens. Both the patched-Codex status item and the companion pane exist. Session receipts are text returned through hook `systemMessage`, not Markdown exports.
+
+This historical sequence is not the release plan for accounting activation. Production sessions remain legacy-accounted under the current contract at the top of this document.
 
 ---
 
