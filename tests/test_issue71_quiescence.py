@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import socket
 import sqlite3
 import subprocess
@@ -64,12 +65,17 @@ def _seed(root: Path) -> Path:
 
 
 def _stamp(root: Path, updated_at: float) -> Path:
+    """Write the marker the way the daemon does: whole, by rename. A
+    reader must never see a half-written file, which would read as no
+    marker at all."""
     marker = hud_snapshot.hud_dir(root) / "_daemon.json"
     marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(json.dumps({
+    tmp = marker.with_name("_daemon.json.stamp")
+    tmp.write_text(json.dumps({
         "v": hud_snapshot.DAEMON_MARKER_VERSION,
         "unattributed_gaps": False, "updated_at": updated_at}),
         encoding="utf-8")
+    os.replace(tmp, marker)
     return marker
 
 
