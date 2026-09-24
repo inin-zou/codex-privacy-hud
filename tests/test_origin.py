@@ -3,6 +3,34 @@ import pytest
 from privacy_hud.origin import Origin, OriginKind, extract_origin
 
 
+@pytest.mark.parametrize("command", [
+    "grep -f/r/patterns -e KEY .env",
+    "grep -f /r/patterns -e KEY .env",
+    "less -k/r/keys .env",
+    "less -k /r/keys .env",
+    "less -T/r/tags .env",
+    "less -T /r/tags .env",
+])
+def test_additional_file_options_leave_accounting_path_unresolved(command):
+    origin = extract_origin("Bash", {"command": command})
+    assert origin is not None
+    assert origin.kind is OriginKind.PATH
+    assert origin.value == ".env"
+    assert origin.evaluated_path is None
+
+
+@pytest.mark.parametrize("command", [
+    "cat .env",
+    "head -n5 .env",
+    "grep -e KEY .env",
+    "less -N .env",
+])
+def test_single_file_options_keep_accounting_path_resolved(command):
+    origin = extract_origin("Bash", {"command": command})
+    assert origin is not None
+    assert origin.evaluated_path == ".env"
+
+
 def _bash(command: str):
     return extract_origin("Bash", {"command": command})
 

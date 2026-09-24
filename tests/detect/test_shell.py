@@ -2,6 +2,49 @@ import pytest
 from privacy_hud.detect.shell import extract_destinations, destination_hosts
 
 
+@pytest.mark.parametrize("host", [
+    "0x7f000001",
+    "0X7F000001",
+    "0xffffffff",
+    "0x7f.0x0.0x0.0x1",
+    "127.1",
+    "2130706433",
+])
+def test_network_numeric_aliases_are_unresolved(host):
+    from privacy_hud.detect.shell import intended_network_recipient
+
+    command = f"curl https://{host}"
+    assert intended_network_recipient(command) is None
+    assert extract_destinations(command) == ["external_net"]
+
+
+@pytest.mark.parametrize("url", [
+    "https://a.test/[1-3]",
+    "https://a.test/{a,b}",
+    "https://a.test/?q=[1-3]",
+    "https://{a,b}@a.test/",
+    "https://u[1-3]@a.test/",
+])
+def test_shell_quoted_curl_url_globs_are_unresolved(url):
+    from privacy_hud.detect.shell import intended_network_recipient
+
+    command = f"curl '{url}'"
+    assert intended_network_recipient(command) is None
+    assert extract_destinations(command) == ["external_net"]
+
+
+@pytest.mark.parametrize("command, endpoint", [
+    ("curl https://127.0.0.1", "https://127.0.0.1:443"),
+    ("curl https://0xabc.example.com", "https://0xabc.example.com:443"),
+    ("curl 'https://[2001:db8::5]/p?q=1'",
+     "https://[2001:db8::5]:443"),
+])
+def test_network_parser_keeps_supported_literal_endpoints(command, endpoint):
+    from privacy_hud.detect.shell import intended_network_recipient
+
+    assert intended_network_recipient(command) == endpoint
+
+
 @pytest.mark.parametrize("cmd,expected", [
     ("cat support.log", "local"),
     ("ls -la", "local"),
