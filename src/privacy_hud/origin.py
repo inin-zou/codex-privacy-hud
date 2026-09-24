@@ -456,7 +456,10 @@ def _one_literal_operand(command: str, program: str,
     value_options = VALUE_OPTIONS.get(program, {})
     known = BOOLEAN_OPTIONS.get(program, frozenset()) | set(value_options)
     for name in options:
-        if name in _MULTI_FILE_OPTIONS:
+        option = (name[:2] if _attached_short_value(name, value_options)
+                  else name)
+        if option in _MULTI_FILE_OPTIONS or (
+                program == "less" and option in {"-k", "-T"}):
             return False
         if name not in known and not _attached_short_value(name,
                                                            value_options):

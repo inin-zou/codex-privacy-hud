@@ -199,7 +199,8 @@ def _canonical_host(host: str) -> str | None:
     labels = host.split(".")
     if not all(_HOST_LABEL.match(label) for label in labels):
         return None
-    if labels[-1].isdigit():
+    if (labels[-1].isdigit()
+            or re.fullmatch(r"0x[0-9a-f]+", labels[-1])):
         # Numeric hosts are read as IPv4 in more spellings than a dotted
         # quad (`127.1`); only the dotted quad is accepted.
         try:
@@ -219,6 +220,11 @@ def _canonical_endpoint(url: str) -> str | None:
     authority = rest
     for stop in "/?#":
         authority = authority.split(stop, 1)[0]
+    # Curl expands URL globs even when shell quotes protect the URL.
+    if (any(char in "{}" for char in rest)
+            or any(char in "[]" for char in rest[len(authority):])
+            or any(char in "[]" for char in authority.rpartition("@")[0])):
+        return None
     if "%" in authority:
         return None
     authority = authority.rpartition("@")[2]
