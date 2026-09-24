@@ -122,11 +122,9 @@ LEDGER_UNSUPPORTED = (
 #: asked at all. Both are the same answer to the user: the transition did
 #: not happen and nothing was moved.
 UNKNOWN_HOLDER = (
-    "Privacy HUD could not verify that all legacy ledger users have "
-    "stopped.\n"
-    "The storage transition was not completed. Existing files were "
-    "preserved.\n"
-    "Close other Privacy HUD processes and retry the repair command."
+    "Privacy HUD could not confirm that storage is safe to move.\n"
+    "The storage transition was not completed. Existing ledger files "
+    "were preserved."
 )
 
 TRANSITION_BUSY = (

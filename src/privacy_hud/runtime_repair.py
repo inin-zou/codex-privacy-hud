@@ -246,7 +246,8 @@ def process_identity(pid: int) -> dict | None:
     before = _ps_identity(pid)
     if before is None:
         return None
-    image = _process_image(int(pid))
+    image = (_process_image(int(pid))
+             if before[0] == str(os.getuid()) else None)
     after = _ps_identity(pid)
     if after is None:
         return None
@@ -286,9 +287,12 @@ def _process_image(pid: int) -> tuple[str, list[str], str | None] | None:
     NUL-separated `/proc/<pid>/cmdline`. macOS: `proc_pidpath` and
     `KERN_PROCARGS2`. Anything else: `None`.
 
-    `launcher` is only ever read on macOS, and only the one variable
-    `__PYVENV_LAUNCHER__`; the rest of the process environment is never
-    kept. Nothing of the old package is executed to learn any of this.
+    `launcher` is only ever read on macOS. `KERN_PROCARGS2` returns a
+    buffer that also contains the process environment; only the
+    `__PYVENV_LAUNCHER__` value is retained in the returned image, and
+    none of it is logged or persisted. `process_identity` calls this only
+    for a process of this user. Nothing of the old package is executed to
+    learn any of this.
     """
     if sys.platform.startswith("linux"):
         try:
@@ -428,14 +432,18 @@ def classify_holder(identity: dict, data_dir: Path, bundle: Path, *,
     except OSError:
         raise refuse("installation") from None
     if bootstrap in argv:
-        index = argv.index("--plugin-data") if "--plugin-data" in argv \
-            else -1
-        if 0 <= index < len(argv) - 1:
-            try:
-                if Path(argv[index + 1]).resolve() == named:
-                    return "current"
-            except OSError:
-                pass
+        if (len(argv) != 6 or argv[1:4] !=
+                ["-I", bootstrap, "--plugin-data"] or argv[5] != "daemon"):
+            raise refuse("launch_form")
+        if interpreter is None:
+            raise refuse("installation")
+        if not _launched_as(identity, Path(interpreter)):
+            raise refuse("interpreter")
+        try:
+            if Path(argv[4]).resolve() == named:
+                return "current"
+        except OSError:
+            pass
         raise refuse("data_dir")
     if tuple(argv[1:]) != LEGACY_DAEMON_ARGS:
         raise refuse("launch_form")
@@ -477,12 +485,20 @@ def stop_holders(data_dir, holders: dict, *, deadline: float,
     escalation: a process that ignores it is reported, never killed.
     `on_signal` is called once, just before the first signal.
     """
-    current_holders = runtime_storage.open_holders(data_dir)
+    current_holders = set(runtime_storage.open_holders(data_dir))
+    current_holders.discard(os.getpid())
+    unexpected = current_holders.difference(holders)
+    if unexpected:
+        raise runtime_storage.QuiescenceRefusal(
+            "holders", pids=unexpected, reason="new_holder")
     recheck = {}
     for pid, recorded in holders.items():
         current = process_identity(pid)
         if current is None:
-            continue  # already gone; nothing to signal and nothing to wait for
+            if pid in current_holders:
+                raise runtime_storage.QuiescenceRefusal(
+                    "identity", pids=(pid,), reason="uninspectable")
+            continue
         if current != recorded:
             raise runtime_storage.QuiescenceRefusal(
                 "unverified", pids=(pid,), reason="changed")
@@ -541,7 +557,10 @@ def _quiesce(data_dir: Path, bundle: Path, *, progress=None,
         for pid in sorted(holders):
             identity = process_identity(pid)
             if identity is None:
-                continue  # exited between discovery and identification
+                if pid in runtime_storage.open_holders(data_dir):
+                    raise runtime_storage.QuiescenceRefusal(
+                        "identity", pids=(pid,), reason="uninspectable")
+                continue
             kind = classify_holder(identity, data_dir, bundle,
                                    interpreter=interpreter)
             legacy = legacy or kind == "legacy"
@@ -946,14 +965,16 @@ def refusal_message(refusal: RuntimeRefusal) -> str:
     is left is a repair that did not complete, and that is what it says.
     """
     if isinstance(refusal, runtime_storage.QuiescenceRefusal):
+        if refusal.check == "transition_lock":
+            return runtime_messages.TRANSITION_BUSY
+        if refusal.check == "stop_timeout":
+            return runtime_messages.HOLDER_STOP_TIMEOUT
+        if refusal.signalled:
+            return runtime_messages.QUIESCENCE_AFTER_STOP
         if (refusal.check in ("inspection", "identity")
                 or (refusal.check == "socket"
                     and refusal.reason in _SOCKET_INSPECTION)):
             return runtime_messages.HOLDER_INSPECTION_FAILED
-        if refusal.check == "stop_timeout":
-            return runtime_messages.HOLDER_STOP_TIMEOUT
-        if refusal.signalled:
-            return runtime_messages.REPAIR_FAILED
         return runtime_messages.HOLDER_UNVERIFIED
     message = _REFUSAL_COPY.get(refusal.code)
     if message is None:

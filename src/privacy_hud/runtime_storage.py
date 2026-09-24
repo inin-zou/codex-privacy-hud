@@ -231,14 +231,15 @@ def acquire_transition(data_dir) -> TransitionLock:
     with _TRANSITIONS_LOCK:
         held = _TRANSITIONS.get(key)
         if held is not None and held.held:
-            raise RuntimeRefusal("transition_incomplete")
+            raise QuiescenceRefusal("transition_lock", reason="busy")
         fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
             os.close(fd)
             if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES):
-                raise RuntimeRefusal("holder_unknown") from exc
+                raise QuiescenceRefusal(
+                    "transition_lock", reason="busy") from None
             raise
         lock = TransitionLock(data_dir=root, path=path, fd=fd)
         _TRANSITIONS[key] = lock
@@ -460,11 +461,12 @@ def _quiescent(root: Path) -> bool:
     return True
 
 
-#: How long `await_quiescence` waits for a daemon heartbeat to expire
-#: (#71). Past `hud_snapshot.STALE_AFTER`, so an unchanged marker always
-#: expires inside it; fixed at the start of the wait, so a marker somebody
-#: keeps re-stamping -- a live publisher -- ends in a refusal rather than
-#: an unbounded wait.
+#: The heartbeat polling budget for `await_quiescence` (#71): no new pass
+#: starts after it. Past `hud_snapshot.STALE_AFTER`, so an unchanged marker
+#: always expires inside it; fixed at the start of the wait, so a marker
+#: somebody keeps re-stamping -- a live publisher -- ends in a refusal. It
+#: is not a hard wall-clock ceiling: each pass's holder inspection has its
+#: own timeout, and a pass already running finishes.
 HEARTBEAT_WAIT = hud_snapshot.STALE_AFTER + 2.0
 
 #: Pause between two passes of that wait. Every pass rechecks holders and
@@ -475,7 +477,8 @@ _RECHECK_INTERVAL = 0.25
 #: module's gate, in the order it asks them; the rest are repair's, about
 #: the processes it was asked to stop.
 QUIESCENCE_CHECKS = ("holders", "inspection", "socket", "heartbeat",
-                     "identity", "unverified", "stop_timeout")
+                     "identity", "unverified", "stop_timeout",
+                     "transition_lock")
 
 
 class QuiescenceRefusal(RuntimeRefusal):
@@ -554,10 +557,10 @@ def await_quiescence(data_dir, *, on_wait=None) -> None:
     marker's own `updated_at` keeps it fresh for `STALE_AFTER` seconds, so
     a repair run inside that window used to refuse and then succeed on an
     unchanged retry. Elapsed time is the only thing that changes, so this
-    waits for it -- with a fixed deadline, rechecking holders and the
-    socket on every pass. A holder or a listener ends the wait with a
-    refusal at once, and a heartbeat still fresh at the deadline is a live
-    publisher and a refusal too.
+    waits for it -- within the `HEARTBEAT_WAIT` polling budget, rechecking
+    holders and the socket on every pass. A holder or a listener ends the
+    wait with a refusal at that pass, and a heartbeat still fresh when the
+    budget is spent is a live publisher and a refusal too.
 
     Nothing is deleted: not the marker, not the socket. An identified
     process having exited is not evidence that nobody else is publishing.

@@ -59,7 +59,14 @@ def home(tmp_path):
     with tarfile.open(tgz, "w:gz") as t:
         t.add(patched, arcname="codex")
     (latest / f"{tgz.name}.sha256").write_text(f"{hashlib.sha256(tgz.read_bytes()).hexdigest()}  {tgz.name}\n")
-    env = {"HOME": str(home), "PATH": f"{bin_}:/usr/bin:/bin", "SHELL": "/bin/zsh",
+    # The suite's interpreter is on PATH as a host python >= 3.11 would be
+    # on any machine this installs on (macOS's own /usr/bin/python3 is
+    # 3.9). Uninstall has to run the bundle's stop surface to confirm the
+    # runtime stopped, and refuses to continue when it cannot (#70), so a
+    # host with no usable interpreter is a different test.
+    env = {"HOME": str(home),
+           "PATH": f"{bin_}:{Path(sys.executable).parent}:/usr/bin:/bin",
+           "SHELL": "/bin/zsh",
            "PRIVACY_HUD_FAKE": "1", "PRIVACY_HUD_TARGET": TRIPLE}
     return home, env, rel
 
