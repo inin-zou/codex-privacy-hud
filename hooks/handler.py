@@ -479,11 +479,15 @@ def _selection(data_dir):
     return "ok", (receipt["selected_build_id"], epoch)
 
 
-def _exchange(s, payload, build_id, epoch, deadline):
+def _exchange(s, payload, build_id, epoch, deadline, *, delivery_key):
     """Hello, then -- only after a matching hello on this connection -- the
     event. Every step shares `deadline`. Nothing the daemon sends is
     relayed unless it is a valid event reply; a protocol error object never
-    becomes hook output."""
+    becomes hook output.
+
+    `delivery_key` (#54 Phase 4) identifies this one delivery to the
+    daemon's accounting. It travels in the event frame only, so it never
+    crosses a handshake that failed."""
     try:
         _send(s, {"v": PROTOCOL_VERSION, "op": "hello",
                   "build_id": build_id, "activation_epoch": epoch,
@@ -503,6 +507,7 @@ def _exchange(s, payload, build_id, epoch, deadline):
     try:
         data = (json.dumps({"v": PROTOCOL_VERSION, "op": "event",
                             "build_id": build_id, "activation_epoch": epoch,
+                            "delivery_key": delivery_key,
                             "payload": payload}, separators=(",", ":"))
                 + "\n").encode()
     except (TypeError, ValueError):
@@ -558,6 +563,10 @@ def main():
             return _setup_hint()
         return _unverified(payload, False)
     build_id, epoch = selected
+    # One delivery key per invocation, before the transport attempt (#54
+    # Phase 4). Nothing retries with it: a failed exchange is reported as
+    # unverified, never replayed.
+    delivery_key = os.urandom(16).hex()
 
     sock_path = os.path.join(data_dir, "daemon.sock")
     try:
@@ -579,7 +588,8 @@ def main():
         return _unverified(payload, starting)
 
     try:
-        return _exchange(s, payload, build_id, epoch, deadline)
+        return _exchange(s, payload, build_id, epoch, deadline,
+                         delivery_key=delivery_key)
     finally:
         try:
             s.close()

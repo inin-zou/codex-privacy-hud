@@ -18,11 +18,12 @@ import unicodedata
 from typing import get_args
 
 from .accounting import DataType, DestinationKind, SafeSuffix
-from .ledger_schema import UnsupportedAccounting
 
 _VALUE_DOMAIN = "privacy-hud/54/value/v1"
 _FILE_DOMAIN = "privacy-hud/54/file/v1"
 _RECIPIENT_DOMAIN = "privacy-hud/54/recipient/v1"
+_ACTION_DOMAIN = "privacy-hud/54/action/v1"
+_TURN_DOMAIN = "privacy-hud/54/turn/v1"
 
 _INVALID_IDENTITY = "invalid accounting identity"
 _INVALID_OBSERVATION = "invalid accounting observation"
@@ -87,14 +88,25 @@ def file_identity(
     return _identity(key, _FILE_DOMAIN, posixpath.normpath(path))
 
 
+def _host_id(value: object) -> str:
+    """A host-supplied ID usable for correlation: a nonempty string with no
+    NUL or other control character."""
+    if (not isinstance(value, str) or not value
+            or any(unicodedata.category(c) == "Cc" for c in value)):
+        raise ValueError(_INVALID_IDENTITY)
+    return value
+
+
 def action_identity(key: bytes, host_action_id: str) -> str:
-    # P4-C1 contract scaffolding: declared, not implemented.
-    raise UnsupportedAccounting("hook evidence is not implemented")
+    """The session's opaque ID for one host tool action (#54 Phase 4): the
+    first 16 bytes of the domain-separated HMAC, as lowercase hex. Only the
+    same host ID under the same session key correlates."""
+    return _identity(key, _ACTION_DOMAIN, _host_id(host_action_id))[:16].hex()
 
 
 def turn_identity(key: bytes, host_turn_id: str) -> str:
-    # P4-C1 contract scaffolding: declared, not implemented.
-    raise UnsupportedAccounting("hook evidence is not implemented")
+    """The session's opaque ID for one host turn; see `action_identity`."""
+    return _identity(key, _TURN_DOMAIN, _host_id(host_turn_id))[:16].hex()
 
 
 def recipient_identity(

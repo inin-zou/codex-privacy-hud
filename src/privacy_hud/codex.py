@@ -37,6 +37,7 @@ readable as "what Codex does", not as a second copy of the daemon.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 # --------------------------------------------------------------------- #
@@ -179,11 +180,29 @@ def is_mcp_tool(tool_name: str) -> bool:
     return tool_name.startswith("mcp")
 
 
+#: `mcp__<server>__<tool>`, the one flattened MCP spelling whose server
+#: can be read back unambiguously (#54 Phase 4). ASCII classes only, and
+#: `\Z` rather than `$`, so a trailing newline is not accepted.
+_MCP_TOOL_NAME = re.compile(
+    r"mcp__(?P<server>[A-Za-z0-9-]+)__(?P<tool>[A-Za-z0-9_.-]+)\Z")
+
+
 def mcp_server_namespace(tool_name: str) -> str | None:
     """The MCP server an `mcp__<server>__<tool>` name addresses, or None.
 
-    P4-C1 contract scaffolding: no namespace is resolved yet."""
-    return None
+    Deliberately narrower than `is_mcp_tool`: that predicate decides which
+    calls are egress, and stays broad; this one names a recipient, and
+    answers only when the flattened name cannot be read two ways. Neither
+    captured component may contain `__`, and the server's case is kept.
+    Anything else -- a missing separator, a doubled one inside the tool
+    name, a character outside the two classes -- is None: unresolved, never
+    guessed."""
+    if not isinstance(tool_name, str):
+        return None
+    match = _MCP_TOOL_NAME.match(tool_name)
+    if match is None or "__" in match.group("tool"):
+        return None
+    return match.group("server")
 
 
 # --------------------------------------------------------------------- #

@@ -8,6 +8,7 @@ from __future__ import annotations
 import ipaddress
 import re
 import shlex
+import unicodedata
 
 NET_BINARIES = {"curl", "wget", "scp", "rsync", "sftp", "ssh", "nc", "netcat",
                 "telnet", "ftp", "http", "httpie"}
@@ -121,8 +122,162 @@ def extract_destinations(command: str) -> list[str]:
     return ["local"]
 
 
+# -- intended network recipient (#54 Phase 4) --------------------------------
+#
+# A recipient identity names one endpoint, so unlike the classifier above it
+# fails *unresolved*: a command outside this closed grammar gets no
+# recipient at all, even when `extract_destinations` rightly calls it
+# external. Nothing here consults DNS, the filesystem or the environment.
+
+#: Characters a shell would act on outside quotes: expansion, globbing,
+#: operators, redirection, comments, history and escapes.
+_UNQUOTED_META = frozenset(";&|<>()$`\\*?[]{}~!#")
+#: Inside double quotes the shell still expands these.
+_DOUBLE_QUOTED_META = frozenset("$`\\!")
+_DATA_OPTIONS = frozenset({"--data", "--data-raw", "-d"})
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+_HOST_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
+_PORT = re.compile(r"[0-9]{1,5}\Z")
+
+
+def _simple_words(command: str) -> list[str] | None:
+    """Split `command` the way a POSIX shell would, or None when the shell
+    would do anything but split it: expand, glob, redirect, chain, escape,
+    or meet an unbalanced quote or a control character."""
+    words: list[str] = []
+    word: list[str] = []
+    in_word = False
+    quote = ""
+    for char in command:
+        if unicodedata.category(char) == "Cc" and char not in " \t":
+            return None
+        if quote == "'":
+            if char == "'":
+                quote = ""
+            else:
+                word.append(char)
+            continue
+        if quote == '"':
+            if char == '"':
+                quote = ""
+            elif char in _DOUBLE_QUOTED_META:
+                return None
+            else:
+                word.append(char)
+            continue
+        if char in " \t":
+            if in_word:
+                words.append("".join(word))
+                word, in_word = [], False
+            continue
+        if char in _UNQUOTED_META:
+            return None
+        in_word = True
+        if char in "'\"":
+            quote = char
+        else:
+            word.append(char)
+    if quote:
+        return None
+    if in_word:
+        words.append("".join(word))
+    return words
+
+
+def _canonical_host(host: str) -> str | None:
+    if host.startswith("["):
+        if not host.endswith("]"):
+            return None
+        try:
+            address = ipaddress.IPv6Address(host[1:-1])
+        except ValueError:
+            return None  # includes a `%zone`: not one endpoint
+        return f"[{address.compressed}]"
+    if not host or not host.isascii() or len(host) > 253:
+        return None
+    host = host.lower()
+    labels = host.split(".")
+    if not all(_HOST_LABEL.match(label) for label in labels):
+        return None
+    if labels[-1].isdigit():
+        # Numeric hosts are read as IPv4 in more spellings than a dotted
+        # quad (`127.1`); only the dotted quad is accepted.
+        try:
+            return str(ipaddress.IPv4Address(host))
+        except ValueError:
+            return None
+    return host
+
+
+def _canonical_endpoint(url: str) -> str | None:
+    """`scheme://lowercase-host:effective-port`, discarding userinfo, path,
+    query and fragment. Only http and https, whose ports are known."""
+    scheme, separator, rest = url.partition("://")
+    scheme = scheme.lower()
+    if not separator or scheme not in _DEFAULT_PORTS:
+        return None
+    authority = rest
+    for stop in "/?#":
+        authority = authority.split(stop, 1)[0]
+    if "%" in authority:
+        return None
+    authority = authority.rpartition("@")[2]
+    if authority.startswith("["):
+        close = authority.find("]")
+        if close < 0:
+            return None
+        host, port_text = authority[:close + 1], authority[close + 1:]
+        if port_text and not port_text.startswith(":"):
+            return None
+        port_text = port_text[1:] if port_text else ""
+        has_port = bool(authority[close + 1:])
+    else:
+        host, has_colon, port_text = authority.partition(":")
+        has_port = bool(has_colon)
+    canonical = _canonical_host(host)
+    if canonical is None:
+        return None
+    if has_port:
+        if not _PORT.match(port_text):
+            return None
+        port = int(port_text)
+        if not 0 < port <= 65535:
+            return None
+    else:
+        port = _DEFAULT_PORTS[scheme]
+    return f"{scheme}://{canonical}:{port}"
+
+
 def intended_network_recipient(command: str) -> str | None:
     """The one endpoint a supported simple `curl` command addresses, or None.
 
-    P4-C1 contract scaffolding: no recipient is resolved yet."""
-    return None
+    Exactly this grammar, in this order, and nothing else:
+
+        curl [-X METHOD] [-H HEADER]* [--data VALUE | --data-raw VALUE |
+             -d VALUE] URL
+
+    No other flag, no second URL, no second data option, no `@file`
+    value, no attached option values, and no shell expansion, globbing or
+    operator anywhere in the command. The URL's userinfo, path, query and
+    fragment never reach the result."""
+    if not isinstance(command, str):
+        return None
+    words = _simple_words(command)
+    if not words or words[0] != "curl":
+        return None
+    rest = words[1:]
+    if rest[:1] == ["-X"]:
+        if len(rest) < 2 or not rest[1] or rest[1].startswith("-"):
+            return None
+        rest = rest[2:]
+    while rest[:1] == ["-H"]:
+        if len(rest) < 2 or rest[1].startswith("@"):
+            return None
+        rest = rest[2:]
+    if rest[:1] and rest[0] in _DATA_OPTIONS:
+        if len(rest) < 2 or rest[1].startswith("@"):
+            return None
+        rest = rest[2:]
+    if len(rest) != 1 or rest[0].startswith("-"):
+        return None
+    return _canonical_endpoint(rest[0])

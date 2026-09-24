@@ -809,7 +809,12 @@ def _handle_session_end(state: State, session_id: str, payload: dict) -> dict:
         release_session(state, session_id)
 
 
-def dispatch(state: State, payload: dict) -> dict:
+def dispatch(
+    state: State,
+    payload: dict,
+    *,
+    delivery_key: str | None = None,
+) -> dict:
     """Route one hook payload to the right handler and return hook-output
     JSON. Never raises `UnknownKey`/`KeyError` silently — an observation
     whose destination the matrix cannot classify propagates, which is a
@@ -834,6 +839,10 @@ def dispatch(state: State, payload: dict) -> dict:
          no event row.
       3. locked, milliseconds: `Engine.observe(obs, scan=...)`. Every ledger
          read and write for this observation, in one critical section.
+
+    `delivery_key` is the daemon-normalized protocol-2 delivery key (#54
+    Phase 4); the daemon always supplies one. It identifies this delivery
+    to version-2 accounting and is never read from the payload.
     """
     event = payload.get("hook_event_name")
     session_id = payload.get("session_id") or ""
