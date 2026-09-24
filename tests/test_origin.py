@@ -4,6 +4,36 @@ from privacy_hud.origin import Origin, OriginKind, extract_origin
 
 
 @pytest.mark.parametrize("command", [
+    "grep -eKEY /r/other .env",
+    "grep -eKEY -- /r/other .env",
+    "grep /r/other -eKEY .env",
+    "egrep -eKEY /r/other .env",
+    'bat --pager="cat /r/other" --paging=always .env',
+    'bat --pager "cat /r/other" --paging always .env',
+    'bat --pager="/bin/cat /r/other" --paging=always .env',
+    'bat --paging=always --pager="head -n5 /r/other" .env',
+])
+def test_hidden_additional_operands_leave_accounting_path_unresolved(command):
+    origin = extract_origin("Bash", {"command": command})
+    assert origin is not None
+    assert origin.kind is OriginKind.PATH
+    assert origin.value == ".env"
+    assert origin.evaluated_path is None
+
+
+@pytest.mark.parametrize("command", [
+    "grep --regexp=KEY .env",
+    "egrep -e KEY .env",
+    "bat --paging=never .env",
+    "bat --language=json .env",
+])
+def test_unambiguous_option_forms_keep_accounting_path_resolved(command):
+    origin = extract_origin("Bash", {"command": command})
+    assert origin is not None
+    assert origin.evaluated_path == ".env"
+
+
+@pytest.mark.parametrize("command", [
     "grep -f/r/patterns -e KEY .env",
     "grep -f /r/patterns -e KEY .env",
     "less -k/r/keys .env",
