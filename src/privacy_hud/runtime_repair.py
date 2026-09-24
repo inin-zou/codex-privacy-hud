@@ -72,9 +72,10 @@ from .runtime_contract import (
 from .runtime_owner import acquire_writer, unselected_activation
 
 __all__ = [
-    "RepairResult", "format_repair_command", "main", "process_identity",
-    "repair_runtime", "resolve_installed_bundle", "stop_holders",
-    "stop_selected_runtime",
+    "LEGACY_DAEMON_ARGS", "RepairResult", "classify_holder",
+    "format_repair_command", "main", "process_identity",
+    "quiescence_diagnostic", "refusal_message", "repair_runtime",
+    "resolve_installed_bundle", "stop_holders", "stop_selected_runtime",
 ]
 
 #: How long the whole quiescence step may take: revalidate, ask to exit,
@@ -202,20 +203,8 @@ def _signal(pid: int, sig: int) -> None:
     os.kill(pid, sig)
 
 
-def process_identity(pid: int) -> dict | None:
-    """The facts that make a pid the same process later, or `None`.
-
-    A pid is not a process: between the moment a holder is recognized and
-    the moment a signal would be sent, that number can belong to
-    something else entirely. `lstart` is the discriminator — a start time
-    plus a pid is an identity a reused number cannot forge — and the
-    user and full argument vector come with it, because "same pid, same
-    start time, different program" is the case that matters after an
-    `exec`.
-
-    I1: `ps` output about *this user's own* processes, held in memory for
-    the length of one repair and never written anywhere.
-    """
+def _ps_identity(pid: int) -> tuple[str, str, str] | None:
+    """`(uid, start time, args)` from `ps`, or `None`."""
     try:
         completed = subprocess.run(
             ["ps", "-ww", "-o", "uid=,lstart=,args=", "-p", str(int(pid))],
@@ -230,127 +219,404 @@ def process_identity(pid: int) -> dict | None:
     parts = line.split(None, 6)
     if len(parts) < 7:
         return None
-    return {"pid": int(pid), "uid": parts[0],
-            "started": " ".join(parts[1:6]), "args": parts[6]}
+    return parts[0], " ".join(parts[1:6]), parts[6]
 
 
-def _is_owned_runtime(identity: dict, data_dir: Path, bundle: Path) -> bool:
-    """Is this process a Privacy HUD runtime *this repair owns*?
+def process_identity(pid: int) -> dict | None:
+    """The facts that make a pid the same process later, or `None`.
 
-    Five conditions, all of them, and none of them a name substring: the
-    same user, the bundled bootstrap's own path, a Privacy HUD
-    subcommand, and this exact data directory. A process that merely has
-    "privacy" in its command line is not a match, and neither is one
-    serving a different installation.
+    A pid is not a process: between the moment a holder is recognized and
+    the moment a signal would be sent, that number can belong to
+    something else entirely. `lstart` is the discriminator — a start time
+    plus a pid is an identity a reused number cannot forge — and the
+    user, the executable and the exact argument vector come with it,
+    because "same pid, same start time, different program" is the case
+    that matters after an `exec`.
+
+    `executable`, `argv` and `launcher` come from `_process_image` and are
+    `None` where this platform cannot read them exactly; a holder with
+    `None` there is refused, never guessed at from `ps` text (#70). The
+    start time is read on both sides of the image, so an image read from
+    a process that replaced this one under the same pid is not recorded
+    as this one's.
+
+    I1: facts about *this user's own* processes, held in memory for the
+    length of one repair and never written anywhere.
     """
-    if identity.get("uid") != str(os.getuid()):
+    before = _ps_identity(pid)
+    if before is None:
+        return None
+    image = (_process_image(int(pid))
+             if before[0] == str(os.getuid()) else None)
+    after = _ps_identity(pid)
+    if after is None:
+        return None
+    if after != before:
+        image = None
+    executable, argv, launcher = (image if image is not None
+                                  else (None, None, None))
+    return {"pid": int(pid), "uid": before[0], "started": before[1],
+            "args": before[2], "executable": executable,
+            "argv": argv, "launcher": launcher}
+
+
+#: The legacy daemon launch form this release can stop (#70): what 0.7.x
+#: hooks ran, `[recorded_python, "-m", "privacy_hud.daemon"]`, with the
+#: data directory in `PLUGIN_DATA`. Exactly this argument vector after the
+#: interpreter, and nothing else: another module, an extra argument, or
+#: "privacy_hud" inside a `-c` string is a different program.
+LEGACY_DAEMON_ARGS = ("-m", "privacy_hud.daemon")
+
+#: `__PYVENV_LAUNCHER__`: what a macOS framework Python's stub sets to the
+#: interpreter path it was started as, before re-executing the framework's
+#: app launcher. It is the only place that path survives the re-exec.
+_LAUNCHER_ENV = b"__PYVENV_LAUNCHER__="
+
+#: `sysctl` names for a process's exact argument vector on macOS.
+_CTL_KERN = 1
+_KERN_PROCARGS2 = 49
+
+
+def _process_image(pid: int) -> tuple[str, list[str], str | None] | None:
+    """`(executable, argv, launcher)` for `pid`, read exactly, or `None`.
+
+    Exactly means from the kernel's own record, never by splitting `ps`
+    text: an argument containing a space and two arguments are the same
+    string to `ps`, and astra's rule is to refuse where the platform
+    cannot tell them apart (#70). Linux: `/proc/<pid>/exe` and the
+    NUL-separated `/proc/<pid>/cmdline`. macOS: `proc_pidpath` and
+    `KERN_PROCARGS2`. Anything else: `None`.
+
+    `launcher` is only ever read on macOS. `KERN_PROCARGS2` returns a
+    buffer that also contains the process environment; only the
+    `__PYVENV_LAUNCHER__` value is retained in the returned image, and
+    none of it is logged or persisted. `process_identity` calls this only
+    for a process of this user. Nothing of the old package is executed to
+    learn any of this.
+    """
+    if sys.platform.startswith("linux"):
+        try:
+            executable = os.readlink(f"/proc/{int(pid)}/exe")
+            raw = Path(f"/proc/{int(pid)}/cmdline").read_bytes()
+        except (OSError, ValueError):
+            return None
+        if not raw:
+            return None
+        argv = [os.fsdecode(part) for part in raw.split(b"\0")]
+        if argv and argv[-1] == "":
+            argv.pop()
+        return (executable, argv, None) if argv else None
+    if sys.platform == "darwin":
+        return _darwin_image(int(pid))
+    return None
+
+
+def _darwin_image(pid: int) -> tuple[str, list[str], str | None] | None:
+    import ctypes
+    import ctypes.util
+    import struct
+
+    try:
+        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        path = ctypes.create_string_buffer(4096)
+        if libc.proc_pidpath(pid, path, ctypes.sizeof(path)) <= 0:
+            return None
+        executable = os.fsdecode(path.value)
+        mib = (ctypes.c_int * 3)(_CTL_KERN, _KERN_PROCARGS2, pid)
+        size = ctypes.c_size_t(0)
+        if libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
+            return None
+        buffer = ctypes.create_string_buffer(size.value)
+        if libc.sysctl(mib, 3, buffer, ctypes.byref(size), None, 0) != 0:
+            return None
+    except (OSError, AttributeError, ValueError):
+        return None
+    raw = buffer.raw[:size.value]
+    if len(raw) < 4:
+        return None
+    argc = struct.unpack_from("i", raw)[0]
+    _exec_path, _, rest = raw[4:].partition(b"\0")
+    parts = rest.lstrip(b"\0").split(b"\0")
+    if argc <= 0 or len(parts) < argc:
+        return None
+    argv = [os.fsdecode(part) for part in parts[:argc]]
+    launcher = None
+    for entry in parts[argc:]:
+        if not entry:
+            break
+        if entry.startswith(_LAUNCHER_ENV):
+            launcher = os.fsdecode(entry[len(_LAUNCHER_ENV):])
+            break
+    return executable, argv, launcher
+
+
+def _launched_as(identity: dict, interpreter: Path) -> bool:
+    """Was this process started as `interpreter`, this installation's
+    recorded one?
+
+    Two shapes, each a relation between exact facts rather than a name:
+
+    * **Direct.** `argv[0]` is the recorded path, as the legacy hook
+      passed it, and the executable is that path's real file.
+    * **macOS framework relaunch.** The framework's stub re-executes its
+      app launcher, so `argv[0]` and the executable are both
+      `<framework>/Resources/Python.app/Contents/MacOS/Python` for the
+      framework the recorded interpreter resolves into, and the path it
+      was started as survives only in `__PYVENV_LAUNCHER__`, which must be
+      the recorded path exactly.
+
+    A basename, a different interpreter of the same version, or a
+    framework launcher with no or another launcher path is none of these.
+    """
+    recorded = str(interpreter)
+    if not os.path.isabs(recorded):
         return False
-    args = identity.get("args") or ""
+    executable = identity.get("executable")
+    argv = identity.get("argv") or []
+    try:
+        real = Path(os.path.realpath(recorded))
+    except (OSError, ValueError):
+        return False
+    if argv[0] == recorded and executable == str(real):
+        return True
+    if real.parent.name != "bin":
+        return False
+    app = (real.parent.parent / "Resources" / "Python.app" / "Contents"
+           / "MacOS" / "Python")
+    return (executable == str(app) and argv[0] == executable
+            and identity.get("launcher") == recorded)
+
+
+def classify_holder(identity: dict, data_dir: Path, bundle: Path, *,
+                    interpreter: Path | None) -> str:
+    """What a process holding this data directory's ledger is, or a
+    refusal saying why it cannot be stopped (#70).
+
+    Returns `"current"` for this installation's bundled bootstrap serving
+    this data directory, and `"legacy"` for a supported legacy daemon of
+    this installation. Every one of astra's rules applies, and none of
+    them is a substring:
+
+    * the same user;
+    * an identity read exactly -- executable and argument vector -- or a
+      refusal (`identity`/`uninspectable`);
+    * a supported launch form: the bundled bootstrap, or exactly
+      `LEGACY_DAEMON_ARGS` after the interpreter;
+    * for a legacy daemon, a relationship to this installation's recorded
+      `interpreter` (`_launched_as`); with none recorded, nothing is;
+    * a relationship to this data directory: the bootstrap names it, and
+      a legacy daemon -- which took it from its environment -- was found
+      holding this directory's ledger by device and inode, which is how
+      the caller found it at all.
+
+    A receipt, a marker pid, an executable basename or a protocol reply
+    is not among the evidence. Nothing here signals anything.
+    """
+    pid = int(identity.get("pid") or 0)
+
+    def refuse(reason: str) -> runtime_storage.QuiescenceRefusal:
+        return runtime_storage.QuiescenceRefusal("unverified", pids=(pid,),
+                                                 reason=reason)
+
+    if identity.get("uid") != str(os.getuid()):
+        raise refuse("user")
+    executable = identity.get("executable")
+    argv = identity.get("argv")
+    if (not isinstance(executable, str) or not isinstance(argv, list)
+            or not argv or not all(isinstance(a, str) for a in argv)):
+        raise runtime_storage.QuiescenceRefusal(
+            "identity", pids=(pid,), reason="uninspectable")
     try:
         bootstrap = str((Path(bundle) / "scripts" / "runtime.py").resolve())
-        named = str(Path(data_dir).resolve())
+        named = Path(data_dir).resolve()
     except OSError:
-        return False
+        raise refuse("installation") from None
+    if bootstrap in argv:
+        if (len(argv) != 6 or argv[1:4] !=
+                ["-I", bootstrap, "--plugin-data"] or argv[5] != "daemon"):
+            raise refuse("launch_form")
+        if interpreter is None:
+            raise refuse("installation")
+        if not _launched_as(identity, Path(interpreter)):
+            raise refuse("interpreter")
+        try:
+            if Path(argv[4]).resolve() == named:
+                return "current"
+        except OSError:
+            pass
+        raise refuse("data_dir")
+    if tuple(argv[1:]) != LEGACY_DAEMON_ARGS:
+        raise refuse("launch_form")
+    if interpreter is None:
+        raise refuse("installation")
+    if not _launched_as(identity, Path(interpreter)):
+        raise refuse("interpreter")
+    return "legacy"
+
+
+def _recorded_interpreter(data_dir: Path) -> Path | None:
+    """The interpreter this installation recorded, from a receipt this
+    code can read as one, or `None`. Legacy daemons were started as it."""
+    if classify_receipt(data_dir) not in ("v1", "v2"):
+        return None
     try:
-        argv = shlex.split(args)
-    except ValueError:
-        # An argument vector this cannot be parsed into words. Fall back
-        # to the absolute pathnames themselves, which is what `ps` shows
-        # for a process started the way `_start_daemon` starts one.
-        return bootstrap in args and f"--plugin-data {named}" in args
-    if bootstrap not in argv or "--plugin-data" not in argv:
-        return False
-    index = argv.index("--plugin-data")
-    if index + 1 >= len(argv):
-        return False
-    try:
-        return Path(argv[index + 1]).resolve() == Path(named)
-    except OSError:
-        return False
+        recorded = read_receipt(data_dir).get("python")
+    except RuntimeRefusal:
+        return None
+    if not isinstance(recorded, str) or not os.path.isabs(recorded):
+        return None
+    return Path(recorded)
 
 
-def stop_holders(data_dir, holders: dict, *, deadline: float) -> None:
-    """Ask each recognized holder to exit, and wait for it.
+def stop_holders(data_dir, holders: dict, *, deadline: float,
+                 on_signal=None) -> bool:
+    """Ask each classified holder to exit, and wait for it. Returns whether
+    any signal was sent.
 
-    Every identity is revalidated *before* any signal is sent, not one at
-    a time: a single holder whose identity moved means this repair no
-    longer knows what it is looking at, and sending a signal to some of
-    the list before discovering that would be exactly the mistake the
-    revalidation exists to prevent.
+    Revalidation comes immediately before signalling, and covers every
+    holder before any is signalled: each must still hold this data
+    directory's ledger by device and inode, and still have exactly the
+    identity it was classified with. One identity that moved means this
+    repair no longer knows what it is looking at, and it refuses with
+    nothing sent. A holder that has exited, or has closed the ledger, is
+    not signalled.
 
-    `SIGTERM` once, then waiting. There is no escalation: a process that
-    ignores it is reported, never killed.
+    `SIGTERM` once, then waiting until `deadline`. There is no
+    escalation: a process that ignores it is reported, never killed.
+    `on_signal` is called once, just before the first signal.
     """
+    current_holders = set(runtime_storage.open_holders(data_dir))
+    current_holders.discard(os.getpid())
+    unexpected = current_holders.difference(holders)
+    if unexpected:
+        raise runtime_storage.QuiescenceRefusal(
+            "holders", pids=unexpected, reason="new_holder")
     recheck = {}
     for pid, recorded in holders.items():
         current = process_identity(pid)
         if current is None:
-            continue  # already gone; nothing to signal and nothing to wait for
+            if pid in current_holders:
+                raise runtime_storage.QuiescenceRefusal(
+                    "identity", pids=(pid,), reason="uninspectable")
+            continue
         if current != recorded:
-            raise RuntimeRefusal("holder_unknown")
-        recheck[pid] = current
+            raise runtime_storage.QuiescenceRefusal(
+                "unverified", pids=(pid,), reason="changed")
+        if pid in current_holders:
+            recheck[pid] = current
+    if not recheck:
+        return False
 
+    if on_signal is not None:
+        on_signal()
     for pid in recheck:
         try:
             _signal(pid, signal.SIGTERM)
         except OSError:
             continue
 
-    while time.monotonic() < deadline:
+    while True:
         remaining = [pid for pid, recorded in recheck.items()
                      if process_identity(pid) == recorded]
         if not remaining:
-            return
+            return True
+        if time.monotonic() >= deadline:
+            refusal = runtime_storage.QuiescenceRefusal(
+                "stop_timeout", pids=remaining)
+            refusal.signalled = True
+            raise refusal
         time.sleep(0.1)
-    raise RuntimeRefusal("holder_unknown")
 
 
-def _quiesce(data_dir: Path, bundle: Path) -> None:
-    """Leave nothing holding the ledger, or refuse.
+def _quiesce(data_dir: Path, bundle: Path, *, progress=None,
+             settle: bool = True) -> bool:
+    """Leave nothing holding the ledger, or refuse. Returns whether a stop
+    signal was sent.
 
     Discovery is about files, not about names: `open_holders` answers who
-    has the database or a sidecar open. What this adds is the one
-    distinction repair is entitled to make — a Privacy HUD runtime this
-    installation owns may be asked to exit; anything else is a holder
-    whose business this is not.
+    has the database or a sidecar open. Every holder is then classified
+    (`classify_holder`) before any is signalled; one that is not this
+    installation's, for this data directory, refuses the whole step with
+    nothing sent. The verified ones are revalidated and asked once to
+    exit (`stop_holders`).
+
+    Afterwards the holders and the socket are checked again. `settle` is
+    repair's: it also waits out a heartbeat the stopped daemon left behind
+    (#71), rechecking holders and the socket on every pass. The stop-only
+    operation does not wait on a heartbeat -- it answers whether processes
+    are gone, not whether storage may move.
     """
     deadline = time.monotonic() + QUIESCE_TIMEOUT
     holders = {pid for pid in runtime_storage.open_holders(data_dir)
                if pid != os.getpid()}
-    if not holders:
-        return
-    owned: dict[int, dict] = {}
-    for pid in sorted(holders):
-        identity = process_identity(pid)
-        if identity is None:
-            continue  # exited between discovery and identification
-        if not _is_owned_runtime(identity, data_dir, bundle):
-            raise RuntimeRefusal("holder_unknown")
-        owned[pid] = identity
-    stop_holders(data_dir, owned, deadline=deadline)
-    if {pid for pid in runtime_storage.open_holders(data_dir)
-            if pid != os.getpid()}:
-        raise RuntimeRefusal("holder_unknown")
+    signalled = False
+    if holders:
+        interpreter = _recorded_interpreter(data_dir)
+        owned: dict[int, dict] = {}
+        legacy = False
+        for pid in sorted(holders):
+            identity = process_identity(pid)
+            if identity is None:
+                if pid in runtime_storage.open_holders(data_dir):
+                    raise runtime_storage.QuiescenceRefusal(
+                        "identity", pids=(pid,), reason="uninspectable")
+                continue
+            kind = classify_holder(identity, data_dir, bundle,
+                                   interpreter=interpreter)
+            legacy = legacy or kind == "legacy"
+            owned[pid] = identity
+
+        def stopping() -> None:
+            if legacy and progress is not None:
+                progress(runtime_messages.LEGACY_DAEMON_STOPPING)
+
+        signalled = stop_holders(data_dir, owned, deadline=deadline,
+                                 on_signal=stopping)
+        if signalled and legacy and progress is not None:
+            progress(runtime_messages.LEGACY_DAEMON_STOPPED)
+
+    def waiting() -> None:
+        if progress is not None:
+            progress(runtime_messages.HEARTBEAT_WAITING)
+
+    try:
+        if settle:
+            runtime_storage.await_quiescence(data_dir, on_wait=waiting)
+        else:
+            runtime_storage.check_quiescence(data_dir, heartbeat=False)
+    except runtime_storage.QuiescenceRefusal as refusal:
+        refusal.signalled = refusal.signalled or signalled
+        raise
+    return signalled
 
 
 def stop_selected_runtime(data_dir) -> bool:
     """Stop the runtime this installation owns, for uninstallation.
 
-    Returns whether the data directory is now free of holders. It never
-    raises: uninstall has to proceed either way, and what it needs to know
-    is whether it is about to delete the interpreter of a live process.
+    `repair --stop-runtime`. The same classifier as repair, so the same
+    verified legacy daemon is stopped here, and nothing repair would
+    refuse to signal is signalled (#70). Under the transition lock, so it
+    never races a repair. Storage is not touched.
+
+    Returns whether the data directory is now free of holders and of a
+    live listener. It never raises: uninstall has to proceed either way,
+    and what it needs to know is whether it is about to delete the
+    interpreter of a live process.
     """
     root = Path(data_dir)
+    if not root.is_dir():
+        return True
     try:
         bundle = _selected_bundle(root)
     except RuntimeRefusal:
-        # No readable selection: there is no bundle whose bootstrap could
-        # identify an owned process, so every holder is unknown and this
-        # answers honestly rather than signalling on a guess.
+        # No readable v2 selection: there is no bundle whose bootstrap
+        # could identify a current runtime. A legacy daemon is still
+        # identified against the recorded interpreter.
         bundle = root
     try:
-        _quiesce(root, bundle)
-    except RuntimeRefusal:
+        with runtime_storage.acquire_transition(root):
+            _quiesce(root, bundle, settle=False)
+    except (RuntimeRefusal, OSError):
         return False
     return True
 
@@ -557,9 +823,13 @@ def _await_handshake(data_dir: Path, activation: Activation) -> None:
 
 def repair_runtime(bundle_root: Path, data_dir: Path, *,
                    python: Path | None = None,
-                   allow_degraded: bool = False) -> RepairResult:
+                   allow_degraded: bool = False,
+                   progress=None) -> RepairResult:
     """Select `bundle_root`, move the ledger behind the fence, and start a
     matching daemon. See the module docstring for the ordered steps.
+
+    `progress`, when given, is called with fixed progress copy from
+    `runtime_messages` as steps that can take a while begin.
 
     A failed preflight preserves the existing receipt and ledger location.
     A later failure may leave a fenced store or a published selection.
@@ -585,7 +855,7 @@ def repair_runtime(bundle_root: Path, data_dir: Path, *,
 
     with runtime_storage.acquire_transition(root):
         runtime_storage.validate_existing_ledger(root)
-        _quiesce(root, bundle)
+        signalled = _quiesce(root, bundle, progress=progress)
         lease_activation = unselected_activation()
         if classify_receipt(root) == "v2":
             receipt = read_receipt(root)
@@ -599,8 +869,12 @@ def repair_runtime(bundle_root: Path, data_dir: Path, *,
                 python=candidate,
             )
         with acquire_writer(root, activation=lease_activation) as lease:
-            cutover = runtime_storage.prepare_storage(
-                root, activation=lease.activation)
+            try:
+                cutover = runtime_storage.prepare_storage(
+                    root, activation=lease.activation)
+            except runtime_storage.QuiescenceRefusal as refusal:
+                refusal.signalled = refusal.signalled or signalled
+                raise
             _retire_snapshots(root, cutover.transition_id)
             runtime_storage.record_stage(root, cutover.transition_id,
                                          "snapshots_retired",
@@ -651,6 +925,63 @@ _REFUSAL_COPY = {
 }
 
 
+#: `"diagnostic"` in the one line a quiescence refusal prints to stderr.
+QUIESCENCE_DIAGNOSTIC = "quiescence_refusal"
+
+
+def quiescence_diagnostic(refusal: runtime_storage.QuiescenceRefusal) -> dict:
+    """The allowlisted facts about a quiescence refusal (#71).
+
+    Captured inside the failing invocation, because a probe run afterwards
+    can miss a race. Fixed identifiers, holder pids, an errno, a heartbeat
+    age, a timestamp and the release: nothing here is a path, a ledger
+    value, an id, a hash or exception text (I1), and nothing is written
+    to disk.
+    """
+    return {
+        "diagnostic": QUIESCENCE_DIAGNOSTIC,
+        "release": RELEASE,
+        "time": round(time.time(), 3),
+        "check": refusal.check,
+        "reason": refusal.reason,
+        "pids": list(refusal.pids),
+        "errno": refusal.errno,
+        "heartbeat_age": refusal.heartbeat_age,
+        "signalled": bool(refusal.signalled),
+    }
+
+
+#: A socket check that could not be asked, as opposed to one answered.
+_SOCKET_INSPECTION = ("stat_error", "connect_error")
+
+
+def refusal_message(refusal: RuntimeRefusal) -> str:
+    """The fixed copy for a refusal, still holding its `{repair_command}`.
+
+    A quiescence refusal is shown as the branch it came from (#70):
+    uninspectable processes or files, a verified process that did not stop,
+    or a holder that could not be verified. The last says no stop signal
+    was sent, which is only true before one was -- after a signal, what
+    is left is a repair that did not complete, and that is what it says.
+    """
+    if isinstance(refusal, runtime_storage.QuiescenceRefusal):
+        if refusal.check == "transition_lock":
+            return runtime_messages.TRANSITION_BUSY
+        if refusal.check == "stop_timeout":
+            return runtime_messages.HOLDER_STOP_TIMEOUT
+        if refusal.signalled:
+            return runtime_messages.QUIESCENCE_AFTER_STOP
+        if (refusal.check in ("inspection", "identity")
+                or (refusal.check == "socket"
+                    and refusal.reason in _SOCKET_INSPECTION)):
+            return runtime_messages.HOLDER_INSPECTION_FAILED
+        return runtime_messages.HOLDER_UNVERIFIED
+    message = _REFUSAL_COPY.get(refusal.code)
+    if message is None:
+        return runtime_messages.RUNTIME_SETUP_FAIL
+    return message
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="privacy-hud-repair")
     parser.add_argument("--bundle-root", required=True, metavar="DIR")
@@ -670,7 +1001,7 @@ def _report_failure(code: str, bundle: Path, data_dir: Path, out) -> None:
     ), file=out)
 
 
-def main(argv: list[str] | None = None, *, out=None) -> int:
+def main(argv: list[str] | None = None, *, out=None, err=None) -> int:
     """`runtime.py --plugin-data DIR setup` and `install.sh
     --repair-runtime` both land here.
 
@@ -680,6 +1011,7 @@ def main(argv: list[str] | None = None, *, out=None) -> int:
     that the transition did not complete and their files were preserved.
     """
     stream = sys.stdout if out is None else out
+    errors = sys.stderr if err is None else err
     try:
         args = _parser().parse_args(sys.argv[1:] if argv is None else argv)
     except SystemExit as exc:
@@ -690,9 +1022,15 @@ def main(argv: list[str] | None = None, *, out=None) -> int:
         result = repair_runtime(
             bundle, data_dir,
             python=Path(args.python) if args.python else None,
-            allow_degraded=args.allow_degraded)
+            allow_degraded=args.allow_degraded,
+            progress=lambda message: print(message, file=stream, flush=True))
     except RuntimeRefusal as refusal:
-        _report_failure(refusal.code, bundle, data_dir, stream)
+        print(refusal_message(refusal).format(
+            repair_command=format_repair_command(bundle, data_dir)),
+            file=stream)
+        if isinstance(refusal, runtime_storage.QuiescenceRefusal):
+            print(json.dumps(quiescence_diagnostic(refusal),
+                             sort_keys=True), file=errors)
         return 1
     except OSError:
         # Deliberately not the exception: an errno and a pathname are a

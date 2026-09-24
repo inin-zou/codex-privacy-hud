@@ -206,12 +206,15 @@ WRAP
 # refuses rather than signalling anything it does not recognize.
 stop_owned_runtime() {
   _pd="$1"
-  [ -n "$_pd" ] && [ -f "$BUNDLE/scripts/runtime.py" ] || return 0
+  [ -n "$_pd" ] && [ -f "$BUNDLE/scripts/runtime.py" ] || return 1
   _rec="$(recorded_python "$_pd" 2>/dev/null || true)"
   _host="$(host_python 2>/dev/null || true)"
   for c in "$_rec" "$SHARE/runtime/bin/python" "$SHARE/venv/bin/python" "$_host"; do
-    if [ -n "$c" ] && [ -x "$c" ]; then
-      "$c" "$BUNDLE/scripts/runtime.py" --plugin-data "$_pd" repair --stop-runtime >/dev/null 2>&1 && return 0
+    if usable_python "$c"; then
+      if "$c" "$BUNDLE/scripts/runtime.py" --plugin-data "$_pd" repair --stop-runtime >/dev/null 2>&1; then
+        return 0
+      fi
+      return 1
     fi
   done
   return 1
@@ -343,8 +346,10 @@ if [ "$UNINSTALL" -eq 1 ]; then
     if stop_owned_runtime "$PD"; then
       log "stopped the Privacy HUD runtime for $PD"
     else
-      log "!! could not confirm that the Privacy HUD runtime stopped; check"
-      log "!! for a running daemon if Codex reports a runtime mismatch"
+      log "Uninstall is incomplete: Privacy HUD could not confirm that the runtime stopped."
+      log "The runtime environment and uninstall manifest were preserved. Data and model purge were skipped."
+      log "Some installer-managed shell or Codex configuration may already have been removed."
+      exit 1
     fi
   fi
   if [ "$PURGE" -eq 1 ]; then

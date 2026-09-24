@@ -214,7 +214,7 @@ the same process instead of starting a second one.
 and never installs or replaces a patched Codex binary. Do not describe
 either as doing the other's job.
 
-Privacy HUD 0.8.1 retains snapshot version 2. The snapshot-v2 patched
+Privacy HUD 0.8.2 retains snapshot version 2. The snapshot-v2 patched
 Codex builds for 0.154.0, 0.155.0, and 0.155.1 were re-released on
 2026-09-22; an earlier installation of one of those versions may still
 contain the older reader. Updating the plugin does not replace that

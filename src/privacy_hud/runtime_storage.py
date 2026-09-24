@@ -231,14 +231,15 @@ def acquire_transition(data_dir) -> TransitionLock:
     with _TRANSITIONS_LOCK:
         held = _TRANSITIONS.get(key)
         if held is not None and held.held:
-            raise RuntimeRefusal("transition_incomplete")
+            raise QuiescenceRefusal("transition_lock", reason="busy")
         fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
             os.close(fd)
             if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES):
-                raise RuntimeRefusal("holder_unknown") from exc
+                raise QuiescenceRefusal(
+                    "transition_lock", reason="busy") from None
             raise
         lock = TransitionLock(data_dir=root, path=path, fd=fd)
         _TRANSITIONS[key] = lock
@@ -323,8 +324,7 @@ def prepare_storage(data_dir, *, activation: Activation) -> CutoverResult:
     version = validate_existing_ledger(root)
     _record(root, transition_id, "validated", preserved)
 
-    if not _quiescent(root):
-        raise RuntimeRefusal("holder_unknown")
+    check_quiescence(root)
     _record(root, transition_id, "quiesced", preserved)
 
     if source is not None:
@@ -452,31 +452,135 @@ def _quiescent(root: Path) -> bool:
     fence, so it is also the recheck that stands between a holder
     appearing and a file moving underneath it.
     """
+    try:
+        check_quiescence(root)
+    except QuiescenceRefusal as refusal:
+        if refusal.check == "inspection":
+            raise
+        return False
+    return True
+
+
+#: The heartbeat polling budget for `await_quiescence` (#71), fixed at
+#: the start and longer than `hud_snapshot.STALE_AFTER`. The deadline is
+#: checked after each refused inspection, before another sleep. A final
+#: inspection can start at or after the deadline. This is not a hard
+#: wall-clock ceiling: holder inspections have their own timeouts.
+HEARTBEAT_WAIT = hud_snapshot.STALE_AFTER + 2.0
+
+#: Pause between two passes of that wait. Every pass rechecks holders and
+#: the socket before it looks at the heartbeat again.
+_RECHECK_INTERVAL = 0.25
+
+#: The checks a quiescence refusal can name. The first four are this
+#: module's gate, in the order it asks them; the rest are repair's, about
+#: the processes it was asked to stop.
+QUIESCENCE_CHECKS = ("holders", "inspection", "socket", "heartbeat",
+                     "identity", "unverified", "stop_timeout",
+                     "transition_lock")
+
+
+class QuiescenceRefusal(RuntimeRefusal):
+    """`holder_unknown`, naming the check that refused (#71).
+
+    The code is unchanged, so every caller that refuses on
+    `holder_unknown` still does. What this adds is *which* check it was,
+    for the one-line diagnostic repair prints inside the failing
+    invocation: holder pids, an inspection failure, a socket
+    classification and its errno, or a heartbeat's age. Fixed identifiers
+    and numbers only -- never a path, a ledger value, or exception text
+    (I1).
+    """
+
+    def __init__(self, check: str, *, pids=(), reason: str | None = None,
+                 errno_: int | None = None,
+                 heartbeat_age: float | None = None) -> None:
+        super().__init__("holder_unknown")
+        self.check = check
+        self.pids = tuple(sorted(int(p) for p in pids))
+        self.reason = reason
+        self.errno = errno_ if isinstance(errno_, int) else None
+        self.heartbeat_age = (None if heartbeat_age is None
+                              else round(float(heartbeat_age), 1))
+        #: Set by repair when it had already sent a stop signal in the
+        #: invocation this refusal ends. Copy that says no signal was sent
+        #: is only true while this is false.
+        self.signalled = False
+
+
+def check_quiescence(data_dir, *, heartbeat: bool = True) -> None:
+    """Refuse, naming the check, unless nothing is visibly still able to
+    hold the old ledger. See `_quiescent` for the three signals.
+
+    `heartbeat=False` is for the stop-only operation, which answers
+    whether processes are gone, not whether storage may move.
+    """
+    root = Path(data_dir)
     holders = {pid for pid in open_holders(root) if pid != os.getpid()}
     if holders:
-        return False
+        raise QuiescenceRefusal("holders", pids=holders)
     sock = codex.socket_path(root)
     try:
         info = os.stat(sock)
     except FileNotFoundError:
         info = None
-    except OSError:
-        return False
+    except OSError as exc:
+        raise QuiescenceRefusal("socket", reason="stat_error",
+                                errno_=exc.errno) from None
     if info is not None:
         if not stat.S_ISSOCK(info.st_mode):
-            return False
+            raise QuiescenceRefusal("socket", reason="not_socket")
         probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             probe.settimeout(_PROBE_TIMEOUT)
             probe.connect(str(sock))
-            return False
         except (ConnectionRefusedError, FileNotFoundError):
             pass
-        except OSError:
-            return False
+        except OSError as exc:
+            raise QuiescenceRefusal("socket", reason="connect_error",
+                                    errno_=exc.errno) from None
+        else:
+            raise QuiescenceRefusal("socket", reason="live_listener")
         finally:
             probe.close()
-    return hud_snapshot.read_daemon_marker(root) is None
+    if heartbeat:
+        age = hud_snapshot.daemon_marker_age(root)
+        if age is not None:
+            raise QuiescenceRefusal("heartbeat", heartbeat_age=age)
+
+
+def await_quiescence(data_dir, *, on_wait=None) -> None:
+    """`check_quiescence`, waiting out a heartbeat and nothing else (#71).
+
+    A daemon that has exited leaves `hud/_daemon.json` behind, and the
+    marker's own `updated_at` keeps it fresh for `STALE_AFTER` seconds, so
+    a repair run inside that window used to refuse and then succeed on an
+    unchanged retry. Elapsed time is the only thing that changes, so this
+    waits for it -- within the `HEARTBEAT_WAIT` polling budget, rechecking
+    holders and the socket on every pass. A holder or a listener ends the
+    wait with a refusal at that pass, and a heartbeat still fresh when the
+    budget is spent is a live publisher and a refusal too.
+
+    Nothing is deleted: not the marker, not the socket. An identified
+    process having exited is not evidence that nobody else is publishing.
+
+    `on_wait` is called once, when the wait begins.
+    """
+    deadline = time.monotonic() + HEARTBEAT_WAIT
+    announced = False
+    while True:
+        try:
+            check_quiescence(data_dir)
+            return
+        except QuiescenceRefusal as refusal:
+            remaining = deadline - time.monotonic()
+            if refusal.check != "heartbeat" or remaining <= 0:
+                raise
+            if not announced:
+                announced = True
+                if on_wait is not None:
+                    on_wait()
+        time.sleep(min(_RECHECK_INTERVAL, max(remaining, 0.0)))
 
 
 #: Where `lsof` is on the systems this runs on, for the case where it is
@@ -530,7 +634,7 @@ def holder_paths(data_dir) -> list[Path]:
     except FileNotFoundError:
         entries = []
     except OSError:
-        raise RuntimeRefusal("holder_unknown") from None
+        raise QuiescenceRefusal("inspection", reason="paths") from None
     for entry in entries:
         if entry.is_dir() and not entry.is_symlink():
             bases.append(entry / LEGACY_NAME)
@@ -544,9 +648,9 @@ def holder_paths(data_dir) -> list[Path]:
             except FileNotFoundError:
                 continue
             except OSError:
-                raise RuntimeRefusal("holder_unknown") from None
+                raise QuiescenceRefusal("inspection", reason="paths") from None
             if stat.S_ISLNK(info.st_mode):
-                raise RuntimeRefusal("holder_unknown")
+                raise QuiescenceRefusal("inspection", reason="paths")
             if stat.S_ISREG(info.st_mode):
                 found.append(path)
     return found
@@ -573,7 +677,7 @@ def open_holders(data_dir) -> frozenset[int]:
         return frozenset()
     inspect = _inspector()
     if inspect is None:
-        raise RuntimeRefusal("holder_unknown")
+        raise QuiescenceRefusal("inspection", reason="no_inspector")
     return inspect(paths)
 
 
@@ -585,22 +689,26 @@ def _lsof_holders(lsof: str, paths: list[Path]) -> frozenset[int]:
         completed = subprocess.run(
             [lsof, "-n", "-P", "-F", "pn", "--", *[str(p) for p in paths]],
             capture_output=True, text=True, timeout=_INSPECT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise QuiescenceRefusal("inspection", reason="lsof_timeout") from None
     except (OSError, subprocess.SubprocessError):
-        raise RuntimeRefusal("holder_unknown") from None
+        raise QuiescenceRefusal("inspection",
+                                reason="lsof_unavailable") from None
     # 0: holders found. 1: none found, which lsof also reports for a path
     # it could not examine -- so an error line is a refusal, not an empty
     # answer.
     if completed.returncode not in (0, 1):
-        raise RuntimeRefusal("holder_unknown")
+        raise QuiescenceRefusal("inspection", reason="lsof_status")
     if completed.stderr.strip():
-        raise RuntimeRefusal("holder_unknown")
+        raise QuiescenceRefusal("inspection", reason="lsof_stderr")
     holders = set()
     for line in completed.stdout.splitlines():
         if line.startswith("p"):
             try:
                 holders.add(int(line[1:]))
             except ValueError:
-                raise RuntimeRefusal("holder_unknown") from None
+                raise QuiescenceRefusal("inspection",
+                                        reason="lsof_output") from None
     return frozenset(holders)
 
 
@@ -621,7 +729,7 @@ def _proc_holders(paths: list[Path]) -> frozenset[int]:
         try:
             info = path.stat()
         except OSError:
-            raise RuntimeRefusal("holder_unknown") from None
+            raise QuiescenceRefusal("inspection", reason="proc") from None
         targets.add((info.st_dev, info.st_ino))
     if not targets:
         return frozenset()
@@ -630,7 +738,7 @@ def _proc_holders(paths: list[Path]) -> frozenset[int]:
     try:
         entries = os.listdir("/proc")
     except OSError:
-        raise RuntimeRefusal("holder_unknown") from None
+        raise QuiescenceRefusal("inspection", reason="proc") from None
     for entry in entries:
         if not entry.isdigit():
             continue
@@ -641,7 +749,7 @@ def _proc_holders(paths: list[Path]) -> frozenset[int]:
         except (FileNotFoundError, ProcessLookupError):
             continue
         except OSError:
-            raise RuntimeRefusal("holder_unknown") from None
+            raise QuiescenceRefusal("inspection", reason="proc") from None
         try:
             descriptors = os.listdir(f"/proc/{pid}/fd")
         except (FileNotFoundError, ProcessLookupError):
@@ -649,7 +757,7 @@ def _proc_holders(paths: list[Path]) -> frozenset[int]:
         except OSError as exc:
             if exc.errno == errno.EACCES:
                 continue
-            raise RuntimeRefusal("holder_unknown") from None
+            raise QuiescenceRefusal("inspection", reason="proc") from None
         for fd in descriptors:
             descriptor = f"/proc/{pid}/fd/{fd}"
             try:
@@ -665,14 +773,14 @@ def _proc_holders(paths: list[Path]) -> frozenset[int]:
                     if (stat_error.errno == errno.EACCES
                             and link_error.errno == errno.EACCES):
                         continue
-                    raise RuntimeRefusal("holder_unknown") from None
+                    raise QuiescenceRefusal("inspection", reason="proc") from None
                 # Only kernel pseudo-objects are demonstrably unrelated.
                 # A different filesystem pathname can be a hard link or
                 # a mount alias of a target; it still needs inode matching.
                 if (re.fullmatch(r"(?:socket|pipe):\[[0-9]+\]", target)
                         or target.startswith("anon_inode:")):
                     continue
-                raise RuntimeRefusal("holder_unknown") from None
+                raise QuiescenceRefusal("inspection", reason="proc") from None
             if (info.st_dev, info.st_ino) in targets:
                 holders.add(pid)
                 break

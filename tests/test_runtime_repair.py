@@ -767,7 +767,7 @@ def test_repair_reports_preservation_and_degradation_separately(install):
                         "--allow-degraded"], out=out)
     output = out.getvalue()
     assert code == 0, output
-    assert "Privacy HUD 0.8.1 is running from the selected plugin bundle." \
+    assert "Privacy HUD 0.8.2 is running from the selected plugin bundle." \
         in output
     assert "Existing ledger records were preserved." in output
     assert "Deep-scan detection is unavailable." in output
@@ -863,7 +863,7 @@ def test_offline_repair_cli_runs_without_installers(install):
         )
 
     assert completed.returncode == 0, completed.stderr
-    assert "Privacy HUD 0.8.1 is running" in completed.stdout
+    assert "Privacy HUD 0.8.2 is running" in completed.stdout
     assert "Traceback" not in completed.stderr
     assert stubs.calls() == []
     assert contract.classify_receipt(install.data) == "v2"
@@ -888,3 +888,129 @@ def test_incomplete_repair_copy_does_not_invent_a_holder(code):
         "Run this command in another terminal:\n"
         f"  {command}\n"
     )
+
+
+def test_repair_cli_writer_lock_contention_prints_unknown_holder(
+    tmp_path, monkeypatch
+):
+    import select
+
+    from privacy_hud import runtime_messages
+
+    bundle = make_bundle(tmp_path / "bundle")
+    data = tmp_path / "data"
+    python = make_venv(tmp_path / "venv")
+    seed_ledger(data)
+    receipt = write_receipt_v2(data, bundle=bundle, python=python)
+
+    # This child holds only the writer lease, not an open ledger file.
+    # Keep the actual acquire_writer/flock path on both sides.
+    holder_source = textwrap.dedent("""
+        import sys
+        from pathlib import Path
+
+        sys.path.insert(0, sys.argv[1])
+        from privacy_hud.runtime_contract import load_activation
+        from privacy_hud.runtime_owner import acquire_writer
+
+        data = Path(sys.argv[2])
+        with acquire_writer(data, activation=load_activation(data)):
+            print("ready", flush=True)
+            sys.stdin.buffer.read()
+    """)
+
+    holder = subprocess.Popen(
+        [
+            sys.executable, "-I", "-B", "-c", holder_source,
+            str(bundle / "src"), str(data),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=_clean_env(),
+    )
+
+    def snapshot():
+        # Exclude repair's coordination lock. Preserve every other
+        # pre-existing path's type, mode and bytes; the assertion below
+        # permits only newly created SQLite read-side sidecars.
+        result = {}
+        for path in data.rglob("*"):
+            rel = path.relative_to(data).as_posix()
+            if rel == storage.TRANSITION_LOCK_NAME:
+                continue
+            info = path.lstat()
+            result[rel] = (
+                info.st_mode,
+                path.read_bytes() if path.is_file() else None,
+            )
+        return result
+
+    signal_calls = []
+
+    def record_signal(pid, sig):
+        signal_calls.append((pid, sig))
+
+    try:
+        assert holder.stdout is not None
+        readable, _, _ = select.select([holder.stdout], [], [], 30)
+        assert readable, "writer-lock holder did not become ready"
+        assert holder.stdout.readline() == "ready\n"
+        assert holder.poll() is None
+
+        # No database descriptor is held by this synthetic process.
+        # Do not invoke lsof, including during quiescence rechecks.
+        monkeypatch.setattr(storage, "open_holders", lambda root: set())
+        monkeypatch.setattr(repair, "_signal", record_signal)
+
+        before = snapshot()
+        receipt_before = receipt.read_bytes()
+        out = io.StringIO()
+        err = io.StringIO()
+
+        status = repair.main(
+            [
+                "--bundle-root", str(bundle),
+                "--plugin-data", str(data),
+                "--allow-degraded",
+            ],
+            out=out,
+            err=err,
+        )
+
+        assert status == 1
+        assert out.getvalue() == (
+            runtime_messages.UNKNOWN_HOLDER.format(
+                repair_command=repair.format_repair_command(bundle, data)
+            )
+            + "\n"
+        )
+        # A bare RuntimeRefusal has no quiescence diagnostic.
+        assert err.getvalue() == ""
+        import stat
+
+        after = snapshot()
+        assert before.keys() <= after.keys(), "repair removed existing paths"
+        assert {name: after[name] for name in before} == before
+
+        added = after.keys() - before.keys()
+        assert added <= {"ledger.db-wal", "ledger.db-shm"}
+        for name in added:
+            assert stat.S_ISREG(after[name][0]), name
+        if "ledger.db-wal" in added:
+            assert after["ledger.db-wal"][1] == b""
+        assert receipt.read_bytes() == receipt_before
+        assert signal_calls == []
+        assert holder.poll() is None
+    finally:
+        # EOF releases the lease normally; successful cleanup sends
+        # no signal. Kill only this test's child if cleanup hangs.
+        try:
+            _, holder_stderr = holder.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            holder.kill()
+            holder.communicate(timeout=10)
+            raise
+
+    assert holder.returncode == 0, holder_stderr

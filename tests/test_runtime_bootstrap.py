@@ -158,7 +158,7 @@ def test_same_release_modified_source_is_refused(world, change):
         (package / "mask.py").unlink()
     manifest = json.loads((world.bundle / "runtime-build.json").read_text(
         encoding="utf-8"))
-    assert manifest["release"] == "0.8.1"
+    assert manifest["release"] == "0.8.2"
     _assert_refused(world, run_bootstrap(world, "probe"))
 
 

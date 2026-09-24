@@ -33,7 +33,7 @@ from privacy_hud.matrix.loader import load_matrix
 from runtime_helpers import shared_bundle, short_data_dir, write_receipt_v2
 
 REPO = Path(__file__).resolve().parents[1]
-RELEASE = "0.8.1"
+RELEASE = "0.8.2"
 
 PLUGIN_JSON = REPO / ".codex-plugin" / "plugin.json"
 MARKETPLACE_JSON = REPO / ".agents" / "plugins" / "marketplace.json"
@@ -56,7 +56,7 @@ CURRENT_CONTRACT_REQUIREMENT = (
 #: The replacement compatibility paragraphs, in order, for `README.md`,
 #: `docs/installing-by-hand.md` and `patches/README.md`.
 COMPATIBILITY = [
-    "Privacy HUD 0.8.1 retains snapshot version 2. Production sessions still "
+    "Privacy HUD 0.8.2 retains snapshot version 2. Production sessions still "
     "use legacy accounting. Snapshot-v2 readers accept version 1 as "
     "explicitly legacy and version 2 with nullable accounting fields. Older "
     "snapshot-v1-only readers reject version 2 and show no Privacy item. "
@@ -122,7 +122,7 @@ RELEASE_SENTENCE = (
 #: astra's Chinese text, published as written. It is not translated here
 #: and must not be paraphrased in review.
 COMPATIBILITY_ZH = [
-    "Privacy HUD 0.8.1 继续使用 snapshot v2，实际会话仍采用旧版记账。支持 v2 "
+    "Privacy HUD 0.8.2 继续使用 snapshot v2，实际会话仍采用旧版记账。支持 v2 "
     "的读取器会将 v1 明确标为旧版记账，并支持带可空记账字段的 v2。仅支持 v1 "
     "的旧读取器会拒绝 v2，不显示 Privacy 状态项。Codex 版本号相同并不代表快照"
     "兼容。",
@@ -188,7 +188,7 @@ def _flowed(text: str) -> str:
 # versions
 # --------------------------------------------------------------------- #
 
-def test_issue66_versions_are_0_8_1():
+def test_issue66_versions_are_0_8_2():
     """Four declarations, one release. Codex caches an installed plugin
     by version, so a bump that reaches three of them ships nothing."""
     assert json.loads(_text(PLUGIN_JSON))["version"] == RELEASE
