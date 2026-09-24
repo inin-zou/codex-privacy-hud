@@ -667,8 +667,8 @@ def _spies(module, monkeypatch) -> dict:
 def test_phase4_rehearsal_runs_real_dispatch_and_consumers(
         tmp_path, monkeypatch, capsys):
     module = _module()
-    seen = _spies(module, monkeypatch)
     root = _fenced_root(tmp_path)
+    seen = _spies(module, monkeypatch)
     code, out, err = _run4(module, _active(root), _work(tmp_path), capsys)
     assert (code, out, err) == (0, PASS4, "")
     events = set(seen["dispatch"])
@@ -681,8 +681,8 @@ def test_phase4_rehearsal_runs_real_dispatch_and_consumers(
 def test_phase4_rehearsal_checks_lazy_replay_and_restart(
         tmp_path, monkeypatch, capsys):
     module = _module()
-    seen = _spies(module, monkeypatch)
     root = _fenced_root(tmp_path)
+    seen = _spies(module, monkeypatch)
     code, out, _err = _run4(module, _active(root), _work(tmp_path), capsys)
     assert (code, out) == (0, PASS4)
     roots = [entry[0] for entry in seen["new_state"]]
@@ -694,8 +694,8 @@ def test_phase4_rehearsal_checks_lazy_replay_and_restart(
 def test_phase4_clones_use_matching_root_writer_leases(
         tmp_path, monkeypatch, capsys):
     module = _module()
-    seen = _spies(module, monkeypatch)
     root = _fenced_root(tmp_path)
+    seen = _spies(module, monkeypatch)
     work = _work(tmp_path)
     code, out, _err = _run4(module, _active(root), work, capsys)
     assert (code, out) == (0, PASS4)
@@ -711,8 +711,8 @@ def test_phase4_clones_use_matching_root_writer_leases(
 def test_phase4_child_releases_parent_ownership_before_restart(
         tmp_path, monkeypatch, capsys):
     module = _module()
-    seen = _spies(module, monkeypatch)
     root = _fenced_root(tmp_path)
+    seen = _spies(module, monkeypatch)
     code, out, _err = _run4(module, _active(root), _work(tmp_path), capsys)
     assert (code, out) == (0, PASS4)
     assert seen["acquire"]
@@ -724,8 +724,8 @@ def test_phase4_child_releases_parent_ownership_before_restart(
 def test_phase4_rehearsal_checks_all_crash_boundaries(
         tmp_path, monkeypatch, capsys):
     module = _module()
-    seen = _spies(module, monkeypatch)
     root = _fenced_root(tmp_path)
+    seen = _spies(module, monkeypatch)
     code, out, _err = _run4(module, _active(root), _work(tmp_path), capsys)
     assert (code, out) == (0, PASS4)
     stops: dict[str, list[int]] = {}
