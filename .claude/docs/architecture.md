@@ -195,19 +195,7 @@ On B3/B4, `engine.TIER3_EGRESS_BUDGET` is a duration (1.0 s) used to construct a
 
 A scan gap means an applicable deep scan supplied no accepted result; the call is then decided on tiers 0-2. Each observed scan gap is recorded per observation and counted per session, including observations with no event row — see §10 below and `docs/known-limits.md` #21.
 
-**Shell destination extraction (Tier 2)** is what makes egress detection real. Parse the command, walk the AST, and classify each sink:
-
-```text
-curl/wget/http     → external host from URL
-scp/rsync/sftp     → remote host
-ssh <host> <cmd>   → remote host
-nc/netcat          → host:port
-git push           → remote URL from config
-> /dev/tcp/...     → host:port
-pipes              → follow the chain; the last sink wins
-```
-
-Anything unparseable crossing B4 is treated as an unknown external destination and fails closed.
+**Shell destination classification (Tier 2).** `extract_destinations` uses shell tokenization and heuristic checks for network-command names, URLs, host-like arguments, IP literals and other destination patterns. It returns a boundary category, `local` or `external_net`; it does not build a shell AST, resolve Git remotes from configuration or trace pipeline data flow. A recognized `git push` contributes a `git-remote` marker. Tokenization failure is classified as external. External classification selects the applicable policy path; it does not by itself mean the call is denied.
 
 **Interfaces.** Detectors implement `Detector.scan(text, ctx) -> list[Finding]` and declare a `DetectorProfile` containing tier and cost. The engine schedules cheap and expensive detectors by that declaration; availability is separate runtime state. `ModelDetector` implements the expensive local `openai/privacy-filter` detector, and tests can substitute a detector with the same declared profile.
 
@@ -658,7 +646,7 @@ checks the property as behaviour, with a co-occurring finding in its payload.
 
 **UI delivery.** Codex Desktop does not currently render MCP Apps inline iframe resources ([openai/codex#21019](https://github.com/openai/codex/issues/21019)), and `tui.status_line` accepts only built-in item identifiers. So:
 
-- **L2/L3** — daemon serves static HTML + vanilla JS on `127.0.0.1:<ephemeral>`; the `$privacy` skill prints the URL and an ASCII table fallback, so the demo works even with no browser.
+- **L2/L3** — the `$privacy` skill uses the bundled runtime launcher to start a separate `local_ui_server` process serving static HTML + vanilla JS on `127.0.0.1:<ephemeral>`. The hook daemon serves the Unix-domain socket, not HTTP. The skill prints the browser URL and an ASCII audit fallback.
   - **Which session either surface shows** is resolved by `mcp_tools.resolve_audit_session`: an explicit `$privacy <id>` wins, otherwise the daemon's `active_sessions` op (§2) names the session that fired a hook most recently, and only if the daemon cannot be asked does it fall back to the ledger's most-recently-*started* session — labelled as that, never as the caller's own. The skill reports concurrent active sessions; the browser labels the selected session by its full ID. `local_ui_server`'s default (`/api/session` with no `session_id`) goes through the same function but separately timed resolutions can select different sessions; the skill therefore pins its selected ID in the browser URL, and so does `ambient` — on its own much slower clock (`ambient.RESOLVE_INTERVAL`, ~30 s, against a 2 s redraw), because the identity question is the one thing the ledger cannot answer while the ambient *reading* stays a snapshot-file poll. All three surfaces therefore name one session at a time. See README known limit 8, including why the ambient line carries no marker for session ambiguity: `⚠unverified` means the record has a hole, not "I am unsure whose record this is", and one glyph cannot carry both.
   - **What the skill's terminal audit header claims** follows from its resolution: `render.audit(..., resolved=)` writes the subtitle from `ResolvedSession.basis` (`Current session` only for a single daemon-named live session; `Session <id>`, `Most recently active session`, `Most recently started session`, `No session on record` otherwise). The browser and its ASCII view pass `session_id` and show `Session <full ID>`. Without either an ID or a resolution, the renderer shows `Session ID unknown`.
 - **L1** — `privacy_hud.ambient` (entry point `privacy_hud.ambient:main`, console script `privacy-hud-ambient`): a standalone process the user runs in a second terminal pane, which reads the contract A snapshot `$PLUGIN_DATA/hud/<session_id>.json` (written by the daemon) and redraws `render.hud_line()` in place. The fallback when no patched build matches the installed Codex version; not a Codex status item itself.
@@ -676,61 +664,15 @@ The MCP tools return structured JSON regardless, so when Codex renders MCP UI th
 - **Writes serialized** through a single SQLite connection in WAL mode; the UI reads on a separate read-only connection.
 - **No chunk cache.** Findings are not reused across observations or sessions. Legacy ledger deduplication can avoid another score contribution, but it does not avoid scanning an unchanged payload again.
 
-**Latency budget** — the table below was a design-time estimate, never empirically verified until real weights actually loaded (every prior dev/CI environment had `ModelDetector.available == False`, so tier 3 silently never ran and this budget was never truly exercised):
-
-```text
-client cold start        25 ms
-socket round trip         2 ms
-tier 0-2 scan              6 ms
-tier 3 (measured, real weights, short text)  ~280 ms
-policy + ledger write     5 ms
-                        ──────
-                    ~40 / ~320 ms
-```
-
-The original 40 ms tier-3 estimate was roughly 7x too low. The 150 ms
-target and `hooks/handler.py`'s original 120 ms client timeout were both
-calibrated against that estimate; the client timeout is now 2 s (see
-`hooks/handler.py`'s own comment for the measurement and reasoning), and
-the "comfortably under 150 ms" claim below no longer holds for any call
-that actually reaches tier 3 — those now cost several hundred ms, still
-comfortably inside Codex's own hook timeout ceiling but no longer
-imperceptible. `Engine._scan()`'s shape pre-filter (which used to skip
-tier 3 for text that didn't look email/phone/SSN-shaped) was removed
-because it silently prevented tier 3 from ever running on the categories
-it exists to catch (address, person, date, account number) — see engine.py's
-fix commit. That correctness fix is what makes this latency real rather
-than theoretical.
+**Latency limits.** The original design estimates and measurements on short inputs do not establish current completion bounds. The hook client uses the shared 2.0-second deadline described in §2. Outbound deep scanning uses the admission and result-acceptance rules in §4; ingress does not use the egress deadline. Neither the input cap nor these deadlines guarantee detector wall-clock completion.
 
 **`PostToolUse` is synchronous.** The host behavior recorded in §7 is why these hooks are not configured as asynchronous. Tool results can contain large payloads, and an applicable `openai/privacy-filter` scan can exceed the hook client's waiting budget. A size cap limits the input offered to the model; it does not establish a latency guarantee. If the client cannot obtain a usable ingress reply, it reports the observation as unverified.
 
-**Mitigation (binding on Task 10's implementation): bounded tier 3 on `PostToolUse`.**
-
-```text
-on PostToolUse(tool_response):
-  tiers 0-2 (path rules, regex+entropy, structural parse)  → always run on the FULL payload
-                                                               (cheap: ~8 ms combined per §4,
-                                                               roughly linear in size)
-  tier 3 (the NER model)                                    → skipped entirely above
-                                                               8192 characters
-
-  if len(tool_response) > 8192 chars:
-      record the event as usual, and record a scan gap (`oversize`) for the
-      observation: inference is not attempted
-      → the same "Scan gap — fast-path results only." state design.md §5 defines;
-        every scan gap is treated alike, because from the ledger's point of view
-        the effect is the same: an applicable deep scan supplied no accepted result.
-```
-
-**What ships, on truncation.** This section specified scanning the first 8 KB and marking the remainder. The engine skips the deep scan **entirely** above `MAX_TIER3_CHARS` (8192 characters) rather than scanning a prefix, and `Engine._scan` says why: a prefix scan reports a clean result for a payload it mostly did not read, and the resulting row looks the same as a fully scanned one. Skip-and-record was chosen over truncate-and-scan for that reason, and the paragraphs below are kept because the sizing argument is still the sizing argument.
-
 **Why the current cap is stated in characters.** `MAX_TIER3_CHARS` is 8192 characters, not a byte limit. Above it, the entire deep scan is skipped and an applicable observation records an `oversize` scan gap. The cap does not establish a 40 ms scan time, a 150 ms completion bound or complete detection. Cheap detectors still inspect the full observation text.
 
-Tiers 0-2 are deliberately left unbounded (full payload, every time): they are cheap enough not to need a cap, and skipping them on the tail of a large payload would silently reintroduce the exact "large disclosure goes unrecorded" gap tier 3's bound is meant to close for the cheap, deterministic checks (credential patterns, path rules) that do not need a model to run.
+**Cheap scanning and classification.** `PathDetector` and `SecretDetector` scan the full observation text without the deep-scan size cap. Shell destination classification is a separate heuristic over command text, not a structural parse of every tool result. An oversized applicable observation skips the entire deep scan; no prefix is scanned.
 
-This connects directly to a piece of UI that already exists for a different reason: design.md §5's degraded-state banner was designed for deep-scanner *timeout*. It now covers every scan gap — an applicable deep scan supplied no accepted result — under one string, "Scan gap — fast-path results only.", one fewer state for the UI layer to invent.
-
-**What ships, on where that is recorded.** This section says "mark the affected event degraded". The implementation records the *scan* instead, in an append-only `scan_gaps` table counted per session by `Ledger.coverage`, and the reason is the case a per-event mark cannot reach: an observation whose cheap tiers found nothing and which had a scan gap writes **no event row at all**, and is otherwise indistinguishable from a clean scan. Each observed scan gap is recorded per observation and counted per session, including observations with no event row. The cost of that choice is real and is stated in `docs/known-limits.md` #21: the audit can say a session had three scan gaps and cannot say which calls they were.
+**Scan-gap recording.** Each observed scan gap is recorded per observation in the append-only `scan_gaps` table and counted per session by `Ledger.coverage`. An observation with no findings can have a scan gap without producing an event row. The audit reports incomplete scanning through its scan-gap banners; the stored gap count does not identify which calls had gaps. See `design.md` §5 and `docs/known-limits.md` #21.
 
 ---
 

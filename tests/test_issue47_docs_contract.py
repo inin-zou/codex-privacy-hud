@@ -838,3 +838,107 @@ def test_issue47_direct_access_copy_is_exact():
     assert _paragraph(architecture, "**Direct access:**") == DESIGN_DIRECT_ACCESS
     assert "**Escape hatches:**" not in _read(DESIGN)
     assert "deep-links to the L3 for the offending flow" not in _read(DESIGN)
+
+
+def test_issue47_surrounding_claims_match_the_corrected_contract():
+    latency = (
+        "**Latency limits.** The original design estimates and measurements "
+        "on short inputs do not establish current completion bounds. The hook "
+        "client uses the shared 2.0-second deadline described in §2. Outbound "
+        "deep scanning uses the admission and result-acceptance rules in §4; "
+        "ingress does not use the egress deadline. Neither the input cap nor "
+        "these deadlines guarantee detector wall-clock completion."
+    )
+    cheap_scanning = (
+        "**Cheap scanning and classification.** `PathDetector` and "
+        "`SecretDetector` scan the full observation text without the "
+        "deep-scan size cap. Shell destination classification is a separate "
+        "heuristic over command text, not a structural parse of every tool "
+        "result. An oversized applicable observation skips the entire deep "
+        "scan; no prefix is scanned."
+    )
+    gap_recording = (
+        "**Scan-gap recording.** Each observed scan gap is recorded per "
+        "observation in the append-only `scan_gaps` table and counted per "
+        "session by `Ledger.coverage`. An observation with no findings can "
+        "have a scan gap without producing an event row. The audit reports "
+        "incomplete scanning through its scan-gap banners; the stored gap "
+        "count does not identify which calls had gaps. See `design.md` §5 "
+        "and `docs/known-limits.md` #21."
+    )
+    performance_bullets = (
+        "- **One daemon, many sessions.** State is keyed by `session_id` "
+        "throughout; there is no global mutable session state.\n"
+        "- **Writes serialized** through a single SQLite connection in WAL "
+        "mode; the UI reads on a separate read-only connection.\n"
+        + ARCH_NO_CACHE_BULLET
+    )
+    expected_performance = "\n\n".join([
+        ARCH_PERFORMANCE_HEADING,
+        performance_bullets,
+        latency,
+        ARCH_POSTTOOLUSE,
+        ARCH_CAP,
+        cheap_scanning,
+        gap_recording,
+    ])
+    assert _section(ARCH, ARCH_PERFORMANCE_HEADING) == expected_performance
+
+    shell_classification = (
+        "**Shell destination classification (Tier 2).** "
+        "`extract_destinations` uses shell tokenization and heuristic checks "
+        "for network-command names, URLs, host-like arguments, IP literals "
+        "and other destination patterns. It returns a boundary category, "
+        "`local` or `external_net`; it does not build a shell AST, resolve "
+        "Git remotes from configuration or trace pipeline data flow. A "
+        "recognized `git push` contributes a `git-remote` marker. "
+        "Tokenization failure is classified as external. External "
+        "classification selects the applicable policy path; it does not "
+        "by itself mean the call is denied."
+    )
+    detection = _section(ARCH, ARCH_DETECTION_HEADING)
+    assert _paragraph(
+        detection, "**Shell destination classification (Tier 2).**"
+    ) == shell_classification
+    assert _read(ARCH).count(shell_classification) == 1
+    for stale in (
+        "Parse the command, walk the AST",
+        "remote URL from config",
+        "the last sink wins",
+    ):
+        assert stale not in detection
+
+    ui_delivery = (
+        "- **L2/L3** — the `$privacy` skill uses the bundled runtime launcher "
+        "to start a separate `local_ui_server` process serving static HTML "
+        "+ vanilla JS on `127.0.0.1:<ephemeral>`. The hook daemon serves the "
+        "Unix-domain socket, not HTTP. The skill prints the browser URL "
+        "and an ASCII audit fallback."
+    )
+    delivery = _section(ARCH, "## 9. MCP server and UI delivery")
+    assert _line(delivery, "- **L2/L3**") == ui_delivery
+    assert "daemon serves static HTML" not in delivery
+
+    taxonomy = _section(PRD, "### 5.1 Event taxonomy")
+    assert _line(taxonomy, "| Local scanner detects") == (
+        "| Local scanner detects an email in a file | `detected` "
+        "(representable; no production writer) | No |"
+    )
+    assert _line(taxonomy, "| Session transcript persisted") == (
+        "| Session transcript persisted to disk | `retention` "
+        "(representable; no production writer) | Transcript retention "
+        "is outside this ledger's account |"
+    )
+
+    quality_targets = (
+        "**Historical quality targets, not current measurements or "
+        "guarantees:** fast path < 15 ms p50, < 150 ms p99 including deep "
+        "scan · zero false blocks in the demo path · ledger survives "
+        "`PreCompact`. Current scan scheduling and deadline limits are "
+        "described in `architecture.md` §§4 and 10."
+    )
+    success = _section(PRD, "## 12. Success criteria")
+    assert _paragraph(
+        success, "**Historical quality targets,"
+    ) == quality_targets
+    assert "**Quality bars:**" not in success

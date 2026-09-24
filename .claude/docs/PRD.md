@@ -100,7 +100,7 @@ Most "privacy for AI" tooling alarms on *detection*. Detection is cheap and misl
 | Event | Classification | Counts toward disclosure budget |
 |---|---|---|
 | Codex discovers a sensitive file path locally | `local_access` | No |
-| Local scanner detects an email in a file | `detected` | No |
+| Local scanner detects an email in a file | `detected` (representable; no production writer) | No |
 | File content enters model context | `exposed` | **Yes** |
 | Data is passed to a subagent | `exposed` (new destination) | **Yes** (destination delta) |
 | Arguments sent to an MCP tool | `exposed` | **Yes** |
@@ -108,7 +108,7 @@ Most "privacy for AI" tooling alarms on *detection*. Detection is cheap and misl
 | Content redacted/minimized before send | `prevented` | No |
 | Call blocked before execution | `prevented` | No |
 | Sensitive content read by a local tool only | `local_access` | No (tracked, not billed) |
-| Session transcript persisted to disk | `retention` | Tracked separately |
+| Session transcript persisted to disk | `retention` (representable; no production writer) | Transcript retention is outside this ledger's account |
 
 ### 5.2 Trust boundaries
 
@@ -408,7 +408,7 @@ Current production accounting remains legacy. The inactive accounting core and i
 4. `$privacy` shows all three tabs with real data from a real session.
 5. Judge asks "where does my data go?" → answer is "nowhere; here is the metadata-only ledger."
 
-**Quality bars:** fast path < 15 ms p50, < 150 ms p99 including deep scan · zero false blocks in the demo path · ledger survives `PreCompact`.
+**Historical quality targets, not current measurements or guarantees:** fast path < 15 ms p50, < 150 ms p99 including deep scan · zero false blocks in the demo path · ledger survives `PreCompact`. Current scan scheduling and deadline limits are described in `architecture.md` §§4 and 10.
 
 ---
 
