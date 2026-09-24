@@ -269,6 +269,24 @@ def _is_owned_runtime(identity: dict, data_dir: Path, bundle: Path) -> bool:
         return False
 
 
+#: The legacy daemon launch form this release can stop (#70): what 0.7.x
+#: hooks ran, `[recorded_python, "-m", "privacy_hud.daemon"]`.
+LEGACY_DAEMON_ARGS = ("-m", "privacy_hud.daemon")
+
+
+def _process_image(pid: int):
+    """Scaffolding: no exact image yet."""
+    return None
+
+
+def classify_holder(identity: dict, data_dir: Path, bundle: Path, *,
+                    interpreter: Path | None) -> str:
+    """Scaffolding: the 0.8.1 rule, unnamed."""
+    if _is_owned_runtime(identity, data_dir, bundle):
+        return "current"
+    raise RuntimeRefusal("holder_unknown")
+
+
 def stop_holders(data_dir, holders: dict, *, deadline: float) -> None:
     """Ask each recognized holder to exit, and wait for it.
 
@@ -704,6 +722,11 @@ def quiescence_diagnostic(refusal: runtime_storage.QuiescenceRefusal) -> dict:
         "heartbeat_age": refusal.heartbeat_age,
         "signalled": bool(refusal.signalled),
     }
+
+
+def refusal_message(refusal: RuntimeRefusal) -> str:
+    """Scaffolding: the 0.8.1 mapping."""
+    return _REFUSAL_COPY.get(refusal.code, runtime_messages.REPAIR_FAILED)
 
 
 def _parser() -> argparse.ArgumentParser:

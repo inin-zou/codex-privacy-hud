@@ -129,6 +129,44 @@ UNKNOWN_HOLDER = (
     "Close other Privacy HUD processes and retry the repair command."
 )
 
+#: Explicit repair, stopping a legacy daemon it has verified as this
+#: installation's, for this data directory (#70). astra's copy: printed
+#: immediately before the one SIGTERM, and after the verified exit.
+LEGACY_DAEMON_STOPPING = (
+    "Stopping the verified legacy Privacy HUD daemon for this data "
+    "directory."
+)
+LEGACY_DAEMON_STOPPED = (
+    "The legacy Privacy HUD daemon stopped. Checking that storage can be "
+    "moved safely."
+)
+
+#: A process holds the ledger and its identity could not be verified as
+#: one this installation may stop (#70). Only ever shown before any stop
+#: signal was sent in the invocation -- its second sentence says so.
+HOLDER_UNVERIFIED = (
+    "Privacy HUD could not verify the identity of a process using this "
+    "ledger.\n"
+    "No stop signal was sent. The storage transition did not start.\n"
+    "Existing ledger files were preserved."
+)
+
+#: The operating system could not be asked who holds the ledger, or what
+#: a holder is running (#70).
+HOLDER_INSPECTION_FAILED = (
+    "Privacy HUD could not inspect processes using this ledger.\n"
+    "The storage transition did not start. Existing ledger files were "
+    "preserved."
+)
+
+#: A verified process was sent SIGTERM once and did not exit within
+#: `runtime_repair.QUIESCE_TIMEOUT` (#70). It is not escalated.
+HOLDER_STOP_TIMEOUT = (
+    "The verified Privacy HUD process did not stop within 20 seconds.\n"
+    "The storage transition did not start. Existing ledger files were "
+    "preserved."
+)
+
 #: Repair found a fresh daemon heartbeat and nothing else in the way
 #: (#71): it waits for the heartbeat to expire, rechecking holders and the
 #: socket, instead of refusing. astra's copy.
