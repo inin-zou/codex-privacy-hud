@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.2
+
+- Stop a verified legacy Privacy HUD daemon during explicit runtime repair, and complete the storage transition in the same invocation.
+- Share that process classifier with `repair --stop-runtime` and the uninstall stop.
+- Refuse unverified or uninspectable ledger holders, and a verified process that does not stop, each with its own message; send SIGTERM once and never escalate.
+- Wait for a recent daemon heartbeat to expire before the storage transition, rechecking holders and the socket; delete neither.
+- Name the check that refused runtime repair in one allowlisted diagnostic line.
+- Keep version-2 accounting inactive, the prepared schema at generation 5401 and snapshot version 2.
+
+Refs #70, #71.
+
 ## 0.8.1
 
 - Implement the version-2 accounting core, inactive for production sessions.
