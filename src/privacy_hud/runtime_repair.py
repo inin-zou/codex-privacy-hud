@@ -418,14 +418,14 @@ def classify_holder(identity: dict, data_dir: Path, bundle: Path, *,
         return runtime_storage.QuiescenceRefusal("unverified", pids=(pid,),
                                                  reason=reason)
 
+    if identity.get("uid") != str(os.getuid()):
+        raise refuse("user")
     executable = identity.get("executable")
     argv = identity.get("argv")
     if (not isinstance(executable, str) or not isinstance(argv, list)
             or not argv or not all(isinstance(a, str) for a in argv)):
         raise runtime_storage.QuiescenceRefusal(
             "identity", pids=(pid,), reason="uninspectable")
-    if identity.get("uid") != str(os.getuid()):
-        raise refuse("user")
     try:
         bootstrap = str((Path(bundle) / "scripts" / "runtime.py").resolve())
         named = Path(data_dir).resolve()
