@@ -33,7 +33,7 @@ from privacy_hud.matrix.loader import load_matrix
 from runtime_helpers import shared_bundle, short_data_dir, write_receipt_v2
 
 REPO = Path(__file__).resolve().parents[1]
-RELEASE = "0.8.1"
+RELEASE = "0.8.2"
 
 PLUGIN_JSON = REPO / ".codex-plugin" / "plugin.json"
 MARKETPLACE_JSON = REPO / ".agents" / "plugins" / "marketplace.json"
@@ -188,7 +188,7 @@ def _flowed(text: str) -> str:
 # versions
 # --------------------------------------------------------------------- #
 
-def test_issue66_versions_are_0_8_1():
+def test_issue66_versions_are_0_8_2():
     """Four declarations, one release. Codex caches an installed plugin
     by version, so a bump that reaches three of them ships nothing."""
     assert json.loads(_text(PLUGIN_JSON))["version"] == RELEASE

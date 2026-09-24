@@ -111,14 +111,14 @@ def _read(relative: str) -> str:
     return (REPO / relative).read_text(encoding="utf-8")
 
 
-def test_phase3_versions_are_0_8_1():
+def test_phase3_versions_are_0_8_2():
     plugin = json.loads(_read(".codex-plugin/plugin.json"))
     marketplace = json.loads(_read(".agents/plugins/marketplace.json"))
     project = tomllib.loads(_read("pyproject.toml"))
-    assert plugin["version"] == "0.8.1"
+    assert plugin["version"] == "0.8.2"
     assert [p["version"] for p in marketplace["plugins"]
-            if p["name"] == plugin["name"]] == ["0.8.1"]
-    assert project["project"]["version"] == "0.8.1"
+            if p["name"] == plugin["name"]] == ["0.8.2"]
+    assert project["project"]["version"] == "0.8.2"
 
 
 def test_phase3_contract_blocks_match_verbatim():
@@ -190,11 +190,11 @@ def test_phase3_summary_and_refusal_copy_is_exact():
         "disclosure or host enforcement.")
     assert accounting.PHASE3_SURFACE_UNSUPPORTED == (
         "This Privacy HUD surface does not support version-2 accounting "
-        "in 0.8.1.")
+        "in 0.8.2.")
     assert json.dumps({"error": accounting.PHASE3_SURFACE_UNSUPPORTED},
                       separators=(",", ":")) == (
         '{"error":"This Privacy HUD surface does not support version-2 '
-        'accounting in 0.8.1."}')
+        'accounting in 0.8.2."}')
 
 
 def test_phase3_source_module_documentation_matches_verbatim():
