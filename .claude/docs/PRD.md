@@ -189,6 +189,8 @@ A detail view shows one public legacy row, its recorded source/destination assoc
 
 The terminal detail view does not save policy rules. The local audit browser has buttons that POST to `/api/policy`; the MCP `privacy.update_policy` tool is a separate policy-writing surface. Report a rule as saved only after that surface returns success, and include its returned conditions. Host application of a later denial or rewritten input is not confirmed.
 
+Mask scope is session-wide by detected data type, without a source restriction. If a matching mask rule selects an otherwise eligible outbound call, the rewriter receives all findings from that call, including findings of other types; it does not restrict rewriting to the selected type. An origin-rule denial takes precedence, and a mask rule does not weaken the built-in handling of hard-blocked types. Saving a rule does not confirm detection on a later call or host application of rewritten input. Already disclosed data cannot be recalled from this session.
+
 `Already disclosed data cannot be recalled from this session.` remains required copy.
 
 ---
@@ -304,33 +306,21 @@ rule that every user-facing action claim must trace to the surface that
 performs it, and `architecture.md` §9 for the full tool list and withheld
 set.
 
-### 7.6 The `ask` workaround (designed, never built — do not read this as current behavior)
+### 7.6 Consent flow — historical proposal, not shipped
 
-This section records the reasoning about Codex's missing `ask` decision, which is still true. The five-step flow below is a design record of what an interactive consent loop *would* look like; no surface implements steps 2–5. `privacy.allow_once` exists in code but is deliberately not exposed as an MCP tool (§7.5), and nothing else calls it: there is no UI button, no `$privacy` subcommand, and no retry path that consumes the token it would write. Treat this as a proposal this branch left withdrawn, not a description of the shipped product — see `CLAUDE.md` §5.
+The proposed deny → review → consent token → retry workflow is not available in the shipped product. Neither the audit browser, the `$privacy` skill nor the exposed MCP tools offer `Allow once`, `Minimize & retry`, a minimization preview or a consent-driven retry.
 
-Codex `PreToolUse` supports `deny`, `allow`, and `allow + updatedInput` — but **not** `permissionDecision: "ask"`. So an interactive three-button prompt cannot come from a single hook response. The flow as designed:
+Internal token primitives exist: `mcp_tools.allow_once` can mint a token, and `Engine.observe` can consume one. These functions do not establish a reachable consent workflow. No shipped user-facing surface issues the token, and a saved origin-rule denial is evaluated before the token-consumption branch.
 
-1. Risky call is **denied** by the hook, with a `permissionDecisionReason` pointing at the audit UI.
-2. UI shows the exposure detail.
-3. User chooses `Allow once` or `Minimize & retry`.
-4. `privacy.allow_once` writes a **single-use policy token** (scoped to tool + argument hash, TTL 120 s).
-5. Codex retries; the hook consumes the token and allows or rewrites.
+The available actions are those in the Level 3 policy section: the browser and `privacy.update_policy` can save conditional policy rules. They do not authorize a blocked call once, replay it or establish that the host applied a later denial or rewrite. `$privacy` opens the session audit; it does not deep-link a denial to an event.
 
-### 7.7 Minimization example
+Already disclosed data cannot be recalled from this session.
 
-Original:
+### 7.7 What minimization rewrites
 
-```bash
-curl sentry.example.com -d "$(cat support.log)"
-```
+Minimization operates on detected spans in the tool arguments supplied to the hook. It can return rewritten command text or structured MCP arguments. It does not open files referenced by shell commands, rewrite an upload through a helper executable, or offer a preview-and-retry action.
 
-Rewritten via `updatedInput`:
-
-```bash
-privacy-minimize support.log | curl sentry.example.com -d @-
-```
-
-Pseudonymization is **stable within a session** (`jo•••@acme.com` → `user_7f3a@example.invalid` consistently), so the agent's reasoning survives minimization.
+For example, a detected email in an MCP argument can be replaced with a session-stable pseudonym when the engine selects a rewrite. The returned `updatedInput` is not evidence that the host applied it or that the recipient received it. See `architecture.md` §8.
 
 ---
 
@@ -356,7 +346,7 @@ Verified constraints force this decision:
 ## 9. Platform limitations (state these in the demo)
 
 1. **Hosted tools bypass hooks.** WebSearch and similar hosted tools do not trigger local function-tool hook paths. Privacy HUD is a practical guardrail, not a mathematically complete enforcement boundary.
-2. **No `ask` decision.** Interactive consent requires the deny → token → retry dance (§7.6).
+2. **No interactive consent surface.** The proposed consent workflow is not shipped. Internal token primitives exist, but no browser button, `$privacy` branch or exposed MCP tool issues consent tokens (§7.6).
 3. **No custom status item.** See §8.
 4. **Model-context accounting is inferential for file reads.** A tool result does not establish admission into model context. Phase 1 retains the legacy charge and labels it; evidence-based accounting is not activated.
 5. **Prompt-injection resistance is out of scope.** A hostile repo could try to talk the agent out of using the tool; the hook layer is not bypassable by the model, which is precisely why enforcement lives there.

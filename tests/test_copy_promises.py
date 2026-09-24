@@ -71,3 +71,64 @@ def test_the_block_templates_promise_no_action_without_a_surface():
         text = _templates()[name]
         assert "minimize" not in text, f"{name} still offers minimize"
         assert "allow once" not in text, f"{name} still names allow once"
+
+
+#: The sections that describe the consent workflow (#47 item 12), each with
+#: the heading that names it. The workflow is withdrawn; these sections
+#: exist to say so.
+_CONSENT_SECTIONS = {
+    ".claude/docs/design.md":
+        "## 8. Consent flow — historical proposal, not shipped",
+    ".claude/docs/PRD.md":
+        "### 7.6 Consent flow — historical proposal, not shipped",
+    ".claude/docs/architecture.md":
+        "## 8. Enforcement and the unshipped consent workflow",
+}
+
+#: The consent actions a user cannot take on any shipped surface.
+_CONSENT_ACTIONS = ("`Allow once`", "`Minimize & retry`")
+
+#: A sentence naming a consent action must also deny that it ships.
+_DENIAL = re.compile(r"\b(Neither|No|not)\b")
+
+
+def _section_text(rel: str, heading: str) -> str:
+    lines = (REPO / rel).read_text(encoding="utf-8").split("\n")
+    found = [i for i, line in enumerate(lines) if line == heading]
+    assert len(found) == 1, f"{rel}: expected one {heading!r}"
+    level = len(heading) - len(heading.lstrip("#"))
+    body = []
+    for line in lines[found[0] + 1:]:
+        match = re.match(r"(#+) ", line)
+        if line.strip() == "---" or (match and len(match.group(1)) <= level):
+            break
+        body.append(line)
+    return "\n".join(body)
+
+
+def test_documented_consent_actions_are_explicitly_unavailable():
+    """#47 item 12: `mcp_tools.allow_once` existing was mistaken for the
+    action being available (CLAUDE.md §5). Every current description of the
+    consent workflow names it as unshipped, and every sentence that names a
+    consent action says no shipped surface offers it."""
+    for rel, heading in _CONSENT_SECTIONS.items():
+        assert "not shipped" in heading or "unshipped" in heading, rel
+        text = _section_text(rel, heading)
+        assert "not shipped" in text or "not available in the shipped product" in text, rel
+        assert "No shipped user-facing surface" in text or (
+            "no shipped user-facing surface" in text), rel
+        named = 0
+        for sentence in re.split(r"(?<=[.!?])\s+", text):
+            if any(action in sentence for action in _CONSENT_ACTIONS):
+                named += 1
+                assert _DENIAL.search(sentence), (
+                    f"{rel}: names a consent action without denying it "
+                    f"ships: {sentence!r}")
+        assert named, f"{rel}: the section no longer names what is unavailable"
+
+    # The denial templates still point only at the ledger review.
+    for name in ("BLOCK_TEMPLATE", "ORIGIN_BLOCK_TEMPLATE"):
+        text = _templates()[name]
+        assert text.rstrip().endswith("Run $privacy to review the ledger."), name
+        for word in ("minimize", "allow once", "retry", "consent"):
+            assert word not in text.lower(), f"{name} offers {word}"

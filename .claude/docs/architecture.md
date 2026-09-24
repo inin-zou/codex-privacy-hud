@@ -641,38 +641,21 @@ Codex provides `PLUGIN_ROOT` and `PLUGIN_DATA` for plugin-bundled hooks; the led
 
 ---
 
-## 8. Enforcement and the consent loop
+## 8. Enforcement and the unshipped consent workflow
 
-Codex `PreToolUse` supports `deny`, `allow`, and `allow + updatedInput`, but **not** `permissionDecision: "ask"`. Consent is therefore a state machine across turns rather than a modal.
+The engine can return an allow decision, a denial, or rewritten tool input. Dispatch translates these into the host's hook output. A denial is returned in `hookSpecificOutput.permissionDecision`; a rewrite is returned through `updatedInput`. Neither response confirms that the host applied it.
 
-```mermaid
-stateDiagram-v2
-    [*] --> Evaluate: PreToolUse
-    Evaluate --> Allow: no findings
-    Evaluate --> Rewrite: policy says mask/minimize
-    Evaluate --> CheckToken: findings cross B3/B4
-    CheckToken --> Allow: valid token
-    CheckToken --> Deny: no token
-    Deny --> Review: user runs $privacy
-    Review --> Mint: user picks allow-once / minimize
-    Mint --> [*]: agent retries → CheckToken
-    Rewrite --> [*]: allow + updatedInput
-    Allow --> [*]
-```
+A saved mask rule selects an outbound call by detected data type, without a source restriction. When that rule selects an otherwise eligible call, the rewriter receives all findings from the call, including other detected types. Origin-rule denials take precedence, and mask rules do not weaken the built-in handling of hard-blocked types.
 
-**Token binding.** `args_hash = SHA256(canonical_json(tool_input))`, so a token authorizes exactly one call with exactly those arguments. TTL 120 s, single use, deleted on consumption; minting again for the same call replaces the earlier token. A token cannot be replayed, cannot authorize a different payload, and cannot outlive the user's attention.
+`minimize_tool_input` rewrites detected spans in the supplied tool arguments. For supported string-command tools it returns rewritten command text; for structured MCP arguments it rewrites the scanned JSON text and parses the result. It does not read files named by a command. No `privacy-minimize` executable is shipped, and no file-upload rewrite through such a helper is implemented.
 
-**Rewrite path.** For Bash and `apply_patch`, `updatedInput` requires a string `command`; for MCP tools it is a replacement arguments object. Two rewrite strategies:
+Pseudonyms are stable within a session for the same data type and value. This describes the returned input, not confirmed delivery or successful completion of the original task.
 
-```text
-Bash    curl sentry.example.com -d "$(cat support.log)"
-     →  privacy-minimize support.log | curl sentry.example.com -d @-
+The proposed deny → review → consent token → retry workflow is not shipped. No browser button, `$privacy` branch or exposed MCP tool offers `Allow once`, `Minimize & retry`, a before/after preview or a consent-driven retry.
 
-MCP     {"body": "contact jordan@acme.com about 4412"}
-     →  {"body": "contact user_7f3a@example.invalid about 4412"}
-```
+Internal token primitives remain implemented and tested. Tokens bind the session, tool and hash of canonical tool arguments, expire after 120 seconds and are single-use. `Engine.observe` can consume them in its built-in block branch, but no shipped user-facing surface mints them. Origin-rule denials are decided before that branch.
 
-**Pseudonymization is stable per session** — the same input value always maps to the same pseudonym via `HMAC(session_salt, value)` reduced into a readable token. The agent's cross-references survive minimization, which is the difference between minimization and breaking the task.
+Already disclosed data cannot be recalled from this session.
 
 ---
 
