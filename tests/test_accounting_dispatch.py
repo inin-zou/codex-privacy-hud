@@ -470,7 +470,7 @@ def test_sessionend_during_scan_cannot_recreate_identity(state):
                 end(state)
             return super().scan(text, ctx)
 
-    state.detectors = [EndsDuringScan()]
+    state.detectors[:] = [EndsDuringScan()]
     state.hook_adapter.on("PostToolUse", "t1", scope="pairs",
                           receipts=lambda k: [receipt(k, EMAIL)]
                           if k else [])
@@ -790,3 +790,17 @@ def test_dispatch_permission_then_rejection(state):
     s = summary(state)
     assert s.permission_actions == 1
     assert count(state, "disclosures") == 0 and s.confirmed_points == 0
+
+
+def test_path_rule_ids_follow_the_path_patterns():
+    from privacy_hud.accounting import PATH_RULE_IDS
+    from privacy_hud.detect.paths import PATTERNS
+    assert len(engine_mod.PATH_RULES) == len(PATTERNS)
+    assert set(engine_mod.PATH_RULES) == PATH_RULE_IDS
+    for path, rule in ((".env", "path.env"), ("~/.ssh/id_rsa",
+                                               "path.ssh_private_key"),
+                       ("a.p12", "path.key_container"),
+                       ("~/.aws/credentials", "path.aws_credentials"),
+                       ("credentials.json", "path.credentials_json"),
+                       ("~/.ssh/config", "path.ssh_config")):
+        assert engine_mod._path_rule_id(path) == rule, path

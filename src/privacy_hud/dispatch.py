@@ -102,6 +102,7 @@ No raw sensitive value is ever logged or printed anywhere in this module.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import os
@@ -118,7 +119,7 @@ from .detect.model import ModelDetector
 from .detect.paths import PathDetector
 from .detect.secrets import SecretDetector
 from .detect.shell import extract_destinations
-from .engine import Engine, Observation
+from .engine import Engine, Observation, ScanResult
 from .hook_evidence import (
     DELIVERY_KEY_ABSENT,
     CurrentHookAdapter,
@@ -861,15 +862,7 @@ def _activate_session(state: State, session_id: str, payload: dict, *,
     salt = new_salt()
     evidence = state.hook_adapter.normalize(
         payload=payload, delivery_key=delivery_key, accounting_key=key)
-    start = ObservationRecord(
-        session_id=session_id, delivery_key=evidence.delivery_key,
-        action_id=evidence.action_id, turn_id=evidence.turn_id,
-        ts=int(time.time()), hook_event=evidence.hook_event,
-        phase=evidence.phase, action_kind=evidence.action_kind,
-        boundary=evidence.boundary, decision="none",
-        evidence=evidence.evidence,
-        resolution_scope=evidence.resolution_scope,
-        potential_crossing=evidence.potential_crossing, scan_gap=None)
+    start = _lifecycle_record(session_id, evidence)
     if not ledger.start_accounted_session(
             session_id, cwd=payload.get("cwd", "") or "",
             model=payload.get("model", "") or "",
@@ -969,28 +962,60 @@ def _handle_session_end(
     Reading afterwards would narrow the window at the exact moment the receipt
     is being written, so a gap that occurred during the session's final seconds
     could drop out of the very artifact meant to account for it.
-    """
-    with state.lock:
-        summary = state.ledger.summary(session_id)
-        coverage = state.ledger.coverage(session_id)
-        rows = [r.to_exposure()
-                for r in state.ledger.list_events(session_id, "exposed")]
-        started = state.started_at.get(session_id)
-        state.ledger.end_session(session_id)
-        # Discard the session's salt, accounting key and Engine now —
-        # SessionEnd is the one place a session's identity is destroyed,
-        # per the session/salt lifecycle contract above. A hook event for
-        # this session_id that arrives after this point is enforced with a
-        # temporary engine whose salt never becomes session state
-        # (`_get_or_start_engine`), and its findings are recorded with a
-        # NULL hash and no charge.
-        _discard_session_identity(state, session_id)
-        try:
-            state.hud.retire(session_id)
-        except Exception as exc:
-            _log.debug("hud retire failed: %s", type(exc).__name__)
 
+    For a version-2 session (#54 Phase 4) the SessionEnd lifecycle
+    observation, the pre-end coverage reading and `end_session` (with its
+    identity-hash erasure) are one outer write transaction: they commit
+    together or roll back together. The receipt is rendered only from the
+    committed summary. Identity destruction and snapshot retirement are in
+    a `finally` that covers every step, reads included, and liveness is
+    released in an outer `finally`, outside the lock. A failure propagates
+    to the daemon's exception boundary; no receipt is fabricated.
+    """
     try:
+        with state.lock:
+            try:
+                ledger = state.ledger
+                session = ledger.conn.execute(
+                    "SELECT * FROM sessions WHERE session_id=?",
+                    (session_id,)).fetchone()
+                if _is_version_2(session):
+                    evidence = state.hook_adapter.normalize(
+                        payload=payload, delivery_key=delivery_key,
+                        accounting_key=_usable_key(state, session_id,
+                                                   session))
+                    with ledger._atomic_accounting_write():
+                        ledger.record_observation(
+                            _lifecycle_record(session_id, evidence), ())
+                        coverage = ledger.coverage(session_id)
+                        ledger.end_session(session_id)
+                    summary = ledger.summary(session_id)
+                    rows = [r.to_exposure() for r in
+                            ledger.list_events(session_id, "exposed")]
+                else:
+                    summary = ledger.summary(session_id)
+                    coverage = ledger.coverage(session_id)
+                    rows = [r.to_exposure() for r in
+                            ledger.list_events(session_id, "exposed")]
+                    ledger.end_session(session_id)
+                started = state.started_at.get(session_id)
+            finally:
+                # Discard the session's salt, accounting key and Engine now
+                # -- SessionEnd is the one place a session's identity is
+                # destroyed, per the session/salt lifecycle contract above,
+                # and it is destroyed whether or not the end persisted. A
+                # hook event for this session_id that arrives after this
+                # point is enforced with a temporary engine whose salt never
+                # becomes session state (`_get_or_start_engine`), and its
+                # findings are recorded with a NULL hash and no charge. A
+                # version-2 session whose end failed is marked unavailable
+                # on its next touch.
+                _discard_session_identity(state, session_id)
+                try:
+                    state.hud.retire(session_id)
+                except Exception as exc:
+                    _log.debug("hud retire failed: %s", type(exc).__name__)
+
         minutes = None
         if started is not None:
             minutes = max(0, int((time.time() - started) // 60))
@@ -1010,6 +1035,63 @@ def _handle_session_end(
         # just means the daemon does not even begin considering exit while
         # the receipt is still being built.
         release_session(state, session_id)
+
+
+def _usable_key(state: State, session_id: str, session) -> bytes | None:
+    """This process's accounting key for `session_id`, or None when the
+    session is ended, its accounting is unavailable, or no key is held.
+    Read under `State.lock`, at the moment it is used."""
+    if (session is None or session["ended_at"] is not None
+            or session["accounting_status"] != "available"):
+        return None
+    return state.accounting_keys.get(session_id)
+
+
+def _lifecycle_record(session_id: str, evidence) -> ObservationRecord:
+    return ObservationRecord(
+        session_id=session_id, delivery_key=evidence.delivery_key,
+        action_id=evidence.action_id, turn_id=evidence.turn_id,
+        ts=int(time.time()), hook_event=evidence.hook_event,
+        phase=evidence.phase, action_kind=evidence.action_kind,
+        boundary=evidence.boundary, decision="none",
+        evidence=evidence.evidence,
+        resolution_scope=evidence.resolution_scope,
+        potential_crossing=evidence.potential_crossing, scan_gap=None)
+
+
+def _accounting_for(state: State, session_id: str, payload: dict,
+                    delivery_key: str):
+    """The delivery's version-2 evidence, normalized now with the session's
+    current key, or None for a session that is not version-2 accounted.
+    Caller holds `State.lock`; nothing here is carried across scanning."""
+    session = state.ledger.conn.execute(
+        "SELECT * FROM sessions WHERE session_id=?",
+        (session_id,)).fetchone()
+    if not _is_version_2(session):
+        return None
+    return state.hook_adapter.normalize(
+        payload=payload, delivery_key=delivery_key,
+        accounting_key=_usable_key(state, session_id, session))
+
+
+def _metadata_observation(event: str, session_id: str,
+                          payload: dict) -> Observation:
+    """A registered hook with no legacy observation mapping -- a local
+    command, a non-shell tool, a lifecycle or subagent-stop event -- as a
+    zero-text observation, so a version-2 session still records that it
+    was delivered. Nothing is scanned for it."""
+    tool_name = payload.get("tool_name")
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        tool_input = {}
+    destination = "subagent" if event == "SubagentStop" else "local"
+    direction = "local" if event == "PreToolUse" else "lifecycle"
+    return Observation(
+        session_id=session_id, turn_id=payload.get("turn_id"),
+        hook_event=event, direction=direction, source="lifecycle",
+        destination=destination, text="",
+        tool_name=tool_name if isinstance(tool_name, str) else None,
+        tool_input=tool_input)
 
 
 def dispatch(
@@ -1079,15 +1161,39 @@ def dispatch(
     # a session, and must not keep the daemon alive.
     note_session_live(state, session_id)
 
-    if event not in _KNOWN_EVENTS:
-        return _allow()
-
-    obs = _build_observation(event, session_id, payload)
-    if obs is None:
-        return _allow()
+    obs = (_build_observation(event, session_id, payload)
+           if event in _KNOWN_EVENTS else None)
 
     cwd = payload.get("cwd", "") or ""
     model = payload.get("model", "") or ""
+    if not isinstance(cwd, str):
+        cwd = ""
+
+    if obs is None:
+        # Nothing to score -- but a version-2 session still records that a
+        # registered hook was delivered (#54 Phase 4). Anything else keeps
+        # the empty allow, and an unknown session is not created for it.
+        if event not in codex.KNOWN_EVENTS:
+            return _allow()
+        with state.lock:
+            session = state.ledger.conn.execute(
+                "SELECT * FROM sessions WHERE session_id=?",
+                (session_id,)).fetchone()
+            if not _is_version_2(session):
+                return _allow()
+            engine = _get_or_start_engine(state, session_id, cwd=cwd,
+                                          model=model)
+            accounting = _accounting_for(state, session_id, payload,
+                                         delivery_key)
+            meta = _metadata_observation(event, session_id, payload)
+            dest = meta.destination
+            decision = engine.observe(
+                dataclasses.replace(meta, accounting=accounting, cwd=cwd),
+                scan=ScanResult(dest_kind=dest,
+                                boundary=state.matrix.boundary_for(dest),
+                                findings=(), degraded=False))
+            _publish_hud(state, session_id)
+        return _decision_to_output(decision)
 
     with state.lock:
         engine = _get_or_start_engine(state, session_id, cwd=cwd, model=model)
@@ -1114,6 +1220,15 @@ def dispatch(
         # of the scan. `_get_or_start_engine` is idempotent, so in the
         # ordinary case this is a dict lookup.
         engine = _get_or_start_engine(state, session_id, cwd=cwd, model=model)
+        # #54 Phase 4: normalized only now, with the key current at this
+        # moment; no key or resolved identity crossed the unlocked scan.
+        accounting = _accounting_for(state, session_id, payload,
+                                     delivery_key)
+        if accounting is not None:
+            obs = dataclasses.replace(
+                obs, accounting=accounting, cwd=cwd,
+                evaluated_path=(obs.origin.evaluated_path
+                                if obs.origin is not None else None))
         decision = engine.observe(obs, scan=scan)
         _publish_hud(state, session_id)
 

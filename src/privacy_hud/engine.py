@@ -108,14 +108,28 @@ Global constraints this module must not violate:
 """
 from __future__ import annotations
 
+import posixpath
 import threading
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import get_args
 
 from .detect.base import Cost, Finding, is_available, profile_of
-from .detect.paths import is_sensitive_path
-from .hook_evidence import HookEvidence
+from .accounting import (
+    EventRecord,
+    Evidence,
+    ObservationRecord,
+    RecipientInput,
+    SafeSuffix,
+    SubjectInput,
+    ValueFinding,
+    coalesce_value_findings,
+)
+from .accounting import Decision as AccountingDecision
+from .detect.paths import PATTERNS, is_sensitive_path
+from .hook_evidence import HookEvidence, classify_evidence
+from .identity import file_identity, safe_masked_example
 from .mask import mask, value_hash
 from .matrix.loader import HARD_BLOCKED_DATA_TYPES, UnknownKey
 from .minimize import consume_token, minimize_tool_input
@@ -715,8 +729,12 @@ class Engine:
         """
         if obs.origin is None or obs.hook_event == "PreToolUse":
             return
+        # The enforcement representation only (#54 Phase 4): the transient
+        # evaluated path is an accounting input and never outlives the
+        # observation that carried it.
+        origin = Origin(value=obs.origin.value, kind=obs.origin.kind)
         for f in findings:
-            self._origins.setdefault(value_hash(self.salt, f.value), obs.origin)
+            self._origins.setdefault(value_hash(self.salt, f.value), origin)
 
     def _blocked_origin(self, session_id: str, findings: Sequence[Finding]) -> Origin | None:
         """The origin of the first finding whose source the user has blocked.
@@ -992,7 +1010,9 @@ class Engine:
         # `Ledger.record_scan_gap` has the argument; the consequence is that
         # `coverage().verified` goes false, so the audit's banner and its
         # empty-state line both stop claiming a complete account (#47 item 6).
-        if scan.degraded_reason is not None:
+        # A version-2 observation carries its gap inside its one atomic
+        # write instead (#54 Phase 4).
+        if scan.degraded_reason is not None and obs.accounting is None:
             self.ledger.record_scan_gap(obs.session_id,
                                         boundary=scan.boundary,
                                         reason=scan.degraded_reason)
@@ -1132,6 +1152,11 @@ class Engine:
             elif policy_action == "mask":
                 action = "rewrite"
 
+        if obs.accounting is not None:
+            return self._observe_v2(
+                obs, scan, action=action, blocked_origin=blocked_origin,
+                read_block=read_block, notice=notice)
+
         if dest_kind == "local":
             # Ruling 1: local always classifies as local_access, overriding
             # whatever `direction` the caller supplied -- except for #36's
@@ -1165,7 +1190,20 @@ class Engine:
         # Display only; a decision never reads it.
         summary = self.ledger.summary(obs.session_id)
         pct = getattr(summary, "legacy_percent", None)
+        return self._decision(obs, findings, action=action,
+                              blocked_origin=blocked_origin,
+                              read_block=read_block, notice=notice, pct=pct,
+                              degraded=degraded, dest_kind=dest_kind)
 
+    def _decision(self, obs: Observation, findings: Sequence[Finding], *,
+                  action: str, blocked_origin: Origin | None,
+                  read_block: str | None, notice: str | None,
+                  pct: int | None, degraded: bool, dest_kind: str,
+                  updated_input: str | dict | None = None) -> Decision:
+        """The hook decision for a ruled observation: the same templates and
+        shapes for either accounting. `updated_input` is passed in when the
+        caller has already constructed the rewrite (version 2 builds it
+        before recording that a rewrite was issued)."""
         if action == "deny" and read_block is not None:
             # #36: the read guard's own template -- takes `tool`/`path`, not
             # the egress templates' `label`/`destination`/`origin_phrase`.
@@ -1186,8 +1224,7 @@ class Engine:
                 tool=obs.tool_name or "tool", label=label,
                 source=obs.source, destination=dest_kind,
                 origin_phrase=phrase)
-            updated_input = None
-            if action == "rewrite":
+            if action == "rewrite" and updated_input is None:
                 # Task 12: every "rewrite" Decision returned by this engine
                 # must carry a real, non-None updated_input — see the
                 # caveat on Decision.updated_input above. Reached from
@@ -1206,9 +1243,270 @@ class Engine:
                 # minimize_tool_input docstring for the full rationale.
                 updated_input = minimize_tool_input(self.salt, obs.tool_name or "",
                                                      ti, findings, text=obs.text)
+            if action != "rewrite":
+                updated_input = None
             return Decision(action, reason=msg, system_message=msg,
                              budget_percent=pct, updated_input=updated_input,
                              degraded=degraded)
 
         return Decision("allow", system_message=notice, budget_percent=pct,
                          degraded=degraded)
+
+    # -- #54 Phase 4: version-2 accounting --------------------------------
+
+    def _observe_v2(self, obs: Observation, scan: ScanResult, *, action: str,
+                    blocked_origin: Origin | None, read_block: str | None,
+                    notice: str | None) -> Decision:
+        """Record one version-2 observation and return the unchanged hook
+        decision.
+
+        Everything this delivery establishes -- the observation, one event
+        per identified value or guarded file and supported kind, the
+        identities, first disclosures, score increment and scan gap -- goes
+        to the ledger in exactly one `record_observation` call. An issued
+        rewrite is constructed before that call, so a rewrite that cannot
+        be built leaves no record of having been issued.
+
+        Evidence is what happened here and nothing more: the decision this
+        engine issued (PreToolUse only), local detection where scanning
+        found a value, the adapter's hook evidence, and pair receipts
+        merged only into the event of the pair they name. Identities are
+        hashed only with this engine's accounting key while the session is
+        open and available; otherwise every subject and recipient is
+        unresolved and no substitute key is used."""
+        acc = obs.accounting
+        assert acc is not None
+        findings = scan.findings
+        updated_input = None
+        if action == "rewrite":
+            ti = obs.tool_input if obs.tool_input is not None else obs.text
+            updated_input = minimize_tool_input(
+                self.salt, obs.tool_name or "", ti, findings, text=obs.text)
+
+        decision: AccountingDecision = (
+            action if obs.hook_event == "PreToolUse" else "none")  # type: ignore[assignment]
+        issued = _ISSUED.get(decision, Evidence(0))
+
+        session = self.ledger.conn.execute(
+            "SELECT accounting_status, ended_at FROM sessions"
+            " WHERE session_id=?", (obs.session_id,)).fetchone()
+        key = self.accounting_key
+        if (session is None or session["ended_at"] is not None
+                or session["accounting_status"] != "available"):
+            key = None
+        profile = self.ledger.profile_for_session(obs.session_id)
+
+        recipient = acc.recipient
+        if key is None and recipient.identity_hash is not None:
+            recipient = RecipientInput(
+                destination_kind=recipient.destination_kind,
+                identity_hash=None)
+
+        guarded = (obs.hook_event == "PreToolUse" and obs.direction == "local"
+                   and obs.origin is not None
+                   and is_sensitive_path(obs.origin.value))
+        # A guarded read's path findings are matches against the command's
+        # own text -- the detector pattern, not a file. The file is the
+        # guarded subject below.
+        values = [f for f in findings
+                  if not (guarded and f.data_type == "path")]
+        value_findings = (coalesce_value_findings(profile, key, values)
+                          if key is not None
+                          else _unresolved_value_findings(profile, values))
+
+        source = _source_label(obs, guarded)
+        drafts: list[_Draft] = []
+        for vf in value_findings:
+            drafts.append(_Draft(
+                subject=vf.subject, recipient=recipient,
+                evidence=issued | Evidence.LOCAL_DETECTION,
+                data_type=vf.data_type, rule_id=None,
+                occurrences=vf.occurrences, source_label=source,
+                masked_example=vf.masked_example))
+        if guarded:
+            assert obs.origin is not None
+            drafts.append(_Draft(
+                subject=_file_subject(key, obs.evaluated_path, obs.cwd),
+                recipient=recipient, evidence=issued, data_type="path",
+                rule_id=_path_rule_id(obs.origin.value), occurrences=1,
+                source_label="local file", masked_example=None))
+
+        for receipt in acc.receipt_events:
+            if key is None and (receipt.subject.identity_hash is not None
+                                or receipt.recipient.identity_hash
+                                is not None):
+                continue
+            matched = False
+            for draft in drafts:
+                if _same_pair(draft, receipt):
+                    draft.evidence |= receipt.evidence
+                    matched = True
+            if not matched:
+                drafts.append(_Draft(
+                    subject=receipt.subject, recipient=receipt.recipient,
+                    evidence=receipt.evidence, data_type=receipt.data_type,
+                    rule_id=receipt.rule_id,
+                    occurrences=receipt.occurrences,
+                    source_label=receipt.source_label,
+                    masked_example=receipt.masked_example))
+
+        events: list[EventRecord] = []
+        observed = acc.evidence | issued
+        for draft in drafts:
+            observed |= draft.evidence
+            for kind in classify_evidence(boundary=acc.boundary,
+                                          evidence=draft.evidence):
+                events.append(EventRecord(
+                    subject=draft.subject, recipient=draft.recipient,
+                    kind=kind, evidence=draft.evidence,
+                    data_type=draft.data_type,  # type: ignore[arg-type]
+                    rule_id=draft.rule_id, occurrences=draft.occurrences,
+                    source_label=draft.source_label, boundary=acc.boundary,
+                    masked_example=draft.masked_example))
+
+        # A resolution scope needs resolving evidence to act on. Receipts
+        # dropped above (no key: their identities cannot be recorded) leave
+        # nothing for it to resolve.
+        scope = acc.resolution_scope
+        if not observed & _RESOLVING:
+            scope = "none"
+        gap = scan.degraded_reason if acc.phase != "lifecycle" else None
+        self.ledger.record_observation(ObservationRecord(
+            session_id=obs.session_id, delivery_key=acc.delivery_key,
+            action_id=acc.action_id, turn_id=acc.turn_id,
+            ts=int(time.time()), hook_event=acc.hook_event, phase=acc.phase,
+            action_kind=acc.action_kind, boundary=acc.boundary,
+            decision=decision, evidence=observed,
+            resolution_scope=scope,
+            potential_crossing=acc.potential_crossing,
+            scan_gap=gap),  # type: ignore[arg-type]
+            events)
+
+        # Display only; a decision never reads it.
+        summary = self.ledger.summary(obs.session_id)
+        pct = getattr(summary, "percent", None)
+        return self._decision(obs, findings, action=action,
+                              blocked_origin=blocked_origin,
+                              read_block=read_block, notice=notice, pct=pct,
+                              degraded=scan.degraded,
+                              dest_kind=scan.dest_kind,
+                              updated_input=updated_input)
+
+
+# --------------------------------------------------------------------- #
+# version-2 helpers (#54 Phase 4)
+# --------------------------------------------------------------------- #
+
+#: The evidence a PreToolUse decision issues. Only PreToolUse returns a
+#: permission decision; every other hook's decision is "none".
+_ISSUED: dict[str, Evidence] = {
+    "allow": Evidence.PERMISSION_ISSUED,
+    "deny": Evidence.DENY_ISSUED,
+    "rewrite": Evidence.PERMISSION_ISSUED | Evidence.REWRITE_ISSUED,
+}
+
+#: `detect.paths.PATTERNS`, in order, as the allowlisted rule IDs an event
+#: may carry. `tests/test_accounting_dispatch.py` pins the two together.
+PATH_RULES: tuple[str, ...] = (
+    "path.env", "path.ssh_private_key", "path.key_container",
+    "path.aws_credentials", "path.credentials_json", "path.ssh_config",
+)
+
+_SAFE_SUFFIXES: tuple[str, ...] = get_args(SafeSuffix)
+
+#: Evidence that can resolve an action's outcome (the ledger requires one of
+#: these before an observation may claim a resolution scope).
+_RESOLVING = (Evidence.DENY_ENFORCED | Evidence.REWRITE_ENFORCED
+              | Evidence.CROSSING_CONFIRMED
+              | Evidence.REJECTED_BEFORE_CROSSING)
+
+
+@dataclass
+class _Draft:
+    """One finding event before classification: its evidence can still
+    gain the bits of a receipt naming its pair."""
+
+    subject: SubjectInput
+    recipient: RecipientInput
+    evidence: Evidence
+    data_type: str
+    rule_id: str | None
+    occurrences: int
+    source_label: str
+    masked_example: str | None
+
+
+def _same_pair(draft: _Draft, receipt: EventRecord) -> bool:
+    """Whether a receipt names this draft's pair: both identities resolved
+    and equal. An unresolved identity matches nothing."""
+    return (draft.subject.identity_hash is not None
+            and draft.recipient.identity_hash is not None
+            and draft.subject.subject_kind == receipt.subject.subject_kind
+            and draft.subject.identity_hash == receipt.subject.identity_hash
+            and draft.recipient.destination_kind
+            == receipt.recipient.destination_kind
+            and draft.recipient.identity_hash
+            == receipt.recipient.identity_hash)
+
+
+def _path_rule_id(path: str) -> str | None:
+    for pattern, rule_id in zip(PATTERNS, PATH_RULES, strict=True):
+        if pattern.search(path):
+            return rule_id
+    return None
+
+
+def _file_subject(key: bytes | None, evaluated_path: str | None,
+                  cwd: str) -> SubjectInput:
+    """The guarded file's subject: its lexical identity when the guard
+    evaluated one literal path and the key is available, else unresolved.
+    The allowlisted suffix comes from the evaluated path only."""
+    suffix = None
+    if evaluated_path:
+        ext = posixpath.splitext(posixpath.basename(evaluated_path))[1]
+        if ext.lower() in _SAFE_SUFFIXES:
+            suffix = ext.lower()
+    identity = None
+    if key is not None and evaluated_path:
+        try:
+            identity = file_identity(key, evaluated_path, cwd)
+        except ValueError:
+            identity = None
+    return SubjectInput(subject_kind="file", identity_hash=identity,
+                        safe_suffix=suffix)  # type: ignore[arg-type]
+
+
+def _unresolved_value_findings(profile, findings: Sequence[Finding]
+                               ) -> tuple[ValueFinding, ...]:
+    """`coalesce_value_findings` without a key: one unresolved subject per
+    exact value within this observation, grouped in memory only. No value
+    is hashed."""
+    groups: dict[str, tuple[set[str], set[tuple[int, int]]]] = {}
+    for f in findings:
+        if f.data_type not in profile.severity:
+            raise ValueError("invalid accounting observation")
+        types, spans = groups.setdefault(f.value, (set(), set()))
+        types.add(f.data_type)
+        spans.add((f.start, f.end))
+    out = []
+    for value, (types, spans) in groups.items():
+        data_type = min(types, key=lambda t: (-profile.severity[t], t))
+        out.append(ValueFinding(
+            subject=SubjectInput(subject_kind="value", identity_hash=None),
+            data_type=data_type,  # type: ignore[arg-type]
+            occurrences=len(spans),
+            masked_example=safe_masked_example(
+                data_type, value)))  # type: ignore[arg-type]
+    return tuple(out)
+
+
+def _source_label(obs: Observation, guarded: bool) -> str:
+    if obs.hook_event == "UserPromptSubmit":
+        return "user prompt"
+    if obs.hook_event == "PostToolUse":
+        return "tool result"
+    if obs.hook_event == "PreToolUse":
+        return "local file" if guarded else "tool input"
+    if obs.hook_event in ("SubagentStart", "SubagentStop"):
+        return "main agent"
+    return "lifecycle"

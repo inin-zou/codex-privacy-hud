@@ -246,6 +246,32 @@ def classify_evidence(
     boundary: Boundary,
     evidence: Evidence,
 ) -> tuple[EventKind, ...]:
-    # P4-C5 contract scaffolding: declared, not implemented.
-    from .ledger_schema import UnsupportedAccounting
-    raise UnsupportedAccounting("evidence classification is not implemented")
+    """The event kinds one finding event's own evidence supports.
+
+    Terminal kinds first, every one that applies, in the stable order
+    prevented, exposed, local_access, retention: a denial issued or
+    enforced, a rejection before crossing or an applied rewrite is
+    `prevented`; a confirmed crossing of a non-B0 boundary is `exposed`;
+    observed execution at B0 is `local_access`; observed persistence is
+    `retention`. Only when none applies: an issued permission is
+    `permitted`, otherwise a local detection is `detected`, otherwise
+    nothing. An issued rewrite alone is neither prevention nor an applied
+    rewrite. The evidence is the event's, never another pair's."""
+    kinds: list[EventKind] = []
+    if evidence & (Evidence.DENY_ISSUED | Evidence.DENY_ENFORCED
+                   | Evidence.REJECTED_BEFORE_CROSSING
+                   | Evidence.REWRITE_ENFORCED):
+        kinds.append("prevented")
+    if Evidence.CROSSING_CONFIRMED in evidence and boundary != "B0":
+        kinds.append("exposed")
+    if Evidence.EXECUTION_OBSERVED in evidence and boundary == "B0":
+        kinds.append("local_access")
+    if Evidence.PERSISTENCE_OBSERVED in evidence:
+        kinds.append("retention")
+    if kinds:
+        return tuple(kinds)
+    if Evidence.PERMISSION_ISSUED in evidence:
+        return ("permitted",)
+    if Evidence.LOCAL_DETECTION in evidence:
+        return ("detected",)
+    return ()
