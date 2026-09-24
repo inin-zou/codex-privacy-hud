@@ -511,3 +511,238 @@ def test_issue47_historical_build_orders_do_not_offer_unshipped_features():
     questions = _section(DESIGN, "## 13. Open design questions")
     assert _line(questions, "4. ") == DESIGN_PREVIEW_QUESTION
     assert _line(_section(PRD, "## 13. Open questions"), "1. ") == PRD_LANGUAGE
+
+
+# --- B15: current process model -------------------------------------------
+
+ARCH_PROCESS_HEADING = "## 2. Process model"
+ARCH_PROCESS = ARCH_PROCESS_HEADING + "\n\n" + (
+    "Hooks execute a thin stdlib-only client for each event. Detection and "
+    "ledger ownership live in a long-running daemon so the model is not "
+    "loaded in each hook process. The client imports spawn-related modules "
+    "only on the spawn path."
+    "\n\n"
+    "**Startup.** After validating that receipt v2 selects this bundle, the "
+    "hook client attempts to connect to `$PLUGIN_DATA/daemon.sock`. A "
+    "failed connection can trigger a detached daemon launch through the "
+    "selected bundle's bootstrap and recorded Python interpreter. "
+    "Auto-spawn can be disabled, and a cooldown limits repeated launch "
+    "attempts. An absent or unusable runtime selection does not authorize "
+    "spawning another bundle."
+    "\n\n"
+    "The hook does not wait for the new daemon to become ready. Initial "
+    "hooks can therefore go unchecked while the model loads. They receive "
+    "the boundary-specific unavailable response; their missing observations "
+    "cannot be reconstructed. A handshake failure or a timeout after "
+    "connection does not trigger a replacement daemon."
+    "\n\n"
+    "**Ownership and lifetime.** The daemon serves concurrent sessions "
+    "within its plugin-data directory, with state keyed by session ID. "
+    "Startup ownership and the runtime writer lease prevent cooperating "
+    "processes from becoming competing writers. One session ending does not "
+    "stop a daemon still serving another. The lifetime policy uses a "
+    "five-minute grace after the last live session ends, a four-hour "
+    "stale-session interval and a four-hour idle timeout."
+    "\n\n"
+    "**Socket protocol.** Communication uses newline-delimited JSON over the "
+    "local Unix-domain socket. Protocol 2 requires a matching `hello` on the "
+    "same connection before the client sends a hook payload. Runtime "
+    "identity includes the selected build and activation epoch. The client "
+    "forwards only the validated event reply's `output` object to the host; "
+    "protocol errors are not hook output."
+    "\n\n"
+    "One 2.0-second monotonic deadline covers connection, hello, event "
+    "transmission and reply. It is not a fresh two seconds for each socket "
+    "operation. An event whose reply is lost has an unknown outcome and is "
+    "not replayed."
+    "\n\n"
+    "The daemon's `active_sessions` operation supplies session IDs and ages "
+    "since their last hook activity. Audit resolution uses an explicit "
+    "session ID when supplied, otherwise daemon activity when available, "
+    "and otherwise the ledger's most recently started session. These bases "
+    "are labelled separately; ledger history alone does not prove which "
+    "session is currently active."
+    "\n\n"
+    "| Condition | Hook-client response |\n"
+    "|---|---|\n"
+    "| No usable runtime selection | No spawn; an unavailable response, or "
+    "the initial setup hint when applicable |\n"
+    "| Connection failure after valid selection | Attempt eligible detached "
+    "startup; return without waiting for readiness |\n"
+    "| Incompatible runtime or handshake | Runtime refusal; no hook payload "
+    "is sent to an unverified daemon |\n"
+    "| Unchecked ingress | Allow with an unverified warning |\n"
+    "| Unchecked outbound call | Return a denial |\n"
+    "| Lost reply after sending an event | Report unverified; do not replay "
+    "the event |\n"
+    "| Client-level exception | Exit successfully with empty output |"
+    "\n\n"
+    "A returned denial does not establish host enforcement. This process "
+    "description does not establish that runtime repair can stop every "
+    "historical daemon or explain every quiescence refusal; #70 and #71 "
+    "track those separate repair defects."
+)
+
+KNOWN_LIMITS_DEADLINE_OLD = (
+    "The hook client gives the daemon 2.0 s per socket operation, and I6 "
+    "turns a missed deadline on an outbound call into a **deny**."
+)
+KNOWN_LIMITS_DEADLINE = (
+    "The hook client uses one 2.0-second deadline across connection, hello, "
+    "event transmission and reply, and I6 turns an unchecked outbound call "
+    "into a **deny**."
+)
+
+
+def test_issue47_process_model_matches_protocol_two():
+    process = _section(ARCH, ARCH_PROCESS_HEADING)
+    assert process == ARCH_PROCESS
+    for claim in ("can trigger a detached daemon launch",
+                  "The hook does not wait for the new daemon to become ready.",
+                  "Protocol 2 requires a matching `hello`",
+                  "One 2.0-second monotonic deadline covers connection, hello, "
+                  "event transmission and reply.",
+                  "is not replayed"):
+        assert claim in process
+    for stale in ("[NOT IMPLEMENTED]", "requires starting it manually",
+                  '{"v":1,"op":"event"', "Presidio", "per socket operation."):
+        assert stale not in process
+
+    limits = _read(KNOWN_LIMITS)
+    assert limits.count(KNOWN_LIMITS_DEADLINE) == 1
+    assert KNOWN_LIMITS_DEADLINE_OLD not in limits
+
+    # With §2 replaced, no document states Presidio as current.
+    for rel in (PRD, ARCH):
+        _assert_no_affirmative_presidio(_read(rel), rel)
+
+
+# --- B16: compaction, taxonomy and receipt --------------------------------
+
+ARCH_COMPACTION_HEADING = "### 3.5 Compaction and receipts"
+ARCH_COMPACTION = ARCH_COMPACTION_HEADING + "\n\n" + (
+    "Compaction does not reverse a disclosure or reduce the stored legacy "
+    "score. The ledger is not reconstructed from the transcript."
+    "\n\n"
+    "No compaction timeline marker is written. `PreCompact` is registered "
+    "as a hook, but dispatch creates no disclosure observation for it. "
+    "`PostCompact` is not registered. A non-observation event can refresh "
+    "daemon liveness without adding a ledger event."
+    "\n\n"
+    "The legacy `detected` and `retention` classifications remain "
+    "representable and readable, but no production event writer emits "
+    "those classifications. Their presence in a taxonomy or renderer does "
+    "not establish local-scan or transcript-retention evidence."
+    "\n\n"
+    "At `SessionEnd`, dispatch ends the ledger session, discards its "
+    "in-memory identity state, retires its HUD snapshot and returns a text "
+    "receipt in hook `systemMessage`. The plugin does not save a Markdown "
+    "receipt file. Returning the receipt does not confirm that the host "
+    "displayed it, and transcript retention remains outside this ledger's "
+    "account."
+)
+PRD_PRECOMPACT_ROW = (
+    "| `PreCompact` | No compaction timeline event is written; the stored "
+    "ledger remains. `PostCompact` is not registered. |"
+)
+PRD_SESSIONEND_ROW = (
+    "| `SessionEnd` | End the session and return a text receipt in hook "
+    "`systemMessage`; no Markdown receipt file is saved |"
+)
+DESIGN_RECEIPT_INTRO = (
+    "Returned as text in hook `systemMessage` at `SessionEnd`. The plugin "
+    "does not save a Markdown receipt file, and returning this text does "
+    "not confirm that the host displayed it:"
+)
+DESIGN_RECEIPT_ROW = (
+    "| `Receipt` | SessionEnd | text returned in hook `systemMessage`; no "
+    "Markdown file export |"
+)
+
+
+def test_issue47_compaction_and_receipt_have_no_export_promise():
+    assert _section(ARCH, ARCH_COMPACTION_HEADING) == ARCH_COMPACTION
+    assert "write a marker row" not in _read(ARCH)
+
+    hooks = _section(PRD, "### 7.2 Hook mapping")
+    assert _line(hooks, "| `PreCompact`") == PRD_PRECOMPACT_ROW
+    assert _line(hooks, "| `SessionEnd`") == PRD_SESSIONEND_ROW
+    assert "`PreCompact` / `PostCompact`" not in hooks
+
+    receipt = _section(DESIGN, "## 10. Session privacy receipt")
+    assert receipt.startswith(
+        "## 10. Session privacy receipt\n\n" + DESIGN_RECEIPT_INTRO
+        + "\n\n```text\nPRIVACY RECEIPT")
+    # The qualification after the example is preserved.
+    assert "Transcript retention is outside this ledger's account." in receipt
+    inventory = _section(DESIGN, "## 12. Component inventory")
+    assert _line(inventory, "| `Receipt`") == DESIGN_RECEIPT_ROW
+    assert "terminal + Markdown" not in _read(DESIGN)
+
+
+# --- B17: delivery ----------------------------------------------------------
+
+PRD_DELIVERY_HEADING = "## 8. Where the UI actually lives"
+PRD_DELIVERY = PRD_DELIVERY_HEADING + "\n\n" + (
+    "The native Privacy status item is supplied by a separately patched "
+    "Codex build. Stock Codex does not gain a plugin-owned status item "
+    "merely by installing this plugin."
+    "\n\n"
+    "On supported macOS installations, `install.sh` downloads a matching "
+    "patched build, creates a forwarder, adjusts PATH when needed and adds "
+    "`privacy` to the Codex status-line configuration. It does not modify "
+    "the official Codex binary. The forwarder selects a matching installed "
+    "patched build and otherwise runs the official binary. Matching Codex "
+    "version numbers alone do not establish snapshot-reader compatibility; "
+    "the installation notes describe that separate requirement."
+    "\n\n"
+    "| Level | Shipped delivery |\n"
+    "|---|---|\n"
+    "| L1 ambient HUD | Privacy item in a compatible patched Codex; a "
+    "separate terminal companion pane is the fallback |\n"
+    "| Hook notices | Hook output returned to the host; delivery or display "
+    "is not confirmed by the plugin |\n"
+    "| L2 session audit | `$privacy` invokes the installed bundle's runtime "
+    "launcher to print an ASCII audit and start a local browser UI |\n"
+    "| L3 event detail | Browser row selection, or the existing detail "
+    "launcher with separate session and event IDs |"
+    "\n\n"
+    "The browser binds to `127.0.0.1` on an OS-assigned port. The skill's "
+    "audit path does not call the MCP server. The exposed MCP tools are a "
+    "separate interface to the underlying audit and policy operations."
+    "\n\n"
+    "The native status item displays accounting snapshots; it does not "
+    "verify runtime alignment. Production sessions still use legacy "
+    "accounting. No delivery surface establishes complete monitoring, "
+    "confirmed disclosure or host enforcement."
+)
+PRD_LIMIT_3 = (
+    "3. **Stock Codex has no plugin-owned Privacy status item.** The native "
+    "item requires a compatible separately patched build; the companion "
+    "pane is the fallback (§8)."
+)
+PRD_AMBIENT_QUESTION = (
+    "3. **Ambient delivery decision:** both the patched-Codex status item "
+    "and the separate companion renderer ship. The latter is the fallback "
+    "when a compatible patched build is unavailable."
+)
+DESIGN_L1_QUESTION = (
+    "1. **L1 delivery is implemented:** a compatible patched Codex supplies "
+    "the native Privacy item; the separate companion renderer is the "
+    "fallback. The official Codex binary is not modified."
+)
+
+
+def test_issue47_delivery_distinguishes_patched_and_stock_codex():
+    delivery = _section(PRD, PRD_DELIVERY_HEADING)
+    assert delivery == PRD_DELIVERY
+    assert ("Matching Codex version numbers alone do not establish "
+            "snapshot-reader compatibility") in delivery
+    assert "`$privacy` invokes the installed bundle's runtime launcher" in delivery
+    assert "The skill's audit path does not call the MCP server." in delivery
+    assert "`$privacy` skill → MCP tool" not in _read(PRD)
+
+    limits = _section(PRD, "## 9. Platform limitations (state these in the demo)")
+    assert _line(limits, "3. ") == PRD_LIMIT_3
+    assert _line(_section(PRD, "## 13. Open questions"), "3. ") == PRD_AMBIENT_QUESTION
+    assert _line(_section(DESIGN, "## 13. Open design questions"), "1. ") == DESIGN_L1_QUESTION

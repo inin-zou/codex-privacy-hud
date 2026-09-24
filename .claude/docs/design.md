@@ -321,7 +321,7 @@ Already disclosed data cannot be recalled from this session.
 
 ## 10. Session privacy receipt
 
-Returned at `SessionEnd` for the host to display:
+Returned as text in hook `systemMessage` at `SessionEnd`. The plugin does not save a Markdown receipt file, and returning this text does not confirm that the host displayed it:
 
 ```text
 PRIVACY RECEIPT · session_123 · 41 min
@@ -363,13 +363,13 @@ Duration is omitted when unavailable. Unrecorded receipts show unavailable accou
 | `ActionButton` | browser L3 | saves a policy rule; terminal text has no buttons |
 | `IrreversibilityNotice` | 3 | permanent, `warn`, non-dismissible |
 | `BlockNotice` | systemMessage | tool + data + flow + one next step |
-| `Receipt` | SessionEnd | terminal + Markdown |
+| `Receipt` | SessionEnd | text returned in hook `systemMessage`; no Markdown file export |
 
 ---
 
 ## 13. Open design questions
 
-1. **Does L1 ship in v1?** The companion renderer needs a terminal pane we do not own. `systemMessage` + `$privacy` may carry the demo alone.
+1. **L1 delivery is implemented:** a compatible patched Codex supplies the native Privacy item; the separate companion renderer is the fallback. The official Codex binary is not modified.
 2. **Row aggregation granularity.** Aggregating by `(type, source, destination)` hides per-occurrence timing. Does `All events` need an expandable row, or is the flat timeline enough?
 3. **Budget calibration.** 120 points is a guess. A normal 40-minute session should land in the 20–40% range; needs one real-session pass to tune.
 4. **Unshipped minimization preview:** a future preview would need a design for long payloads. No preview or preview-and-retry action is available today.

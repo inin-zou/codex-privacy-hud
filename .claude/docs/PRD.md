@@ -236,8 +236,8 @@ Codex sets `PLUGIN_ROOT` and `PLUGIN_DATA` for plugin-bundled hooks; the ledger 
 | `PermissionRequest` | Contribute privacy verdict to the approval decision |
 | `PostToolUse` | Record actual result; classify tool output entering context |
 | `SubagentStart` / `SubagentStop` | Track propagation to subagent destination |
-| `PreCompact` / `PostCompact` | Ledger survives compaction — it is not derived from the transcript |
-| `SessionEnd` | Emit session privacy receipt |
+| `PreCompact` | No compaction timeline event is written; the stored ledger remains. `PostCompact` is not registered. |
+| `SessionEnd` | End the session and return a text receipt in hook `systemMessage`; no Markdown receipt file is saved |
 
 Verified hook payload fields (stdin JSON): `session_id`, `transcript_path`, `cwd`, `hook_event_name`, `model`, `permission_mode`, plus `turn_id`, `prompt`, `tool_name`, `tool_use_id`, `tool_input`, `tool_response`, `agent_id`, `agent_type` depending on the event.
 
@@ -319,20 +319,20 @@ For example, a detected email in an MCP argument can be replaced with a session-
 
 ## 8. Where the UI actually lives
 
-Verified constraints force this decision:
+The native Privacy status item is supplied by a separately patched Codex build. Stock Codex does not gain a plugin-owned status item merely by installing this plugin.
 
-- `tui.status_line` accepts an **ordered list of built-in status-item identifiers** (default `["spinner", "project"]`); arbitrary scripts/custom items are **not** documented as supported. Unlike Claude Code's statusline, we cannot inject a custom footer segment today.
-- Codex Desktop does **not currently render MCP Apps inline iframe UI resources** ([openai/codex#21019](https://github.com/openai/codex/issues/21019)), so an MCP-returned HTML widget is not a reliable delivery surface.
+On supported macOS installations, `install.sh` downloads a matching patched build, creates a forwarder, adjusts PATH when needed and adds `privacy` to the Codex status-line configuration. It does not modify the official Codex binary. The forwarder selects a matching installed patched build and otherwise runs the official binary. Matching Codex version numbers alone do not establish snapshot-reader compatibility; the installation notes describe that separate requirement.
 
-**Therefore:**
+| Level | Shipped delivery |
+|---|---|
+| L1 ambient HUD | Privacy item in a compatible patched Codex; a separate terminal companion pane is the fallback |
+| Hook notices | Hook output returned to the host; delivery or display is not confirmed by the plugin |
+| L2 session audit | `$privacy` invokes the installed bundle's runtime launcher to print an ASCII audit and start a local browser UI |
+| L3 event detail | Browser row selection, or the existing detail launcher with separate session and event IDs |
 
-| Level | Delivery in v1 | Future |
-|---|---|---|
-| L1 ambient HUD | Optional terminal companion renderer (separate pane/process) | Native footer item if Codex opens custom status items |
-| L1 alerts | Hook `systemMessage` — native, always works | — |
-| L2/L3 audit UI | `$privacy` skill → MCP tool → **local web UI on `127.0.0.1`**, plus an ASCII fallback rendered in-terminal | MCP Apps UI when Codex renders it; App Server client for a fully native always-on HUD |
+The browser binds to `127.0.0.1` on an OS-assigned port. The skill's audit path does not call the MCP server. The exposed MCP tools are a separate interface to the underlying audit and policy operations.
 
-**Pitch honesty rule:** do not claim the plugin injects a native Codex footer. Claim: hooks + policy + ledger + audit UI, with the ambient HUD as an optional companion.
+The native status item displays accounting snapshots; it does not verify runtime alignment. Production sessions still use legacy accounting. No delivery surface establishes complete monitoring, confirmed disclosure or host enforcement.
 
 ---
 
@@ -340,7 +340,7 @@ Verified constraints force this decision:
 
 1. **Hosted tools bypass hooks.** WebSearch and similar hosted tools do not trigger local function-tool hook paths. Privacy HUD is a practical guardrail, not a mathematically complete enforcement boundary.
 2. **No interactive consent surface.** The proposed consent workflow is not shipped. Internal token primitives exist, but no browser button, `$privacy` branch or exposed MCP tool issues consent tokens (§7.6).
-3. **No custom status item.** See §8.
+3. **Stock Codex has no plugin-owned Privacy status item.** The native item requires a compatible separately patched build; the companion pane is the fallback (§8).
 4. **Model-context accounting is inferential for file reads.** A tool result does not establish admission into model context. Phase 1 retains the legacy charge and labels it; evidence-based accounting is not activated.
 5. **Prompt-injection resistance is out of scope.** A hostile repo could try to talk the agent out of using the tool; the hook layer is not bypassable by the model, which is precisely why enforcement lives there.
 
@@ -416,7 +416,7 @@ Current production accounting remains legacy. The inactive accounting core and i
 
 1. **Language decision:** Python with a persistent daemon and a stdlib-only hook client. The shipped deep detector is local `openai/privacy-filter` through `transformers`; Presidio is not part of the runtime.
 2. **Audit UI stack:** static HTML + vanilla JS served from a tiny local server (fast, zero build) vs a bundled framework. Recommendation: **static + vanilla**, matching the terminal aesthetic of the mockup.
-3. **Does the companion HUD ship in v1** or is `systemMessage` + `$privacy` enough for the demo?
+3. **Ambient delivery decision:** both the patched-Codex status item and the separate companion renderer ship. The latter is the fallback when a compatible patched build is unavailable.
 4. **Budget cap default (120)** — needs a calibration pass against a real session so a normal working session doesn't hit 100% in ten minutes.
 
 ---

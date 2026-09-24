@@ -45,58 +45,31 @@ Everything inside `plugin` is local. The only sockets that exist are a unix doma
 
 ## 2. Process model
 
-**Problem.** Hooks are `exec`'d per event. A Python interpreter with Presidio loaded costs 1.5–3 s of cold start. Paying that on every `PreToolUse` makes the agent unusable.
+Hooks execute a thin stdlib-only client for each event. Detection and ledger ownership live in a long-running daemon so the model is not loaded in each hook process. The client imports spawn-related modules only on the spawn path.
 
-**Solution.** Split into a **thin client** and a **long-lived daemon**.
+**Startup.** After validating that receipt v2 selects this bundle, the hook client attempts to connect to `$PLUGIN_DATA/daemon.sock`. A failed connection can trigger a detached daemon launch through the selected bundle's bootstrap and recorded Python interpreter. Auto-spawn can be disabled, and a cooldown limits repeated launch attempts. An absent or unusable runtime selection does not authorize spawning another bundle.
 
-```text
-hooks/handler.py     ~40 lines, stdlib only, no imports beyond json/socket/sys
-                     → reads stdin, writes to socket, reads reply, writes stdout
-                     → cold start ≈ 25 ms
+The hook does not wait for the new daemon to become ready. Initial hooks can therefore go unchecked while the model loads. They receive the boundary-specific unavailable response; their missing observations cannot be reconstructed. A handshake failure or a timeout after connection does not trigger a replacement daemon.
 
-daemon               [NOT IMPLEMENTED] designed to start lazily on first
-                     use; this build requires starting it manually — see
-                     README.md "Using it in Codex" §2. Accepted for this
-                     hackathon's scope rather than built.
-                     → holds Presidio models, regex set, SQLite conn, policy cache
-                     → one process per user, serves all concurrent sessions
-                     → reference-counts live sessions (SessionStart /
-                       SessionEnd, and any hook event as a keep-alive) and
-                       exits 5 min after the LAST one ends — never on a
-                       single SessionEnd, since one daemon serves them all.
-                       Fallbacks for a SessionEnd that never arrives: a
-                       session idle 4 h stops counting, and 4 h with no
-                       connection at all exits regardless of the count.
-```
+**Ownership and lifetime.** The daemon serves concurrent sessions within its plugin-data directory, with state keyed by session ID. Startup ownership and the runtime writer lease prevent cooperating processes from becoming competing writers. One session ending does not stop a daemon still serving another. The lifetime policy uses a five-minute grace after the last live session ends, a four-hour stale-session interval and a four-hour idle timeout.
 
-**Socket protocol.** Newline-delimited JSON over `$PLUGIN_DATA/daemon.sock` (mode `0600`).
+**Socket protocol.** Communication uses newline-delimited JSON over the local Unix-domain socket. Protocol 2 requires a matching `hello` on the same connection before the client sends a hook payload. Runtime identity includes the selected build and activation epoch. The client forwards only the validated event reply's `output` object to the host; protocol errors are not hook output.
 
-```json
-→ {"v":1,"op":"event","payload":{ ...verbatim Codex hook JSON... }}
-← {"v":1,"decision":"deny","reason":"...","systemMessage":"...","budget":28}
-```
+One 2.0-second monotonic deadline covers connection, hello, event transmission and reply. It is not a fresh two seconds for each socket operation. An event whose reply is lost has an unknown outcome and is not replayed.
 
-The client is deliberately dumb: it forwards the hook payload unmodified and relays whatever the daemon returns. All policy lives in one place, and the client has no dependencies that could break a user's session.
+The daemon's `active_sessions` operation supplies session IDs and ages since their last hook activity. Audit resolution uses an explicit session ID when supplied, otherwise daemon activity when available, and otherwise the ledger's most recently started session. These bases are labelled separately; ledger history alone does not prove which session is currently active.
 
-`op` is the discriminator, and there is a second value on it, used by the `$privacy` skill and by nothing on the hook path:
-
-```json
-→ {"v":1,"op":"active_sessions"}
-← {"v":1,"op":"active_sessions","sessions":[{"session_id":"…","age":0.04}, …]}
-```
-
-Most recently active first; `age` is seconds since that session's last hook event (an age and not a timestamp, because a monotonic clock means nothing in another process). **Why the daemon has to be asked:** Codex exposes no session id to a skill, and neither question the ledger can answer is the right one — "most recently started" names the wrong session as soon as a second window is open, and "most recently disclosing" (`MAX(events.ts)`) skips a session that has disclosed nothing, which is precisely the clean session this tool must get right. The daemon's session reference count (`dispatch.State.live`) is updated for *every* hook carrying a session id, including the ones that write no ledger row, so it covers both. Running `$privacy` fires a hook in the asking session, which is what makes "most recently active" mean "the caller". `hooks/handler.py` is deliberately not taught this op: stdlib-only, hot path, no reason to ask. An unknown `op` is answered with silence, which every client on this socket already treats as "no useful answer" — never with an error object, which would reach Codex as hook output.
-
-**Failure behavior** (matters more than the happy path):
-
-| Failure | Client behavior |
+| Condition | Hook-client response |
 |---|---|
-| Socket missing | Apply per-boundary default below. (Designed to also spawn the daemon detached at this point — **not implemented in this build**; the daemon must be started manually. See README.md "Known limits".) |
-| Daemon timeout (> 2 s) | Ingress: allow + `systemMessage` "unverified". Egress (B3/B4): **deny** |
-| Daemon crash mid-request | Same as timeout |
-| Client itself throws | `exit 0` with empty stdout — never block Codex on our own bug |
+| No usable runtime selection | No spawn; an unavailable response, or the initial setup hint when applicable |
+| Connection failure after valid selection | Attempt eligible detached startup; return without waiting for readiness |
+| Incompatible runtime or handshake | Runtime refusal; no hook payload is sent to an unverified daemon |
+| Unchecked ingress | Allow with an unverified warning |
+| Unchecked outbound call | Return a denial |
+| Lost reply after sending an event | Report unverified; do not replay the event |
+| Client-level exception | Exit successfully with empty output |
 
-Fail-open on reads, fail-closed on egress. A privacy tool that hangs the agent gets uninstalled; one that silently leaks is worse.
+A returned denial does not establish host enforcement. This process description does not establish that runtime repair can stop every historical daemon or explain every quiescence refusal; #70 and #71 track those separate repair defects.
 
 ---
 
@@ -180,11 +153,15 @@ Consequences, all intentional: hashes are not comparable across sessions, are us
 
 The **masked exemplar** (`jo•••@acme.com`) is computed at detection time by a type-specific masker and is the only human-readable residue stored. Maskers are unit-tested to guarantee the original is unrecoverable (e.g. emails keep 2 leading chars + full domain; credentials store *nothing* but their type).
 
-### 3.5 Compaction
+### 3.5 Compaction and receipts
 
-Compaction shrinks the context. It does **not** un-disclose anything — those bytes already reached the model.
+Compaction does not reverse a disclosure or reduce the stored legacy score. The ledger is not reconstructed from the transcript.
 
-Because the ledger is event-sourced from hooks rather than derived from the transcript, compaction is a no-op for correctness. `PreCompact`/`PostCompact` write a marker row so the timeline can show it, and nothing else. This is the concrete payoff of not deriving state from the transcript: a transcript-scraping design would silently lose history here, exactly as `claude-hud` would if the transcript were truncated.
+No compaction timeline marker is written. `PreCompact` is registered as a hook, but dispatch creates no disclosure observation for it. `PostCompact` is not registered. A non-observation event can refresh daemon liveness without adding a ledger event.
+
+The legacy `detected` and `retention` classifications remain representable and readable, but no production event writer emits those classifications. Their presence in a taxonomy or renderer does not establish local-scan or transcript-retention evidence.
+
+At `SessionEnd`, dispatch ends the ledger session, discards its in-memory identity state, retires its HUD snapshot and returns a text receipt in hook `systemMessage`. The plugin does not save a Markdown receipt file. Returning the receipt does not confirm that the host displayed it, and transcript retention remains outside this ledger's account.
 
 ### 3.6 Known imprecision
 
