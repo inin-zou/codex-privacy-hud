@@ -455,22 +455,29 @@ def test_classifier_accepts_the_framework_relaunch(tmp_path):
                                   interpreter=venv) == "legacy"
 
 
-def test_classifier_accepts_the_current_bootstrap(tmp_path):
-    base, _app, venv = _framework(tmp_path)
+@pytest.mark.parametrize("framework_relaunch", [False, True])
+def test_classifier_accepts_the_current_bootstrap(tmp_path,
+                                                 framework_relaunch):
+    base, app, venv = _framework(tmp_path)
     bundle = tmp_path / "bundle"
     bootstrap = bundle / "scripts" / "runtime.py"
     bootstrap.parent.mkdir(parents=True)
     bootstrap.write_text("", encoding="utf-8")
     data = tmp_path / "data"
     data.mkdir()
-    identity = _identity([str(venv), "-I", str(bootstrap), "--plugin-data",
-                          str(data), "daemon"], executable=str(base))
+    argv0 = app if framework_relaunch else venv
+    executable = app if framework_relaunch else base
+    identity = _identity(
+        [str(argv0), "-I", str(bootstrap), "--plugin-data",
+         str(data), "daemon"],
+        executable=str(executable),
+        launcher=str(venv) if framework_relaunch else None)
     assert repair.classify_holder(identity, data, bundle,
-                                  interpreter=None) == "current"
+                                  interpreter=venv) == "current"
     other = tmp_path / "elsewhere"
     other.mkdir()
     with pytest.raises(storage.QuiescenceRefusal) as refusal:
-        repair.classify_holder(identity, other, bundle, interpreter=None)
+        repair.classify_holder(identity, other, bundle, interpreter=venv)
     assert refusal.value.reason == "data_dir"
 
 
@@ -582,4 +589,268 @@ def test_no_signal_copy_is_not_used_after_a_signal():
     assert repair.refusal_message(refusal) == \
         runtime_messages.HOLDER_UNVERIFIED
     refusal.signalled = True
-    assert "No stop signal was sent" not in repair.refusal_message(refusal)
+    assert repair.refusal_message(refusal) == (
+        "Privacy HUD sent a stop signal but could not confirm that storage "
+        "is safe to move.\n"
+        "The storage transition was not completed. Existing ledger files "
+        "were preserved.\n"
+        "The quiescence_refusal diagnostic line names the blocking check.")
+
+
+@pytest.mark.parametrize("case, reason", [
+    ("argument_only", "launch_form"),
+    ("extra_argument", "launch_form"),
+    ("wrong_executable", "interpreter"),
+    ("missing_interpreter", "installation"),
+])
+def test_current_bootstrap_requires_exact_ownership(tmp_path, case, reason):
+    base, _app, venv = _framework(tmp_path)
+    bundle = tmp_path / "bundle"
+    data = tmp_path / "data"
+    bootstrap = str(bundle / "scripts" / "runtime.py")
+    argv = [str(venv), "-I", bootstrap, "--plugin-data",
+            str(data), "daemon"]
+    executable = str(base)
+    interpreter = venv
+    if case == "argument_only":
+        argv = [str(venv), "-c", "pass", *argv[2:]]
+    elif case == "extra_argument":
+        argv.append("--unexpected")
+    elif case == "wrong_executable":
+        executable = "/unrelated/executable"
+    else:
+        interpreter = None
+    identity = _identity(argv, executable=executable)
+    with pytest.raises(storage.QuiescenceRefusal) as failure:
+        repair.classify_holder(identity, data, bundle,
+                               interpreter=interpreter)
+    assert failure.value.check == "unverified"
+    assert failure.value.reason == reason
+
+
+@pytest.mark.parametrize("case, check", [
+    ("new_holder", "holders"),
+    ("uninspectable", "identity"),
+])
+def test_revalidation_refuses_before_any_signal(tmp_path, monkeypatch,
+                                               case, check):
+    first = _identity(["/python", "-m", "privacy_hud.daemon"],
+                      executable="/python")
+    second = dict(first, pid=4343)
+    classified = {4242: first}
+    if case == "uninspectable":
+        classified[4343] = second
+    monkeypatch.setattr(storage, "open_holders",
+                        lambda root: frozenset({4242, 4343}))
+    monkeypatch.setattr(repair, "process_identity",
+                        lambda pid: first if pid == 4242 else None)
+    signals = []
+    monkeypatch.setattr(repair, "_signal",
+                        lambda pid, sig: signals.append((pid, sig)))
+    with pytest.raises(storage.QuiescenceRefusal) as failure:
+        repair.stop_holders(tmp_path, classified, deadline=0.0)
+    assert failure.value.check == check
+    assert failure.value.pids == (4343,)
+    assert failure.value.signalled is False
+    assert signals == []
+
+
+def test_initial_uninspectable_holder_blocks_other_signals(tmp_path,
+                                                          monkeypatch):
+    identity = _identity(["/python", "-m", "privacy_hud.daemon"],
+                         executable="/python")
+    monkeypatch.setattr(storage, "open_holders",
+                        lambda root: frozenset({4242, 4343}))
+    monkeypatch.setattr(repair, "process_identity",
+                        lambda pid: identity if pid == 4242 else None)
+    monkeypatch.setattr(repair, "_recorded_interpreter", lambda root: None)
+    monkeypatch.setattr(repair, "classify_holder",
+                        lambda *args, **kwargs: "legacy")
+    monkeypatch.setattr(repair, "QUIESCE_TIMEOUT", 0.0)
+    signals = []
+    monkeypatch.setattr(repair, "_signal",
+                        lambda pid, sig: signals.append((pid, sig)))
+    with pytest.raises(storage.QuiescenceRefusal) as failure:
+        repair._quiesce(tmp_path, tmp_path)
+    assert failure.value.check == "identity"
+    assert failure.value.pids == (4343,)
+    assert signals == []
+
+
+def test_other_uid_is_not_read_with_process_image(monkeypatch):
+    facts = (str(os.getuid() + 1), "fixed-start", "unrelated")
+    monkeypatch.setattr(repair, "_ps_identity", lambda pid: facts)
+
+    def forbidden(pid):
+        pytest.fail("image/environment inspection preceded the UID gate")
+
+    monkeypatch.setattr(repair, "_process_image", forbidden)
+    identity = repair.process_identity(4242)
+    assert identity is not None
+    assert identity["executable"] is None
+    assert identity["argv"] is None
+    assert identity["launcher"] is None
+
+
+@pytest.mark.parametrize("check, reason", [
+    ("holders", None),
+    ("inspection", "lsof_stderr"),
+    ("identity", "uninspectable"),
+    ("socket", "live_listener"),
+    ("socket", "connect_error"),
+    ("heartbeat", None),
+])
+def test_post_signal_refusal_has_specific_copy_and_diagnostic(
+        tmp_path, monkeypatch, check, reason):
+    failure = storage.QuiescenceRefusal(check, reason=reason)
+    failure.signalled = True
+
+    def refuse(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(repair, "repair_runtime", refuse)
+    out, err = io.StringIO(), io.StringIO()
+    code = repair.main(
+        ["--bundle-root", str(tmp_path), "--plugin-data", str(tmp_path)],
+        out=out, err=err)
+    assert code == 1
+    assert out.getvalue() == runtime_messages.QUIESCENCE_AFTER_STOP + "\n"
+    assert "Activation may be incomplete" not in out.getvalue()
+    assert "No stop signal was sent" not in out.getvalue()
+    lines = err.getvalue().splitlines()
+    assert len(lines) == 1
+    diagnostic = json.loads(lines[0])
+    assert diagnostic["check"] == check
+    assert diagnostic["reason"] == reason
+    assert diagnostic["signalled"] is True
+
+
+@pytest.mark.parametrize("external", [False, True])
+def test_transition_contention_names_the_lock(tmp_path, monkeypatch,
+                                             external):
+    child = None
+    with contextlib.ExitStack() as stack:
+        if external:
+            child = subprocess.Popen(
+                [sys.executable, "-I", "-c",
+                 "import fcntl, sys; "
+                 "f = open(sys.argv[1], 'a'); "
+                 "fcntl.flock(f, fcntl.LOCK_EX); "
+                 "print('ready', flush=True); sys.stdin.readline()",
+                 str(tmp_path / storage.TRANSITION_LOCK_NAME)],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True)
+            assert child.stdout is not None
+            assert child.stdout.readline().strip() == "ready"
+        else:
+            stack.enter_context(storage.acquire_transition(tmp_path))
+
+        def attempt(bundle_root, data_dir, **kwargs):
+            with storage.acquire_transition(data_dir):
+                pytest.fail("a concurrent transition acquired the lock")
+
+        monkeypatch.setattr(repair, "repair_runtime", attempt)
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            code = repair.main(
+                ["--bundle-root", str(tmp_path),
+                 "--plugin-data", str(tmp_path)], out=out, err=err)
+        finally:
+            if child is not None:
+                child.communicate("\n", timeout=30)
+
+    assert code == 1
+    assert out.getvalue() == (
+        "Another Privacy HUD operation holds the storage transition lock.\n"
+        "This invocation sent no stop signal and did not start a storage "
+        "transition.\n"
+        "Let that operation finish before retrying the repair command.\n")
+    lines = err.getvalue().splitlines()
+    assert len(lines) == 1
+    diagnostic = json.loads(lines[0])
+    assert diagnostic["check"] == "transition_lock"
+    assert diagnostic["reason"] == "busy"
+    assert diagnostic["signalled"] is False
+    assert "transition_lock" in storage.QUIESCENCE_CHECKS
+
+
+@pytestmark_darwin
+@pytest.mark.parametrize("purge", [False, True])
+def test_failed_uninstall_stop_preserves_environment_and_purge_targets(
+        tmp_path, install, purge):
+    home, env, _ = _fake_home(tmp_path)
+    seed_ledger(install.data)
+    write_receipt_v1(install.data, python=install.python)
+    share = home / ".local" / "share" / "codex-privacy-hud"
+    runtime = share / "runtime"
+    runtime.mkdir(parents=True)
+    sentinel = runtime / "keep"
+    sentinel.write_text("environment", encoding="utf-8")
+    model = tmp_path / "model"
+    model.mkdir()
+    model_file = model / "weights"
+    model_file.write_text("model", encoding="utf-8")
+    manifest = share / "manifest.json"
+    manifest.write_text(json.dumps({
+        "v": 1, "created": [], "edited": {},
+        "plugin_data": str(install.data),
+        "model_snapshot": str(model)}), encoding="utf-8")
+    manifest_before = manifest.read_bytes()
+
+    with legacy_daemon(
+            install, tail=("-m", "privacy_hud.daemon", "--unsupported")) \
+            as daemon:
+        command = ["sh", str(install.bundle / "install.sh"), "--uninstall"]
+        if purge:
+            command.append("--purge")
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=120, env=env)
+        assert _alive(daemon)
+
+    assert result.returncode == 1
+    assert sentinel.read_text(encoding="utf-8") == "environment"
+    assert manifest.read_bytes() == manifest_before
+    assert model_file.read_text(encoding="utf-8") == "model"
+    assert storage.legacy_path(install.data).is_file()
+    assert (
+        "Uninstall is incomplete: Privacy HUD could not confirm that the "
+        "runtime stopped.\n"
+        "The runtime environment and uninstall manifest were preserved. "
+        "Data and model purge were skipped.\n"
+        "Some installer-managed shell or Codex configuration may already "
+        "have been removed."
+    ) in result.stdout
+    assert "removed " + str(share) not in result.stdout
+
+
+@pytestmark_darwin
+def test_uninstall_does_not_retry_a_refused_stop_with_another_interpreter(
+        tmp_path, install):
+    home, env, _ = _fake_home(tmp_path)
+    share = home / ".local" / "share" / "codex-privacy-hud"
+    fallback = share / "runtime" / "bin" / "python"
+    fallback.parent.mkdir(parents=True)
+    recorded = tmp_path / "recorded-python"
+    calls = tmp_path / "stop-calls"
+    env["TEST_STOP_CALLS"] = str(calls)
+    script = (
+        '#!/bin/sh\n'
+        '[ "$1" = "-I" ] && exit 0\n'
+        'printf "%s\\n" stop >> "$TEST_STOP_CALLS"\n'
+        'exit 1\n'
+    )
+    for path in (recorded, fallback):
+        path.write_text(script, encoding="utf-8")
+        path.chmod(0o755)
+    write_receipt_v1(install.data, python=recorded)
+    (share / "manifest.json").write_text(json.dumps({
+        "v": 1, "created": [], "edited": {},
+        "plugin_data": str(install.data),
+        "model_snapshot": ""}), encoding="utf-8")
+    result = subprocess.run(
+        ["sh", str(install.bundle / "install.sh"), "--uninstall"],
+        capture_output=True, text=True, timeout=120, env=env)
+    assert result.returncode == 1
+    assert calls.read_text(encoding="utf-8").splitlines() == ["stop"]
+    assert fallback.is_file()
+    assert (share / "manifest.json").is_file()

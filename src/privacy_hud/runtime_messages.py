@@ -129,6 +129,21 @@ UNKNOWN_HOLDER = (
     "Close other Privacy HUD processes and retry the repair command."
 )
 
+TRANSITION_BUSY = (
+    "Another Privacy HUD operation holds the storage transition lock.\n"
+    "This invocation sent no stop signal and did not start a storage "
+    "transition.\n"
+    "Let that operation finish before retrying the repair command."
+)
+
+QUIESCENCE_AFTER_STOP = (
+    "Privacy HUD sent a stop signal but could not confirm that storage "
+    "is safe to move.\n"
+    "The storage transition was not completed. Existing ledger files "
+    "were preserved.\n"
+    "The quiescence_refusal diagnostic line names the blocking check."
+)
+
 #: Explicit repair, stopping a legacy daemon it has verified as this
 #: installation's, for this data directory (#70). astra's copy: printed
 #: immediately before the one SIGTERM, and after the verified exit.
