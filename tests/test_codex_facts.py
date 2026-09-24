@@ -175,3 +175,20 @@ def test_the_manifest_declares_the_mcp_server_in_the_shape_codex_parses():
     assert entry == {"command": "python3", "args": ["./mcp/server.py"],
                      "cwd": "."}
     assert (repo / "mcp" / "server.py").is_file()
+
+
+# --- #54 Phase 4: MCP server namespace -----------------------------------
+
+def test_ambiguous_mcp_name_is_unresolved():
+    from privacy_hud import codex
+    assert codex.mcp_server_namespace("mcp__vault__read") == "vault"
+    assert codex.mcp_server_namespace("mcp__Git-Hub__pr.list_v2") == \
+        "Git-Hub"
+    for name in ("mcp", "mcp__", "mcp__vault", "mcp__vault__",
+                 "mcp____read", "mcp__a__b__c", "mcp__a_b__c",
+                 "mcpvault__read", "mcp_vault__read", "mcp__va ult__read",
+                 "mcp__vault__re/ad", "MCP__vault__read",
+                 "mcp__vault__read\n", "mcp__vault__réad", ""):
+        assert codex.mcp_server_namespace(name) is None, name
+        # The broad egress predicate is unchanged by this narrower one.
+    assert codex.is_mcp_tool("mcp__a__b__c")

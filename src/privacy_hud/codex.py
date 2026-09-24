@@ -179,6 +179,13 @@ def is_mcp_tool(tool_name: str) -> bool:
     return tool_name.startswith("mcp")
 
 
+def mcp_server_namespace(tool_name: str) -> str | None:
+    """The MCP server an `mcp__<server>__<tool>` name addresses, or None.
+
+    P4-C1 contract scaffolding: no namespace is resolved yet."""
+    return None
+
+
 # --------------------------------------------------------------------- #
 # Codex's directories
 # --------------------------------------------------------------------- #

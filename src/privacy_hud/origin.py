@@ -32,7 +32,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 from . import codex
@@ -253,6 +253,8 @@ class Origin:
 
     value: str
     kind: OriginKind
+    evaluated_path: str | None = field(default=None, compare=False,
+                                       repr=False)
 
 
 def _tokens(command: str) -> list[str] | None:

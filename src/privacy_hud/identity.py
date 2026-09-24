@@ -18,6 +18,7 @@ import unicodedata
 from typing import get_args
 
 from .accounting import DataType, DestinationKind, SafeSuffix
+from .ledger_schema import UnsupportedAccounting
 
 _VALUE_DOMAIN = "privacy-hud/54/value/v1"
 _FILE_DOMAIN = "privacy-hud/54/file/v1"
@@ -84,6 +85,16 @@ def file_identity(
             raise ValueError(_INVALID_IDENTITY)
         path = posixpath.join(base, path)
     return _identity(key, _FILE_DOMAIN, posixpath.normpath(path))
+
+
+def action_identity(key: bytes, host_action_id: str) -> str:
+    # P4-C1 contract scaffolding: declared, not implemented.
+    raise UnsupportedAccounting("hook evidence is not implemented")
+
+
+def turn_identity(key: bytes, host_turn_id: str) -> str:
+    # P4-C1 contract scaffolding: declared, not implemented.
+    raise UnsupportedAccounting("hook evidence is not implemented")
 
 
 def recipient_identity(

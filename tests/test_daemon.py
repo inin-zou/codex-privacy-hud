@@ -39,6 +39,8 @@ from runtime_helpers import writer_state
 from runtime_helpers import writer_ledger
 from runtime_helpers import activation as _activation
 
+ACCOUNTING_FAILURE = ("Privacy HUD could not record this event — this "
+                      "event is unverified.")
 CREDENTIAL = "sk-proj-Ab3xY9zQw1Er5Ty7Ui0OpAs2Df4Gh6Jk8Lm"
 
 
@@ -564,7 +566,9 @@ def test_daemon_still_allows_non_pretooluse_when_dispatch_raises_internally(
     out = _raw_call(sock_path, {"hook_event_name": "PostToolUse",
                                 "session_id": "sockfail3", "tool_name": "Read",
                                 "tool_response": "contact jordan@acme.com"})
-    assert out == {}
+    # #54 Phase 4: fail open, but no longer silently -- the fixed ingress
+    # warning says the event went unrecorded.
+    assert out == {"systemMessage": ACCOUNTING_FAILURE}
 
 
 def test_concurrent_calls_for_the_same_session_do_not_corrupt_the_ledger(running_daemon):
@@ -867,7 +871,7 @@ def test_daemon_fails_closed_when_the_unlocked_scan_phase_raises(
     out = _raw_call(sock_path, {"hook_event_name": "PostToolUse",
                                 "session_id": "scanfail", "tool_name": "Read",
                                 "tool_response": "contact jordan@acme.com"})
-    assert out == {}
+    assert out == {"systemMessage": ACCOUNTING_FAILURE}
 
 
 def test_a_session_ending_mid_scan_does_not_reuse_the_discarded_salt(tmp_path):

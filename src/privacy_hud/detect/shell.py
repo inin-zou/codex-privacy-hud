@@ -119,3 +119,10 @@ def extract_destinations(command: str) -> list[str]:
         if BARE_HOST.match(t) or URL.search(t):
             return ["external_net"]
     return ["local"]
+
+
+def intended_network_recipient(command: str) -> str | None:
+    """The one endpoint a supported simple `curl` command addresses, or None.
+
+    P4-C1 contract scaffolding: no recipient is resolved yet."""
+    return None
