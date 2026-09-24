@@ -117,6 +117,12 @@ from .detect.paths import PathDetector
 from .detect.secrets import SecretDetector
 from .detect.shell import extract_destinations
 from .engine import Engine, Observation
+from .hook_evidence import (
+    DELIVERY_KEY_ABSENT,
+    CurrentHookAdapter,
+    HookEvidenceAdapter,
+    normalize_delivery_key,
+)
 from .hud_snapshot import HudPublisher
 from .ledger import Ledger, open_connection
 from .mask import new_salt
@@ -176,6 +182,11 @@ class State:
     salts: dict[str, bytes] = field(default_factory=dict)
     engines: dict[str, Engine] = field(default_factory=dict)
     started_at: dict[str, float] = field(default_factory=dict)
+    accounting_keys: dict[str, bytes] = field(default_factory=dict)
+    hook_adapter: HookEvidenceAdapter = field(
+        default_factory=CurrentHookAdapter)
+    #: P4-C4 staging: see `_handle_session_start`. A Python attribute only.
+    accounting_activation: bool = False
 
     # -- session reference count (daemon lifetime) --------------------- #
     # session_id -> `time.monotonic()` of the last hook event seen for it.
@@ -715,7 +726,21 @@ def _publish_hud(state: State, session_id: str) -> None:
         _log.debug("hud publish failed: %s", type(exc).__name__)
 
 
-def _handle_session_start(state: State, session_id: str, payload: dict) -> dict:
+def _invalidate_missing_accounting_keys(state: State) -> None:
+    """P4-C3 contract scaffolding: declared, not implemented."""
+
+
+def _discard_session_identity(state: State, session_id: str) -> None:
+    """P4-C3 contract scaffolding: declared, not implemented."""
+
+
+def _handle_session_start(
+    state: State,
+    session_id: str,
+    payload: dict,
+    *,
+    delivery_key: str,
+) -> dict:
     """A genuine `SessionStart`. For a session the ledger does not hold yet,
     this is the one place #54's structural rebuild may run: it and the new
     session commit in one write transaction, or neither does. A replayed
@@ -751,7 +776,13 @@ def _handle_session_start(state: State, session_id: str, payload: dict) -> dict:
     return _allow()
 
 
-def _handle_session_end(state: State, session_id: str, payload: dict) -> dict:
+def _handle_session_end(
+    state: State,
+    session_id: str,
+    payload: dict,
+    *,
+    delivery_key: str,
+) -> dict:
     """Retire a session and return its receipt as hook output.
 
     `summary` is a `ledger.py` summary variant, and the raw legacy rows are
@@ -847,10 +878,14 @@ def dispatch(
     event = payload.get("hook_event_name")
     session_id = payload.get("session_id") or ""
 
+    if delivery_key is None:
+        delivery_key = normalize_delivery_key(DELIVERY_KEY_ABSENT)
     if event == "SessionStart":
-        return _handle_session_start(state, session_id, payload)
+        return _handle_session_start(state, session_id, payload,
+                                     delivery_key=delivery_key)
     if event == "SessionEnd":
-        return _handle_session_end(state, session_id, payload)
+        return _handle_session_end(state, session_id, payload,
+                                   delivery_key=delivery_key)
 
     # Everything else is evidence that `session_id` is still alive, and is
     # counted as such BEFORE the `_KNOWN_EVENTS` filter and before

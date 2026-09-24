@@ -577,8 +577,10 @@ class _PermissiveSettings:
 
 class Engine:
     def __init__(self, *, ledger, matrix, salt: bytes, detectors: list,
-                 settings=None):
+                 settings=None, accounting_key: bytes | None = None):
         self.ledger = ledger
+        #: P4-C3 scaffolding: accepted, not yet owned.
+        self.accounting_key = accounting_key
         self.matrix = matrix
         self.salt = salt
         self.detectors = detectors
@@ -610,6 +612,9 @@ class Engine:
         #: `_origins` above, and for the same reason: it lives on the
         #: Engine because `dispatch` builds one Engine per session.
         self._read_notice_shown = False
+
+    def clear_session_identity(self) -> None:
+        """P4-C3 contract scaffolding: declared, not implemented."""
 
     # -- Ruling 2: destination normalization --------------------------
     def _normalize_destination(self, destination: str) -> str:

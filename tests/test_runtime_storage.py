@@ -883,3 +883,55 @@ def test_proc_inspection_permission_failure_refuses(monkeypatch, failure_at):
             storage._proc_holders([Path(target)])
 
     assert failure.value.code == "holder_unknown"
+
+
+# --------------------------------------------------------------------- #
+# #54 Phase 4: repair of activated storage is generation-preserving
+# --------------------------------------------------------------------- #
+
+def test_repair_preserves_activated_generation_and_accounting_values(
+        tmp_path):
+    from test_accounting_activation import seed_activated_ledger
+
+    data_dir = tmp_path / "data"
+    sid = seed_activated_ledger(storage.legacy_path(data_dir),
+                                lease_root=tmp_path / "seed-owner")
+    before = _state(storage.legacy_path(data_dir))
+    assert before[0] == ledger_schema.ACTIVATED_VERSION
+    assert storage.validate_existing_ledger(data_dir) == \
+        ledger_schema.ACTIVATED_VERSION
+
+    result = _cutover(data_dir)
+
+    assert result.schema_version == ledger_schema.ACTIVATED_VERSION
+    assert _state(storage.active_path(data_dir)) == before
+    conn = _raw(storage.active_path(data_dir))
+    try:
+        rows = conn.execute("SELECT session_id, accounting_version,"
+                            " accounting_status FROM sessions"
+                            " WHERE accounting_version=2").fetchall()
+        assert [tuple(r) for r in rows] == [(sid, 2, "available")]
+    finally:
+        conn.close()
+
+
+def test_repair_5401_does_not_activate_accounting(tmp_path):
+    """Regression gate: repair preserves a prepared ledger's generation and
+    creates no version-2 session."""
+    data_dir = tmp_path / "data"
+    _write(data_dir, prepared=True)
+    before = _state(storage.legacy_path(data_dir))
+
+    result = _cutover(data_dir)
+
+    assert result.schema_version == ledger_schema.PREPARED_VERSION
+    after = _state(storage.active_path(data_dir))
+    assert after == before
+    conn = _raw(storage.active_path(data_dir))
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM sessions"
+                            " WHERE accounting_version=2").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM observations"
+                            ).fetchone()[0] == 0
+    finally:
+        conn.close()

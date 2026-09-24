@@ -2184,3 +2184,48 @@ def test_dispatch_reads_only_latch_fields_the_hook_client_writes():
     assert written, "the hook client must write a latch"
     assert read, "the daemon must read one"
     assert read <= written
+
+
+def test_daemon_shutdown_discards_registered_identity(tmp_path, monkeypatch):
+    """#54 Phase 4: once its workers have drained, a stopping daemon clears
+    every registered engine and drops every accounting key, salt and start
+    time before it gives up ledger ownership. It fabricates no SessionEnd
+    and ends nothing in the ledger."""
+    from runtime_helpers import activation as make_activation
+
+    sock_dir = tempfile.mkdtemp(prefix="phd")
+    state = writer_state(tmp_path / "data")
+    state.accounting_activation = True
+    dispatch(state, {"hook_event_name": "SessionStart", "session_id": "k1",
+                     "cwd": "/r", "model": "gpt-5"})
+    dispatch(state, {"hook_event_name": "SessionStart", "session_id": "k2",
+                     "cwd": "/r", "model": "gpt-5"})
+    engines = dict(state.engines)
+    assert set(state.accounting_keys) == {"k1", "k2"}
+    daemon = Daemon(Path(sock_dir) / "d.sock", tmp_path / "data",
+                    idle_timeout=3600, poll_interval=0.05, state=state,
+                    activation=make_activation())
+    seen_at_release = []
+    real_release = Daemon._release_writer_lease
+
+    def release(self):
+        seen_at_release.append((dict(state.accounting_keys),
+                                dict(state.engines), dict(state.salts)))
+        return real_release(self)
+
+    monkeypatch.setattr(Daemon, "_release_writer_lease", release)
+    thread = threading.Thread(target=daemon.serve_forever, daemon=True)
+    thread.start()
+    daemon.stop()
+    thread.join(timeout=5.0)
+    try:
+        assert seen_at_release == [({}, {}, {})]
+        assert state.started_at == {}
+        for engine in engines.values():
+            assert engine.accounting_key is None
+        rows = state.ledger.conn.execute(
+            "SELECT session_id, ended_at FROM sessions"
+            " WHERE session_id IN ('k1','k2') ORDER BY session_id").fetchall()
+        assert [tuple(r) for r in rows] == [("k1", None), ("k2", None)]
+    finally:
+        state.ledger.conn.close()

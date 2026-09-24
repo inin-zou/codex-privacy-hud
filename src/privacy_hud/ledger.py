@@ -895,6 +895,10 @@ class Ledger:
             raise UnsupportedAccounting(
                 "version-2 accounting requires a prepared ledger")
 
+    def _require_accounting_storage(self) -> None:
+        """P4-C3 contract scaffolding: still prepared storage only."""
+        self._require_prepared()
+
     def ensure_profile(self, profile: ScoringProfile) -> str:
         """Store `profile` under its content ID unless it is already stored,
         and return the ID. An existing row is reused, never replaced; one
@@ -991,6 +995,27 @@ class Ledger:
             "INSERT INTO coverage(session_id,ts,observer,reason)"
             " VALUES(?,?,?,?)",
             (session_id, now, self.observer, COVERAGE_SESSION_START))
+
+    def _insert_v2_session(
+        self,
+        session_id: str,
+        *,
+        profile: ScoringProfile,
+    ) -> None:
+        # P4-C3 contract scaffolding: declared, not implemented.
+        raise UnsupportedAccounting("accounting activation is not implemented")
+
+    def start_accounted_session(
+        self,
+        session_id: str,
+        *,
+        cwd: str,
+        model: str,
+        profile: ScoringProfile,
+        start_observation: ObservationRecord,
+    ) -> bool:
+        # P4-C3 contract scaffolding: declared, not implemented.
+        raise UnsupportedAccounting("accounting activation is not implemented")
 
     @contextmanager
     def _atomic_accounting_write(self) -> Iterator[None]:

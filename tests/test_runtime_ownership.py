@@ -299,7 +299,9 @@ def test_socket_conflict_precedes_ledger_open(monkeypatch, tmp_path):
         "a refused daemon must not open a ledger")
 
 
-@pytest.mark.parametrize("layout", ["unknown", "activated", "altered"])
+# #54 Phase 4: a valid activated (5402) ledger is now this writer's own
+# generation; `test_5402_writer_reopens_without_schema_changes` covers it.
+@pytest.mark.parametrize("layout", ["unknown", "altered"])
 def test_noninitializing_writer_validates_before_writable_open(
     tmp_path, monkeypatch, layout
 ):
@@ -340,3 +342,42 @@ def test_noninitializing_writer_validates_before_writable_open(
 
     assert reads == [path]
     assert path.read_bytes() == before
+
+
+def test_5402_readers_cannot_write_or_activate(tmp_path):
+    """#54 Phase 4: a reader of an activated ledger reads version-2
+    accounting and can neither write it nor activate anything, through the
+    API or through its own SQL."""
+    from accounting_fakes import crossed, event
+    from test_accounting_activation import (
+        PROFILE, image, seed_activated_ledger, start_observation,
+    )
+
+    path = tmp_path / "ledger.db"
+    sid = seed_activated_ledger(path)
+    before = image(path)
+    reader = Ledger(path, M, initialize=False)
+    try:
+        assert reader.summary(sid).accounting_version == 2
+        mutations = [
+            lambda: reader.start_accounted_session(
+                "new", cwd="", model="", profile=PROFILE,
+                start_observation=start_observation("new")),
+            lambda: reader.record_observation(crossed(sid), [event()]),
+            lambda: reader.mark_accounting_unavailable(sid),
+            lambda: reader.end_session(sid),
+            lambda: reader.ensure_profile(PROFILE),
+            lambda: reader.start_session("x", cwd="", model=""),
+        ]
+        for mutate in mutations:
+            with pytest.raises(RuntimeRefusal):
+                mutate()
+        for sql in ("INSERT INTO sessions(session_id,started_at,budget_cap)"
+                    " VALUES('raw',1,120.0)",
+                    "UPDATE sessions SET accounting_status='unavailable'",
+                    "PRAGMA user_version = 5401"):
+            with pytest.raises(sqlite3.OperationalError):
+                reader.conn.execute(sql)
+    finally:
+        reader.conn.close()
+    assert image(path) == before

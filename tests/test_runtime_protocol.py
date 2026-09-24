@@ -646,3 +646,63 @@ def test_new_accounting_failure_warns_on_ingress(real_daemon, data_dir,
     # The hook client relays the warning unchanged.
     out, _ = run_hook(data_dir, INGRESS)
     assert out == {"systemMessage": ACCOUNTING_FAILURE}
+
+
+# --------------------------------------------------------------------- #
+# #54 Phase 4: generation 5402 capability, and stale identity
+# --------------------------------------------------------------------- #
+
+def test_5402_capabilities_agree_across_manifest_and_hook(data_dir):
+    from privacy_hud import runtime_contract
+    values = _handler_literals()
+    manifest = json.loads((REPO / "runtime-build.json").read_text())
+    assert runtime_contract.READABLE_SCHEMAS == (0, 5401, 5402)
+    assert runtime_contract.WRITABLE_SCHEMAS == (0, 5401, 5402)
+    assert values["READABLE_SCHEMAS"] == (0, 5401, 5402)
+    assert manifest["readable_schemas"] == [0, 5401, 5402]
+    assert manifest["writable_schemas"] == [0, 5401, 5402]
+    # The stdlib client accepts a matching hello from an activated ledger.
+    relayed = {"v": 2, "op": "event", "ok": True,
+               "output": {"systemMessage": "from an activated daemon"}}
+    server = Scripted(data_dir / "daemon.sock",
+                      [{**hello_ok(), "schema_version": 5402}, relayed])
+    try:
+        out, _ = run_hook(data_dir, INGRESS)
+    finally:
+        server.close()
+    assert out == {"systemMessage": "from an activated daemon"}
+
+
+def test_stale_build_and_epoch_cannot_dispatch_after_selection(
+        real_daemon, data_dir, tmp_path):
+    """A daemon whose selection moved on (repair selected another build or
+    epoch) writes nothing for a hook that still reaches it: no activation,
+    observation or policy row. A hook of a stale identity is refused at the
+    hello."""
+    from runtime_helpers import write_receipt_v2 as reselect
+
+    daemon = real_daemon(data_dir)
+    daemon.state.accounting_activation = True
+    sock_path = data_dir / "daemon.sock"
+    state_dir = tmp_path / "state"
+    before = _ledger_counts(daemon)
+    # A stale hook identity: refused before any dispatch.
+    for build, epoch in ((OTHER_BUILD, TEST_EPOCH), (REPO_BUILD, OTHER_EPOCH)):
+        replies = raw_exchange(sock_path, hello(build, epoch))
+        assert replies[0]["ok"] is False
+    # The daemon's own selection moves: its writer lease is no longer
+    # current, so a matching hook's start writes nothing.
+    reselect(state_dir, bundle=REPO, python="/usr/bin/python3",
+             build_id=REPO_BUILD, epoch=OTHER_EPOCH)
+    replies = raw_exchange(sock_path, hello(), event(SESSION_START))
+    assert replies[1]["output"] == {"systemMessage": ACCOUNTING_FAILURE}
+    policy = {"v": 2, "op": "policy_update", "build_id": REPO_BUILD,
+              "activation_epoch": TEST_EPOCH, "session_id": "legacy",
+              "rule_type": "mask", "selector": "email"}
+    assert raw_exchange(sock_path, hello(), policy)[1] is None
+    assert _ledger_counts(daemon) == before
+    with daemon.state.lock:
+        version = daemon.state.ledger.conn.execute(
+            "PRAGMA user_version").fetchone()[0]
+    assert version == 0
+    assert daemon.state.accounting_keys == {}

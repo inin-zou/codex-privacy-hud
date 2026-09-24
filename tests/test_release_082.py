@@ -39,8 +39,9 @@ def test_every_declaration_is_0_8_2():
 def test_what_0_8_2_does_not_move():
     assert contract.PROTOCOL_VERSION == 2
     assert contract.STORAGE_GENERATION == 1
-    assert contract.READABLE_SCHEMAS == (0, 5401)
-    assert contract.WRITABLE_SCHEMAS == (0, 5401)
+    # #54 Phase 4 deliberately adds generation 5402 to both capabilities.
+    assert contract.READABLE_SCHEMAS == (0, 5401, 5402)
+    assert contract.WRITABLE_SCHEMAS == (0, 5401, 5402)
     assert contract.SNAPSHOT_VERSIONS == (2,)
 
 
