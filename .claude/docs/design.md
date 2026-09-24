@@ -47,7 +47,7 @@ Level 3  EXPOSURE DETAIL  one flow, its evidence, its remedies
 
 Each level answers exactly one question. A view that answers two questions is a view that will be redesigned.
 
-**Escape hatches:** every level reachable directly — `$privacy` opens L2; `$privacy <id>` deep-links to L3; a block notification deep-links to the L3 for the offending flow.
+**Direct access:** `$privacy` opens the Level 2 audit after resolving a session. `$privacy <session_id>` explicitly selects a session; the positional argument is not an event or flow ID. Browser row selection opens Level 3 for that row. The existing terminal detail launcher requires both the selected session ID and an event ID. Denial messages offer the session audit and contain no event deep link.
 
 ---
 
@@ -248,6 +248,9 @@ support.log → main agent → GitHub MCP
 
 **Browser actions.** The local browser POSTs rules to `/api/policy`; `privacy.update_policy` is a separate MCP writer. The terminal detail view has no policy buttons.
 - `Save mask rule for detected <type>` — the browser POSTs a `mask` rule to `/api/policy`. The rule selects a data type, not a source. The former label `Protect future occurrences` claimed an outcome that saving a rule cannot guarantee. Matching requires detection; types other than `path` and `credential` require an accepted deep-scan result. Host application is not confirmed.
+
+Mask scope is session-wide by detected data type, without a source restriction. If a matching mask rule selects an otherwise eligible outbound call, the rewriter receives all findings from that call, including findings of other types; it does not restrict rewriting to the selected type. An origin-rule denial takes precedence, and a mask rule does not weaken the built-in handling of hard-blocked types. Saving a rule does not confirm detection on a later call or host application of rewritten input. Already disclosed data cannot be recalled from this session.
+
 - Where a row names a real origin, `Save block rule for values read from {source}` or `Save block rule for values from {source} output` saves `block_path` or `block_command`. Saving succeeds independently of whether a later observation matches or the host applies a denial.
 
 A source rule matches the whole value, normalised: it compares a later outbound value against the origin-tagged value under a salted HMAC of `value.strip().lower()` (`mask.py`), so if the model summarizes, rewrites, or quotes part of what it read, the copy no longer matches and the rule does not catch it (`docs/known-limits.md` #10). This said "only byte-identical values" until #49 item 7, which contradicted the salted hash described in the same sentence: case and surrounding whitespace do not defeat the rule, so the set that matches is wider than a byte comparison, not narrower. Origin extraction is best-effort too (`docs/known-limits.md` #11) — a row with no recognised origin offers no rule at all, rather than one that would not work.
@@ -282,32 +285,15 @@ PRIVACY HUD issued a tool-call denial
 
 ---
 
-## 8. Consent flow
+## 8. Consent flow — historical proposal, not shipped
 
-Historical proposal, not shipped behavior. No surface offers the buttons or token-minting steps below; this section does not authorize user-facing instructions to use them.
+The proposed deny → review → consent token → retry workflow is not available in the shipped product. Neither the audit browser, the `$privacy` skill nor the exposed MCP tools offer `Allow once`, `Minimize & retry`, a minimization preview or a consent-driven retry.
 
-Codex `PreToolUse` has no `ask` decision, so consent is a three-beat flow rather than a modal (see `architecture.md` §8 for the token mechanics).
+Internal token primitives exist: `mcp_tools.allow_once` can mint a token, and `Engine.observe` can consume one. These functions do not establish a reachable consent workflow. No shipped user-facing surface issues the token, and a saved origin-rule denial is evaluated before the token-consumption branch.
 
-```text
-1. BLOCK      hook denies · systemMessage explains
-2. REVIEW     $privacy → L3 for the blocked flow
-3. RESOLVE    user picks one:
+The available actions are those in the Level 3 policy section: the browser and `privacy.update_policy` can save conditional policy rules. They do not authorize a blocked call once, replay it or establish that the host applied a later denial or rewrite. `$privacy` opens the session audit; it does not deep-link a denial to an event.
 
-   [ Minimize & retry ]   pseudonymize, then allow — recommended, shown first
-   [ Allow once ]         one-shot token, 120 s TTL, this exact call only
-   [ Keep blocked ]       dismiss; adds nothing to the budget
-```
-
-`Minimize & retry` leads because it is the option that preserves both the user's privacy and the agent's task. The UI shows a **before/after preview** of the minimization so the user can see what the tool will receive:
-
-```text
-before   "contact jordan@acme.com about ticket 4412"
-after    "contact user_7f3a@example.invalid about ticket 4412"
-```
-
-Pseudonyms are stable within the session, so the agent's reasoning survives the rewrite — worth stating in the UI, because users assume redaction breaks the task.
-
-`Allow once` requires the user to have seen the L3 detail first. The button is disabled with the hint `Review the exposure first` until the detail view has been opened. Consent without information is not consent.
+Already disclosed data cannot be recalled from this session.
 
 ---
 
@@ -335,7 +321,7 @@ Pseudonyms are stable within the session, so the agent's reasoning survives the 
 
 ## 10. Session privacy receipt
 
-Returned at `SessionEnd` for the host to display:
+Returned as text in hook `systemMessage` at `SessionEnd`. The plugin does not save a Markdown receipt file, and returning this text does not confirm that the host displayed it:
 
 ```text
 PRIVACY RECEIPT · session_123 · 41 min
@@ -377,13 +363,13 @@ Duration is omitted when unavailable. Unrecorded receipts show unavailable accou
 | `ActionButton` | browser L3 | saves a policy rule; terminal text has no buttons |
 | `IrreversibilityNotice` | 3 | permanent, `warn`, non-dismissible |
 | `BlockNotice` | systemMessage | tool + data + flow + one next step |
-| `Receipt` | SessionEnd | terminal + Markdown |
+| `Receipt` | SessionEnd | text returned in hook `systemMessage`; no Markdown file export |
 
 ---
 
 ## 13. Open design questions
 
-1. **Does L1 ship in v1?** The companion renderer needs a terminal pane we do not own. `systemMessage` + `$privacy` may carry the demo alone.
+1. **L1 delivery is implemented:** a compatible patched Codex supplies the native Privacy item; the separate companion renderer is the fallback. The official Codex binary is not modified.
 2. **Row aggregation granularity.** Aggregating by `(type, source, destination)` hides per-occurrence timing. Does `All events` need an expandable row, or is the flat timeline enough?
 3. **Budget calibration.** 120 points is a guess. A normal 40-minute session should land in the 20–40% range; needs one real-session pass to tune.
-4. **Minimization preview length.** Long payloads need a diff view rather than before/after strings.
+4. **Unshipped minimization preview:** a future preview would need a design for long payloads. No preview or preview-and-retry action is available today.

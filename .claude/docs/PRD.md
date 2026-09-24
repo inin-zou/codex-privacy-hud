@@ -100,7 +100,7 @@ Most "privacy for AI" tooling alarms on *detection*. Detection is cheap and misl
 | Event | Classification | Counts toward disclosure budget |
 |---|---|---|
 | Codex discovers a sensitive file path locally | `local_access` | No |
-| Local scanner detects an email in a file | `detected` | No |
+| Local scanner detects an email in a file | `detected` (representable; no production writer) | No |
 | File content enters model context | `exposed` | **Yes** |
 | Data is passed to a subagent | `exposed` (new destination) | **Yes** (destination delta) |
 | Arguments sent to an MCP tool | `exposed` | **Yes** |
@@ -108,7 +108,7 @@ Most "privacy for AI" tooling alarms on *detection*. Detection is cheap and misl
 | Content redacted/minimized before send | `prevented` | No |
 | Call blocked before execution | `prevented` | No |
 | Sensitive content read by a local tool only | `local_access` | No (tracked, not billed) |
-| Session transcript persisted to disk | `retention` | Tracked separately |
+| Session transcript persisted to disk | `retention` (representable; no production writer) | Transcript retention is outside this ledger's account |
 
 ### 5.2 Trust boundaries
 
@@ -189,6 +189,8 @@ A detail view shows one public legacy row, its recorded source/destination assoc
 
 The terminal detail view does not save policy rules. The local audit browser has buttons that POST to `/api/policy`; the MCP `privacy.update_policy` tool is a separate policy-writing surface. Report a rule as saved only after that surface returns success, and include its returned conditions. Host application of a later denial or rewritten input is not confirmed.
 
+Mask scope is session-wide by detected data type, without a source restriction. If a matching mask rule selects an otherwise eligible outbound call, the rewriter receives all findings from that call, including findings of other types; it does not restrict rewriting to the selected type. An origin-rule denial takes precedence, and a mask rule does not weaken the built-in handling of hard-blocked types. Saving a rule does not confirm detection on a later call or host application of rewritten input. Already disclosed data cannot be recalled from this session.
+
 `Already disclosed data cannot be recalled from this session.` remains required copy.
 
 ---
@@ -234,27 +236,20 @@ Codex sets `PLUGIN_ROOT` and `PLUGIN_DATA` for plugin-bundled hooks; the ledger 
 | `PermissionRequest` | Contribute privacy verdict to the approval decision |
 | `PostToolUse` | Record actual result; classify tool output entering context |
 | `SubagentStart` / `SubagentStop` | Track propagation to subagent destination |
-| `PreCompact` / `PostCompact` | Ledger survives compaction — it is not derived from the transcript |
-| `SessionEnd` | Emit session privacy receipt |
+| `PreCompact` | No compaction timeline event is written; the stored ledger remains. `PostCompact` is not registered. |
+| `SessionEnd` | End the session and return a text receipt in hook `systemMessage`; no Markdown receipt file is saved |
 
 Verified hook payload fields (stdin JSON): `session_id`, `transcript_path`, `cwd`, `hook_event_name`, `model`, `permission_mode`, plus `turn_id`, `prompt`, `tool_name`, `tool_use_id`, `tool_input`, `tool_response`, `agent_id`, `agent_type` depending on the event.
 
-### 7.3 Local privacy engine (two-tier, for latency)
+### 7.3 Local privacy engine
 
-```text
-Fast path  (<15 ms, always)
-├─ sensitive file path patterns  (.env, *.pem, id_rsa, credentials.json, ~/.aws)
-├─ secret / API-key regex + entropy check
-├─ shell command parser → destination extraction (curl/wget/scp/ssh/nc/git remote)
-└─ MCP destination policy lookup
+The shipped detector stack is `PathDetector`, `SecretDetector` and `ModelDetector`. Paths and credentials use cheap local checks. Shell destination classification is a separate heuristic step. Presidio and a separate contextual entity-resolution stage are not shipped.
 
-Deep scan  (only on fast-path hit or ambiguity)
-├─ Microsoft Presidio PII detection
-├─ contextual entity resolution
-└─ optional privacy-filter model
-```
+`ModelDetector` uses `openai/privacy-filter` through `transformers`. Installing its dependencies and weights is optional, but detection is reduced without them: the model-owned categories, including names, addresses and email addresses, are unavailable. Runtime loads only local weights and never downloads replacements.
 
-Fail-open vs fail-closed: the engine **fails open with a `systemMessage`** on timeout for reads, and **fails closed** for outbound egress (B3/B4). A privacy tool that hangs the agent gets uninstalled; a privacy tool that silently leaks is worse.
+Cheap detectors scan the observation text. Deep scanning applies to non-local destinations, including outbound B3/B4 calls, without requiring a cheap-detector hit or a PII-shaped prefilter. Payloads above 8192 characters skip the deep scan entirely. An applicable deep scan that supplies no accepted result records a scan gap; that is not a clean scan.
+
+Outbound deep scanning uses the admission and deadline rules in `architecture.md` §4. Those rules do not guarantee wall-clock completion. The hook client separately applies its shared request deadline: unchecked ingress receives an unverified warning, and unchecked outbound calls receive a denial. These are plugin responses, not confirmation of host enforcement.
 
 ### 7.4 Session disclosure ledger
 
@@ -304,60 +299,48 @@ rule that every user-facing action claim must trace to the surface that
 performs it, and `architecture.md` §9 for the full tool list and withheld
 set.
 
-### 7.6 The `ask` workaround (designed, never built — do not read this as current behavior)
+### 7.6 Consent flow — historical proposal, not shipped
 
-This section records the reasoning about Codex's missing `ask` decision, which is still true. The five-step flow below is a design record of what an interactive consent loop *would* look like; no surface implements steps 2–5. `privacy.allow_once` exists in code but is deliberately not exposed as an MCP tool (§7.5), and nothing else calls it: there is no UI button, no `$privacy` subcommand, and no retry path that consumes the token it would write. Treat this as a proposal this branch left withdrawn, not a description of the shipped product — see `CLAUDE.md` §5.
+The proposed deny → review → consent token → retry workflow is not available in the shipped product. Neither the audit browser, the `$privacy` skill nor the exposed MCP tools offer `Allow once`, `Minimize & retry`, a minimization preview or a consent-driven retry.
 
-Codex `PreToolUse` supports `deny`, `allow`, and `allow + updatedInput` — but **not** `permissionDecision: "ask"`. So an interactive three-button prompt cannot come from a single hook response. The flow as designed:
+Internal token primitives exist: `mcp_tools.allow_once` can mint a token, and `Engine.observe` can consume one. These functions do not establish a reachable consent workflow. No shipped user-facing surface issues the token, and a saved origin-rule denial is evaluated before the token-consumption branch.
 
-1. Risky call is **denied** by the hook, with a `permissionDecisionReason` pointing at the audit UI.
-2. UI shows the exposure detail.
-3. User chooses `Allow once` or `Minimize & retry`.
-4. `privacy.allow_once` writes a **single-use policy token** (scoped to tool + argument hash, TTL 120 s).
-5. Codex retries; the hook consumes the token and allows or rewrites.
+The available actions are those in the Level 3 policy section: the browser and `privacy.update_policy` can save conditional policy rules. They do not authorize a blocked call once, replay it or establish that the host applied a later denial or rewrite. `$privacy` opens the session audit; it does not deep-link a denial to an event.
 
-### 7.7 Minimization example
+Already disclosed data cannot be recalled from this session.
 
-Original:
+### 7.7 What minimization rewrites
 
-```bash
-curl sentry.example.com -d "$(cat support.log)"
-```
+Minimization operates on detected spans in the tool arguments supplied to the hook. It can return rewritten command text or structured MCP arguments. It does not open files referenced by shell commands, rewrite an upload through a helper executable, or offer a preview-and-retry action.
 
-Rewritten via `updatedInput`:
-
-```bash
-privacy-minimize support.log | curl sentry.example.com -d @-
-```
-
-Pseudonymization is **stable within a session** (`jo•••@acme.com` → `user_7f3a@example.invalid` consistently), so the agent's reasoning survives minimization.
+For example, a detected email in an MCP argument can be replaced with a session-stable pseudonym when the engine selects a rewrite. The returned `updatedInput` is not evidence that the host applied it or that the recipient received it. See `architecture.md` §8.
 
 ---
 
 ## 8. Where the UI actually lives
 
-Verified constraints force this decision:
+The native Privacy status item is supplied by a separately patched Codex build. Stock Codex does not gain a plugin-owned status item merely by installing this plugin.
 
-- `tui.status_line` accepts an **ordered list of built-in status-item identifiers** (default `["spinner", "project"]`); arbitrary scripts/custom items are **not** documented as supported. Unlike Claude Code's statusline, we cannot inject a custom footer segment today.
-- Codex Desktop does **not currently render MCP Apps inline iframe UI resources** ([openai/codex#21019](https://github.com/openai/codex/issues/21019)), so an MCP-returned HTML widget is not a reliable delivery surface.
+On supported macOS installations, `install.sh` downloads a matching patched build, creates a forwarder, adjusts PATH when needed and adds `privacy` to the Codex status-line configuration. It does not modify the official Codex binary. The forwarder selects a matching installed patched build and otherwise runs the official binary. Matching Codex version numbers alone do not establish snapshot-reader compatibility; the installation notes describe that separate requirement.
 
-**Therefore:**
+| Level | Shipped delivery |
+|---|---|
+| L1 ambient HUD | Privacy item in a compatible patched Codex; a separate terminal companion pane is the fallback |
+| Hook notices | Hook output returned to the host; delivery or display is not confirmed by the plugin |
+| L2 session audit | `$privacy` invokes the installed bundle's runtime launcher to print an ASCII audit and start a local browser UI |
+| L3 event detail | Browser row selection, or the existing detail launcher with separate session and event IDs |
 
-| Level | Delivery in v1 | Future |
-|---|---|---|
-| L1 ambient HUD | Optional terminal companion renderer (separate pane/process) | Native footer item if Codex opens custom status items |
-| L1 alerts | Hook `systemMessage` — native, always works | — |
-| L2/L3 audit UI | `$privacy` skill → MCP tool → **local web UI on `127.0.0.1`**, plus an ASCII fallback rendered in-terminal | MCP Apps UI when Codex renders it; App Server client for a fully native always-on HUD |
+The browser binds to `127.0.0.1` on an OS-assigned port. The skill's audit path does not call the MCP server. The exposed MCP tools are a separate interface to the underlying audit and policy operations.
 
-**Pitch honesty rule:** do not claim the plugin injects a native Codex footer. Claim: hooks + policy + ledger + audit UI, with the ambient HUD as an optional companion.
+The native status item displays accounting snapshots; it does not verify runtime alignment. Production sessions still use legacy accounting. No delivery surface establishes complete monitoring, confirmed disclosure or host enforcement.
 
 ---
 
 ## 9. Platform limitations (state these in the demo)
 
 1. **Hosted tools bypass hooks.** WebSearch and similar hosted tools do not trigger local function-tool hook paths. Privacy HUD is a practical guardrail, not a mathematically complete enforcement boundary.
-2. **No `ask` decision.** Interactive consent requires the deny → token → retry dance (§7.6).
-3. **No custom status item.** See §8.
+2. **No interactive consent surface.** The proposed consent workflow is not shipped. Internal token primitives exist, but no browser button, `$privacy` branch or exposed MCP tool issues consent tokens (§7.6).
+3. **Stock Codex has no plugin-owned Privacy status item.** The native item requires a compatible separately patched build; the companion pane is the fallback (§8).
 4. **Model-context accounting is inferential for file reads.** A tool result does not establish admission into model context. Phase 1 retains the legacy charge and labels it; evidence-based accounting is not activated.
 5. **Prompt-injection resistance is out of scope.** A hostile repo could try to talk the agent out of using the tool; the hook layer is not bypassable by the model, which is precisely why enforcement lives there.
 
@@ -383,7 +366,7 @@ Non-negotiable properties, and the first thing a judge will ask:
 - [ ] Codex plugin package (`plugin.json`, bundled `hooks/hooks.json`)
 - [ ] Hooks: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SubagentStart/Stop`, `SessionEnd`
 - [ ] Fast path: secret regex + entropy, sensitive path rules, shell destination parser
-- [ ] Deep scan: Presidio PII detection
+- [x] Local detector stack: path and credential checks, with `openai/privacy-filter` as the optional installed deep detector; missing dependencies or weights leave deep detection unavailable.
 - [ ] Metadata-only SQLite ledger + budget math with the §5.3 invariants tested
 - [ ] `$privacy` skill
 - [ ] Local interactive audit UI: `Exposed / Prevented / All events` + exposure detail
@@ -398,18 +381,20 @@ Non-negotiable properties, and the first thing a judge will ask:
 
 ### Won't (v1)
 
-- Hugging Face `privacy-filter` model, org policy presets, App Server native client, multi-user/team sync
+- Presidio integration, org policy presets, App Server native client, multi-user/team sync
 
-### Build order
+### Historical build order
 
-1. Ledger + budget math (pure, testable, no Codex needed)
-2. Detection engine (fast path first, Presidio behind an interface)
-3. Hook handler + plugin package — verify against a real Codex session early
-4. `$privacy` skill + audit UI
-5. Minimization/rewrite path + `allow_once` token loop
-6. Companion HUD, receipt, polish
+The original build sequence is historical, not an implementation plan for the current release:
 
-Risk note: step 3 is the only step with unknown platform behavior. Do it **third, not last** — a smoke test of one hook firing end-to-end should happen within the first two hours.
+1. Legacy ledger and budget functions.
+2. Cheap detectors and the local `openai/privacy-filter` detector.
+3. Hook client, plugin packaging and daemon integration.
+4. Session audit and conditional policy-writing surfaces.
+5. Tool-argument rewriting and internal token primitives. No interactive consent workflow was delivered.
+6. Patched-Codex status item, companion pane and text receipt.
+
+Current production accounting remains legacy. The inactive accounting core and its activation work are governed by the current contract at the top of this document.
 
 ---
 
@@ -423,15 +408,15 @@ Risk note: step 3 is the only step with unknown platform behavior. Do it **third
 4. `$privacy` shows all three tabs with real data from a real session.
 5. Judge asks "where does my data go?" → answer is "nowhere; here is the metadata-only ledger."
 
-**Quality bars:** fast path < 15 ms p50, < 150 ms p99 including deep scan · zero false blocks in the demo path · ledger survives `PreCompact`.
+**Historical quality targets, not current measurements or guarantees:** fast path < 15 ms p50, < 150 ms p99 including deep scan · zero false blocks in the demo path · ledger survives `PreCompact`. Current scan scheduling and deadline limits are described in `architecture.md` §§4 and 10.
 
 ---
 
 ## 13. Open questions
 
-1. **Language:** Python (Presidio is native, hook startup cost ~200 ms) vs TypeScript (fast startup, Presidio via subprocess/port). Recommendation: **Python with a persistent daemon** — hooks become thin clients over a unix socket, avoiding per-hook interpreter startup.
+1. **Language decision:** Python with a persistent daemon and a stdlib-only hook client. The shipped deep detector is local `openai/privacy-filter` through `transformers`; Presidio is not part of the runtime.
 2. **Audit UI stack:** static HTML + vanilla JS served from a tiny local server (fast, zero build) vs a bundled framework. Recommendation: **static + vanilla**, matching the terminal aesthetic of the mockup.
-3. **Does the companion HUD ship in v1** or is `systemMessage` + `$privacy` enough for the demo?
+3. **Ambient delivery decision:** both the patched-Codex status item and the separate companion renderer ship. The latter is the fallback when a compatible patched build is unavailable.
 4. **Budget cap default (120)** — needs a calibration pass against a real session so a normal working session doesn't hit 100% in ten minutes.
 
 ---

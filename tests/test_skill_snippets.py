@@ -278,3 +278,47 @@ def test_the_skill_does_not_tell_the_model_to_announce_enforcement():
     text = SKILL_MD.read_text(encoding="utf-8")
     assert "now enforced, not merely recorded" not in text
     assert "Say the rule is **saved**" in text
+
+
+def _prose_under(heading: str) -> str:
+    """The prose between a `**N. ...**` step heading and its first Bash
+    block."""
+    text = SKILL_MD.read_text(encoding="utf-8")
+    start = text.index(heading + "\n\n") + len(heading) + 2
+    return text[start:text.index("\n\n```bash\n", start)]
+
+
+#: #47 item 18: the positional argument to `$privacy` is a session ID.
+STEP_1_PROSE = (
+    "One command resolves the session, reads the ledger read-only, and "
+    "renders the Level 2 table (design.md §5). After handling the "
+    "documented command branches, a positional ID supplied to `$privacy` is "
+    "a session ID. Set `SESSION_ID` to that session ID; omit it when no "
+    "session ID was supplied. It is not an event or flow deep link."
+)
+
+#: #47 item 18: event detail needs the selected session and an event ID.
+STEP_2_PROSE = (
+    "Use this step only when the request identifies a particular event in "
+    "the selected session. `SESSION_ID` is the session selected in step 1; "
+    "`EVENT_ID` is that event's numeric `id`, not the positional argument "
+    "after `$privacy`. The detail command requires both identifiers. Do not "
+    "infer an event ID from a denial message: those messages contain no "
+    "event deep link. If no event ID is available, show the session audit "
+    "and its browser URL; the browser opens detail when a row is selected."
+)
+
+
+def test_skill_positional_id_is_a_session_id():
+    assert _prose_under("**1. Print the audit.**") == STEP_1_PROSE
+    assert 'audit ${SESSION_ID:+"$SESSION_ID"}' in _block("audit")
+
+
+def test_skill_event_detail_requires_two_identifiers():
+    assert _prose_under("**2. Show one event's detail.**") == STEP_2_PROSE
+    assert 'detail "${SESSION_ID:?}" "${EVENT_ID:?}"' in _block("detail")
+    text = SKILL_MD.read_text(encoding="utf-8")
+    assert "$privacy detail" not in text
+    assert "$privacy <event_id>" not in text
+    assert "L3 deep link" not in text
+    assert "`$privacy <id>` deep link" not in text

@@ -45,58 +45,31 @@ Everything inside `plugin` is local. The only sockets that exist are a unix doma
 
 ## 2. Process model
 
-**Problem.** Hooks are `exec`'d per event. A Python interpreter with Presidio loaded costs 1.5–3 s of cold start. Paying that on every `PreToolUse` makes the agent unusable.
+Hooks execute a thin stdlib-only client for each event. Detection and ledger ownership live in a long-running daemon so the model is not loaded in each hook process. The client imports spawn-related modules only on the spawn path.
 
-**Solution.** Split into a **thin client** and a **long-lived daemon**.
+**Startup.** After validating that receipt v2 selects this bundle, the hook client attempts to connect to `$PLUGIN_DATA/daemon.sock`. A failed connection can trigger a detached daemon launch through the selected bundle's bootstrap and recorded Python interpreter. Auto-spawn can be disabled, and a cooldown limits repeated launch attempts. An absent or unusable runtime selection does not authorize spawning another bundle.
 
-```text
-hooks/handler.py     ~40 lines, stdlib only, no imports beyond json/socket/sys
-                     → reads stdin, writes to socket, reads reply, writes stdout
-                     → cold start ≈ 25 ms
+The hook does not wait for the new daemon to become ready. Initial hooks can therefore go unchecked while the model loads. They receive the boundary-specific unavailable response; their missing observations cannot be reconstructed. A handshake failure or a timeout after connection does not trigger a replacement daemon.
 
-daemon               [NOT IMPLEMENTED] designed to start lazily on first
-                     use; this build requires starting it manually — see
-                     README.md "Using it in Codex" §2. Accepted for this
-                     hackathon's scope rather than built.
-                     → holds Presidio models, regex set, SQLite conn, policy cache
-                     → one process per user, serves all concurrent sessions
-                     → reference-counts live sessions (SessionStart /
-                       SessionEnd, and any hook event as a keep-alive) and
-                       exits 5 min after the LAST one ends — never on a
-                       single SessionEnd, since one daemon serves them all.
-                       Fallbacks for a SessionEnd that never arrives: a
-                       session idle 4 h stops counting, and 4 h with no
-                       connection at all exits regardless of the count.
-```
+**Ownership and lifetime.** The daemon serves concurrent sessions within its plugin-data directory, with state keyed by session ID. Startup ownership and the runtime writer lease prevent cooperating processes from becoming competing writers. One session ending does not stop a daemon still serving another. The lifetime policy uses a five-minute grace after the last live session ends, a four-hour stale-session interval and a four-hour idle timeout.
 
-**Socket protocol.** Newline-delimited JSON over `$PLUGIN_DATA/daemon.sock` (mode `0600`).
+**Socket protocol.** Communication uses newline-delimited JSON over the local Unix-domain socket. Protocol 2 requires a matching `hello` on the same connection before the client sends a hook payload. Runtime identity includes the selected build and activation epoch. The client forwards only the validated event reply's `output` object to the host; protocol errors are not hook output.
 
-```json
-→ {"v":1,"op":"event","payload":{ ...verbatim Codex hook JSON... }}
-← {"v":1,"decision":"deny","reason":"...","systemMessage":"...","budget":28}
-```
+One 2.0-second monotonic deadline covers connection, hello, event transmission and reply. It is not a fresh two seconds for each socket operation. An event whose reply is lost has an unknown outcome and is not replayed.
 
-The client is deliberately dumb: it forwards the hook payload unmodified and relays whatever the daemon returns. All policy lives in one place, and the client has no dependencies that could break a user's session.
+The daemon's `active_sessions` operation supplies session IDs and ages since their last hook activity. Audit resolution uses an explicit session ID when supplied, otherwise daemon activity when available, and otherwise the ledger's most recently started session. These bases are labelled separately; ledger history alone does not prove which session is currently active.
 
-`op` is the discriminator, and there is a second value on it, used by the `$privacy` skill and by nothing on the hook path:
-
-```json
-→ {"v":1,"op":"active_sessions"}
-← {"v":1,"op":"active_sessions","sessions":[{"session_id":"…","age":0.04}, …]}
-```
-
-Most recently active first; `age` is seconds since that session's last hook event (an age and not a timestamp, because a monotonic clock means nothing in another process). **Why the daemon has to be asked:** Codex exposes no session id to a skill, and neither question the ledger can answer is the right one — "most recently started" names the wrong session as soon as a second window is open, and "most recently disclosing" (`MAX(events.ts)`) skips a session that has disclosed nothing, which is precisely the clean session this tool must get right. The daemon's session reference count (`dispatch.State.live`) is updated for *every* hook carrying a session id, including the ones that write no ledger row, so it covers both. Running `$privacy` fires a hook in the asking session, which is what makes "most recently active" mean "the caller". `hooks/handler.py` is deliberately not taught this op: stdlib-only, hot path, no reason to ask. An unknown `op` is answered with silence, which every client on this socket already treats as "no useful answer" — never with an error object, which would reach Codex as hook output.
-
-**Failure behavior** (matters more than the happy path):
-
-| Failure | Client behavior |
+| Condition | Hook-client response |
 |---|---|
-| Socket missing | Apply per-boundary default below. (Designed to also spawn the daemon detached at this point — **not implemented in this build**; the daemon must be started manually. See README.md "Known limits".) |
-| Daemon timeout (> 2 s) | Ingress: allow + `systemMessage` "unverified". Egress (B3/B4): **deny** |
-| Daemon crash mid-request | Same as timeout |
-| Client itself throws | `exit 0` with empty stdout — never block Codex on our own bug |
+| No usable runtime selection | No spawn; an unavailable response, or the initial setup hint when applicable |
+| Connection failure after valid selection | Attempt eligible detached startup; return without waiting for readiness |
+| Incompatible runtime or handshake | Runtime refusal; no hook payload is sent to an unverified daemon |
+| Unchecked ingress | Allow with an unverified warning |
+| Unchecked outbound call | Return a denial |
+| Lost reply after sending an event | Report unverified; do not replay the event |
+| Client-level exception | Exit successfully with empty output |
 
-Fail-open on reads, fail-closed on egress. A privacy tool that hangs the agent gets uninstalled; one that silently leaks is worse.
+A returned denial does not establish host enforcement. This process description does not establish that runtime repair can stop every historical daemon or explain every quiescence refusal; #70 and #71 track those separate repair defects.
 
 ---
 
@@ -156,40 +129,15 @@ sequenceDiagram
     D-->>C: budget=28
 ```
 
-### 3.3 Incremental update algorithm
+### 3.3 Incremental processing without a chunk cache
 
-Each event is processed in one pass:
+Each observation is scanned from its own text. There is no content-hash findings cache and no shared 64 MB LRU. Re-reading unchanged content can repeat detector work.
 
-```python
-def on_event(ev):
-    obs = normalize(ev)                    # → {turn_id, direction, boundary, source, text}
-    if cached := chunk_cache.get(hash(obs.text)):
-        findings = cached                  # re-read of an unchanged file costs nothing
-    else:
-        findings = engine.scan(obs.text)   # fast path, deep scan only if needed
-        chunk_cache.put(hash(obs.text), findings)
+Dispatch separates scanning from policy and ledger work. It computes one `ScanResult` outside the ledger lock and passes that result into `Engine.observe` while holding the lock. This avoids scanning the same observation twice; it does not reuse results from earlier observations or other sessions.
 
-    delta = 0
-    for f in findings:                     # f = {type, value_hash, masked_exemplar}
-        key = (f.value_hash, obs.destination)
-        if key in disclosed_set:           # same value, same destination
-            ledger.bump_count(key)         # count += 1, budget delta = 0
-        else:
-            disclosed_set.add(key)
-            ledger.append(DisclosureEvent(f, obs))
-            delta += severity(f.type) * volume(count) * dest_mult(obs.boundary)
+Production sessions still use legacy accounting. Legacy deduplication uses `(session_id, value_hash, destination)` and can increment an existing row's repetition count instead of adding a new contribution. That accounting deduplication happens after detection and is not a computational cache. It can also collapse different outcomes; this section does not resolve #47 items 3, 4 or 8.
 
-    return ledger.budget_add(delta)        # monotonic, never decreases
-```
-
-**Why this satisfies the PRD invariants:**
-
-- *Prevented events score zero* — a denied `PreToolUse` never produces an ingress observation, so no event is appended.
-- *Monotonic* — `budget_add` only ever adds; there is no removal path, because disclosure is irreversible.
-- *Same value + same destination does not double-count* — the `disclosed_set` membership check.
-- *New destination does count* — the key includes `destination`, so `support.log → subagent` is a distinct entry from `support.log → model_context`.
-
-**Cost.** `O(bytes crossing a boundary)`, not `O(context size × turns)`. Combined with the chunk cache, re-reading an unchanged file is `O(1)`.
+Processing is incremental over observed payloads rather than a rescan of the full conversation. There is no O(1) unchanged-file reread guarantee. Detection misses and recorded scan gaps remain possible.
 
 ### 3.4 Value identity without storing values
 
@@ -205,11 +153,15 @@ Consequences, all intentional: hashes are not comparable across sessions, are us
 
 The **masked exemplar** (`jo•••@acme.com`) is computed at detection time by a type-specific masker and is the only human-readable residue stored. Maskers are unit-tested to guarantee the original is unrecoverable (e.g. emails keep 2 leading chars + full domain; credentials store *nothing* but their type).
 
-### 3.5 Compaction
+### 3.5 Compaction and receipts
 
-Compaction shrinks the context. It does **not** un-disclose anything — those bytes already reached the model.
+Compaction does not reverse a disclosure or reduce the stored legacy score. The ledger is not reconstructed from the transcript.
 
-Because the ledger is event-sourced from hooks rather than derived from the transcript, compaction is a no-op for correctness. `PreCompact`/`PostCompact` write a marker row so the timeline can show it, and nothing else. This is the concrete payoff of not deriving state from the transcript: a transcript-scraping design would silently lose history here, exactly as `claude-hud` would if the transcript were truncated.
+No compaction timeline marker is written. `PreCompact` is registered as a hook, but dispatch creates no disclosure observation for it. `PostCompact` is not registered. A non-observation event can refresh daemon liveness without adding a ledger event.
+
+The legacy `detected` and `retention` classifications remain representable and readable, but no production event writer emits those classifications. Their presence in a taxonomy or renderer does not establish local-scan or transcript-retention evidence.
+
+At `SessionEnd`, dispatch ends the ledger session, discards its in-memory identity state, retires its HUD snapshot and returns a text receipt in hook `systemMessage`. The plugin does not save a Markdown receipt file. Returning the receipt does not confirm that the host displayed it, and transcript retention remains outside this ledger's account.
 
 ### 3.6 Known imprecision
 
@@ -226,37 +178,26 @@ Where we are imprecise, we are deliberately imprecise **toward over-reporting ex
 
 ## 4. Detection engine
 
-```text
-scan(text) →
-  ┌─ Tier 0: path/context rules      ~0.1 ms   .env, *.pem, id_rsa, ~/.aws, credentials.json
-  ├─ Tier 1: regex + entropy          ~2 ms    API keys, tokens, JWTs, connection strings
-  ├─ Tier 2: structural parse         ~3 ms    shell AST → destination extraction
-  └─ Tier 3: Presidio NER            ~40 ms    names, addresses, phones, orgs  [conditional]
-```
+The shipped stack contains two cheap detectors and one expensive detector:
 
-Tier 3 runs only when Tier 1 hits, when the payload crosses B3/B4, or when the text contains PII-shaped tokens that Tier 1 could not classify. Roughly 10–15% of events in practice.
+| Component | Role |
+|---|---|
+| `PathDetector` | Tier 0: sensitive path patterns |
+| `SecretDetector` | Tier 1: credential patterns and entropy checks |
+| Shell destination classification | Tier 2: heuristics over command text, outside the detector list |
+| `ModelDetector` | Tier 3: local `openai/privacy-filter` token classification |
 
-**What ships, on the B3/B4 half of that sentence.** The engine did the opposite for most of this project's life — it excluded B3/B4 outright — so the types tier 3 owns (`person`, `address`, `email`, `phone`, `url`, `date`, `account`) could not appear on any outbound row (#47 item 1). The exclusion is gone, and the reason it could not simply be deleted is what the rest of this section has to account for: an outbound call is a `PreToolUse`, `hooks/handler.py` gives the daemon 2.0 s per socket operation, and I6 turns a missed deadline into a **deny** of a call that should have been allowed.
+Presidio is not shipped. Cheap detectors scan each observation's text. Deep scanning applies to non-local destinations, including B3/B4, without a cheap-hit or PII-shape prerequisite. It is skipped entirely above `MAX_TIER3_CHARS` (8192 characters). Missing weights or an unsuccessful applicable scan produce a scan gap, not evidence of a clean payload.
+
+**Outbound deep scanning.** Before #47 items 1 and 6, the engine excluded B3/B4 from deep scanning. It now attempts the applicable scan under the admission and acceptance rules below. The hook client separately uses one 2.0-second deadline across connection, hello, event transmission and reply; an outbound call that cannot be checked receives a denial.
 
 On B3/B4, `engine.TIER3_EGRESS_BUDGET` is a duration (1.0 s) used to construct an absolute monotonic deadline. Egress uses a requested timeout based on the remaining budget and an inclusive completion cutoff; neither guarantees elapsed time. See `engine.TIER3_EGRESS_BUDGET`, which states the exact acceptance condition; this summary must agree with it. At most one egress scan worker is admitted at a time. Admission is nonblocking; the worker retains its slot until it exits, including after caller abandonment. Ingress does not use the egress deadline.
 
 A scan gap means an applicable deep scan supplied no accepted result; the call is then decided on tiers 0-2. Each observed scan gap is recorded per observation and counted per session, including observations with no event row — see §10 below and `docs/known-limits.md` #21.
 
-**Shell destination extraction (Tier 2)** is what makes egress detection real. Parse the command, walk the AST, and classify each sink:
+**Shell destination classification (Tier 2).** `extract_destinations` uses shell tokenization and heuristic checks for network-command names, URLs, host-like arguments, IP literals and other destination patterns. It returns a boundary category, `local` or `external_net`; it does not build a shell AST, resolve Git remotes from configuration or trace pipeline data flow. A recognized `git push` contributes a `git-remote` marker. Tokenization failure is classified as external. External classification selects the applicable policy path; it does not by itself mean the call is denied.
 
-```text
-curl/wget/http     → external host from URL
-scp/rsync/sftp     → remote host
-ssh <host> <cmd>   → remote host
-nc/netcat          → host:port
-git push           → remote URL from config
-> /dev/tcp/...     → host:port
-pipes              → follow the chain; the last sink wins
-```
-
-Anything unparseable crossing B4 is treated as an unknown external destination and fails closed.
-
-**Interfaces.** Each tier implements `Detector.scan(text, ctx) -> list[Finding]`. Presidio sits behind this interface so it can be swapped for a local privacy-filter model without touching the ledger, and stubbed in tests.
+**Interfaces.** Detectors implement `Detector.scan(text, ctx) -> list[Finding]` and declare a `DetectorProfile` containing tier and cost. The engine schedules cheap and expensive detectors by that declaration; availability is separate runtime state. `ModelDetector` implements the expensive local `openai/privacy-filter` detector, and tests can substitute a detector with the same declared profile.
 
 ---
 
@@ -641,38 +582,21 @@ Codex provides `PLUGIN_ROOT` and `PLUGIN_DATA` for plugin-bundled hooks; the led
 
 ---
 
-## 8. Enforcement and the consent loop
+## 8. Enforcement and the unshipped consent workflow
 
-Codex `PreToolUse` supports `deny`, `allow`, and `allow + updatedInput`, but **not** `permissionDecision: "ask"`. Consent is therefore a state machine across turns rather than a modal.
+The engine can return an allow decision, a denial, or rewritten tool input. Dispatch translates these into the host's hook output. A denial is returned in `hookSpecificOutput.permissionDecision`; a rewrite is returned through `updatedInput`. Neither response confirms that the host applied it.
 
-```mermaid
-stateDiagram-v2
-    [*] --> Evaluate: PreToolUse
-    Evaluate --> Allow: no findings
-    Evaluate --> Rewrite: policy says mask/minimize
-    Evaluate --> CheckToken: findings cross B3/B4
-    CheckToken --> Allow: valid token
-    CheckToken --> Deny: no token
-    Deny --> Review: user runs $privacy
-    Review --> Mint: user picks allow-once / minimize
-    Mint --> [*]: agent retries → CheckToken
-    Rewrite --> [*]: allow + updatedInput
-    Allow --> [*]
-```
+A saved mask rule selects an outbound call by detected data type, without a source restriction. When that rule selects an otherwise eligible call, the rewriter receives all findings from the call, including other detected types. Origin-rule denials take precedence, and mask rules do not weaken the built-in handling of hard-blocked types.
 
-**Token binding.** `args_hash = SHA256(canonical_json(tool_input))`, so a token authorizes exactly one call with exactly those arguments. TTL 120 s, single use, deleted on consumption; minting again for the same call replaces the earlier token. A token cannot be replayed, cannot authorize a different payload, and cannot outlive the user's attention.
+`minimize_tool_input` rewrites detected spans in the supplied tool arguments. For supported string-command tools it returns rewritten command text; for structured MCP arguments it rewrites the scanned JSON text and parses the result. It does not read files named by a command. No `privacy-minimize` executable is shipped, and no file-upload rewrite through such a helper is implemented.
 
-**Rewrite path.** For Bash and `apply_patch`, `updatedInput` requires a string `command`; for MCP tools it is a replacement arguments object. Two rewrite strategies:
+Pseudonyms are stable within a session for the same data type and value. This describes the returned input, not confirmed delivery or successful completion of the original task.
 
-```text
-Bash    curl sentry.example.com -d "$(cat support.log)"
-     →  privacy-minimize support.log | curl sentry.example.com -d @-
+The proposed deny → review → consent token → retry workflow is not shipped. No browser button, `$privacy` branch or exposed MCP tool offers `Allow once`, `Minimize & retry`, a before/after preview or a consent-driven retry.
 
-MCP     {"body": "contact jordan@acme.com about 4412"}
-     →  {"body": "contact user_7f3a@example.invalid about 4412"}
-```
+Internal token primitives remain implemented and tested. Tokens bind the session, tool and hash of canonical tool arguments, expire after 120 seconds and are single-use. `Engine.observe` can consume them in its built-in block branch, but no shipped user-facing surface mints them. Origin-rule denials are decided before that branch.
 
-**Pseudonymization is stable per session** — the same input value always maps to the same pseudonym via `HMAC(session_salt, value)` reduced into a readable token. The agent's cross-references survive minimization, which is the difference between minimization and breaking the task.
+Already disclosed data cannot be recalled from this session.
 
 ---
 
@@ -722,7 +646,7 @@ checks the property as behaviour, with a co-occurring finding in its payload.
 
 **UI delivery.** Codex Desktop does not currently render MCP Apps inline iframe resources ([openai/codex#21019](https://github.com/openai/codex/issues/21019)), and `tui.status_line` accepts only built-in item identifiers. So:
 
-- **L2/L3** — daemon serves static HTML + vanilla JS on `127.0.0.1:<ephemeral>`; the `$privacy` skill prints the URL and an ASCII table fallback, so the demo works even with no browser.
+- **L2/L3** — the `$privacy` skill uses the bundled runtime launcher to start a separate `local_ui_server` process serving static HTML + vanilla JS on `127.0.0.1:<ephemeral>`. The hook daemon serves the Unix-domain socket, not HTTP. The skill prints the browser URL and an ASCII audit fallback.
   - **Which session either surface shows** is resolved by `mcp_tools.resolve_audit_session`: an explicit `$privacy <id>` wins, otherwise the daemon's `active_sessions` op (§2) names the session that fired a hook most recently, and only if the daemon cannot be asked does it fall back to the ledger's most-recently-*started* session — labelled as that, never as the caller's own. The skill reports concurrent active sessions; the browser labels the selected session by its full ID. `local_ui_server`'s default (`/api/session` with no `session_id`) goes through the same function but separately timed resolutions can select different sessions; the skill therefore pins its selected ID in the browser URL, and so does `ambient` — on its own much slower clock (`ambient.RESOLVE_INTERVAL`, ~30 s, against a 2 s redraw), because the identity question is the one thing the ledger cannot answer while the ambient *reading* stays a snapshot-file poll. All three surfaces therefore name one session at a time. See README known limit 8, including why the ambient line carries no marker for session ambiguity: `⚠unverified` means the record has a hole, not "I am unsure whose record this is", and one glyph cannot carry both.
   - **What the skill's terminal audit header claims** follows from its resolution: `render.audit(..., resolved=)` writes the subtitle from `ResolvedSession.basis` (`Current session` only for a single daemon-named live session; `Session <id>`, `Most recently active session`, `Most recently started session`, `No session on record` otherwise). The browser and its ASCII view pass `session_id` and show `Session <full ID>`. Without either an ID or a resolution, the renderer shows `Session ID unknown`.
 - **L1** — `privacy_hud.ambient` (entry point `privacy_hud.ambient:main`, console script `privacy-hud-ambient`): a standalone process the user runs in a second terminal pane, which reads the contract A snapshot `$PLUGIN_DATA/hud/<session_id>.json` (written by the daemon) and redraws `render.hud_line()` in place. The fallback when no patched build matches the installed Codex version; not a Codex status item itself.
@@ -738,63 +662,17 @@ The MCP tools return structured JSON regardless, so when Codex renders MCP UI th
 
 - **One daemon, many sessions.** State is keyed by `session_id` throughout; there is no global mutable session state.
 - **Writes serialized** through a single SQLite connection in WAL mode; the UI reads on a separate read-only connection.
-- **Chunk cache** is content-hash keyed and bounded (LRU, 64 MB), shared across sessions — safe because it maps content hash to *findings*, never to content.
+- **No chunk cache.** Findings are not reused across observations or sessions. Legacy ledger deduplication can avoid another score contribution, but it does not avoid scanning an unchanged payload again.
 
-**Latency budget** — the table below was a design-time estimate, never empirically verified until real weights actually loaded (every prior dev/CI environment had `ModelDetector.available == False`, so tier 3 silently never ran and this budget was never truly exercised):
+**Latency limits.** The original design estimates and measurements on short inputs do not establish current completion bounds. The hook client uses the shared 2.0-second deadline described in §2. Outbound deep scanning uses the admission and result-acceptance rules in §4; ingress does not use the egress deadline. Neither the input cap nor these deadlines guarantee detector wall-clock completion.
 
-```text
-client cold start        25 ms
-socket round trip         2 ms
-tier 0-2 scan              6 ms
-tier 3 (measured, real weights, short text)  ~280 ms
-policy + ledger write     5 ms
-                        ──────
-                    ~40 / ~320 ms
-```
+**`PostToolUse` is synchronous.** The host behavior recorded in §7 is why these hooks are not configured as asynchronous. Tool results can contain large payloads, and an applicable `openai/privacy-filter` scan can exceed the hook client's waiting budget. A size cap limits the input offered to the model; it does not establish a latency guarantee. If the client cannot obtain a usable ingress reply, it reports the observation as unverified.
 
-The original 40 ms tier-3 estimate was roughly 7x too low. The 150 ms
-target and `hooks/handler.py`'s original 120 ms client timeout were both
-calibrated against that estimate; the client timeout is now 2 s (see
-`hooks/handler.py`'s own comment for the measurement and reasoning), and
-the "comfortably under 150 ms" claim below no longer holds for any call
-that actually reaches tier 3 — those now cost several hundred ms, still
-comfortably inside Codex's own hook timeout ceiling but no longer
-imperceptible. `Engine._scan()`'s shape pre-filter (which used to skip
-tier 3 for text that didn't look email/phone/SSN-shaped) was removed
-because it silently prevented tier 3 from ever running on the categories
-it exists to catch (address, person, date, account number) — see engine.py's
-fix commit. That correctness fix is what makes this latency real rather
-than theoretical.
+**Why the current cap is stated in characters.** `MAX_TIER3_CHARS` is 8192 characters, not a byte limit. Above it, the entire deep scan is skipped and an applicable observation records an `oversize` scan gap. The cap does not establish a 40 ms scan time, a 150 ms completion bound or complete detection. Cheap detectors still inspect the full observation text.
 
-**`PostToolUse` is synchronous, and that is the honest cost.** §7's platform note explains why: Codex CLI 0.145.0 does not implement `async: true` on hooks — an event marked async is silently never executed, not deferred. So `PostToolUse` sits on the same critical path as `PreToolUse`, and it is the hook that scans the *largest* payloads in the system: tool results, meaning file contents, command output, and MCP responses — the primary ingress chokepoint described in §3.2. An unbounded synchronous scan of a large `tool_response` (a multi-hundred-KB file read, say) run through tier 3 (Presidio NER, superlinear-ish in practice) could blow past both the 150 ms budget and the hook's own 5 s hard timeout (`hooks.json`'s `"timeout": 5`), and a timed-out `PostToolUse` fails open per §2's table — meaning the largest disclosures would be exactly the ones most likely to go unrecorded if scanning were left unbounded.
+**Cheap scanning and classification.** `PathDetector` and `SecretDetector` scan the full observation text without the deep-scan size cap. Shell destination classification is a separate heuristic over command text, not a structural parse of every tool result. An oversized applicable observation skips the entire deep scan; no prefix is scanned.
 
-**Mitigation (binding on Task 10's implementation): bounded tier 3 on `PostToolUse`.**
-
-```text
-on PostToolUse(tool_response):
-  tiers 0-2 (path rules, regex+entropy, structural parse)  → always run on the FULL payload
-                                                               (cheap: ~8 ms combined per §4,
-                                                               roughly linear in size)
-  tier 3 (the NER model)                                    → skipped entirely above
-                                                               8192 characters
-
-  if len(tool_response) > 8192 chars:
-      record the event as usual, and record a scan gap (`oversize`) for the
-      observation: inference is not attempted
-      → the same "Scan gap — fast-path results only." state design.md §5 defines;
-        every scan gap is treated alike, because from the ledger's point of view
-        the effect is the same: an applicable deep scan supplied no accepted result.
-```
-
-**What ships, on truncation.** This section specified scanning the first 8 KB and marking the remainder. The engine skips the deep scan **entirely** above `MAX_TIER3_CHARS` (8192 characters) rather than scanning a prefix, and `Engine._scan` says why: a prefix scan reports a clean result for a payload it mostly did not read, and the resulting row looks the same as a fully scanned one. Skip-and-record was chosen over truncate-and-scan for that reason, and the paragraphs below are kept because the sizing argument is still the sizing argument.
-
-**Why 8 KB.** It is sized to keep tier 3's synchronous cost close to the ~40 ms figure this budget already assumes (§4's Tier 3 estimate), which was measured against a typical small-to-medium chunk, not a large file read — capping the input size is what keeps that estimate honest at any payload size, rather than letting cost scale with whatever the tool happened to return. It also comfortably clears the 150 ms target with room for tiers 0-2, the socket round trip, and the ledger write, while leaving wide margin below the 5 s hook timeout even under a slow/cold-cache tier 3 run. This is a starting point, not a tuned constant — Task 10 should treat it as adjustable pending a real measurement of tier 3 latency vs. input size on this machine, but it must ship with *some* concrete bound rather than an unbounded scan, because unbounded is the failure mode this section exists to rule out.
-
-Tiers 0-2 are deliberately left unbounded (full payload, every time): they are cheap enough not to need a cap, and skipping them on the tail of a large payload would silently reintroduce the exact "large disclosure goes unrecorded" gap tier 3's bound is meant to close for the cheap, deterministic checks (credential patterns, path rules) that do not need a model to run.
-
-This connects directly to a piece of UI that already exists for a different reason: design.md §5's degraded-state banner was designed for deep-scanner *timeout*. It now covers every scan gap — an applicable deep scan supplied no accepted result — under one string, "Scan gap — fast-path results only.", one fewer state for the UI layer to invent.
-
-**What ships, on where that is recorded.** This section says "mark the affected event degraded". The implementation records the *scan* instead, in an append-only `scan_gaps` table counted per session by `Ledger.coverage`, and the reason is the case a per-event mark cannot reach: an observation whose cheap tiers found nothing and which had a scan gap writes **no event row at all**, and is otherwise indistinguishable from a clean scan. Each observed scan gap is recorded per observation and counted per session, including observations with no event row. The cost of that choice is real and is stated in `docs/known-limits.md` #21: the audit can say a session had three scan gaps and cannot say which calls they were.
+**Scan-gap recording.** Each observed scan gap is recorded per observation in the append-only `scan_gaps` table and counted per session by `Ledger.coverage`. An observation with no findings can have a scan gap without producing an event row. The audit reports incomplete scanning through its scan-gap banners; the stored gap count does not identify which calls had gaps. See `design.md` §5 and `docs/known-limits.md` #21.
 
 ---
 
@@ -832,15 +710,13 @@ Everything except the two `Yes` rows runs without Codex, which is what makes the
 
 ---
 
-## 13. Build order
+## 13. Historical build order
 
-1. **Budget engine + ledger** — pure, testable, no platform dependency.
-2. **Detection engine** — fast path first; Presidio behind the `Detector` interface.
-3. **Hook client + plugin package** — smoke-test one real hook firing end-to-end **within the first two hours**. This is the only step with unknown platform behavior; discovering a surprise here on hour seven is the project's biggest risk.
-4. **Daemon + socket** — once the client contract is proven.
-5. **`$privacy` skill + audit UI.**
-6. **Rewrite path + consent tokens** — the demo's centerpiece.
-7. **Companion HUD, receipt, polish.**
+The original implementation sequence was ledger and budget functions, detection, hooks and daemon integration, audit surfaces, tool-argument rewriting, and ambient displays.
+
+The shipped deep detector is local `openai/privacy-filter`, not Presidio. Internal consent-token primitives exist, but no shipped surface issues consent tokens. Both the patched-Codex status item and the companion pane exist. Session receipts are text returned through hook `systemMessage`, not Markdown exports.
+
+This historical sequence is not the release plan for accounting activation. Production sessions remain legacy-accounted under the current contract at the top of this document.
 
 ---
 
