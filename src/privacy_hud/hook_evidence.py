@@ -23,6 +23,7 @@ from .accounting import (
     ActionKind,
     Boundary,
     DestinationKind,
+    EventKind,
     EventRecord,
     Evidence,
     HookEvent,
@@ -238,3 +239,13 @@ class CurrentHookAdapter:
             resolution_scope="none",
             potential_crossing=potential,
         )
+
+
+def classify_evidence(
+    *,
+    boundary: Boundary,
+    evidence: Evidence,
+) -> tuple[EventKind, ...]:
+    # P4-C5 contract scaffolding: declared, not implemented.
+    from .ledger_schema import UnsupportedAccounting
+    raise UnsupportedAccounting("evidence classification is not implemented")

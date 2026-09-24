@@ -115,6 +115,7 @@ from dataclasses import dataclass
 
 from .detect.base import Cost, Finding, is_available, profile_of
 from .detect.paths import is_sensitive_path
+from .hook_evidence import HookEvidence
 from .mask import mask, value_hash
 from .matrix.loader import HARD_BLOCKED_DATA_TYPES, UnknownKey
 from .minimize import consume_token, minimize_tool_input
@@ -424,6 +425,15 @@ class Observation:
     #: when it can be named. `None` means the source is a bare label -- a
     #: tool name or `user prompt` -- and no rule can target the row.
     origin: Origin | None = None
+    #: #54 Phase 4: the daemon-normalized evidence for a version-2 session's
+    #: delivery, or None for legacy accounting. V2 uses `accounting.turn_id`;
+    #: the legacy `turn_id` above is unchanged.
+    accounting: HookEvidence | None = None
+    #: The transient literal path the read guard evaluated, before display
+    #: collapse, and the payload's working directory. Inputs to a file
+    #: identity only; never persisted, displayed or kept in origin state.
+    evaluated_path: str | None = None
+    cwd: str = ""
 
 
 @dataclass(frozen=True)
