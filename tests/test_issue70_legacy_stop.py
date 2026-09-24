@@ -854,3 +854,25 @@ def test_uninstall_does_not_retry_a_refused_stop_with_another_interpreter(
     assert calls.read_text(encoding="utf-8").splitlines() == ["stop"]
     assert fallback.is_file()
     assert (share / "manifest.json").is_file()
+
+
+def test_classifier_refuses_other_user_without_image(tmp_path):
+    """Other-user identities have no image; ownership is the refusal."""
+    identity = {
+        "pid": 4242,
+        "uid": str(os.getuid() + 1),
+        "started": "Mon Jan  1 00:00:00 2024",
+        "args": "/usr/bin/python3 -m privacy_hud.daemon",
+        "executable": None,
+        "argv": None,
+        "launcher": None,
+    }
+
+    with pytest.raises(storage.QuiescenceRefusal) as refusal:
+        repair.classify_holder(
+            identity, tmp_path, tmp_path, interpreter=None)
+
+    assert refusal.value.check == "unverified"
+    assert refusal.value.reason == "user"
+    assert refusal.value.pids == (4242,)
+    assert refusal.value.signalled is False
