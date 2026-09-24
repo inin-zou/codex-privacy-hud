@@ -305,32 +305,53 @@ def stop_holders(data_dir, holders: dict, *, deadline: float) -> None:
     raise RuntimeRefusal("holder_unknown")
 
 
-def _quiesce(data_dir: Path, bundle: Path) -> None:
-    """Leave nothing holding the ledger, or refuse.
+def _quiesce(data_dir: Path, bundle: Path, *, progress=None,
+             settle: bool = True) -> bool:
+    """Leave nothing holding the ledger, or refuse. Returns whether a stop
+    signal was sent.
 
     Discovery is about files, not about names: `open_holders` answers who
     has the database or a sidecar open. What this adds is the one
     distinction repair is entitled to make — a Privacy HUD runtime this
     installation owns may be asked to exit; anything else is a holder
     whose business this is not.
+
+    `settle` is repair's: after any stop, wait out a heartbeat the stopped
+    daemon left behind (#71), rechecking holders and the socket on every
+    pass. The stop-only operation answers a narrower question and only
+    rechecks holders.
     """
     deadline = time.monotonic() + QUIESCE_TIMEOUT
     holders = {pid for pid in runtime_storage.open_holders(data_dir)
                if pid != os.getpid()}
-    if not holders:
-        return
-    owned: dict[int, dict] = {}
-    for pid in sorted(holders):
-        identity = process_identity(pid)
-        if identity is None:
-            continue  # exited between discovery and identification
-        if not _is_owned_runtime(identity, data_dir, bundle):
+    signalled = False
+    if holders:
+        owned: dict[int, dict] = {}
+        for pid in sorted(holders):
+            identity = process_identity(pid)
+            if identity is None:
+                continue  # exited between discovery and identification
+            if not _is_owned_runtime(identity, data_dir, bundle):
+                raise RuntimeRefusal("holder_unknown")
+            owned[pid] = identity
+        stop_holders(data_dir, owned, deadline=deadline)
+        signalled = bool(owned)
+    if not settle:
+        if {pid for pid in runtime_storage.open_holders(data_dir)
+                if pid != os.getpid()}:
             raise RuntimeRefusal("holder_unknown")
-        owned[pid] = identity
-    stop_holders(data_dir, owned, deadline=deadline)
-    if {pid for pid in runtime_storage.open_holders(data_dir)
-            if pid != os.getpid()}:
-        raise RuntimeRefusal("holder_unknown")
+        return signalled
+
+    def announce() -> None:
+        if progress is not None:
+            progress(runtime_messages.HEARTBEAT_WAITING)
+
+    try:
+        runtime_storage.await_quiescence(data_dir, on_wait=announce)
+    except runtime_storage.QuiescenceRefusal as refusal:
+        refusal.signalled = signalled
+        raise
+    return signalled
 
 
 def stop_selected_runtime(data_dir) -> bool:
@@ -349,7 +370,7 @@ def stop_selected_runtime(data_dir) -> bool:
         # answers honestly rather than signalling on a guess.
         bundle = root
     try:
-        _quiesce(root, bundle)
+        _quiesce(root, bundle, settle=False)
     except RuntimeRefusal:
         return False
     return True
@@ -562,6 +583,9 @@ def repair_runtime(bundle_root: Path, data_dir: Path, *,
     """Select `bundle_root`, move the ledger behind the fence, and start a
     matching daemon. See the module docstring for the ordered steps.
 
+    `progress`, when given, is called with fixed progress copy from
+    `runtime_messages` as steps that can take a while begin.
+
     A failed preflight preserves the existing receipt and ledger location.
     A later failure may leave a fenced store or a published selection.
     Retry resumes from the recorded selection and filesystem state.
@@ -586,7 +610,7 @@ def repair_runtime(bundle_root: Path, data_dir: Path, *,
 
     with runtime_storage.acquire_transition(root):
         runtime_storage.validate_existing_ledger(root)
-        _quiesce(root, bundle)
+        signalled = _quiesce(root, bundle, progress=progress)
         lease_activation = unselected_activation()
         if classify_receipt(root) == "v2":
             receipt = read_receipt(root)
@@ -600,8 +624,12 @@ def repair_runtime(bundle_root: Path, data_dir: Path, *,
                 python=candidate,
             )
         with acquire_writer(root, activation=lease_activation) as lease:
-            cutover = runtime_storage.prepare_storage(
-                root, activation=lease.activation)
+            try:
+                cutover = runtime_storage.prepare_storage(
+                    root, activation=lease.activation)
+            except runtime_storage.QuiescenceRefusal as refusal:
+                refusal.signalled = refusal.signalled or signalled
+                raise
             _retire_snapshots(root, cutover.transition_id)
             runtime_storage.record_stage(root, cutover.transition_id,
                                          "snapshots_retired",
@@ -652,6 +680,32 @@ _REFUSAL_COPY = {
 }
 
 
+#: `"diagnostic"` in the one line a quiescence refusal prints to stderr.
+QUIESCENCE_DIAGNOSTIC = "quiescence_refusal"
+
+
+def quiescence_diagnostic(refusal: runtime_storage.QuiescenceRefusal) -> dict:
+    """The allowlisted facts about a quiescence refusal (#71).
+
+    Captured inside the failing invocation, because a probe run afterwards
+    can miss a race. Fixed identifiers, holder pids, an errno, a heartbeat
+    age, a timestamp and the release: nothing here is a path, a ledger
+    value, an id, a hash or exception text (I1), and nothing is written
+    to disk.
+    """
+    return {
+        "diagnostic": QUIESCENCE_DIAGNOSTIC,
+        "release": RELEASE,
+        "time": round(time.time(), 3),
+        "check": refusal.check,
+        "reason": refusal.reason,
+        "pids": list(refusal.pids),
+        "errno": refusal.errno,
+        "heartbeat_age": refusal.heartbeat_age,
+        "signalled": bool(refusal.signalled),
+    }
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="privacy-hud-repair")
     parser.add_argument("--bundle-root", required=True, metavar="DIR")
@@ -681,6 +735,7 @@ def main(argv: list[str] | None = None, *, out=None, err=None) -> int:
     that the transition did not complete and their files were preserved.
     """
     stream = sys.stdout if out is None else out
+    errors = sys.stderr if err is None else err
     try:
         args = _parser().parse_args(sys.argv[1:] if argv is None else argv)
     except SystemExit as exc:
@@ -691,9 +746,13 @@ def main(argv: list[str] | None = None, *, out=None, err=None) -> int:
         result = repair_runtime(
             bundle, data_dir,
             python=Path(args.python) if args.python else None,
-            allow_degraded=args.allow_degraded)
+            allow_degraded=args.allow_degraded,
+            progress=lambda message: print(message, file=stream, flush=True))
     except RuntimeRefusal as refusal:
         _report_failure(refusal.code, bundle, data_dir, stream)
+        if isinstance(refusal, runtime_storage.QuiescenceRefusal):
+            print(json.dumps(quiescence_diagnostic(refusal),
+                             sort_keys=True), file=errors)
         return 1
     except OSError:
         # Deliberately not the exception: an errno and a pathname are a

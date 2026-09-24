@@ -495,3 +495,25 @@ def read_daemon_marker(data_dir, *, now: float | None = None,
     if not ignore_staleness and now - float(updated_at) > STALE_AFTER:
         return None
     return gaps
+
+
+def daemon_marker_age(data_dir, *, now: float | None = None) -> float | None:
+    """Seconds since `_daemon.json`'s `updated_at`, when
+    `read_daemon_marker` would call the marker fresh, else `None`.
+
+    For repair's quiescence gate and its diagnostics (#71): the age is the
+    one fact about the file they report, and the gate waits on it. The same
+    validity and freshness rules as `read_daemon_marker`, so the two never
+    disagree about whether a marker counts.
+    """
+    doc = _load(hud_dir(data_dir) / _DAEMON_MARKER)
+    if doc is None or doc.get("v") != DAEMON_MARKER_VERSION:
+        return None
+    gaps, updated_at = doc.get("unattributed_gaps"), doc.get("updated_at")
+    if not (isinstance(gaps, bool) and _is_num(updated_at)):
+        return None
+    now = time.time() if now is None else now
+    age = now - float(updated_at)
+    if age > STALE_AFTER:
+        return None
+    return age
