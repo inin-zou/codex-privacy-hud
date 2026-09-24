@@ -49,9 +49,9 @@ class Crash(Exception):
 # helpers
 # --------------------------------------------------------------------- #
 
-def start_observation(session_id: str, **changes) -> ObservationRecord:
+def start_observation(sid: str, /, **changes) -> ObservationRecord:
     values = dict(
-        session_id=session_id, delivery_key=secrets.token_hex(16),
+        session_id=sid, delivery_key=secrets.token_hex(16),
         action_id=secrets.token_hex(16), turn_id=None, ts=int(time.time()),
         hook_event="SessionStart", phase="lifecycle",
         action_kind="lifecycle", boundary="B0", decision="none",

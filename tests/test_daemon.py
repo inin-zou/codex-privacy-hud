@@ -1562,6 +1562,18 @@ def test_a_session_that_never_ends_does_not_pin_the_daemon(lifetime_daemon,
         session_stale_after=0.05, idle_timeout=3600.0)
     _session_start(sock_path, "leaked")
     assert daemon.live_sessions() == 1
+    # #54 Phase 4: a daemon that has stopped discards every session's
+    # in-memory identity before giving up ownership, so what the sweep left
+    # alone is read at that moment, not after it.
+    at_shutdown: list[tuple[set, set]] = []
+    discard = daemon._discard_session_identities
+
+    def record_then_discard():
+        at_shutdown.append((set(startup_state.salts),
+                            set(startup_state.engines)))
+        discard()
+
+    daemon._discard_session_identities = record_then_discard
 
     daemon.linger_grace = 0.01
     thread.join(timeout=10.0)
@@ -1576,8 +1588,11 @@ def test_a_session_that_never_ends_does_not_pin_the_daemon(lifetime_daemon,
         "SELECT ended_at FROM sessions WHERE session_id=?",
         ("leaked",)).fetchone()[0]
     assert ended is None, "the staleness sweep ended a session it only guessed"
-    assert "leaked" in startup_state.salts
-    assert "leaked" in startup_state.engines
+    assert len(at_shutdown) == 1
+    salts, engines = at_shutdown[0]
+    assert "leaked" in salts
+    assert "leaked" in engines
+    assert "leaked" not in startup_state.salts
 
 
 def test_the_absolute_cap_bounds_the_daemon_even_with_a_live_session(

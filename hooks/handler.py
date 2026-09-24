@@ -97,7 +97,7 @@ EXIT_ALREADY_RUNNING = 3
 # tests/test_runtime_protocol.py pins every one of them.
 PROTOCOL_VERSION = 2
 STORAGE_GENERATION = 1
-READABLE_SCHEMAS = (0, 5401)
+READABLE_SCHEMAS = (0, 5401, 5402)
 HELLO_FRAME_LIMIT = 16384  # 16 KiB
 EVENT_FRAME_LIMIT = 8388608  # 8 MiB
 HELLO_REPLY_FIELDS = ("v", "op", "ok", "release", "build_id",

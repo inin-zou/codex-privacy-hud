@@ -11,7 +11,9 @@ Three generations, recorded in `PRAGMA user_version`:
   `events_legacy_v1`. Production sessions remain legacy-accounted;
   isolated synthetic tests and the private-copy rehearsal may exercise
   version-2 accounting without activating production session creation.
-- 5402: activated (#54 Phase 4). A daemon of this version refuses it.
+- 5402: activated (#54 Phase 4). Genuine starts for absent sessions
+  use V2; existing sessions and late attachments retain their own
+  accounting. The activated layout is the prepared one.
 
 The rebuild is the one structural change CLAUDE.md §4 permits. It runs
 only inside a write transaction the daemon owns at a genuine new-session

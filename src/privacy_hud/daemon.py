@@ -78,6 +78,7 @@ from pathlib import Path
 
 from . import codex
 from .dispatch import (
+    _discard_session_identity,
     State,
     _deny,
     active_sessions,
@@ -1143,6 +1144,20 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
                     "another process owns the ledger") from exc
             raise
 
+    def _discard_session_identities(self) -> None:
+        """Clear every registered engine and drop every accounting key,
+        salt and start time this daemon holds (#54 Phase 4). Nothing is
+        written: shutdown fabricates no SessionEnd and ends no session, so
+        an open version-2 session is simply left without a key -- the next
+        daemon marks it unavailable."""
+        state = getattr(self, "state", None)
+        if state is None:
+            return
+        with state.lock:
+            for session_id in (set(state.engines) | set(state.accounting_keys)
+                               | set(state.salts) | set(state.started_at)):
+                _discard_session_identity(state, session_id)
+
     def _release_writer_lease(self) -> None:
         """Give the writer lease back. Idempotent, and a no-op for a daemon
         that never took one."""
@@ -1460,9 +1475,14 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
                 # after our socket file is gone: while that file exists a
                 # client can still reach us, and a daemon answering
                 # requests it may no longer write would be worse than one
-                # that is simply not there.
-                self._release_writer_lease()
-                self._release_startup_lock()
+                # that is simply not there. Session identity goes first
+                # (#54 Phase 4): the workers have drained, so no request
+                # can use a key after this, and none outlives ownership.
+                try:
+                    self._discard_session_identities()
+                finally:
+                    self._release_writer_lease()
+                    self._release_startup_lock()
 
 
 def _default_socket_path(data_dir: Path) -> Path:

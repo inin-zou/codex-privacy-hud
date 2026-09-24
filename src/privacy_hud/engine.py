@@ -579,8 +579,14 @@ class Engine:
     def __init__(self, *, ledger, matrix, salt: bytes, detectors: list,
                  settings=None, accounting_key: bytes | None = None):
         self.ledger = ledger
-        #: P4-C3 scaffolding: accepted, not yet owned.
+        #: #54 Phase 4: this session's version-2 accounting key, installed
+        #: by the daemon only after the session's activation committed, or
+        #: None. Separate from `salt`, the enforcement salt: a replacement
+        #: enforcement engine never recreates accounting identity.
         self.accounting_key = accounting_key
+        #: Set by `clear_session_identity`; the engine then takes no further
+        #: identity-bearing observation work.
+        self._identity_cleared = False
         self.matrix = matrix
         self.salt = salt
         self.detectors = detectors
@@ -614,7 +620,16 @@ class Engine:
         self._read_notice_shown = False
 
     def clear_session_identity(self) -> None:
-        """P4-C3 contract scaffolding: declared, not implemented."""
+        """Discard this engine's session identity (#54 Phase 4): the
+        accounting-key reference, the salt reference and every origin
+        association keyed by it. The engine is unusable for identity-bearing
+        observation work afterwards; `scan` stays usable because it never
+        touched identity. Idempotent. This drops references; it does not
+        promise that Python memory is wiped."""
+        self.accounting_key = None
+        self.salt = b""
+        self._origins.clear()
+        self._identity_cleared = True
 
     # -- Ruling 2: destination normalization --------------------------
     def _normalize_destination(self, destination: str) -> str:
@@ -947,6 +962,11 @@ class Engine:
             result it would have gotten had the two phases run back to
             back.
         """
+        if self._identity_cleared:
+            # A cleared engine must not hash, remember or record anything
+            # for its session again (#54 Phase 4). `dispatch` re-resolves
+            # the session's engine under the lock, so it never gets here.
+            raise RuntimeError("this engine's session identity was cleared")
         if scan is None:
             scan = self.scan(obs)
         dest_kind = scan.dest_kind
