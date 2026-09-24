@@ -237,7 +237,7 @@ def test_browser_rejects_malformed_v2_summary(v2ui):
     assert status == 200
     for change in ({"unresolved_actions": None},
                    {"confirmed_points": "0"}, {"denials_issued": True},
-                   {"percent": 1e309}, {"observations": -1},
+                   {"percent": 101}, {"observations": -1},
                    {"denials_issued": 1.5}):
         broken = dict(good)
         broken["summary"] = {**good["summary"], **change}

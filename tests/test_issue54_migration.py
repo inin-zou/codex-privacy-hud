@@ -126,7 +126,10 @@ def test_migration_preserves_every_legacy_cell(legacy):
 
     raw = _raw(legacy)
     try:
-        assert _version(raw) == 5401
+        # #54 Phase 4: the genuine start upgrades generation 0 directly to
+        # activated storage and is itself version-2 accounted; the Phase 2
+        # rebuild inside that upgrade still preserves every legacy cell.
+        assert _version(raw) == 5402
         assert NEW_TABLES <= _tables(raw)
         assert _cells(raw, "events_legacy_v1") == before_events
         sessions = _cells(raw, "sessions")
@@ -134,9 +137,9 @@ def test_migration_preserves_every_legacy_cell(legacy):
         assert [s[:width] for s in sessions[:len(before_sessions)]] == \
             before_sessions
         new = raw.execute(
-            "SELECT accounting_version, accounting_status, profile_id"
+            "SELECT accounting_version, accounting_status"
             " FROM sessions WHERE session_id='new1'").fetchone()
-        assert new == (1, "legacy", None)
+        assert new == (2, "available")
     finally:
         raw.close()
 

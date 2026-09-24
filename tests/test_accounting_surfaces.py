@@ -213,9 +213,9 @@ def test_snapshot_publish_v2_preserves_null(led, tmp_path):
     numeric = start_v2(led)
     led.record_observation(crossed(numeric), [event()])
     n = led.summary(numeric)
-    publisher.publish(numeric, summary=n, unverified=True)
+    publisher.publish(numeric, summary=n, unverified=False)
     doc = json.loads(hs.snapshot_path(tmp_path, numeric).read_text())
-    assert doc["percent"] == n.percent and doc["unverified"] is True
+    assert doc["percent"] == n.percent and doc["unverified"] is False
     assert doc["confirmed_points"] == n.confirmed_points
 
 

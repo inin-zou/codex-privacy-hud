@@ -306,12 +306,11 @@ def test_new_metadata_has_no_planted_sensitive_bytes(led, tmp_path, caplog):
     rows = [r.to_exposure() for kind in ("exposed", "prevented")
             for r in led.list_events(sid, kind)]
     details = [led.get_event(sid, r.id) for r in rows]
-    refusals = []
-    for call in (lambda: render.receipt(sid, summary, rows, None),
-                 lambda: render.detail(rows[0])):
-        with pytest.raises(UnsupportedAccounting) as caught:
-            call()
-        refusals.append(str(caught.value))
+    # #54 Phase 4: the surfaces render version 2 now, and what they render
+    # carries no planted byte either.
+    refusals = [render.receipt(sid, summary, rows, None),
+                *(render.detail(r) for r in rows),
+                render.audit(summary, rows, "All events", session_id=sid)]
     led.conn.set_trace_callback(None)
     led.end_session(sid)
 

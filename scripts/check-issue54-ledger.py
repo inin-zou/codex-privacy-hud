@@ -943,16 +943,22 @@ def _check_synthetic_v2(path: Path) -> None:
     finally:
         led.conn.close()
 
-    # A genuine production start on this copy is still legacy.
+    # A frozen Phase 3 compatibility scenario, not a claim about current
+    # production. Phase 3 production created a legacy session through the
+    # legacy session boundary; that path is replayed here, explicitly, and
+    # must still yield a legacy session on a prepared copy. Since #54 Phase
+    # 4 a genuine production SessionStart activates version-2 accounting,
+    # which only the Phase 4 rehearsal exercises. The check keeps its fixed
+    # name so historical output stays comparable.
     production = _PRODUCTION_PREFIX + uuid.uuid4().hex
     with _silenced():
         state = dispatch.new_state(path.parent,
                                    writer_lease=_lease(path))
     try:
-        with _silenced():
-            dispatch.dispatch(state, {"hook_event_name": "SessionStart",
-                                      "session_id": production, "cwd": "",
-                                      "model": ""})
+        with state.ledger._write_transaction():
+            if not state.ledger.session_exists(production):
+                state.ledger.prepare_session_boundary(production)
+            state.ledger.start_session(production, cwd="", model="")
         version = state.ledger.conn.execute(
             "SELECT accounting_version FROM sessions WHERE session_id=?",
             (production,)).fetchone()

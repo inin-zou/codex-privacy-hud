@@ -188,13 +188,14 @@ def test_phase3_summary_and_refusal_copy_is_exact():
         "not a measurement of harm. Permission, a returned denial, a returned "
         "rewrite, and a successful tool result do not by themselves confirm "
         "disclosure or host enforcement.")
-    assert accounting.PHASE3_SURFACE_UNSUPPORTED == (
-        "This Privacy HUD surface does not support version-2 accounting "
-        "in 0.8.2.")
-    assert json.dumps({"error": accounting.PHASE3_SURFACE_UNSUPPORTED},
+    # #54 Phase 4 retired the Phase 3 surface refusal: version-2 sessions
+    # are presented, and corrupt accounting has Phase 4's fixed error.
+    assert not hasattr(accounting, "PHASE3_SURFACE_UNSUPPORTED")
+    from privacy_hud import render
+    assert json.dumps({"error": render.ACCOUNTING_READ_ERROR},
                       separators=(",", ":")) == (
-        '{"error":"This Privacy HUD surface does not support version-2 '
-        'accounting in 0.8.2."}')
+        '{"error":"Privacy HUD accounting could not be read. No percentage '
+        'or counts are available."}')
 
 
 def test_phase3_source_module_documentation_matches_verbatim():

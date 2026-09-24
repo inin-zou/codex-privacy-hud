@@ -367,15 +367,16 @@ def test_upgrade_071_running_daemon_wal_then_old_restart(upgrade):
     # 9. repair itself retained generation 0
     assert _generation(active) == 0
 
-    # 10. a genuine new-session boundary prepares 5401, and production
-    #     accounting stays legacy
+    # 10. a genuine new-session boundary rebuilds and activates the ledger
+    #     in one transaction (#54 Phase 4): generation 5402, the new
+    #     session version-2 accounted, the existing one still legacy
     activation = contract.load_activation(data)
     with runtime_client.connect_runtime(data, activation=activation,
                                         timeout=30.0) as connection:
         connection.request(runtime_client.OP_EVENT, {"payload": {
             "hook_event_name": "SessionStart", "session_id": NEW_SESSION,
             "cwd": "/work", "model": "gpt-5"}})
-    assert _generation(active) == ledger_schema.PREPARED_VERSION
+    assert _generation(active) == ledger_schema.ACTIVATED_VERSION
     after = _cells(active)
     assert after["events_legacy_v1"] == before_cells["events"]
     assert not after["events"], (
@@ -385,6 +386,8 @@ def test_upgrade_071_running_daemon_wal_then_old_restart(upgrade):
     try:
         summary = mcp_tools.get_session_summary(ledger, OLD_SESSION)
         assert summary.accounting_version == 1
+        assert mcp_tools.get_session_summary(
+            ledger, NEW_SESSION).accounting_version == 2
     finally:
         ledger.conn.close()
 
@@ -396,7 +399,7 @@ def test_upgrade_071_running_daemon_wal_then_old_restart(upgrade):
     assert historical.returncode != 0
     assert storage.legacy_path(data).is_dir()
     assert _cells(active) == frozen
-    assert _generation(active) == ledger_schema.PREPARED_VERSION
+    assert _generation(active) == ledger_schema.ACTIVATED_VERSION
 
     # 13. the surfaces a user reaches, on the repaired installation
     audit = runtime_commands.audit(data, activation=activation,

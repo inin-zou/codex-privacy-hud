@@ -17,7 +17,6 @@ from pathlib import Path
 
 import pytest
 
-from privacy_hud import dispatch as dispatch_mod
 from privacy_hud import local_ui_server
 
 REPO = Path(__file__).resolve().parents[1]
@@ -166,9 +165,10 @@ def _run(*, base: str = "", search: str = "", routes: dict | None = None,
 
 
 def _start(state, session_id: str) -> None:
-    dispatch_mod.dispatch(state, {
-        "hook_event_name": "SessionStart", "session_id": session_id,
-        "cwd": "/w", "model": "gpt-5", "turn_id": "t1"})
+    """A legacy-accounted session, as 0.8.x recorded one. A genuine
+    SessionStart now creates a version-2 session (#54 Phase 4), so the
+    legacy page is exercised on a session that existed before activation."""
+    state.ledger.start_session(session_id, cwd="/w", model="gpt-5")
 
 
 @pytest.fixture

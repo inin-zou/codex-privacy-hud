@@ -62,10 +62,8 @@ def start_observation(sid: str, /, **changes) -> ObservationRecord:
 
 
 def activating_state(data_dir: Path):
-    """The daemon's state, with activation of genuine starts enabled."""
-    state = writer_state(data_dir)
-    state.accounting_activation = True
-    return state
+    """The daemon's state. Genuine starts activate accounting."""
+    return writer_state(data_dir)
 
 
 def start(state, sid: str, **extra) -> dict:
@@ -475,7 +473,6 @@ def test_restart_marks_open_v2_unavailable_before_publication(
 
     monkeypatch.setattr(hs.HudPublisher, "sweep", sweep)
     fresh = writer_state(tmp_path)
-    fresh.accounting_activation = True
     try:
         assert observed == ["unavailable"]
         conn = fresh.ledger.conn
@@ -500,7 +497,6 @@ def test_crash_after_activation_commit_does_not_replace_key(tmp_path):
     start(state, "s1")
     old_key = state.accounting_keys["s1"]
     fresh = restart(state, tmp_path)
-    fresh.accounting_activation = True
     try:
         conn = fresh.ledger.conn
         row = session_row(conn, "s1")
@@ -732,7 +728,6 @@ def test_accounting_activation_does_not_rotate_runtime_epoch(tmp_path):
     selected = load_activation(root)
     layout = sorted(p.name for p in root.iterdir())
     state = writer_state(root, selected=selected)
-    state.accounting_activation = True
     try:
         start(state, "s1")
         assert session_row(state.ledger.conn, "s1")[

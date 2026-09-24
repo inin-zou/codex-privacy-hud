@@ -1084,7 +1084,6 @@ def test_v2_hook_pipeline_has_no_outbound_network(network_guard, tmp_path,
 
     monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))
     state = writer_state(tmp_path)
-    state.accounting_activation = True
     state.detectors = [PathDetector(), SecretDetector(), EmailDetector()]
     try:
         for payload in (

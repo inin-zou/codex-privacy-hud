@@ -270,14 +270,17 @@ def test_ambient_names_unattributed_gaps_without_a_number(data_dir,
 
 # -- dispatch ---------------------------------------------------------------
 
-def test_session_start_publishes_a_legacy_snapshot(state, tmp_path):
+def test_session_start_publishes_a_version_2_snapshot(state, tmp_path):
+    """A genuine start is version-2 accounted since #54 Phase 4, and its
+    snapshot says so; a legacy session's snapshot is pinned above."""
     from privacy_hud import dispatch as dispatch_mod
     dispatch_mod.dispatch(state, {
         "hook_event_name": "SessionStart", "session_id": SID,
         "cwd": "/w", "model": "gpt-5", "turn_id": "t1"})
     doc = _doc(tmp_path)
-    assert doc["v"] == 2 and doc["accounting_version"] == 1
-    assert doc["percent"] == 0
+    assert doc["v"] == 2 and doc["accounting_version"] == 2
+    assert doc["percent"] == 0 and doc["legacy_prevented_rows"] is None
+    assert (doc["denials_issued"], doc["unresolved_actions"]) == (0, 0)
 
 
 def test_the_publisher_never_reads_the_summary_through_int(state, tmp_path):

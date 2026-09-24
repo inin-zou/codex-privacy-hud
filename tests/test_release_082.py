@@ -45,10 +45,10 @@ def test_what_0_8_2_does_not_move():
     assert contract.SNAPSHOT_VERSIONS == (2,)
 
 
-def test_surface_refusal_names_this_release():
-    assert accounting.PHASE3_SURFACE_UNSUPPORTED == (
-        "This Privacy HUD surface does not support version-2 accounting "
-        "in 0.8.2.")
+def test_surface_refusal_is_retired():
+    """#54 Phase 4 replaced the Phase 3 surface refusal with real version-2
+    surfaces; the refusal constant is gone from production code."""
+    assert not hasattr(accounting, "PHASE3_SURFACE_UNSUPPORTED")
 
 
 def test_changelog_has_a_0_8_2_section_above_0_8_1():

@@ -70,7 +70,9 @@ def _start(st, session_id="s1"):
 def test_session_start_creates_session(tmp_path):
     st = writer_state(tmp_path)
     _start(st)
-    assert st.ledger.summary("s1").legacy_percent == 0
+    # A genuine start is version-2 accounted since #54 Phase 4.
+    summary = st.ledger.summary("s1")
+    assert summary.accounting_version == 2 and summary.percent == 0
 
 
 def test_session_start_returns_empty_hook_output(tmp_path):
@@ -102,7 +104,8 @@ def test_pretooluse_bash_local_command_is_allowed(tmp_path):
         "hook_event_name": "PreToolUse", "session_id": "s1", "turn_id": "t1",
         "tool_name": "Bash", "tool_input": {"command": "ls -la"}})
     assert out == {}
-    assert st.ledger.summary("s1").legacy_permitted_crossing_rows == 0
+    summary = st.ledger.summary("s1")
+    assert summary.event_rows == 0 and summary.exposure_events == 0
 
 
 def test_pretooluse_mcp_tool_classifies_as_mcp_destination(tmp_path):
@@ -137,7 +140,10 @@ def test_posttooluse_records_an_exposure(tmp_path):
     _start(st)
     dispatch(st, {"hook_event_name": "PostToolUse", "session_id": "s1",
                   "tool_name": "Read", "tool_response": f"key={CREDENTIAL}"})
-    assert st.ledger.summary("s1").legacy_permitted_crossing_rows >= 1
+    # Version 2 records the finding event; a tool result alone confirms no
+    # crossing, so nothing is an exposure yet (#54 Phase 4).
+    summary = st.ledger.summary("s1")
+    assert summary.event_rows >= 1 and summary.exposure_events == 0
 
 
 def test_userpromptsubmit_is_ingress_to_model_context(tmp_path):
@@ -147,7 +153,7 @@ def test_userpromptsubmit_is_ingress_to_model_context(tmp_path):
                         "session_id": "s1",
                         "prompt": f"here is my key {CREDENTIAL}"})
     assert "deny" not in json.dumps(out)
-    assert st.ledger.summary("s1").legacy_permitted_crossing_rows >= 1
+    assert st.ledger.summary("s1").event_rows >= 1
 
 
 def test_subagentstart_propagates_without_denying(tmp_path):
@@ -573,9 +579,12 @@ def test_daemon_still_allows_non_pretooluse_when_dispatch_raises_internally(
 
 def test_concurrent_calls_for_the_same_session_do_not_corrupt_the_ledger(running_daemon):
     daemon, sock_path = running_daemon
-    _raw_call(sock_path, {"hook_event_name": "SessionStart",
-                          "session_id": "sockc", "cwd": "/r",
-                          "model": "gpt-5"})
+    # A legacy-accounted session, as 0.8.x recorded one: the legacy writer's
+    # budget read-modify-write is what this test holds under concurrency. A
+    # genuine SessionStart would be version-2 accounted (#54 Phase 4), whose
+    # concurrency is covered by tests/test_accounting_dispatch.py.
+    with daemon.state.lock:
+        daemon.state.ledger.start_session("sockc", cwd="/r", model="gpt-5")
 
     errors = []
 
@@ -645,8 +654,9 @@ def test_concurrent_calls_for_the_same_session_do_not_corrupt_the_ledger(running
     score = conn.execute(
         "SELECT budget_score FROM sessions WHERE session_id=?",
         ("sockc",)).fetchone()[0]
+    table = daemon.state.ledger._legacy_events_table()
     delta_sum = conn.execute(
-        "SELECT COALESCE(SUM(budget_delta), 0) FROM events_legacy_v1"
+        f"SELECT COALESCE(SUM(budget_delta), 0) FROM {table}"
         " WHERE session_id=?",
         ("sockc",)).fetchone()[0]
     assert score == pytest.approx(delta_sum), (
@@ -656,7 +666,7 @@ def test_concurrent_calls_for_the_same_session_do_not_corrupt_the_ledger(running
     # here, and every recorded delta must have been an increment.
     assert score >= 0
     assert conn.execute(
-        "SELECT COUNT(*) FROM events_legacy_v1 WHERE budget_delta < 0").fetchone()[0] == 0
+        f"SELECT COUNT(*) FROM {table} WHERE budget_delta < 0").fetchone()[0] == 0
 
     # Dedupe survived the interleaving: UNIQUE(session_id, value_hash,
     # destination) is enforced by Ledger.record's SELECT-then-INSERT, which
@@ -664,7 +674,7 @@ def test_concurrent_calls_for_the_same_session_do_not_corrupt_the_ledger(running
     # here would mean two threads both passed the SELECT before either
     # INSERTed.
     dupes = conn.execute(
-        "SELECT COUNT(*) FROM (SELECT value_hash, destination FROM events_legacy_v1"
+        f"SELECT COUNT(*) FROM (SELECT value_hash, destination FROM {table}"
         " WHERE session_id=? GROUP BY value_hash, destination"
         " HAVING COUNT(*) > 1)", ("sockc",)).fetchone()[0]
     assert dupes == 0
@@ -882,8 +892,8 @@ def test_a_session_ending_mid_scan_does_not_reuse_the_discarded_salt(tmp_path):
     from privacy_hud.dispatch import dispatch
 
     st = writer_state(tmp_path)
-    dispatch(st, {"hook_event_name": "SessionStart", "session_id": "race",
-                  "cwd": "/r", "model": "gpt-5"})
+    # A legacy session (version 2's race is in test_accounting_dispatch).
+    st.ledger.start_session("race", cwd="/r", model="gpt-5")
 
     # Fire SessionEnd from inside the scan, i.e. exactly in the window the
     # split opens. Patching `Engine.scan` is how we make that window
@@ -916,7 +926,8 @@ def test_a_session_ending_mid_scan_does_not_reuse_the_discarded_salt(tmp_path):
     ) == seen["ended_session"]
 
     rows = st.ledger.conn.execute(
-        "SELECT value_hash, budget_delta FROM events_legacy_v1"
+        "SELECT value_hash, budget_delta FROM"
+        f" {st.ledger._legacy_events_table()}"
         " WHERE session_id='race'").fetchall()
     assert rows
     assert all(row["value_hash"] is None for row in rows)
@@ -2210,7 +2221,6 @@ def test_daemon_shutdown_discards_registered_identity(tmp_path, monkeypatch):
 
     sock_dir = tempfile.mkdtemp(prefix="phd")
     state = writer_state(tmp_path / "data")
-    state.accounting_activation = True
     dispatch(state, {"hook_event_name": "SessionStart", "session_id": "k1",
                      "cwd": "/r", "model": "gpt-5"})
     dispatch(state, {"hook_event_name": "SessionStart", "session_id": "k2",

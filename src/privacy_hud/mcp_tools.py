@@ -84,6 +84,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from .accounting import AccountingEventRow, Evidence
 from .ledger import ExposureRow, Ledger, SessionCoverage, SessionSummary
 from .matrix.loader import HARD_BLOCKED_DATA_TYPES
 from .minimize import mint_token
@@ -547,6 +548,19 @@ def list_exposures(
     rows: list[ExposureRow] = []
     with ledger._read_transaction():
         version2 = ledger._accounting_version(session_id) == 2
+        if version2 and tab == "Prevented":
+            # #54 Phase 4: interventions are prevention evidence OR an
+            # issued rewrite, each row once, in event-ID order -- the same
+            # selection `AccountingSummary.intervention_events` counts.
+            found: list[AccountingEventRow] = []
+            for kind in _V2_TAB_KINDS["All events"]:
+                found.extend(
+                    r for r in ledger.list_events(session_id, kind)
+                    if isinstance(r, AccountingEventRow)
+                    and (r.kind == "prevented"
+                         or bool(r.evidence & Evidence.REWRITE_ISSUED)))
+            found.sort(key=lambda r: r.id)
+            return [r.to_exposure() for r in found]
         kinds = (_V2_TAB_KINDS if version2 else _TAB_KINDS)[tab]
         for kind in kinds:
             rows.extend(r.to_exposure()

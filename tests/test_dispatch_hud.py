@@ -34,6 +34,13 @@ def _prompt(state, text, sid=SID):
                                      "prompt": text})
 
 
+def _legacy_session(state):
+    """A legacy-accounted session, as 0.8.x recorded one: `events.source`
+    and `source_kind` (#40) are legacy columns. A genuine SessionStart is
+    version-2 accounted since #54 Phase 4, whose source labels are opaque."""
+    state.ledger.start_session(SID, cwd="/w", model="gpt-5")
+
+
 def _hook(state, event, **fields):
     return dispatch.dispatch(
         state, {"hook_event_name": event, "session_id": SID, "cwd": "/w",
@@ -43,7 +50,10 @@ def _hook(state, event, **fields):
 def test_session_start_publishes_a_zero_snapshot(state, tmp_path):
     _start(state)
     snap = hs.read_snapshot(tmp_path, SID)
-    assert snap is not None and snap.percent == 0 and snap.legacy_prevented_rows == 0
+    # A genuine start is version-2 accounted since #54 Phase 4.
+    assert snap is not None and snap.accounting_version == 2
+    assert (snap.percent, snap.denials_issued, snap.unresolved_actions,
+            snap.legacy_prevented_rows) == (0, 0, 0, None)
 
 
 def test_an_observation_republishes_the_ledger_numbers(state, tmp_path):
@@ -52,8 +62,9 @@ def test_an_observation_republishes_the_ledger_numbers(state, tmp_path):
     snap = hs.read_snapshot(tmp_path, SID)
     summary = state.ledger.summary(SID)
     coverage = state.ledger.coverage(SID)
-    assert snap.percent == summary.legacy_percent
-    assert snap.legacy_prevented_rows == summary.legacy_prevented_rows
+    assert snap.percent == summary.percent
+    assert snap.denials_issued == summary.denials_issued
+    assert snap.unresolved_actions == summary.unresolved_actions
     assert snap.unverified == (not coverage.verified)
 
 
@@ -147,22 +158,24 @@ def test_a_session_first_met_without_session_start_gets_a_zero_snapshot(state, t
 
 
 def test_a_file_read_records_the_path_as_the_source(state):
-    _hook(state, "SessionStart")
+    _legacy_session(state)
     _hook(state, "PostToolUse", tool_name="Bash",
           tool_input={"command": "cat .env"},
           tool_response="OPENAI_API_KEY=sk-proj-Ab3xY9zQw1Er5Ty7Ui0OpAs2Df4Gh6Jk8Lm")
     row = state.ledger.conn.execute(
-        "SELECT source, source_kind FROM events_legacy_v1").fetchone()
+        "SELECT source, source_kind FROM"
+        f" {state.ledger._legacy_events_table()}").fetchone()
     assert (row["source"], row["source_kind"]) == (".env", "path")
 
 
 def test_a_command_with_no_readable_path_records_its_program_name(state):
-    _hook(state, "SessionStart")
+    _legacy_session(state)
     _hook(state, "PostToolUse", tool_name="Bash",
           tool_input={"command": "env"},
           tool_response="OPENAI_API_KEY=sk-proj-Ab3xY9zQw1Er5Ty7Ui0OpAs2Df4Gh6Jk8Lm")
     row = state.ledger.conn.execute(
-        "SELECT source, source_kind FROM events_legacy_v1").fetchone()
+        "SELECT source, source_kind FROM"
+        f" {state.ledger._legacy_events_table()}").fetchone()
     assert (row["source"], row["source_kind"]) == ("env", "command")
 
 
@@ -171,11 +184,12 @@ def test_a_payload_with_no_origin_keeps_the_tool_name(state):
     # detector stack, and CI installs no `transformers`, so tier 3 finds
     # nothing there. An email (tier 3 only) made this pass locally and fail on
     # every CI Python -- the row it asserts on was never written.
-    _hook(state, "SessionStart")
+    _legacy_session(state)
     _hook(state, "PostToolUse", tool_name="WebFetch",
           tool_response="OPENAI_API_KEY=sk-proj-Ab3xY9zQw1Er5Ty7Ui0OpAs2Df4Gh6Jk8Lm")
     row = state.ledger.conn.execute(
-        "SELECT source, source_kind FROM events_legacy_v1").fetchone()
+        "SELECT source, source_kind FROM"
+        f" {state.ledger._legacy_events_table()}").fetchone()
     assert (row["source"], row["source_kind"]) == ("WebFetch", None)
 
 
@@ -186,12 +200,13 @@ def test_a_local_read_of_a_path_reaches_the_ledger(state):
     since this is the session's first sensitive read it also carries the
     once-per-session read-guard notice (fix round 1: this notice used to be
     silently dropped by `_decision_to_output`)."""
-    _hook(state, "SessionStart")
+    _legacy_session(state)
     reply = _hook(state, "PreToolUse", tool_name="Bash",
                   tool_input={"command": "cat .env"})
     assert "$privacy read on" in reply.get("systemMessage", "")
     row = state.ledger.conn.execute(
-        "SELECT kind, source, source_kind FROM events_legacy_v1").fetchone()
+        "SELECT kind, source, source_kind FROM"
+        f" {state.ledger._legacy_events_table()}").fetchone()
     assert row is not None, "a local read now produces a row"
     assert (row["kind"], row["source"], row["source_kind"]) == \
         ("local_access", ".env", "path")

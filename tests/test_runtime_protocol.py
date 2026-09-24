@@ -682,7 +682,6 @@ def test_stale_build_and_epoch_cannot_dispatch_after_selection(
     from runtime_helpers import write_receipt_v2 as reselect
 
     daemon = real_daemon(data_dir)
-    daemon.state.accounting_activation = True
     sock_path = data_dir / "daemon.sock"
     state_dir = tmp_path / "state"
     before = _ledger_counts(daemon)

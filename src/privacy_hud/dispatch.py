@@ -195,14 +195,6 @@ class State:
     # another as a Python object, and nothing else can select one.
     hook_adapter: HookEvidenceAdapter = field(
         default_factory=CurrentHookAdapter)
-    # P4-C4 staging, off by default: whether a genuine SessionStart for an
-    # absent session activates version-2 accounting. Production activation
-    # is switched on only once the observation writer (P4-C6) and the
-    # presentation surfaces (P4-C8) handle version-2 sessions; until then a
-    # production start stays legacy exactly as in 0.8.2. A Python attribute
-    # only: no payload, environment variable, configuration, CLI flag or
-    # MCP argument reaches it.
-    accounting_activation: bool = False
 
     # -- session reference count (daemon lifetime) --------------------- #
     # session_id -> `time.monotonic()` of the last hook event seen for it.
@@ -895,8 +887,8 @@ def _handle_session_start(
     session commit in one write transaction, or neither does. A replayed
     start for a known session changes nothing structural.
 
-    With activation on (#54 Phase 4), an absent session is activated under
-    version-2 accounting and its key installed after COMMIT; an existing
+    An absent session is activated under version-2 accounting (#54 Phase
+    4) and its key installed after COMMIT; an existing
     version-2 session without a key here stays unavailable. An empty or
     non-string session ID is a probe and writes nothing."""
     if not isinstance(session_id, str) or not session_id:
@@ -914,7 +906,7 @@ def _handle_session_start(
 
         cwd = payload.get("cwd", "") or ""
         model = payload.get("model", "") or ""
-        if session is None and state.accounting_activation:
+        if session is None:
             _activate_session(state, session_id, payload,
                               delivery_key=delivery_key)
         elif _is_version_2(session):

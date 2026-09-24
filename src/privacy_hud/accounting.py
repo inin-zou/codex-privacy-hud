@@ -1,8 +1,9 @@
 """Version-2 accounting: the pure core (#54 Phase 3).
 
 Vocabulary, the frozen scoring profile, identity inputs and value-finding
-normalization. Nothing here performs I/O, and no production path uses it in
-Phase 3: sessions are still created under legacy (version-1) accounting.
+normalization. Nothing here performs I/O. Since #54 Phase 4, sessions a
+genuine SessionStart creates are version-2 accounted; existing and lazily
+attached sessions keep legacy (version-1) accounting.
 """
 from __future__ import annotations
 
@@ -482,10 +483,6 @@ ACCOUNTING_NOTE = (
     "disclosure or host enforcement."
 )
 
-PHASE3_SURFACE_UNSUPPORTED = (
-    "This Privacy HUD surface does not support version-2 accounting "
-    "in 0.8.2."
-)
 
 
 # -- outcomes ----------------------------------------------------------------
