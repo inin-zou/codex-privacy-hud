@@ -479,6 +479,37 @@ def _quiescent(root: Path) -> bool:
     return hud_snapshot.read_daemon_marker(root) is None
 
 
+#: How long `await_quiescence` may wait for a heartbeat to expire (#71).
+#: Scaffolding: not yet implemented.
+HEARTBEAT_WAIT = 0.0
+
+
+class QuiescenceRefusal(RuntimeRefusal):
+    """`holder_unknown`, naming the check that refused (#71). Scaffolding."""
+
+    def __init__(self, check: str, *, pids=(), reason: str | None = None,
+                 errno_: int | None = None,
+                 heartbeat_age: float | None = None) -> None:
+        super().__init__("holder_unknown")
+        self.check = check
+        self.pids = tuple(sorted(int(p) for p in pids))
+        self.reason = reason
+        self.errno = errno_
+        self.heartbeat_age = heartbeat_age
+        self.signalled = False
+
+
+def check_quiescence(data_dir, *, heartbeat: bool = True) -> None:
+    """Scaffolding: the 0.8.1 gate, unnamed."""
+    if not _quiescent(Path(data_dir)):
+        raise RuntimeRefusal("holder_unknown")
+
+
+def await_quiescence(data_dir, *, on_wait=None) -> None:
+    """Scaffolding: one check, no wait."""
+    check_quiescence(data_dir)
+
+
 #: Where `lsof` is on the systems this runs on, for the case where it is
 #: not on the inherited `PATH`. Repair is launched from an installer, a
 #: managed wrapper and a hook, none of which has the user's shell `PATH`

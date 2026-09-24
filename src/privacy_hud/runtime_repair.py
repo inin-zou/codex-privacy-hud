@@ -557,7 +557,8 @@ def _await_handshake(data_dir: Path, activation: Activation) -> None:
 
 def repair_runtime(bundle_root: Path, data_dir: Path, *,
                    python: Path | None = None,
-                   allow_degraded: bool = False) -> RepairResult:
+                   allow_degraded: bool = False,
+                   progress=None) -> RepairResult:
     """Select `bundle_root`, move the ledger behind the fence, and start a
     matching daemon. See the module docstring for the ordered steps.
 
@@ -670,7 +671,7 @@ def _report_failure(code: str, bundle: Path, data_dir: Path, out) -> None:
     ), file=out)
 
 
-def main(argv: list[str] | None = None, *, out=None) -> int:
+def main(argv: list[str] | None = None, *, out=None, err=None) -> int:
     """`runtime.py --plugin-data DIR setup` and `install.sh
     --repair-runtime` both land here.
 

@@ -129,6 +129,14 @@ UNKNOWN_HOLDER = (
     "Close other Privacy HUD processes and retry the repair command."
 )
 
+#: Repair found a fresh daemon heartbeat and nothing else in the way
+#: (#71): it waits for the heartbeat to expire, rechecking holders and the
+#: socket, instead of refusing. astra's copy.
+HEARTBEAT_WAITING = (
+    "A recent Privacy HUD heartbeat remains. Waiting for it to expire and "
+    "checking for active processes."
+)
+
 #: A policy mutation whose reply never came back. The request reached the
 #: daemon; what happened to it there is not knowable from here, so this
 #: says exactly that and offers no action -- 0.8.0 has no surface that
