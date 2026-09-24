@@ -319,11 +319,22 @@ flowchart TD
 
 ## 卸载
 
+运行已安装的 0.8.2 插件包中的脚本。将下面的占位路径替换为该插件包的绝对目录；该目录必须同时包含 `install.sh` 和 `scripts/runtime.py`。
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/inin-zou/codex-privacy-hud/main/install.sh | sh -s -- --uninstall
+PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.8.2/plugin'
+sh "$PRIVACY_HUD_BUNDLE/install.sh" --uninstall
 ```
 
-卸载脚本只移除安装脚本创建的内容，清单见 `~/.local/share/codex-privacy-hud/manifest.json`。卸载后，`codex` 恢复指向官方二进制。如果不添加 `--purge`，则保留披露账本和模型权重。插件本身需要单独移除：运行 `codex plugin remove codex-privacy-hud`。
+停止运行时需要插件包中的其余文件；仅下载独立脚本并通过管道交给 `sh` 不会提供这些文件。
+
+卸载成功后，会移除 `~/.local/share/codex-privacy-hud/manifest.json` 中记录的安装脚本所管理的文件，并让 `codex` 恢复指向官方二进制。如果不添加 `--purge`，则保留披露账本和模型权重。
+
+卸载需要可用的 Python 3.11+ 解释器来运行插件包中的停止操作。脚本会检查已记录的解释器、安装脚本创建的环境，以及 `PATH` 中的主机解释器。如果这些解释器都不可用，则必须等到有可用解释器后才能完成卸载。没有不依赖 Python 的卸载入口，也没有强制跳过检查的选项。
+
+如果无法确认运行时已停止，卸载会以状态码 1 退出，保留运行时环境和卸载清单，并跳过数据和模型权重清理。转发脚本以及部分由安装脚本管理的 shell 或 Codex 配置可能已经移除。有可用解释器后，重新运行同一条插件包内的卸载命令；停止检查仍然适用。
+
+卸载成功后，再单独移除插件：运行 `codex plugin remove codex-privacy-hud`。
 
 ## 手动安装
 

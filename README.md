@@ -384,14 +384,36 @@ Stated up front, because a privacy tool that overclaims is worse than none:
 
 ## Uninstall
 
+Run the script from the exact installed 0.8.2 plugin bundle. Replace the
+placeholder below with that bundle's absolute directory, containing both
+`install.sh` and `scripts/runtime.py`.
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/inin-zou/codex-privacy-hud/main/install.sh | sh -s -- --uninstall
+PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.8.2/plugin'
+sh "$PRIVACY_HUD_BUNDLE/install.sh" --uninstall
 ```
 
-Removes exactly what the installer created (listed in
-`~/.local/share/codex-privacy-hud/manifest.json`) and restores `codex` to
-the official binary. Your disclosure ledger and the model weights stay
-unless you add `--purge`. The plugin itself is removed separately with
+The stop operation needs the rest of the bundle; a standalone script
+download piped into `sh` does not supply it.
+
+Successful uninstall removes installer-managed files recorded in
+`~/.local/share/codex-privacy-hud/manifest.json` and restores `codex` to
+the official binary. Your disclosure ledger and model weights stay unless
+you add `--purge`.
+
+Uninstall requires a usable Python 3.11+ interpreter to run the bundled
+stop operation. It checks the recorded interpreter, the installer-owned
+environments, and a host interpreter on `PATH`. A host with none cannot
+complete uninstall until a usable interpreter is available again. There
+is no Python-free uninstall or force override.
+
+If shutdown cannot be confirmed, uninstall exits 1, preserves the runtime
+environment and uninstall manifest, and skips both data and model purge.
+The forwarder and some installer-managed shell or Codex configuration may
+already have been removed. Once a usable interpreter is available, rerun
+the same bundle-local command; the stop checks still apply.
+
+After successful uninstall, remove the plugin separately with
 `codex plugin remove codex-privacy-hud`.
 
 ## Installing by hand

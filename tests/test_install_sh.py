@@ -371,3 +371,62 @@ def test_the_install_brings_the_mcp_extra():
 
     pyproject = (REPO / "pyproject.toml").read_text(encoding="utf-8")
     assert "mcp>=2" in pyproject
+
+
+@pytest.mark.parametrize("purge", [False, True])
+def test_uninstall_without_usable_python_preserves_targets_then_retries(
+        home, tmp_path, purge):
+    home_path, env, _ = home
+    share = home_path / ".local/share/codex-privacy-hud"
+    runtime = share / "runtime"
+    runtime.mkdir(parents=True)
+    runtime_file = runtime / "keep"
+    runtime_file.write_bytes(b"runtime")
+    data = tmp_path / "data"
+    data.mkdir()
+    data_file = data / "keep"
+    data_file.write_bytes(b"data")
+    model = tmp_path / "model"
+    model.mkdir()
+    model_file = model / "keep"
+    model_file.write_bytes(b"model")
+    manifest = share / "manifest.json"
+    manifest.write_text(json.dumps({
+        "v": 1, "created": [], "edited": {},
+        "plugin_data": str(data), "model_snapshot": str(model),
+    }), encoding="utf-8")
+    before = manifest.read_bytes()
+
+    unavailable = tmp_path / "unavailable"
+    unavailable.mkdir()
+    for name in ("python3.14", "python3.13", "python3.12",
+                 "python3.11", "python3"):
+        candidate = unavailable / name
+        candidate.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        candidate.chmod(0o755)
+    blocked_env = dict(env, PATH=f"{unavailable}:/usr/bin:/bin")
+    command = ["sh", str(INSTALL), "--uninstall"]
+    if purge:
+        command.append("--purge")
+
+    result = subprocess.run(
+        command, cwd=tmp_path, env=blocked_env,
+        capture_output=True, text=True, timeout=30)
+    assert result.returncode == 1
+    assert "Uninstall is incomplete:" in result.stdout
+    assert manifest.read_bytes() == before
+    assert runtime_file.read_bytes() == b"runtime"
+    assert data_file.read_bytes() == b"data"
+    assert model_file.read_bytes() == b"model"
+
+    result = subprocess.run(
+        command, cwd=tmp_path, env=env,
+        capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not share.exists()
+    if purge:
+        assert not data.exists()
+        assert not model.exists()
+    else:
+        assert data_file.read_bytes() == b"data"
+        assert model_file.read_bytes() == b"model"

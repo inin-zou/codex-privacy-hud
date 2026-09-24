@@ -461,12 +461,11 @@ def _quiescent(root: Path) -> bool:
     return True
 
 
-#: The heartbeat polling budget for `await_quiescence` (#71): no new pass
-#: starts after it. Past `hud_snapshot.STALE_AFTER`, so an unchanged marker
-#: always expires inside it; fixed at the start of the wait, so a marker
-#: somebody keeps re-stamping -- a live publisher -- ends in a refusal. It
-#: is not a hard wall-clock ceiling: each pass's holder inspection has its
-#: own timeout, and a pass already running finishes.
+#: The heartbeat polling budget for `await_quiescence` (#71), fixed at
+#: the start and longer than `hud_snapshot.STALE_AFTER`. The deadline is
+#: checked after each refused inspection, before another sleep. A final
+#: inspection can start at or after the deadline. This is not a hard
+#: wall-clock ceiling: holder inspections have their own timeouts.
 HEARTBEAT_WAIT = hud_snapshot.STALE_AFTER + 2.0
 
 #: Pause between two passes of that wait. Every pass rechecks holders and
