@@ -746,3 +746,95 @@ def test_issue47_delivery_distinguishes_patched_and_stock_codex():
     assert _line(limits, "3. ") == PRD_LIMIT_3
     assert _line(_section(PRD, "## 13. Open questions"), "3. ") == PRD_AMBIENT_QUESTION
     assert _line(_section(DESIGN, "## 13. Open design questions"), "1. ") == DESIGN_L1_QUESTION
+
+
+# --- B18 and B-public: session selection versus event detail ---------------
+
+DESIGN_DIRECT_ACCESS = (
+    "**Direct access:** `$privacy` opens the Level 2 audit after resolving "
+    "a session. `$privacy <session_id>` explicitly selects a session; the "
+    "positional argument is not an event or flow ID. Browser row selection "
+    "opens Level 3 for that row. The existing terminal detail launcher "
+    "requires both the selected session ID and an event ID. Denial messages "
+    "offer the session audit and contain no event deep link."
+)
+
+README_LEVEL_3_START = "**Level 3 — Exposure detail.**"
+README_PUBLIC = (
+    "A mask rule is scoped to the session and selects a detected data type "
+    "across sources. If it selects an otherwise eligible outbound call, "
+    "rewriting uses all findings from that call, including other detected "
+    "types. Origin-rule denials take precedence, and mask rules do not "
+    "weaken the built-in handling of hard-blocked types. Detection and host "
+    "application remain conditional. Already disclosed data cannot be "
+    "recalled from this session."
+    "\n\n"
+    "`$privacy <session_id>` selects a session audit. It is not an event or "
+    "flow deep link. Select a row in the local browser to inspect that "
+    "event; the terminal detail launcher requires separate session and "
+    "event IDs. Denial messages contain no event deep link."
+    "\n\n"
+    "No shipped surface offers `Allow once`, `Minimize & retry`, a "
+    "minimization preview or a consent-driven retry. Internal token "
+    "primitives do not make those actions available."
+    "\n\n"
+    "The deep detector is local `openai/privacy-filter`, not Presidio. "
+    "Installing its dependencies and weights is optional; without them, its "
+    "detection categories are unavailable. Runtime does not download "
+    "missing weights. There is no findings cache across reads or sessions: "
+    "reading unchanged content can repeat scanning even when legacy "
+    "accounting deduplicates the resulting row."
+    "\n\n"
+    "Compaction does not add timeline events or reverse disclosure. At "
+    "session end, the plugin returns a text receipt through hook "
+    "`systemMessage`; it does not save a Markdown receipt file or confirm "
+    "that the host displayed the receipt. Transcript retention remains "
+    "outside this ledger's account."
+)
+
+README_ZH_LEVEL_3_START = "**Level 3：暴露详情。**"
+README_ZH_PUBLIC = (
+    "掩码规则以会话为范围，按检测到的数据类型匹配，不限定来源。"
+    "如果规则选中了符合处理条件的出站调用，改写会使用该次调用的全部检测结果，"
+    "其中也包括其他类型。来源规则的拒绝决定优先，"
+    "掩码规则不会放宽内置策略对硬拦截类型的处理。"
+    "后续能否检测到数据、宿主是否应用改写，仍有条件限制。"
+    "已经披露的数据无法从本次会话中收回。"
+    "\n\n"
+    "`$privacy <session_id>` 选择要审计的会话，不是事件或数据流的详情链接。"
+    "在本地浏览器中选择一行可查看该事件；"
+    "终端详情命令需要分别提供会话 ID 和事件 ID。拒绝消息不包含事件详情链接。"
+    "\n\n"
+    "当前没有任何已提供的入口支持 `Allow once`、`Minimize & retry`、"
+    "脱敏预览或授权后重试。内部存在令牌逻辑，并不代表用户能够执行这些操作。"
+    "\n\n"
+    "深度检测使用本地运行的 `openai/privacy-filter`，不使用 Presidio。"
+    "可以选择不安装其依赖和权重，但这样就无法检测该模型负责的数据类型。"
+    "运行时不会下载缺失的权重。插件没有跨读取或跨会话的检测结果缓存："
+    "再次读取未变化的内容仍可能重新扫描，即使旧版记账随后将结果合并到已有行。"
+    "\n\n"
+    "上下文压缩不会新增时间线事件，也不会逆转已经发生的披露。"
+    "会话结束时，插件通过 hook 的 `systemMessage` 返回文本回执；"
+    "它不会保存 Markdown 回执文件，也无法确认宿主是否显示了回执。"
+    "转录内容的保留情况仍不在本账本的记录范围内。"
+)
+
+
+def test_issue47_public_explanations_match_in_both_languages():
+    _inserted(README, _line(_read(README), README_LEVEL_3_START), README_PUBLIC,
+              "**The MCP tools.**")
+    _inserted(README_ZH, _line(_read(README_ZH), README_ZH_LEVEL_3_START),
+              README_ZH_PUBLIC, "**MCP 工具。**")
+    assert _line(_read(README), "4. **No `ask` decision") == README_LIMIT_4
+    assert _line(_read(README_ZH), "4. **Codex hook 不支持") == README_ZH_LIMIT_4
+    # I5 in both languages: nothing offers to take back a disclosure.
+    for block in (README_PUBLIC, README_ZH_PUBLIC):
+        for word in ("undo", "revoke", "remove from context", "撤销", "撤回"):
+            assert word not in block.lower()
+
+
+def test_issue47_direct_access_copy_is_exact():
+    architecture = _section(DESIGN, "## 2. Information architecture")
+    assert _paragraph(architecture, "**Direct access:**") == DESIGN_DIRECT_ACCESS
+    assert "**Escape hatches:**" not in _read(DESIGN)
+    assert "deep-links to the L3 for the offending flow" not in _read(DESIGN)

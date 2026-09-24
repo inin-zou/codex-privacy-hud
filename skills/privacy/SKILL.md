@@ -68,10 +68,7 @@ python3 "$BUNDLE/scripts/runtime.py" --plugin-data "${PLUGIN_DATA:?}" \
 
 **1. Print the audit.**
 
-One command resolves the session, reads the ledger read-only, and renders
-the Level 2 table (design.md §5). Substitute the id the user typed after
-`$privacy` (design.md §2's `$privacy <id>` deep link); omit it if they
-did not give one.
+One command resolves the session, reads the ledger read-only, and renders the Level 2 table (design.md §5). After handling the documented command branches, a positional ID supplied to `$privacy` is a session ID. Set `SESSION_ID` to that session ID; omit it when no session ID was supplied. It is not an event or flow deep link.
 
 ```bash
 BUNDLE="${PLUGIN_ROOT:?}"
@@ -112,9 +109,7 @@ to show a different one.
 
 **2. Show one event's detail.**
 
-If the user asked for one specific flow (design.md §2's L3 deep link),
-show that instead. `EVENT_ID` is the `id` field on any row the table
-above and the web UI both key off of.
+Use this step only when the request identifies a particular event in the selected session. `SESSION_ID` is the session selected in step 1; `EVENT_ID` is that event's numeric `id`, not the positional argument after `$privacy`. The detail command requires both identifiers. Do not infer an event ID from a denial message: those messages contain no event deep link. If no event ID is available, show the session audit and its browser URL; the browser opens detail when a row is selected.
 
 ```bash
 BUNDLE="${PLUGIN_ROOT:?}"

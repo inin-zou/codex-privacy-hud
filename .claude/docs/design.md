@@ -47,7 +47,7 @@ Level 3  EXPOSURE DETAIL  one flow, its evidence, its remedies
 
 Each level answers exactly one question. A view that answers two questions is a view that will be redesigned.
 
-**Escape hatches:** every level reachable directly — `$privacy` opens L2; `$privacy <id>` deep-links to L3; a block notification deep-links to the L3 for the offending flow.
+**Direct access:** `$privacy` opens the Level 2 audit after resolving a session. `$privacy <session_id>` explicitly selects a session; the positional argument is not an event or flow ID. Browser row selection opens Level 3 for that row. The existing terminal detail launcher requires both the selected session ID and an event ID. Denial messages offer the session audit and contain no event deep link.
 
 ---
 
