@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -128,6 +129,9 @@ def test_case_does_not_construct_real_model(
         ]
     finally:
         fixture.close()
+
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        state.ledger.conn.execute("SELECT 1")
 
 
 def send(state, command, action="a", **extra):
