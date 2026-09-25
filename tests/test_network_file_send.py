@@ -9,6 +9,7 @@ from privacy_hud import dispatch as dispatch_mod
 from privacy_hud import engine as engine_mod
 from privacy_hud.accounting import Evidence
 from privacy_hud.detect import shell
+from privacy_hud.detect.model import StubModelDetector
 from privacy_hud.detect.paths import PathDetector
 from privacy_hud.detect.secrets import SecretDetector
 from privacy_hud.engine import Engine, Observation
@@ -81,6 +82,10 @@ TERMINAL = (
 @pytest.fixture(params=[1, 2], ids=["legacy", "v2"])
 def case(tmp_path, monkeypatch, request):
     monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))
+    # This suite replaces the detector stack immediately after construction.
+    monkeypatch.setattr(
+        dispatch_mod, "ModelDetector", lambda: StubModelDetector([])
+    )
     state = writer_state(tmp_path)
     state.detectors = [PathDetector(), SecretDetector()]
     state.settings = SimpleNamespace(deny_read=False)
