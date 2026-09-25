@@ -354,28 +354,142 @@ def test_restart_key_loss_does_not_recreate_matching(guarded, tmp_path):
 
 
 @pytest.mark.parametrize("seed_first", [False, True])
-def test_recording_failure_rolls_back_and_never_seeds_a_link(
-        guarded, monkeypatch, seed_first):
+@pytest.mark.parametrize(("stage", "error_type"), [
+    ("before", ValueError),
+    ("after-table", sqlite3.OperationalError),
+    ("after-insert", sqlite3.Error),
+    ("after-insert", RuntimeError),
+])
+def test_target_write_failure_preserves_denial_without_seeding_a_link(
+    guarded, monkeypatch, seed_first, stage, error_type,
+):
+    path = "/synthetic-private-team/private-person/secret-alpha.pem"
+    forbidden = (
+        path, "synthetic-private-team", "private-person",
+        "secret-alpha.pem", "cat " + path,
+    )
     if seed_first:
-        deny(guarded, "/r/a.pem", "committed")
+        deny(guarded, path, "committed")
+    conn = guarded.ledger.conn
+    engine = guarded.engines["s1"]
     before = [row.as_dict() for row in public_rows(guarded)]
-    summary_before = guarded.ledger.summary("s1").as_dict()
+    seen_before = dict(engine._guard_targets._seen)
+    schema_before = conn.execute(
+        "SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name"
+    ).fetchall()
+    targets_before = (
+        conn.execute("SELECT * FROM guard_targets ORDER BY event_id").fetchall()
+        if ledger_schema.guard_target_schema_present(conn) else []
+    )
+    observations_before = conn.execute(
+        "SELECT COUNT(*) FROM observations WHERE session_id='s1'"
+    ).fetchone()[0]
     real = ledger_mod.record_target
+    calls = []
 
-    def fail_after_insert(conn, observation, result):
-        real(conn, observation, result)
-        raise RuntimeError("synthetic recording failure")
+    def fail_target(connection, observation, result):
+        calls.append(result.observation_id)
+        if stage == "after-table":
+            if not ledger_schema.guard_target_schema_present(connection):
+                # Leave an incomplete optional schema until rollback.
+                connection.execute(ledger_schema.guard_target_statements()[0])
+        elif stage == "after-insert":
+            real(connection, observation, result)
+        # Deliberately include synthetic path text in the exception.
+        raise error_type("synthetic target failure: " + path)
+
+    delivery = "b" * 32
+    with monkeypatch.context() as patch:
+        patch.setattr(ledger_mod, "record_target", fail_target)
+        deny(guarded, path, "dropped", delivery=delivery)
+
+    assert len(calls) == 1
+    assert not conn.in_transaction
+    rows = public_rows(guarded)
+    assert [row.as_dict() for row in rows[:-1]] == before
+    dropped = rows[-1]
+    assert dropped.guard_target is None
+    assert conn.execute(
+        "SELECT COUNT(*) FROM observations WHERE session_id='s1'"
+    ).fetchone()[0] == observations_before + 1
+    assert conn.execute(
+        "SELECT decision FROM observations WHERE observation_id=?",
+        (calls[0],),
+    ).fetchone()[0] == "deny"
+    assert conn.execute(
+        "SELECT observation_id,kind FROM events WHERE id=?", (dropped.id,),
+    ).fetchone()[:] == (calls[0], "prevented")
+    assert_accounting(guarded, int(seed_first) + 1)
+    assert engine._guard_targets._seen == seen_before
+    assert conn.execute(
+        "SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name"
+    ).fetchall() == schema_before
+    if seed_first:
+        assert conn.execute(
+            "SELECT * FROM guard_targets ORDER BY event_id"
+        ).fetchall() == targets_before
+    else:
+        assert not ledger_schema.guard_target_schema_present(conn)
+    assert ledger_schema.validate_schema(conn) == 5402
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert_no_text_in_database(conn, forbidden)
+
+    # Retrying the recorded delivery must not backfill metadata or seed a link.
+    dump_before_retry = "\n".join(conn.iterdump())
+
+    def unexpected_target_write(*args):
+        pytest.fail("delivery retry attempted a guard-target write")
 
     with monkeypatch.context() as patch:
-        patch.setattr(ledger_mod, "record_target", fail_after_insert)
-        with pytest.raises(RuntimeError, match="synthetic recording failure"):
-            deny(guarded, "/r/a.pem", "failed")
-    assert [row.as_dict() for row in public_rows(guarded)] == before
-    assert guarded.ledger.summary("s1").as_dict() == summary_before
-    deny(guarded, "/r/a.pem", "after-failure")
-    new = target(public_rows(guarded)[-1])
+        patch.setattr(ledger_mod, "record_target", unexpected_target_write)
+        deny(guarded, path, "dropped", delivery=delivery)
+    assert "\n".join(conn.iterdump()) == dump_before_retry
+    assert engine._guard_targets._seen == seen_before
+    assert public_rows(guarded)[-1].guard_target is None
+    assert_accounting(guarded, int(seed_first) + 1)
+
+    deny(guarded, path, "after-failure")
+    successful = public_rows(guarded)[-1]
+    new = target(successful)
     assert new["same_as_event_id"] == (before[0]["id"] if seed_first else None)
-    assert_accounting(guarded, 2 if seed_first else 1)
+    assert new["same_as_event_id"] != dropped.id
+    if seed_first:
+        assert new["target_id"] == before[0]["guard_target"]["target_id"]
+    assert_accounting(guarded, int(seed_first) + 2)
+
+    # The first successful write after the drop can seed future correlation.
+    deny(guarded, path, "later")
+    later = target(public_rows(guarded)[-1])
+    assert later["target_id"] == new["target_id"]
+    assert later["same_as_event_id"] == (
+        before[0]["id"] if seed_first else successful.id
+    )
+    assert_accounting(guarded, int(seed_first) + 3)
+    assert ledger_schema.validate_schema(conn) == 5402
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert_no_text_in_database(conn, forbidden)
+
+
+@pytest.mark.parametrize("failure_type", [KeyboardInterrupt, SystemExit])
+def test_target_write_does_not_swallow_process_control(
+    guarded, monkeypatch, failure_type,
+):
+    conn = guarded.ledger.conn
+    before = "\n".join(conn.iterdump())
+    real = ledger_mod.record_target
+
+    def interrupt_after_insert(connection, observation, result):
+        real(connection, observation, result)
+        raise failure_type()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ledger_mod, "record_target", interrupt_after_insert)
+        with pytest.raises(failure_type):
+            deny(guarded, "/synthetic-private-team/secret-alpha.pem", "interrupt")
+    assert not conn.in_transaction
+    assert "\n".join(conn.iterdump()) == before
+    assert guarded.engines["s1"]._guard_targets._seen == {}
+    assert ledger_schema.validate_schema(conn) == 5402
 
 
 def test_unsupported_and_permitted_calls_receive_no_target(guarded):
