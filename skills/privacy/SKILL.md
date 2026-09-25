@@ -257,7 +257,7 @@ the same process instead of starting a second one.
 and never installs or replaces a patched Codex binary. Do not describe
 either as doing the other's job.
 
-Privacy HUD 0.9.4 writes snapshot version 2. The native Privacy item requires
+Privacy HUD 0.10.0 writes snapshot version 2. The native Privacy item requires
 a patched Codex build containing the snapshot-v2 reader. Matching Codex
 versions and successful plugin installation do not establish that
 compatibility. Until the installed build is verified, run the bundled

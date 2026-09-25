@@ -17,6 +17,7 @@ task-10 brief, both consistent with `hooks/handler.py`'s own
   PostToolUse        origin or tool_name model_context             ingress     tool_response
   PreToolUse (Bash)  tool input          extract_destinations(cmd) egress      command
   PreToolUse (mcp*)  tool input          mcp_tool                  egress      json.dumps(tool_input)
+  PreToolUse (agent) tool input          subagent                  propagate   explicit text
   SubagentStart      main agent          subagent                  propagate   ""
   SessionStart / SessionEnd -- not Engine observations; they drive the
   ledger session lifecycle directly.
@@ -25,18 +26,14 @@ task-10 brief, both consistent with `hooks/handler.py`'s own
   when it can name a path or a program the output came from (#40); `None`
   keeps `tool_name`, exactly as before origins existed.
 
-  PreToolUse whose resolved destination is "local" (a Bash command
-  `extract_destinations` judges local, or any non-Bash/non-MCP tool) is
-  ALSO not an Engine observation, despite direction=="egress" in the
-  table above: tables.toml's taxonomy has no "PreToolUse/local" entry and
-  policy_defaults has no "local" entry (only "PostToolUse/local" exists,
-  because Ruling 1 in engine.py was written against local file reads, not
-  local Bash commands). Building an Observation there would make
-  `Engine.observe` raise `UnknownKey` for the ordinary case of a purely
-  local tool call — not a bug to work around with a caught exception
-  (Global Constraint I2), but a real signal that "nothing crosses a
-  boundary here" should short-circuit before Engine.observe is ever
-  called. See `_build_observation`'s early `return None`.
+  Supported delegation PreToolUse hooks scan explicit message/text-item
+  content as B2 propagation. They do not enter egress policy or rewrite
+  handling. Legacy findings classify as detected; V2 outcomes follow the
+  delivered evidence.
+
+  Recognized local shell reads use the local read guard. Other local
+  commands and unsupported non-shell tools have no content observation;
+  V2 may still record their delivered-hook metadata.
 
 `Observation.tool_input` (added by Task 12, running in parallel on the
 main tree while this task was in flight — see `src/privacy_hud/engine.py`
@@ -135,6 +132,7 @@ from .origin import OriginKind, extract_origin
 from .prompt_hold import confirmed_message, held_reason
 from .render import receipt as render_receipt
 from .runtime import latch_path
+from .runtime_messages import ACCOUNTING_INGRESS_FAILURE
 from .runtime_owner import WriterLease
 from .settings import Settings
 
@@ -533,6 +531,13 @@ def _build_observation(event: str, session_id: str, payload: dict) -> Observatio
         tool_input = payload.get("tool_input")
         if not isinstance(tool_input, dict):
             tool_input = {}
+        if codex.is_b2_delegation(payload):
+            return Observation(
+                session_id=session_id, turn_id=turn_id, hook_event=event,
+                direction="propagate", source="tool input",
+                destination="subagent",
+                text=codex.delegated_text(tool_name, tool_input),
+                tool_name=tool_name, tool_input=tool_input)
         if tool_name == codex.SHELL_TOOL:
             command = tool_input.get("command", "") or ""
             dests = extract_destinations(command)
@@ -1157,6 +1162,8 @@ def dispatch(
         # session, observation, coverage or liveness is written for it. An
         # outbound call that names no session cannot be attributed or
         # verified, so it keeps the fail-closed answer (I6).
+        if codex.is_b2_delegation(payload):
+            return {"systemMessage": ACCOUNTING_INGRESS_FAILURE}
         if event in codex.EGRESS_EVENTS:
             return _deny(None)
         return _allow()

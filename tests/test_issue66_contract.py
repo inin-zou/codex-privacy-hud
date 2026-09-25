@@ -99,7 +99,7 @@ HAZARD = (
 #: Phase 4's, which keeps its statement that 0.8.0 introduced the selected
 #: runtime and the fenced ledger.
 RELEASE_SENTENCE = (
-    "Version 0.9.4 activates evidence-based accounting for new sessions "
+    "Version 0.10.0 activates evidence-based accounting for new sessions "
     "observed from a genuine SessionStart, using the selected runtime and "
     "fenced ledger introduced in 0.8.0. Existing and late-attached sessions "
     "retain legacy accounting; historical records are not backfilled or "
@@ -118,7 +118,7 @@ COMPATIBILITY_ZH = [
 ]
 
 RELEASE_SENTENCE_ZH = (
-    "0.9.4 为收到真正 SessionStart 的新会话启用基于证据的记账，并继续使用 0.8.0 "
+    "0.10.0 为收到真正 SessionStart 的新会话启用基于证据的记账，并继续使用 0.8.0 "
     "引入的运行时选择机制和隔离后的账本。已有会话和开始后才接入的会话仍采用旧版"
     "记账；历史记录不会被回填或重新计分。"
 )
