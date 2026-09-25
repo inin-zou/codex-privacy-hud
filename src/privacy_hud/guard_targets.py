@@ -57,9 +57,10 @@ def record_target(
     observation: ObservationRecord,
     result: RecordResult,
 ) -> int:
-    """Append inside Ledger's existing observation transaction.
+    """Append inside Ledger's optional-metadata savepoint.
 
-    Validation failure rolls back the observation, events and metadata.
+    Ledger isolates ordinary failures here when savepoint rollback succeeds.
+    Core observation/event writes remain in the enclosing transaction.
     No exception includes the candidate or command.
     """
     target = observation.guard_target

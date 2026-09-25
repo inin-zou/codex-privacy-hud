@@ -1548,18 +1548,14 @@ class Engine:
         if (
             proposal is not None
             and not recorded.duplicate_delivery
+            and recorded.guard_target_event_id is not None
             and not self.ledger.conn.in_transaction
         ):
-            # Dispatch holds State.lock here. Publish matching state only
-            # after the ledger's outer transaction has committed.
-            row = self.ledger.conn.execute(
-                "SELECT g.event_id FROM guard_targets g"
-                " JOIN events e ON e.id=g.event_id"
-                " WHERE g.session_id=? AND e.observation_id=?",
-                (obs.session_id, recorded.observation_id),
-            ).fetchone()
-            assert row is not None
-            self._guard_targets.remember(proposal[0], proposal[1], row[0])
+            # Dispatch holds State.lock here. The receipt exists only for
+            # a successful target write; publication also requires commit.
+            self._guard_targets.remember(
+                proposal[0], proposal[1], recorded.guard_target_event_id,
+            )
 
         # Display only; a decision never reads it.
         summary = self.ledger.summary(obs.session_id)

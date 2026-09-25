@@ -522,6 +522,9 @@ class RecordResult:
     disclosure_ids: tuple[int, ...]
     budget_delta: float
     duplicate_delivery: bool
+    # Internal write receipt, not persisted or exposed by audit projections.
+    # The caller must still wait for the outermost commit before publication.
+    guard_target_event_id: int | None = None
 
 
 # -- shared version-2 copy (#54 Phase 3, §C) ---------------------------------
