@@ -153,8 +153,15 @@ def _classify(event: str, payload: dict
     tool_input = _tool_input(payload)
     read = _recognized_read(tool_name, tool_input)
     if event == "PostToolUse":
+        # One action keeps one kind: a delegation's result shares its
+        # pre-hook's `tool_use_id`, so it stays a subagent action. The
+        # result itself is still ingress to the parent's model context.
+        if isinstance(tool_name, str) and tool_name in codex.SUBAGENT_TOOLS:
+            return "subagent", "model_context", True
         return ("read" if read else "tool"), "model_context", True
     # PreToolUse
+    if codex.is_b2_delegation(payload):
+        return "subagent", "subagent", True
     if read:
         return "read", "local", False
     if isinstance(tool_name, str) and codex.is_mcp_tool(tool_name):

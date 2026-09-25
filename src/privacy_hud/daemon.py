@@ -439,16 +439,13 @@ class _Handler(socketserver.StreamRequestHandler):
             # daemon deliberately allowed this" from "the daemon crashed
             # and we defaulted to allow" -- its fail-open/fail-closed
             # logic only fires on the CLIENT's own exception, never on a
-            # cleanly-received reply's content. Only `PreToolUse` can ever
-            # be egress (SessionStart/PostToolUse/SessionEnd/SubagentStart
-            # are ingress/propagate/lifecycle by construction — see
-            # dispatch.py's mapping table), so that cheap, exception-proof
-            # check is the gate: fail closed there (I6), fail open
-            # everywhere else, with a fixed warning. Which events those are is
-            # Codex's fact, not this daemon's, so the set is
-            # `codex.EGRESS_EVENTS` -- the same set `hooks/handler.py`
-            # restates as a literal for its own client-side gate.
-            if payload.get("hook_event_name") in codex.EGRESS_EVENTS:
+            # cleanly-received reply's content. PreToolUse can carry
+            # B3/B4 egress, but the supported B2 delegation names are an
+            # explicit exception. Their failure allows with the fixed
+            # unverified warning, even when their text contains a URL.
+            # Keep other event-wide failure behavior unchanged.
+            if (payload.get("hook_event_name") in codex.EGRESS_EVENTS
+                    and not codex.is_b2_delegation(payload)):
                 output = _deny_for_internal_failure(payload)
             else:
                 # Fail open, but not silently (#54 Phase 4): `{}` would

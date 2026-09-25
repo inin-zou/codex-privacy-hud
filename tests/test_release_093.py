@@ -40,10 +40,11 @@ def test_release_093_changelog():
         r" #\d+", section, re.I)
 
 
-def test_current_release_documents_explicit_upgrade_recovery():
+def test_release_094_documents_explicit_upgrade_recovery():
     text = (REPO / "CHANGELOG.md").read_text()
-    heading = f"## {contract.RELEASE}\n"
-    assert text.startswith("# Changelog\n\n" + heading)
+    assert text.startswith(f"# Changelog\n\n## {contract.RELEASE}\n")
+    heading = "## 0.9.4\n"
+    assert text.index(heading) < text.index("## 0.9.3\n")
     section = text.split(heading, 1)[1].split("\n## ", 1)[0]
 
     assert "any canonical N.N.N sibling path" in section

@@ -14,7 +14,7 @@ Runtime selection, writer ownership, read-only readers, daemon policy RPC, and t
 
 > **Codex Privacy HUD is a local-first plugin that maintains a live disclosure ledger for every Codex session, minimizes sensitive context before tool execution, and lets users inspect exactly what data reached the model, subagents, MCP tools, or external services.**
 
-*(Product intent, and two clauses of it are not built — do not read this as current behavior. What a subagent inherited is never observed, and a destination is a boundary category rather than a recipient, so "MCP tools" is one destination however many servers are called: `docs/known-limits.md` #19 and #20. The shipped equivalent of this sentence is `README.md`'s, which says "what it observed crossing each boundary".)*
+*(Product intent, not a statement of current coverage. Current hooks do not confirm model admission or transmission. Version-2 accounting separates intended recipients from boundary categories where supported identity evidence exists. Explicit parent delegation text is scanned as B2, but subagent recipients remain unresolved and inherited content is not observed. Delegation scanning does not deny or rewrite the call. See `docs/known-limits.md` #19 and #20 for the shipped limits.)*
 
 **Tagline:** See what your agent knows. Control where it goes.
 
@@ -37,7 +37,7 @@ Today a Codex user can answer *"how much of my context window is used?"* but can
 
 - Which of my files' contents actually entered the model context this session?
 - Did that GitHub MCP call carry a customer email in its arguments?
-- Did the subagent I spawned inherit the `.env` I read twenty minutes ago?
+- Did the subagent I spawned inherit the `.env` I read twenty minutes ago? This remains unanswered: scanning explicit delegation text does not reveal inherited history.
 - Did that `curl` pipe my support log to an external host?
 
 Existing tooling fails in three ways:
