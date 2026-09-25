@@ -588,7 +588,7 @@
       [A.detail_masked_example, row.masked_example || A.not_stored],
     ];
     if (row.guard_target) {
-      fields.push(["Guard target", row.guard_target.summary]);
+      fields.push([A.detail_guard_target, row.guard_target.summary]);
     }
     if (row.scan_gap) fields.push([A.detail_scan_gap, row.scan_gap]);
     $("detailFields").innerHTML = fields.map(([label, value]) => `

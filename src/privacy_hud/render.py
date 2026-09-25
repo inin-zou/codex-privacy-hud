@@ -204,7 +204,8 @@ EVENT_CHIPS = ("DENIAL ISSUED", "DENIAL ENFORCED", "REWRITE ISSUED",
 V2_DETAIL_LABELS = ("Subject", "Recipient", "Source", "Boundary",
                     "Observation", "Action", "Evidence",
                     "Occurrences in this observation",
-                    "Confirmed contribution", "Masked example", "Scan gap")
+                    "Confirmed contribution", "Masked example", "Scan gap",
+                    "Guard target")
 NOT_STORED = "Not stored."
 V2_ROW_NOTE = ("This row records evidence at one observation point. It does "
                "not establish a causal multi-hop flow.")
@@ -1024,7 +1025,8 @@ def _detail_v2(row: AccountingExposureRow) -> str:
         ("Masked example", row.masked_example or NOT_STORED),
     ]
     if row.guard_target is not None:
-        fields.append(("Guard target", row.guard_target.summary))
+        fields.append((accounting_copy()["detail_guard_target"],
+                       row.guard_target.summary))
     if row.scan_gap is not None:
         fields.append(("Scan gap", row.scan_gap))
     lines = [_title(row.data_type, row.occurrences)]
