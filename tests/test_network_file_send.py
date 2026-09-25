@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import contextlib
 import sqlite3
 from types import SimpleNamespace
 
@@ -80,31 +81,38 @@ TERMINAL = (
 )
 
 
-@pytest.fixture(params=[1, 2], ids=["legacy", "v2"])
-def case(tmp_path, monkeypatch, request):
+@contextlib.contextmanager
+def _case_state(tmp_path, monkeypatch, version):
     monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))
     # This suite replaces the detector stack immediately after construction.
     monkeypatch.setattr(
         dispatch_mod, "ModelDetector", lambda: StubModelDetector([])
     )
     state = writer_state(tmp_path)
-    state.detectors = [PathDetector(), SecretDetector()]
-    state.settings = SimpleNamespace(deny_read=False)
-    version = request.param
-    if version == 2:
-        dispatch_mod.dispatch(
-            state,
-            {
-                "hook_event_name": "SessionStart",
-                "session_id": "s",
-                "cwd": "/r",
-                "model": "test",
-            },
-        )
-    else:
-        state.ledger.start_session("s", cwd="/r", model="test")
-    yield state, version
-    close_writer(state.ledger)
+    try:
+        state.detectors = [PathDetector(), SecretDetector()]
+        state.settings = SimpleNamespace(deny_read=False)
+        if version == 2:
+            dispatch_mod.dispatch(
+                state,
+                {
+                    "hook_event_name": "SessionStart",
+                    "session_id": "s",
+                    "cwd": "/r",
+                    "model": "test",
+                },
+            )
+        else:
+            state.ledger.start_session("s", cwd="/r", model="test")
+        yield state, version
+    finally:
+        close_writer(state.ledger)
+
+
+@pytest.fixture(params=[1, 2], ids=["legacy", "v2"])
+def case(tmp_path, monkeypatch, request):
+    with _case_state(tmp_path, monkeypatch, request.param) as value:
+        yield value
 
 
 @pytest.mark.parametrize("version", [1, 2], ids=["legacy", "v2"])
@@ -117,18 +125,12 @@ def test_case_does_not_construct_real_model(
         dispatch_mod.ModelDetector, "__init__", forbidden_init
     )
 
-    # Exercise the fixture body with the constructor trap already installed.
-    fixture = case.__wrapped__(
-        tmp_path, monkeypatch, SimpleNamespace(param=version)
-    )
-    try:
-        state, actual_version = next(fixture)
+    # Exercise shared case setup with the constructor trap already installed.
+    with _case_state(tmp_path, monkeypatch, version) as (state, actual_version):
         assert actual_version == version
         assert [type(detector) for detector in state.detectors] == [
             PathDetector, SecretDetector,
         ]
-    finally:
-        fixture.close()
 
     with pytest.raises(sqlite3.ProgrammingError, match="closed"):
         state.ledger.conn.execute("SELECT 1")
