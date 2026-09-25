@@ -52,6 +52,14 @@ exists to stop exactly that — and the bootstrap is what resolves it.
 
 Handle this branch before anything below.
 
+A host plugin update may leave the receipt selecting a deleted bundle.
+The hook's runtime-selection warning or denial may already contain the
+external-terminal repair command. Reproduce that command verbatim when
+present. Repair is not automatic. Do not run installation or stop
+processes merely because the user requested this command-printing branch.
+After a successful repair, the user must restart the Codex app, CLI, or
+IDE integration that loaded the plugin, as the repair output instructs.
+
 `$privacy repair` prints the recovery command for another terminal.
 Invoke the bundled launcher with `repair --print-command` and reproduce
 its output verbatim. This branch does not start installation, stop
@@ -227,7 +235,7 @@ the same process instead of starting a second one.
 and never installs or replaces a patched Codex binary. Do not describe
 either as doing the other's job.
 
-Privacy HUD 0.9.3 writes snapshot version 2. The native Privacy item requires
+Privacy HUD 0.9.4 writes snapshot version 2. The native Privacy item requires
 a patched Codex build containing the snapshot-v2 reader. Matching Codex
 versions and successful plugin installation do not establish that
 compatibility. Until the installed build is verified, run the bundled

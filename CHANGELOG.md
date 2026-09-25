@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.4
+
+- Recognize verified MCP and daemon ledger holders from existing or deleted canonical sibling versions of the same cached plugin during explicit runtime repair and the shared stop-only operation.
+- Retain same-user, exact-launch, recorded-interpreter, resolved-plugin-data, identity-revalidation and quiescence checks. Deleted-bundle recognition establishes ownership under the same-user trust model, not the identity of deleted code.
+- Keep runtime repair explicit and unchecked egress fail-closed. Show the external-terminal repair command when hooks detect a runtime selection mismatch, including at SessionStart.
+- Clarify doctor's explicit-repair requirement and add recovery guidance to ambient runtime failures. Preserve ledger history, runtime formats, accounting generations and snapshot version 2.
+
+Refs #74.
+
 ## 0.9.3
 
 - Recognize verified MCP ledger holders from existing canonical sibling versions of the same cached plugin during explicit runtime repair and the shared stop-only operation.
