@@ -147,9 +147,17 @@ The HUD counts denials issued by action, not confirmed stopped reads. Two separa
 
 ## 19. What a subagent inherited is not recorded.
 
-`SubagentStart` is one of the four accounting chokepoints in `architecture.md`, and the observation built for it carries no text: `dispatch.py:527` constructs it with `text=""`, so no detector ever runs on it and no row can result. A subagent is still a `destination` for data sent to it through a tool call, but the question "did the subagent inherit the `.env` the main agent had read?" — named in `PRD.md` as one the product answers — has no answer in the ledger.
+Privacy HUD 0.9.5 scans explicit delegation text delivered in the parent's `PreToolUse` hook. Supported hook-facing names in Codex 0.154.0, 0.155.0, and 0.155.1 are `spawn_agent`, `multi_agent_v1send_input`, `send_message`, and `followup_task`. It scans string `message` arguments and, for the V1-capable spawn/send-input forms, string `text` fields in items whose type is `text`. Other argument fields and non-text items are not scanned. A pre-hook establishes that arguments were observed, not that the host accepted or executed the call.
 
-This says nothing about what happens *inside* a subagent's own session, which has its own hooks and its own session id.
+Version-2 accounting records a B2 subagent observation even when scanning finds nothing. Findings carry unresolved intended recipients and issued-permission evidence; they are not confirmed disclosures and add no confirmed disclosure charge. No recipient row is invented for an observation without findings. Legacy sessions record findings as zero-cost `detected` rows, without activating version-2 accounting or changing historical records.
+
+This is an observation-only path. It does not deny or rewrite delegation. The configured `subagent = "mask"` default and saved mask or origin rules are not applied to these propagation observations. B2 does not use the B3/B4 deep-scan deadline or fail-closed fallback: client unavailability and daemon failures allow with an unverified warning, including when the delegated text contains a URL. A completed scan with a gap remains incomplete scanning, not a denial.
+
+`SubagentStart` retains `text=""` because its delivered payload contains lifecycle identity and references, but no delegated prompt or inherited history. The plugin does not open transcript paths to reconstruct that missing content. Empty text does not imply that detector methods cannot run or that no version-2 observation row can exist. A newly encountered child still follows legacy late-attachment handling because its `SubagentStart` is not a genuine `SessionStart`.
+
+Deferred work includes requested fork-mode storage, child version-2 activation and lifecycle semantics, lifecycle-only identity storage, post-result child-identity correlation, and scanning `SubagentStop.last_assistant_message`. Fork options can be present in parent arguments, but this release neither stores them nor infers inherited subjects from them. A child turn stopping is not treated as permanent session termination.
+
+Still unobserved by this feature: inherited history and its sensitive subjects; non-text items, attachments, and referenced content; actual delivery or model-context admission; whether the parent received child output; unsupported or internal agent paths; and activity during missing-hook or daemon-startup intervals. Child tool activity remains in the child's own session and is not rolled into the parent's account. "Did the subagent inherit the `.env`?" still has no answer in the ledger.
 
 ## 20. A destination is a boundary category, not a recipient.
 
@@ -157,7 +165,7 @@ Legacy accounting groups destinations by boundary category.
 
 New accounting separates boundary category from recipient identity. Supported, unambiguous MCP namespaces identify intended server configurations; multiple tools in one namespace share a recipient. A narrow parser identifies the intended endpoint of supported simple network commands. Ambiguous names, unsupported command forms, dynamic destinations, and unknown recipients remain unresolved.
 
-Intended identity does not prove transmission, backend identity, downstream forwarding, subagent inheritance, or continuity across unobserved configuration changes. Current hooks do not supply the crossing receipts needed to turn those intentions into confirmed disclosures.
+Explicit delegation observations use the B2 subagent category, but their intended recipient identities remain unresolved, including when a target argument is present. This release does not correlate those identities with spawn results or lifecycle events. Intended identity does not prove transmission, backend identity, downstream forwarding, subagent inheritance, or continuity across unobserved configuration changes. Current hooks do not supply the crossing receipts needed to turn those intentions into confirmed disclosures.
 
 ## 21. On an outbound call, the deep scan is best-effort.
 

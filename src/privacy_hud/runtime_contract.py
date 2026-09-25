@@ -57,7 +57,7 @@ FailureCode = Literal[
 
 #: The release this bundle is. `runtime-build.json` repeats it, and the
 #: manifest builder takes it from here.
-RELEASE = "0.9.3"
+RELEASE = "0.9.5"
 
 #: Socket envelope version (`"v"` on every frame). Protocol 1 clients are
 #: refused; see `daemon._Handler`.

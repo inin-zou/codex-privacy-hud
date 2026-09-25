@@ -24,7 +24,7 @@ Recipient identity is separate from boundary category. Supported, unambiguous MC
 
 Detection runs locally; the plugin sends no prompt, file, or secret to a remote scanner. Runtime communication is limited to Unix-domain sockets and the local browser UI on 127.0.0.1.
 
-Version 0.9.3 activates evidence-based accounting for new sessions observed from a genuine SessionStart, using the selected runtime and fenced ledger introduced in 0.8.0. Existing and late-attached sessions retain legacy accounting; historical records are not backfilled or rescored.
+Version 0.9.5 activates evidence-based accounting for new sessions observed from a genuine SessionStart, using the selected runtime and fenced ledger introduced in 0.8.0. Existing and late-attached sessions retain legacy accounting; historical records are not backfilled or rescored.
 
 Version 0.9.2 adds a default-on lexical network guard. Recognized network commands containing known-sensitive-path references receive a denial independently of the local read guard. No file contents are opened or rewritten. Shell-derived file identities and host enforcement remain unresolved; see known limit 6.
 
@@ -62,9 +62,9 @@ Design-intent illustration. It predates the explicit legacy labels; its bar and 
 
 ## Install
 
-Privacy HUD 0.9.3 retains snapshot version 2. New sessions observed from a genuine SessionStart use version-2 accounting; existing sessions and late attachments retain legacy accounting. Snapshot-v2 readers accept version 1 as explicitly legacy and version 2 with nullable accounting fields. Older snapshot-v1-only readers reject version 2 and show no Privacy item. Matching Codex version numbers do not establish snapshot compatibility.
+Privacy HUD 0.9.5 retains snapshot version 2. New sessions observed from a genuine SessionStart use version-2 accounting; existing sessions and late attachments retain legacy accounting. Snapshot-v2 readers accept version 1 as explicitly legacy and version 2 with nullable accounting fields. Older snapshot-v1-only readers reject version 2 and show no Privacy item. Matching Codex version numbers do not establish snapshot compatibility.
 
-The snapshot-v2 patched Codex builds for 0.154.0, 0.155.0, and 0.155.1 were re-released on 2026-09-22. An earlier installation of one of those versions may still contain the older reader. Updating the plugin does not replace that binary. No additional patched-Codex release is required solely for Privacy HUD 0.9.3.
+The snapshot-v2 patched Codex builds for 0.154.0, 0.155.0, and 0.155.1 were re-released on 2026-09-22. An earlier installation of one of those versions may still contain the older reader. Updating the plugin does not replace that binary. No additional patched-Codex release is required solely for Privacy HUD 0.9.5.
 
 The native Privacy item displays accounting snapshots; it does not verify runtime alignment. Before repair, an old daemon may continue refreshing a legacy reading. Use the bundled doctor command to check alignment. The bundled ambient launcher reports runtime failure instead of displaying a percentage.
 
@@ -77,7 +77,7 @@ Generation 5402 requires the activated-accounting implementation introduced in P
 Runtime mismatches produce an unverified warning on ingress and a denial for outbound calls the hook cannot verify. These are plugin decisions, not confirmation of host enforcement. Monitoring gaps and lost in-memory detection state cannot be reconstructed. Open version-2 sessions whose accounting keys were lost remain unavailable for the rest of those sessions.
 
 ```bash
-PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.9.3/plugin'
+PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.9.5/plugin'
 PRIVACY_HUD_DATA='/absolute/path/to/plugin/data'
 
 python3 "$PRIVACY_HUD_BUNDLE/scripts/runtime.py" \
@@ -291,7 +291,7 @@ The distinction the product is built on:
 | Evidence identifies a subject crossing to a concrete recipient | First distinct disclosure is charged |
 | Evidence identifies a subject excluded by an applied rewrite | Prevention for that subject; zero points |
 | Observed persistence | Retention; zero points |
-| Subagent starts without inherited-content evidence | Observation only; inheritance unresolved |
+| Supported explicit delegation pre-hook | B2 observation; finding recipients unresolved; no confirmed disclosure charge |
 
 The audit contains finding events with explicit outcome evidence. Observations also record actions with no findings. Disclosure identities and charges are separate from event rows. Source-to-recipient associations do not reconstruct causal multi-hop flows.
 
@@ -381,7 +381,7 @@ Stated up front, because a privacy tool that overclaims is worse than none:
 16. **The optional read guard is off by default.** This setting controls recognized shell reads. Credential prompt holds, the default-on network guard, and existing credential-based egress policy operate independently of it. Returned holds and denials do not confirm host enforcement. ([details](docs/known-limits.md#16-nothing-is-blocked-until-you-turn-it-on))
 17. Legacy rows can still collapse different outcomes. New accounting appends independent outcome evidence and counts denials issued by action. Historical rows are not reconstructed, and issued denials do not establish host enforcement. ([details](docs/known-limits.md#17-a-blocked-read-can-leave-a-record-that-says-the-opposite-in-one-sequence))
 18. Legacy rows can still merge files matching one pattern. Version-2 accounting removes pattern-based merging and counts denials issued by action, but all shell-derived file identities remain unresolved, including ordinary `cat .env` reads. Separate opaque subject IDs do not establish distinct files, and the audit does not name the denied file. Confirmed stopped reads require enforcement evidence. #44 remains open for guard-target identity and I1-safe display; 0.10.0 is a proposed target, not a commitment. ([details](docs/known-limits.md#18-a-blocked-reads-row-does-not-name-the-file))
-19. **What a subagent inherited is not recorded.** The `SubagentStart` observation carries no text, so no detector runs on it and no row results. "Did the subagent inherit the `.env`?" has no answer in the ledger. ([details](docs/known-limits.md#19-what-a-subagent-inherited-is-not-recorded))
+19. **Explicit delegation is observed; inherited content is not.** Parent `PreToolUse` hooks scan string `message` arguments for `spawn_agent`, `multi_agent_v1send_input`, `send_message`, and `followup_task`, plus V1 text items. New accounting records B2 observations and findings with unresolved intended recipients; legacy findings are zero-cost detections. This path does not deny or rewrite delegation, even when a mask rule exists. It does not confirm delivery or charge confirmed disclosure. `SubagentStart` still supplies no delegated or inherited text. Fork-mode storage, child accounting activation and identity correlation, stop-message scanning, attachments, inherited history, model admission, parent receipt of child output, internal agents, and missing-hook intervals remain outside this coverage. ([details](docs/known-limits.md#19-what-a-subagent-inherited-is-not-recorded))
 20. Concrete recipients are identified only where the hook and supported parser provide an unambiguous identity. Other recipients remain unresolved. Identity alone does not establish delivery or forwarding. ([details](docs/known-limits.md#20-a-destination-is-a-boundary-category-not-a-recipient))
 21. **On an outbound call, the deep scan is best-effort.** The model is serial, and a missed hook deadline on an outbound call becomes a deny (I6). Egress uses a requested timeout based on the remaining budget and an inclusive completion cutoff; neither guarantees elapsed time. See `engine.TIER3_EGRESS_BUDGET`. Measured: a call under the 1.0 s budget returned at 1.25 s. At most one egress scan worker is admitted at a time. Admission is nonblocking; the worker retains its slot until it exits, including after caller abandonment. A scan gap means an applicable deep scan supplied no accepted result; the call then proceeds on the fast tiers, the same as every outbound call before this existed. A scan gap can omit findings that would otherwise cause blocking or masking. Each observed scan gap is recorded per observation and counted per session, including observations with no event row, so the session stops reading as fully verified — but the audit cannot tell you which calls they were. ([details](docs/known-limits.md#21-on-an-outbound-call-the-deep-scan-is-best-effort))
 22. **Credential prompt holds have a narrow scope.** Only supported credential formats in prompt text can hold a submission. Confirm by resubmitting after 2 seconds and within 5 minutes. Images, attachments, entropy findings, private-key headers, and tier-3 NER findings do not trigger this hold. No daemon reply means ingress fails open. ([details](docs/known-limits.md#22-credential-prompt-holds-have-a-narrow-scope))
@@ -430,12 +430,12 @@ Stated up front, because a privacy tool that overclaims is worse than none:
 
 ## Uninstall
 
-Run the script from the exact installed 0.9.3 plugin bundle. Replace the
+Run the script from the exact installed 0.9.5 plugin bundle. Replace the
 placeholder below with that bundle's absolute directory, containing both
 `install.sh` and `scripts/runtime.py`.
 
 ```bash
-PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.9.3/plugin'
+PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.9.5/plugin'
 sh "$PRIVACY_HUD_BUNDLE/install.sh" --uninstall
 ```
 
