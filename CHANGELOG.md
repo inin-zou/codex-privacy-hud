@@ -21,6 +21,12 @@ Refs #44, #54.
 
 Refs #74.
 
+## Unreleased
+
+- Reconcile the flow requirements with the shipped event-based audit. Withdraw aggregated causal multi-hop chains from the current requirements and document the limits of same-subject associations. No flow writer, cross-observation history view, schema change or accounting change is introduced.
+
+Refs #47.
+
 ## 0.9.3
 
 - Recognize verified MCP ledger holders from existing canonical sibling versions of the same cached plugin during explicit runtime repair and the shared stop-only operation.

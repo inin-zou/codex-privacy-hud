@@ -122,11 +122,7 @@ B3  MCP tool / external service       (disclosure — third party)
 B4  arbitrary network egress (shell)  (disclosure — unbounded third party)
 ```
 
-A single sensitive value can generate multiple disclosure events, one per boundary crossed. The audit UI therefore renders **crossings**, not findings — one row per value observed crossing a boundary. *(The multi-hop **flow** view below this line is designed and never built: the `flows` table has no writer.)*
-
-```text
-support.log → main agent → github MCP
-```
+The audit presents finding-event rows with explicit outcome evidence. Version-2 accounting separates observations, subjects, intended recipients and confirmed disclosures. A repeated subject across observations does not establish causal transfer between them. Aggregated causal multi-hop chains are withdrawn from the current requirements; no flow writer or cross-observation history view is shipped. Legacy rows retain their historical classifications and limitations.
 
 ### 5.3 Disclosure budget formula
 
