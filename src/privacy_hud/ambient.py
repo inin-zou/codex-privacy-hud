@@ -138,6 +138,7 @@ RESOLVE_INTERVAL = 30.0
 #: verified is a reading whose producer is unknown, and drawing one would
 #: be worse than drawing nothing (§A, §D).
 _REFUSAL_CANDIDATES = (
+    "Privacy — runtime mismatch; run $privacy repair",
     runtime_messages.AMBIENT_RUNTIME_MISMATCH,
     runtime_messages.AMBIENT_NARROW_FALLBACK,
 )

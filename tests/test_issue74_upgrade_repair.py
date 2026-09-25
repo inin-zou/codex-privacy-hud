@@ -28,7 +28,7 @@ def upgrade_runtime(tmp_path, monkeypatch):
     monkeypatch.setenv("PLUGIN_DATA", str(data))
 
     parent = codex.plugin_cache_root() / "market" / codex.PLUGIN_NAME
-    selected = parent / "0.9.3"
+    selected = parent / contract.RELEASE
     older = parent / "0.8.2"
     for bundle in (selected, older):
         bootstrap = bundle / "scripts" / "runtime.py"
@@ -143,7 +143,7 @@ def test_sibling_ownership_does_not_depend_on_version_order(
 @pytest.mark.parametrize("case", [
     "outside", "marketplace", "plugin", "nested", "version_prefix",
     "version_suffix", "version_short", "version_zero", "dotdot",
-    "dot", "deleted", "missing_bootstrap", "version_symlink",
+    "dot", "missing_bootstrap", "version_symlink",
     "scripts_symlink", "bootstrap_symlink", "development_selection",
 ])
 def test_sibling_cache_boundary_refuses_path_spoofing(upgrade_runtime, case):
@@ -172,8 +172,6 @@ def test_sibling_cache_boundary_refuses_path_spoofing(upgrade_runtime, case):
         raw = str(f.older / ".." / f.older.name / "scripts" / "runtime.py")
     elif case == "dot":
         raw = str(f.older) + "/./scripts/runtime.py"
-    elif case == "deleted":
-        shutil.rmtree(f.older)
     elif case == "missing_bootstrap":
         (f.older / "scripts" / "runtime.py").unlink()
     elif case == "version_symlink":
@@ -214,7 +212,6 @@ def test_sibling_cache_boundary_refuses_path_spoofing(upgrade_runtime, case):
     ("uid", "user"),
     ("extra", "launch_form"),
     ("isolation", "launch_form"),
-    ("daemon", "launch_form"),
     ("ambient", "launch_form"),
     ("python", "interpreter"),
     ("executable", "interpreter"),
@@ -323,3 +320,276 @@ def test_selected_and_legacy_forms_remain_accepted(upgrade_runtime):
     assert repair.classify_holder(
         legacy, f.data, f.selected, interpreter=f.python) == "legacy"
     assert f.sent == []
+
+
+@pytest.mark.parametrize("command, expected", [
+    ("mcp", "mcp"),
+    ("daemon", "current"),
+])
+@pytest.mark.parametrize("deleted", [False, True])
+@pytest.mark.parametrize("receipt_version", [1, 2])
+@pytest.mark.parametrize("framework", [False, True])
+def test_upgrade_holder_forms(
+        upgrade_runtime, command, expected, deleted, receipt_version,
+        framework):
+    f = upgrade_runtime
+    identity = f.identity(424242, command=command)
+    recorded = f.python
+    if framework:
+        base = f.root / "Python.framework" / "Versions" / "3.12"
+        recorded = base / "bin" / "python3"
+        app = base / "Resources" / "Python.app" / "Contents" / "MacOS" / "Python"
+        identity["argv"][0] = str(app)
+        identity["executable"] = str(app)
+        identity["launcher"] = str(recorded)
+
+    f.write_receipt(receipt_version, recorded)
+    alias = f.root / "data-alias"
+    alias.symlink_to(f.data, target_is_directory=True)
+    identity["argv"][4] = str(alias)
+    if deleted:
+        shutil.rmtree(f.older)
+
+    assert repair.classify_holder(
+        identity, f.data, f.selected,
+        interpreter=repair._recorded_interpreter(f.data)) == expected
+    assert f.sent == []
+
+
+@pytest.mark.parametrize("command", ["mcp", "daemon"])
+@pytest.mark.parametrize("case, reason", [
+    ("uid", "user"),
+    ("extra", "launch_form"),
+    ("isolation", "launch_form"),
+    ("ambient", "launch_form"),
+    ("python", "interpreter"),
+    ("executable", "interpreter"),
+    ("data", "data_dir"),
+    ("no_receipt", "installation"),
+    ("malformed_receipt", "installation"),
+    ("unsafe_receipt", "installation"),
+    ("changed_receipt", "interpreter"),
+    ("uninspectable", "uninspectable"),
+])
+def test_deleted_holder_retains_ownership_gates(
+        upgrade_runtime, command, case, reason):
+    f = upgrade_runtime
+    identity = f.identity(424242, command=command)
+    shutil.rmtree(f.older)
+    receipt = f.data / contract.RECEIPT_NAME
+
+    if case == "uid":
+        identity["uid"] = str(os.getuid() + 1)
+    elif case == "extra":
+        identity["argv"].append("--extra")
+    elif case == "isolation":
+        identity["argv"][1] = "-B"
+    elif case == "ambient":
+        identity["argv"][5] = "ambient"
+    elif case == "python":
+        identity["argv"][0] = str(f.root / "other-python")
+    elif case == "executable":
+        identity["executable"] = str(f.root / "other-python")
+    elif case == "data":
+        identity["argv"][4] = str(f.root / "other-data")
+    elif case == "no_receipt":
+        receipt.unlink()
+    elif case == "malformed_receipt":
+        receipt.write_text("{", encoding="utf-8")
+    elif case == "unsafe_receipt":
+        receipt.chmod(0o666)
+    elif case == "changed_receipt":
+        f.write_receipt(recorded=f.root / "other-python")
+    elif case == "uninspectable":
+        identity["argv"] = None
+
+    with pytest.raises(storage.QuiescenceRefusal) as caught:
+        repair.classify_holder(
+            identity, f.data, f.selected,
+            interpreter=repair._recorded_interpreter(f.data))
+
+    assert caught.value.reason == reason
+    assert f.sent == []
+
+
+@pytest.mark.parametrize("case", [
+    "outside", "marketplace", "plugin", "nested", "version",
+    "dotdot", "dot", "dangling_symlink", "parent_symlink",
+    "missing_parent", "development_selection",
+])
+def test_deleted_holder_cache_boundary(upgrade_runtime, case):
+    f = upgrade_runtime
+    shutil.rmtree(f.older)
+    candidate = f.older
+    selected = f.selected
+    raw = None
+
+    if case == "outside":
+        candidate = f.root / "outside" / "market" / codex.PLUGIN_NAME / "0.8.2"
+    elif case == "marketplace":
+        candidate = (
+            codex.plugin_cache_root() / "other" / codex.PLUGIN_NAME / "0.8.2")
+        candidate.parent.mkdir(parents=True)
+    elif case == "plugin":
+        candidate = f.parent.parent / (codex.PLUGIN_NAME + "-other") / "0.8.2"
+        candidate.parent.mkdir()
+    elif case == "nested":
+        candidate = f.parent / "nested" / "0.8.2"
+        candidate.parent.mkdir()
+    elif case == "version":
+        candidate = f.parent / "00.8.2"
+    elif case == "dotdot":
+        raw = str(f.older / ".." / f.older.name / "scripts" / "runtime.py")
+    elif case == "dot":
+        raw = str(f.older) + "/./scripts/runtime.py"
+    elif case == "dangling_symlink":
+        f.older.symlink_to(f.root / "absent", target_is_directory=True)
+    elif case == "parent_symlink":
+        alias = f.parent.parent / "alias"
+        alias.symlink_to(f.parent, target_is_directory=True)
+        candidate = alias / "0.8.2"
+    elif case == "missing_parent":
+        candidate = (
+            codex.plugin_cache_root() / "absent" / codex.PLUGIN_NAME / "0.8.2")
+    elif case == "development_selection":
+        selected = f.root / "checkout"
+
+    identity = f.identity(424242, candidate)
+    if raw is not None:
+        identity["argv"][2] = raw
+
+    with pytest.raises(storage.QuiescenceRefusal) as caught:
+        repair.classify_holder(
+            identity, f.data, selected, interpreter=f.python)
+
+    assert caught.value.reason == "launch_form"
+    assert f.sent == []
+
+
+def test_missing_bundle_acceptance_is_opt_in(upgrade_runtime):
+    f = upgrade_runtime
+    shutil.rmtree(f.older)
+
+    assert codex.cached_plugin_parent(f.older) is None
+    assert codex.cached_plugin_parent(
+        f.older, allow_missing=True) == f.parent
+
+
+def test_deleted_holder_uses_resolved_codex_home(upgrade_runtime, monkeypatch):
+    f = upgrade_runtime
+    actual = codex.codex_home()
+    alias = f.root / "codex-alias"
+    alias.symlink_to(actual, target_is_directory=True)
+    monkeypatch.setenv("CODEX_HOME", str(alias))
+    shutil.rmtree(f.older)
+
+    assert repair.classify_holder(
+        f.identity(424242), f.data, f.selected,
+        interpreter=f.python) == "mcp"
+
+
+@pytest.mark.parametrize("stop_only", [False, True])
+@pytest.mark.parametrize("respawn", [False, True])
+def test_deleted_mcp_stop_and_replacement_holder(
+        upgrade_runtime, stop_only, respawn):
+    shutil.rmtree(upgrade_runtime.older)
+    test_sibling_mcp_stop_and_replacement_holder(
+        upgrade_runtime, stop_only, respawn)
+
+
+@pytest.mark.parametrize("case", ["unknown", "changed", "departed", "timeout"])
+def test_deleted_mcp_revalidation(
+        upgrade_runtime, monkeypatch, case):
+    shutil.rmtree(upgrade_runtime.older)
+    test_sibling_stop_revalidation_and_announcements(
+        upgrade_runtime, monkeypatch, case)
+
+
+def test_stop_only_handles_a_deleted_receipt_selection(upgrade_runtime):
+    f = upgrade_runtime
+    receipt_path = f.data / contract.RECEIPT_NAME
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["selected_bundle_root"] = str(f.older)
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    receipt_path.chmod(0o600)
+
+    # One holder is the selected daemon. The other names a never-created
+    # sibling path; recognition does not establish prior installation.
+    f.processes[424242] = f.identity(424242, command="daemon")
+    f.processes[424243] = f.identity(424243, f.parent / "0.8.1")
+    shutil.rmtree(f.older)
+    before = receipt_path.read_bytes()
+
+    assert repair.stop_selected_runtime(f.data) is True
+    assert f.sent == [
+        (424242, signal.SIGTERM),
+        (424243, signal.SIGTERM),
+    ]
+    assert receipt_path.read_bytes() == before
+
+
+def test_repair_replaces_deleted_holders_and_preserves_synthetic_ledger(
+        upgrade_runtime, monkeypatch):
+    import sqlite3
+    from contextlib import closing
+
+    from test_runtime_repair import seed_ledger
+
+    f = upgrade_runtime
+    source = seed_ledger(f.data)
+    with closing(sqlite3.connect(source)) as conn:
+        before = tuple(conn.iterdump())
+
+    receipt_path = f.data / contract.RECEIPT_NAME
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["selected_bundle_root"] = str(f.older)
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    receipt_path.chmod(0o600)
+
+    f.processes[424242] = f.identity(424242, command="daemon")
+    f.processes[424243] = f.identity(424243, f.parent / "0.8.1")
+    shutil.rmtree(f.older)
+
+    identity = contract.RuntimeIdentity(
+        release=contract.RELEASE,
+        build_id="c" * 64,
+        protocol=contract.PROTOCOL_VERSION,
+        storage_generation=contract.STORAGE_GENERATION,
+        readable_schemas=contract.READABLE_SCHEMAS,
+        writable_schemas=contract.WRITABLE_SCHEMAS,
+        snapshot_versions=contract.SNAPSHOT_VERSIONS,
+    )
+    monkeypatch.setattr(repair, "load_identity", lambda bundle: identity)
+    monkeypatch.setattr(repair, "_probe", lambda *args: {
+        "transformers": "synthetic",
+        "torch": "synthetic",
+        "mcp": "synthetic",
+    })
+    stages = []
+
+    def start(data_dir, activation):
+        assert not f.processes
+        assert contract.read_receipt(data_dir)["selected_bundle_root"] == \
+            str(f.selected)
+        stages.append("start")
+
+    def ready(data_dir, activation):
+        assert stages == ["start"]
+        stages.append("ready")
+
+    monkeypatch.setattr(repair, "_start_daemon", start)
+    monkeypatch.setattr(repair, "_await_handshake", ready)
+
+    result = repair.repair_runtime(
+        f.selected, f.data, progress=f.progress.append)
+
+    assert stages == ["start", "ready"]
+    assert result.preserved_existing is True
+    assert result.activation.bundle_root == f.selected
+    assert result.activation.epoch != receipt["activation_epoch"]
+    assert f.sent == [
+        (424242, signal.SIGTERM),
+        (424243, signal.SIGTERM),
+    ]
+    with closing(sqlite3.connect(codex.ledger_path(f.data))) as conn:
+        assert tuple(conn.iterdump()) == before
