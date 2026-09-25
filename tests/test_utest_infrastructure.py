@@ -153,10 +153,10 @@ def test_fast_runner_selection_and_budget():
         (121.0, 2, 2),
     ):
         times = iter([0.0, elapsed])
-        budget = runner["FastBudget"](clock=lambda: next(times))
+        budget = runner["FastBudget"](clock=lambda times=times: next(times))
         lines = []
         reporter = SimpleNamespace(write_line=lines.append)
-        manager = SimpleNamespace(get_plugin=lambda name: reporter)
+        manager = SimpleNamespace(get_plugin=lambda name, reporter=reporter: reporter)
         session = SimpleNamespace(
             exitstatus=initial,
             config=SimpleNamespace(pluginmanager=manager),
@@ -247,6 +247,10 @@ def staged_repo(tmp_path):
 
     manifest()
     git("add", ".")
+    git(
+        "-c", "user.name=utest", "-c", "user.email=utest@example.invalid",
+        "-c", "commit.gpgsign=false", "commit", "-q", "-m", "base",
+    )
     return SimpleNamespace(
         root=repo, env=env, log=log, git=git, manifest=manifest, check=check,
     )
@@ -294,6 +298,10 @@ def test_staged_shell_syntax_not_unstaged_fix(staged_repo):
 
 def test_staged_configuration_lints_snapshot(staged_repo):
     case = staged_repo
+    pyproject = case.root / "pyproject.toml"
+    pyproject.write_text(pyproject.read_text() + "\n")
+    case.manifest()
+    case.git("add", "pyproject.toml", "runtime-build.json")
     assert case.check().returncode == 0
     assert json.loads(case.log.read_text())[-1] == "."
 
@@ -316,7 +324,7 @@ def test_deleted_and_renamed_staged_files(staged_repo):
     case = staged_repo
     case.git("mv", "example with spaces.py", "renamed file.py")
     assert case.check().returncode == 0
-    case.git("rm", "renamed file.py")
+    case.git("rm", "-q", "-f", "renamed file.py")
     assert case.check().returncode == 0
 
 
