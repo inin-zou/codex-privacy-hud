@@ -1242,9 +1242,22 @@ def dispatch(
                                                    cwd=cwd)
                     decision = engine.record_prompt_hold(
                         held, matches, held_reason(m.kind for m in matches))
+                except Exception:
+                    # The credential verdict already requires a hold. Keep
+                    # its pending window and replay verdict so the stated
+                    # resubmission path still works; this grants no allow.
+                    # Writes may have committed before a later read failed.
+                    return {
+                        "decision": "block",
+                        "reason": held_reason(m.kind for m in matches) + (
+                            "\n\n  Ledger recording failed; this hold may be missing "
+                            "from the session audit.\n"
+                            "  The resubmission instructions still apply while "
+                            "this session and daemon remain active."
+                        ),
+                    }
                 except BaseException:
-                    # A hold that was not recorded must not leave a pending
-                    # confirmation behind.
+                    # Process-level interruption is not a handled reply.
                     gate.restore(saved)
                     raise
                 _publish_hud(state, session_id)
