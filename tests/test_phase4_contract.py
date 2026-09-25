@@ -22,9 +22,9 @@ from privacy_hud.matrix.loader import load_matrix
 REPO = Path(__file__).resolve().parents[1]
 RELEASE = "0.9.1"
 
-#: The CHANGELOG below the 0.9.0 section, exactly as 0.8.2 published it.
+#: The CHANGELOG below the 0.9.0 section, exactly as 0.8.3 published it.
 PRIOR_CHANGELOG_SHA256 = (
-    "9f0183ab2519706185c7a834db8ca89437fb11b6abd39b42717595e75a8d9658")
+    "c3b39aa9446983dd31af355ab01dcf5ca9f9be558485fa56310a0ef1aefadf2f")
 
 CONTRACT_DOCS = (".claude/docs/PRD.md", ".claude/docs/design.md",
                  ".claude/docs/architecture.md")
@@ -376,7 +376,7 @@ def test_phase4_changelog_preserves_prior_releases():
     head = CHANGELOG_090 + "\n\n"
     assert preserved.startswith(head)
     rest = preserved[len(head):]
-    assert rest.startswith("## 0.8.2\n")
+    assert rest.startswith("## 0.8.3\n")
     assert hashlib.sha256(rest.encode()).hexdigest() == PRIOR_CHANGELOG_SHA256
     assert not re.search(
         r"\b(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved) #\d+",
