@@ -123,11 +123,11 @@ A denial issued by Privacy HUD is not confirmation that the host enforced it. Cu
 
 ## 18. A blocked read's row does not name the file.
 
-This limitation remains for legacy-accounted sessions and historical rows: files matching the same detector pattern may share one legacy row.
+Legacy-accounted sessions and historical rows can still merge files matching one detector pattern. Version-2 accounting removes that pattern-based merging, but the audit still cannot identify which file a shell-read denial concerned.
 
-New accounting identifies an unambiguous literal file path evaluated by the guard independently of the detector pattern. Different identified files have different session-scoped subjects. Unsupported shell evaluation or an unresolved path leaves the subject unresolved. Persisted labels omit sensitive path components and may consist only of an opaque file ID and an allowlisted suffix.
+All shell-derived accounting file identities remain unresolved in 0.9.0, including ordinary `cat .env` reads. Command text does not attest the executable, shell expansion, inherited environment, or program configuration. Each separate observation of a guarded shell read receives an unresolved file subject; distinct opaque IDs do not establish distinct files, and another observation of the same path also receives another unresolved subject. The audit uses source `local file` and label `file <opaque-id>`, without the filename or a suffix. The extracted path remains available to the guard and its immediate denial message; that does not establish which files execution actually read.
 
-The HUD counts denials issued, not confirmed stopped reads. A stopped-read count requires enforcement evidence. File identity is lexical; symlinks and filesystem aliases are not resolved.
+The HUD counts denials issued by action, not confirmed stopped reads. Two separately denied actions count as two denials issued; current hooks establish no confirmed reads stopped. Supported literal structured path inputs can still supply lexical file identity when the accounting key is available; symlinks and filesystem aliases are not resolved. This is parser support, not an evidenced native Codex file-read hook in this integration, and resolved identity alone does not provide a useful path label. #44 remains open for supported guard-target identity and I1-safe audit display. 0.10.0 is a proposed target for that remaining work, not a release commitment.
 
 ## 19. What a subagent inherited is not recorded.
 
