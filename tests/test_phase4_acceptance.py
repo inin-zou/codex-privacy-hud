@@ -542,7 +542,7 @@ def test_phase4_selected_runtime_fenced_upgrade_to_new_session(monkeypatch):
                 (root / contract.RECEIPT_NAME).read_text())
             assert receipt_doc["v"] == 2
             selected = contract.load_activation(root)
-            assert selected.identity.release == contract.RELEASE == "0.9.0"
+            assert selected.identity.release == contract.RELEASE == "0.9.1"
             assert selected.identity.protocol == contract.PROTOCOL_VERSION \
                 == 2
             from privacy_hud.runtime_client import connect_runtime
@@ -551,7 +551,7 @@ def test_phase4_selected_runtime_fenced_upgrade_to_new_session(monkeypatch):
                 hello = dict(conn.hello)
             assert (hello["v"], hello["release"], hello["build_id"],
                     hello["schema_version"]) == (
-                2, "0.9.0", selected.identity.build_id,
+                2, "0.9.1", selected.identity.build_id,
                 ledger_schema.PREPARED_VERSION)
 
             out = run_hook(root, {"hook_event_name": "SessionStart",
@@ -634,7 +634,7 @@ def test_phase4_repair_after_activation_preserves_accounting():
         write_receipt_v1(data, python=inst.python)
         outcome = repair.repair_runtime(inst.bundle, data,
                                         allow_degraded=True)
-        assert outcome.activation.identity.release == "0.9.0"
+        assert outcome.activation.identity.release == "0.9.1"
         assert _await_daemon(data)["ready"] is True
         active = storage.active_path(data)
         assert storage.is_fenced(data)
