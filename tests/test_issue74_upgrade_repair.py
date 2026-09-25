@@ -28,7 +28,7 @@ def upgrade_runtime(tmp_path, monkeypatch):
     monkeypatch.setenv("PLUGIN_DATA", str(data))
 
     parent = codex.plugin_cache_root() / "market" / codex.PLUGIN_NAME
-    selected = parent / "0.9.3"
+    selected = parent / contract.RELEASE
     older = parent / "0.8.2"
     for bundle in (selected, older):
         bootstrap = bundle / "scripts" / "runtime.py"
