@@ -1,7 +1,6 @@
 [
   "tests/detect/test_model.py",
   "tests/test_accounting_activation.py",
-  "tests/test_accounting_dispatch.py",
   "tests/test_accounting_inactive.py",
   "tests/test_browser_accounting_js.py",
   "tests/test_browser_honesty.py",
