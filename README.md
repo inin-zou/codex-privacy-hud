@@ -299,7 +299,7 @@ Privacy HUD 0.9.1 can request a hold before a user prompt enters model context w
 
 Confirmation is case-sensitive and lasts for this session while the daemon runs. Restarting the daemon loses it. Entropy findings, tier-3 NER findings, and private-key headers do not trigger prompt holds. Images and attachments are not scanned. If the daemon does not answer, including during cold startup, prompts fail open with an unverified warning.
 
-The inspected Codex 0.154.0 and 0.155.1 source clears the composer on submission and does not restore it after a hook hold; this has not been verified in a live TUI. A hold does not prevent Codex from retaining local input history. The ledger records a denial issued, not confirmed host enforcement. See [limit 22](docs/known-limits.md#22-credential-prompt-holds-have-a-narrow-scope).
+The inspected Codex 0.154.0 and 0.155.1 source clears the composer on submission and does not restore it after a hook hold; this has not been verified in a live TUI. A hold does not prevent Codex from retaining local input history. When recording succeeds, the ledger records a denial issued, not confirmed host enforcement. A recording failure after the hold decision still returns a block, with a warning that the hold may be missing from the audit. The in-memory confirmation window remains usable for a fresh eligible submission while the session and daemon remain active; replaying the same delivery stays held. Confirmation becomes reusable only after its own observation records successfully. If no usable reply reaches the client, ingress still fails open. See [limit 22](docs/known-limits.md#22-credential-prompt-holds-have-a-narrow-scope).
 
 ### The read guard
 
