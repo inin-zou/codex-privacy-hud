@@ -191,6 +191,115 @@ def test_mcp_exiting_before_revalidation_is_not_signalled(
     assert f.progress == []
 
 
+@pytest.mark.parametrize("missing_kind", ["legacy", "mcp"])
+@pytest.mark.parametrize("departure", ["exited", "closed"])
+@pytest.mark.parametrize("timeout", [False, True])
+def test_mixed_holder_announcements_follow_revalidated_targets(
+        fake_runtime, monkeypatch, missing_kind, departure, timeout):
+    f = fake_runtime
+    legacy_pid = 424243
+    legacy = f.identity(legacy_pid)
+    legacy["argv"] = [str(f.python), *repair.LEGACY_DAEMON_ARGS]
+    f.processes[legacy_pid] = legacy
+
+    omitted = legacy_pid if missing_kind == "legacy" else 424242
+    target = 424242 if missing_kind == "legacy" else legacy_pid
+    stopping = (
+        messages.MCP_STOPPING if missing_kind == "legacy"
+        else messages.LEGACY_DAEMON_STOPPING
+    )
+    stopped = (
+        messages.MCP_STOPPED if missing_kind == "legacy"
+        else messages.LEGACY_DAEMON_STOPPED
+    )
+    reads = {424242: 0, legacy_pid: 0}
+    holder_calls = 0
+
+    def holders(root):
+        nonlocal holder_calls
+        holder_calls += 1
+        if holder_calls == 1:
+            return sorted(f.processes)
+        if departure == "exited":
+            f.processes.pop(omitted, None)
+        return sorted(pid for pid in f.processes if pid != omitted)
+
+    def identity(pid):
+        reads[pid] += 1
+        return f.processes.get(pid)
+
+    send = repair._signal
+
+    def announced_send(pid, sig):
+        assert reads == {424242: 2, legacy_pid: 2}
+        assert f.progress == [stopping]
+        send(pid, sig)
+
+    monkeypatch.setattr(storage, "open_holders", holders)
+    monkeypatch.setattr(repair, "process_identity", identity)
+    monkeypatch.setattr(repair, "_signal", announced_send)
+    f.exits = not timeout
+
+    if timeout:
+        ticks = iter([0.0, repair.QUIESCE_TIMEOUT])
+        monkeypatch.setattr(repair.time, "monotonic", lambda: next(ticks))
+        with pytest.raises(storage.QuiescenceRefusal) as caught:
+            repair._quiesce(f.data, f.bundle, progress=f.progress.append)
+        assert caught.value.check == "stop_timeout"
+        assert caught.value.pids == (target,)
+        assert caught.value.signalled is True
+        assert repair.refusal_message(caught.value) == \
+            messages.HOLDER_STOP_TIMEOUT
+        assert f.progress == [stopping]
+    else:
+        assert repair._quiesce(
+            f.data, f.bundle, progress=f.progress.append) is True
+        assert f.progress == [stopping, stopped]
+
+    assert f.sent == [(target, signal.SIGTERM)]
+    assert (omitted in f.processes) is (departure == "closed")
+
+
+@pytest.mark.parametrize("still_holding", [False, True])
+def test_stop_holders_preserves_bool_and_zero_argument_callback(
+        fake_runtime, monkeypatch, still_holding):
+    f = fake_runtime
+    classified = dict(f.processes)
+    events = []
+    send = repair._signal
+
+    def targets(pids):
+        assert isinstance(pids, frozenset)
+        assert pids == frozenset({424242})
+        assert f.sent == []
+        events.append("targets")
+
+    def before_signal():
+        assert events == ["targets"]
+        assert f.sent == []
+        events.append("before")
+
+    def observed_send(pid, sig):
+        assert events == ["targets", "before"]
+        events.append("signal")
+        send(pid, sig)
+
+    monkeypatch.setattr(
+        storage, "open_holders",
+        lambda root: sorted(f.processes) if still_holding else [])
+    monkeypatch.setattr(repair, "_signal", observed_send)
+
+    result = repair.stop_holders(
+        f.data, classified, deadline=0.0,
+        on_signal=before_signal, on_targets=targets)
+
+    assert result is still_holding
+    assert events == (
+        ["targets", "before", "signal"] if still_holding else [])
+    assert f.sent == (
+        [(424242, signal.SIGTERM)] if still_holding else [])
+
+
 def test_mcp_is_announced_before_one_sigterm(fake_runtime, monkeypatch):
     f = fake_runtime
     send = repair._signal
