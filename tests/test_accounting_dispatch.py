@@ -849,3 +849,23 @@ def test_phase4_production_adapter_records_no_terminal_evidence(state):
     assert s.denials_issued == 1 and s.denials_enforced == 0
     assert s.unresolved_actions >= 3
     assert count(state, "disclosures") == 0
+
+
+def test_deterministic_states_do_not_construct_real_model(
+        tmp_path, monkeypatch):
+    from privacy_hud.detect.model import ModelDetector
+
+    def forbidden_init(self, *args, **kwargs):
+        pytest.fail("deterministic accounting state constructed the real model")
+
+    monkeypatch.setattr(ModelDetector, "__init__", forbidden_init)
+    setup = state.__wrapped__(tmp_path, monkeypatch)
+    try:
+        st = next(setup)
+        assert [type(detector) for detector in st.detectors] == [
+            PathDetector, SecretDetector, EmailDetector,
+        ]
+        # Exercise the second construction too, with the trap still active.
+        test_missing_key_does_not_weaken_egress_denial(st, tmp_path)
+    finally:
+        setup.close()

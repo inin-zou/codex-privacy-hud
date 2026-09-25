@@ -2254,3 +2254,24 @@ def test_daemon_shutdown_discards_registered_identity(tmp_path, monkeypatch):
         assert [tuple(r) for r in rows] == [("k1", None), ("k2", None)]
     finally:
         state.ledger.conn.close()
+
+
+def test_slow_scan_fixture_does_not_construct_real_model(
+        tmp_path, monkeypatch):
+    from privacy_hud.detect.model import ModelDetector
+    from privacy_hud.detect.paths import PathDetector
+    from privacy_hud.detect.secrets import SecretDetector
+
+    def forbidden_init(self, *args, **kwargs):
+        pytest.fail("slow-scan fixture constructed the real model")
+
+    monkeypatch.setattr(ModelDetector, "__init__", forbidden_init)
+    setup = slow_scan_daemon.__wrapped__(tmp_path)
+    try:
+        daemon, _, slow = next(setup)
+        assert [type(detector) for detector in daemon.state.detectors] == [
+            PathDetector, SecretDetector, _SlowTier3Detector,
+        ]
+        assert daemon.state.detectors[-1] is slow
+    finally:
+        setup.close()

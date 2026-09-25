@@ -743,3 +743,14 @@ def test_phase4_old_runtime_rejected_after_activated_upgrade(tmp_path):
             ledger_schema.ACTIVATED_VERSION
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_cheap_pipeline_does_not_construct_real_model(
+        tmp_path, monkeypatch):
+    from privacy_hud.detect.model import ModelDetector
+
+    def forbidden_init(self, *args, **kwargs):
+        pytest.fail("cheap Phase 4 pipeline constructed the real model")
+
+    monkeypatch.setattr(ModelDetector, "__init__", forbidden_init)
+    test_phase4_new_start_to_end_contract(tmp_path, monkeypatch)
