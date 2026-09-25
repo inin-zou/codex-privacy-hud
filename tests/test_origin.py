@@ -27,10 +27,10 @@ def test_hidden_additional_operands_leave_accounting_path_unresolved(command):
     "bat --paging=never .env",
     "bat --language=json .env",
 ])
-def test_unambiguous_option_forms_keep_accounting_path_resolved(command):
+def test_option_forms_without_execution_evidence_stay_unresolved(command):
     origin = extract_origin("Bash", {"command": command})
     assert origin is not None
-    assert origin.evaluated_path == ".env"
+    assert origin.evaluated_path is None
 
 
 @pytest.mark.parametrize("command", [
@@ -55,10 +55,10 @@ def test_additional_file_options_leave_accounting_path_unresolved(command):
     "grep -e KEY .env",
     "less -N .env",
 ])
-def test_single_file_options_keep_accounting_path_resolved(command):
+def test_single_operand_without_execution_evidence_stays_unresolved(command):
     origin = extract_origin("Bash", {"command": command})
     assert origin is not None
-    assert origin.evaluated_path == ".env"
+    assert origin.evaluated_path is None
 
 
 def _bash(command: str):
@@ -304,8 +304,7 @@ def test_evaluated_path_survives_home_display_collapse(monkeypatch):
     key = bytes(range(32))
     monkeypatch.setenv("HOME", "/Users/jordan")
     for origin in (
-            extract_origin("Read", {"file_path": "/Users/jordan/p/.env"}),
-            _bash("cat /Users/jordan/p/.env")):
+            extract_origin("Read", {"file_path": "/Users/jordan/p/.env"}),):
         assert origin is not None
         assert origin.value == "~/p/.env"
         assert origin.evaluated_path == "/Users/jordan/p/.env"
@@ -317,7 +316,7 @@ def test_evaluated_path_survives_home_display_collapse(monkeypatch):
     # Display equality and enforcement semantics are unchanged.
     assert _bash("cat /Users/jordan/p/.env") == \
         Origin("~/p/.env", OriginKind.PATH)
-    assert _bash("cat config/.env").evaluated_path == "config/.env"
+    assert _bash("cat config/.env").evaluated_path is None
 
 
 @pytest.mark.parametrize("command", [
@@ -348,15 +347,11 @@ def test_evaluated_path_survives_home_display_collapse(monkeypatch):
 def test_ambiguous_shell_path_is_unresolved(command):
     origin = _bash(command)
     assert origin is None or origin.evaluated_path is None, command
-    # The literal, unambiguous forms are resolved, which is what makes the
-    # refusals above meaningful.
-    for literal, path in (("cat a.pem", "a.pem"),
-                          ("head -n 5 /etc/passwd", "/etc/passwd"),
-                          ("grep -i KEY config/.env", "config/.env"),
-                          ("cat -- .env", ".env"),
-                          ("cat 'dir with space/k.pem'",
-                           "dir with space/k.pem")):
-        assert _bash(literal).evaluated_path == path, literal
+    # Literal operands also lack evidence about the actual execution.
+    for literal in ("cat a.pem", "head -n 5 /etc/passwd",
+                    "grep -i KEY config/.env", "cat -- .env",
+                    "cat 'dir with space/k.pem'"):
+        assert _bash(literal).evaluated_path is None, literal
     for tool_input in ({"file_path": "~/k.pem"}, {"file_path": "$HOME/k"},
                        {"file_path": "a\x00b"}, {"path": "*.pem"}):
         origin = extract_origin("Read", tool_input)

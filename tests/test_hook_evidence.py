@@ -275,7 +275,7 @@ def test_identity_parsers_perform_no_io(monkeypatch):
     finally:
         monkeypatch.undo()
     assert probes == []
-    assert results == ["vault", "https://api.example.com:443", "config/.env"]
+    assert results == ["vault", "https://api.example.com:443", None]
 
 
 # --------------------------------------------------------------------- #
