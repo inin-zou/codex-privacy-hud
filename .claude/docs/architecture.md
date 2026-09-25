@@ -239,7 +239,7 @@ CREATE TABLE events (                     -- legacy UPDATEs: count increments; v
   UNIQUE(session_id, value_hash, destination)
 );
 
-CREATE TABLE flows (                      -- multi-hop chains for the L3 flow line
+CREATE TABLE flows (                      -- retained legacy placeholder; no production writer
   id         INTEGER PRIMARY KEY,
   session_id TEXT NOT NULL,
   value_hash BLOB NOT NULL,
@@ -264,6 +264,8 @@ CREATE TABLE policy_tokens (              -- one-shot consent, §8
   expires_at INTEGER NOT NULL
 );
 ```
+
+The legacy `flows` table is retained unchanged for compatibility. No production code writes it, and event-detail retrieval does not populate hops from it. It is not the storage contract for version-2 subject associations. Current requirements do not include reconstructed causal multi-hop chains. Any future same-subject observation history should be derived read-only from version-2 records without strengthening their evidence or changing accounting.
 
 **What is deliberately absent:** no `content`, no `prompt`, no `raw_value`, no `file_snippet` column anywhere. The schema is the privacy guarantee — a column that does not exist cannot leak.
 
