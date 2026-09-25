@@ -496,6 +496,90 @@ def test_plugin_data_disagreeing_with_codex_warns_and_names_the_real_one(
                in fix for fix in check.fixes)
 
 
+@pytest.mark.parametrize("fenced", [False, True])
+def test_plugin_data_uses_root_for_each_ledger_layout(
+        tmp_path, monkeypatch, fenced):
+    from privacy_hud import codex, runtime_storage
+
+    codex_home = tmp_path / "codex-home"
+    assigned = (
+        codex_home / "plugins" / "data"
+        / "codex-privacy-hud-codex-privacy-hud"
+    )
+    assigned.mkdir(parents=True)
+    historical = assigned / codex.LEDGER_NAME
+
+    if fenced:
+        historical.mkdir()
+        active = runtime_storage.active_path(assigned)
+        active.parent.mkdir(parents=True, exist_ok=True)
+        active.touch()
+        expected = active
+    else:
+        historical.touch()
+        expected = historical
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("PLUGIN_DATA", str(assigned))
+
+    assert doctor._ledger_path() == expected
+    check = doctor.check_plugin_data()
+    assert check.status == doctor.OK
+    assert check.summary == doctor._display_path(assigned)
+    assert check.fixes == []
+
+
+@pytest.mark.parametrize("raw", [None, ""])
+def test_plugin_data_unset_still_fails_with_a_discoverable_candidate(
+        tmp_path, monkeypatch, raw):
+    codex_home = tmp_path / "codex-home"
+    assigned = (
+        codex_home / "plugins" / "data"
+        / "codex-privacy-hud-codex-privacy-hud"
+    )
+    assigned.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    if raw is None:
+        monkeypatch.delenv("PLUGIN_DATA", raising=False)
+    else:
+        monkeypatch.setenv("PLUGIN_DATA", raw)
+
+    assert runtime.plugin_data_dir() == assigned
+    check = doctor.check_plugin_data()
+    assert check.status == doctor.FAIL
+    assert check.summary == "not set — nothing is written until it is"
+    assert check.fixes
+
+
+def test_plugin_data_does_not_need_a_resolved_ledger(
+        tmp_path, monkeypatch):
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    monkeypatch.setenv("PLUGIN_DATA", str(data))
+
+    def forbidden():
+        pytest.fail("PLUGIN_DATA check must not resolve the ledger")
+
+    monkeypatch.setattr(doctor, "_ledger_path", forbidden)
+    assert doctor.check_plugin_data().status == doctor.OK
+
+
+def test_plugin_data_none_resolution_fails_cleanly(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    monkeypatch.setenv("PLUGIN_DATA", str(tmp_path / "data"))
+    monkeypatch.setattr(runtime, "plugin_data_dir", lambda: None)
+
+    check = doctor.check_plugin_data()
+    assert check.status == doctor.FAIL
+    assert "not set" in check.summary
+    assert check.fixes
+
+
 # --------------------------------------------------------------------- #
 # Ledger — read-only, and it must stay that way
 # --------------------------------------------------------------------- #

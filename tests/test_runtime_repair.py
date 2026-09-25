@@ -767,7 +767,7 @@ def test_repair_reports_preservation_and_degradation_separately(install):
                         "--allow-degraded"], out=out)
     output = out.getvalue()
     assert code == 0, output
-    assert "Privacy HUD 0.8.2 is running from the selected plugin bundle." \
+    assert "Privacy HUD 0.8.3 is running from the selected plugin bundle." \
         in output
     assert "Existing ledger records were preserved." in output
     assert "Deep-scan detection is unavailable." in output
@@ -863,7 +863,7 @@ def test_offline_repair_cli_runs_without_installers(install):
         )
 
     assert completed.returncode == 0, completed.stderr
-    assert "Privacy HUD 0.8.2 is running" in completed.stdout
+    assert "Privacy HUD 0.8.3 is running" in completed.stdout
     assert "Traceback" not in completed.stderr
     assert stubs.calls() == []
     assert contract.classify_receipt(install.data) == "v2"

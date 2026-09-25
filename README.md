@@ -62,7 +62,7 @@ Design-intent illustration. It predates the explicit legacy labels; its bar and 
 
 ## Install
 
-Privacy HUD 0.8.2 retains snapshot version 2. Production sessions still use legacy accounting. Snapshot-v2 readers accept version 1 as explicitly legacy and version 2 with nullable accounting fields. Older snapshot-v1-only readers reject version 2 and show no Privacy item. Matching Codex version numbers do not establish snapshot compatibility.
+Privacy HUD 0.8.3 retains snapshot version 2. Production sessions still use legacy accounting. Snapshot-v2 readers accept version 1 as explicitly legacy and version 2 with nullable accounting fields. Older snapshot-v1-only readers reject version 2 and show no Privacy item. Matching Codex version numbers do not establish snapshot compatibility.
 
 The snapshot-v2 patched Codex builds for 0.154.0, 0.155.0, and 0.155.1 were re-released on 2026-09-22. An earlier installation of one of those versions may still contain the older reader. Updating the plugin does not replace that binary. No additional patched-Codex release is required for Privacy HUD 0.8.1.
 
@@ -394,12 +394,12 @@ Stated up front, because a privacy tool that overclaims is worse than none:
 
 ## Uninstall
 
-Run the script from the exact installed 0.8.2 plugin bundle. Replace the
+Run the script from the exact installed 0.8.3 plugin bundle. Replace the
 placeholder below with that bundle's absolute directory, containing both
 `install.sh` and `scripts/runtime.py`.
 
 ```bash
-PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.8.2/plugin'
+PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.8.3/plugin'
 sh "$PRIVACY_HUD_BUNDLE/install.sh" --uninstall
 ```
 
