@@ -512,10 +512,9 @@ def check_read_guard() -> Check:
     would call for one.
     """
     from .settings import Settings
-    ledger = _ledger_path()
-    if ledger is None:
+    data_dir = runtime.plugin_data_dir()
+    if data_dir is None:
         return _plugin_data_unset_check("Read guard")
-    data_dir = ledger.parent
     if Settings(data_dir).deny_read:
         return Check("Read guard", OK, "on — sensitive-path reads denied")
     return Check("Read guard", OK, "off (default) — reads are not blocked")

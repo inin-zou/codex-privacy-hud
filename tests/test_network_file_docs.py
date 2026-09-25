@@ -57,7 +57,8 @@ def test_design_documents_describe_denial_without_upload_rewriting():
 
 def test_changelog_has_a_separate_0_9_2_entry():
     text = read("CHANGELOG.md")
-    assert text.startswith("# Changelog\n\n## 0.9.2\n")
+    assert text.startswith("# Changelog\n\n## ")
+    assert text.count("\n## 0.9.2\n") == 1
     section = text.split("\n## 0.9.2\n", 1)[1].split("\n## 0.9.1\n", 1)[0]
     assert "shell-derived file identities unresolved" in section
     assert "No file contents are opened" in section

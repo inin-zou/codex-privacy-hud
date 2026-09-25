@@ -393,8 +393,10 @@ def classify_holder(identity: dict, data_dir: Path, bundle: Path, *,
     refusal saying why it cannot be stopped (#70).
 
     Returns `"current"` for this installation's bundle-launched daemon,
-    `"mcp"` for its bundle-launched MCP server, and `"legacy"` for a
-    supported legacy daemon. Every one of astra's rules applies, and
+    `"mcp"` for its selected-bundle MCP server or an MCP server from an
+    existing canonical sibling release in the same plugin cache directory,
+    and `"legacy"` for a supported legacy daemon. Other-version daemons
+    remain unsupported. Every one of astra's rules applies, and
     none of them is a substring:
 
     * the same user;
@@ -432,6 +434,15 @@ def classify_holder(identity: dict, data_dir: Path, bundle: Path, *,
         named = Path(data_dir).resolve()
     except OSError:
         raise refuse("installation") from None
+    if (bootstrap not in argv and len(argv) == 6
+            and argv[1] == "-I" and argv[3] == "--plugin-data"
+            and argv[5] == "mcp"):
+        candidate = Path(argv[2]).parent.parent
+        selected_parent = codex.cached_plugin_parent(Path(bundle))
+        if (selected_parent is not None
+                and codex.cached_plugin_parent(candidate) == selected_parent
+                and str(candidate / "scripts" / "runtime.py") == argv[2]):
+            bootstrap = argv[2]
     if bootstrap in argv:
         if (len(argv) != 6 or argv[1:4] !=
                 ["-I", bootstrap, "--plugin-data"]

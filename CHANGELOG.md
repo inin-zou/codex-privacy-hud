@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.3
+
+- Recognize verified MCP ledger holders from existing canonical sibling versions of the same cached plugin during explicit runtime repair and the shared stop-only operation.
+- Retain the same-user, exact-launch, recorded-interpreter and resolved-plugin-data checks; refuse missing or aliased sibling bundles and unverified holders.
+- Preserve existing daemon and legacy launch rules, MCP interruption announcements, identity revalidation and quiescence checks.
+- Read doctor's guard setting from the plugin-data root for both historical and fenced ledger layouts.
+
+Refs #74.
+
 ## 0.9.2
 
 - Add a default-on lexical denial for recognized shell network commands containing known-sensitive-path references, including curl substitutions and upload forms, pipelines, wget, scp and rsync.
