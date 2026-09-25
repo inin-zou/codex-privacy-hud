@@ -263,6 +263,219 @@ def test_session_end_discards_gate_memory(harness):
     assert gate.deliveries == {}
 
 
+@pytest.mark.parametrize("failure_site", ["scan", "observe"])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_failed_confirmation_requires_a_new_hold(
+    harness, monkeypatch, failure_site, legacy
+):
+    state, clock = harness
+    if legacy:
+        state.ledger.start_session("s", cwd="/synthetic", model="test")
+    send(state, "SessionStart")
+    assert prompt(state, A)["decision"] == "block"
+    clock.now += 2
+    gate = state.engines["s"].prompt_gate
+
+    def counts():
+        tables = [
+            row[0]
+            for row in state.ledger.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name"
+                " IN ('observations', 'events', 'events_legacy_v1')"
+                " ORDER BY name"
+            )
+        ]
+        assert tables
+        return tuple(
+            state.ledger.conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE session_id=?",
+                ("s",),
+            ).fetchone()[0]
+            for table in tables
+        )
+
+    before = counts()
+    original = getattr(dispatch_mod.Engine, failure_site)
+    armed = True
+
+    def fail_once(engine, obs, *args, **kwargs):
+        nonlocal armed
+        if armed and obs.hook_event == "UserPromptSubmit" and obs.text == A:
+            armed = False
+            raise RuntimeError("synthetic confirmation failure")
+        return original(engine, obs, *args, **kwargs)
+
+    monkeypatch.setattr(dispatch_mod.Engine, failure_site, fail_once)
+    payload = {
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": "s",
+        "prompt": A,
+    }
+    with pytest.raises(RuntimeError, match="synthetic confirmation failure"):
+        dispatch_mod.dispatch(
+            state, payload, delivery_key="fafafafafafafafafafafafafafafafa"
+        )
+
+    assert not armed
+    assert counts() == before
+    assert gate.allowed == set()
+    assert "fafafafafafafafafafafafafafafafa" not in gate.deliveries
+
+    # The failed delivery's cached allow must not survive either.
+    assert dispatch_mod.dispatch(
+        state, payload, delivery_key="fafafafafafafafafafafafafafafafa"
+    ) == {"decision": "block", "reason": HELD}
+    assert prompt(state, A) == {"decision": "block", "reason": HELD}
+
+    clock.now += 2
+    assert prompt(state, A) == {"systemMessage": CONFIRMED}
+    assert prompt(state, A) == {}
+
+
+def test_failed_confirmation_preserves_other_delivery_changes(
+    harness, monkeypatch
+):
+    from privacy_hud.prompt_hold import credential_hash
+
+    state, clock = harness
+    send(state, "SessionStart")
+    assert prompt(state, A)["decision"] == "block"
+    assert prompt(state, B)["decision"] == "block"
+    clock.now += 2
+    engine = state.engines["s"]
+    gate = engine.prompt_gate
+    c = "ghp_" + "Ef56" * 9
+    b_hash = credential_hash(engine.salt, B)
+    c_hash = credential_hash(engine.salt, c)
+    original = dispatch_mod.Engine.scan
+    armed = True
+
+    def interleave_then_fail(current, obs):
+        nonlocal armed
+        if armed and obs.hook_event == "UserPromptSubmit" and obs.text == A:
+            armed = False
+            assert prompt(state, B) == {"systemMessage": CONFIRMED}
+            assert prompt(state, c)["decision"] == "block"
+            raise RuntimeError("synthetic outer scan failure")
+        return original(current, obs)
+
+    monkeypatch.setattr(dispatch_mod.Engine, "scan", interleave_then_fail)
+    with pytest.raises(RuntimeError, match="synthetic outer scan failure"):
+        prompt(state, A)
+
+    # A whole snapshot restore would erase both intervening changes.
+    assert gate.allowed == {b_hash}
+    assert gate.pending[c_hash] == clock.now
+    assert prompt(state, B) == {}
+    assert prompt(state, c)["decision"] == "block"
+    assert prompt(state, A)["decision"] == "block"
+
+
+def test_unrecorded_confirmation_cannot_authorize_another_delivery(
+    harness, monkeypatch
+):
+    from privacy_hud.prompt_hold import credential_hash
+
+    state, clock = harness
+    send(state, "SessionStart")
+    assert prompt(state, A)["decision"] == "block"
+    clock.now += 2
+    engine = state.engines["s"]
+    gate = engine.prompt_gate
+    a_hash = credential_hash(engine.salt, A)
+    original = dispatch_mod.Engine.scan
+    nested = []
+    armed = True
+
+    def interleave_then_fail(current, obs):
+        nonlocal armed
+        if armed and obs.hook_event == "UserPromptSubmit" and obs.text == A:
+            armed = False
+            nested.append(prompt(state, A))
+            raise RuntimeError("synthetic outer scan failure")
+        return original(current, obs)
+
+    monkeypatch.setattr(dispatch_mod.Engine, "scan", interleave_then_fail)
+    with pytest.raises(RuntimeError, match="synthetic outer scan failure"):
+        prompt(state, A)
+
+    assert nested == [{"decision": "block", "reason": HELD}]
+    assert gate.allowed == set()
+    # Failure must preserve the other delivery's newly recorded hold.
+    assert gate.pending[a_hash] == clock.now
+    assert prompt(state, A)["decision"] == "block"
+    clock.now += 2
+    assert prompt(state, A) == {"systemMessage": CONFIRMED}
+
+
+def test_session_end_during_confirmation_suppresses_stale_notice(
+    harness, monkeypatch
+):
+    state, clock = harness
+    send(state, "SessionStart")
+    assert prompt(state, A)["decision"] == "block"
+    clock.now += 2
+    gate = state.engines["s"].prompt_gate
+    original = dispatch_mod.Engine.scan
+    armed = True
+
+    def end_during_scan(engine, obs):
+        nonlocal armed
+        if armed and obs.hook_event == "UserPromptSubmit" and obs.text == A:
+            armed = False
+            send(state, "SessionEnd")
+        return original(engine, obs)
+
+    monkeypatch.setattr(dispatch_mod.Engine, "scan", end_during_scan)
+    out = prompt(state, A)
+
+    assert CONFIRMED not in out.get("systemMessage", "")
+    assert "s" not in state.engines
+    assert gate.pending == {}
+    assert gate.allowed == set()
+    assert gate.deliveries == {}
+    assert gate._salt == b""
+    assert prompt(state, A)["decision"] == "block"
+
+
+def test_failed_duplicate_cannot_revoke_a_recorded_confirmation(
+    harness, monkeypatch
+):
+    state, clock = harness
+    send(state, "SessionStart")
+    assert prompt(state, A)["decision"] == "block"
+    clock.now += 2
+    gate = state.engines["s"].prompt_gate
+    original = dispatch_mod.Engine.scan
+    armed = True
+    payload = {
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": "s",
+        "prompt": A,
+    }
+    key = "d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"
+
+    def record_duplicate_then_fail(engine, obs):
+        nonlocal armed
+        if armed and obs.hook_event == "UserPromptSubmit" and obs.text == A:
+            armed = False
+            assert dispatch_mod.dispatch(
+                state, payload, delivery_key=key
+            ) == {"systemMessage": CONFIRMED}
+            raise RuntimeError("synthetic duplicate failure")
+        return original(engine, obs)
+
+    monkeypatch.setattr(
+        dispatch_mod.Engine, "scan", record_duplicate_then_fail
+    )
+    with pytest.raises(RuntimeError, match="synthetic duplicate failure"):
+        dispatch_mod.dispatch(state, payload, delivery_key=key)
+
+    assert len(gate.allowed) == 1
+    assert gate.deliveries[key].confirmed == ("GitHub token format",)
+    assert prompt(state, A) == {}
+
+
 def test_hold_surfaces_and_persistence_contain_no_credential(harness):
     from privacy_hud.prompt_hold import credential_hash
 
