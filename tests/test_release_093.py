@@ -12,14 +12,14 @@ from privacy_hud import runtime_contract as contract
 REPO = Path(__file__).resolve().parents[1]
 
 
-def test_release_093_declarations():
+def test_current_release_declarations():
     plugin = json.loads((REPO / ".codex-plugin/plugin.json").read_text())
     marketplace = json.loads(
         (REPO / ".agents/plugins/marketplace.json").read_text())
     project = tomllib.loads((REPO / "pyproject.toml").read_text())
     manifest = json.loads((REPO / contract.MANIFEST_NAME).read_text())
 
-    assert contract.RELEASE == "0.9.3"
+    assert contract.RELEASE == "0.9.5"
     assert plugin["version"] == contract.RELEASE
     assert [entry["version"] for entry in marketplace["plugins"]
             if entry["name"] == plugin["name"]] == [contract.RELEASE]
