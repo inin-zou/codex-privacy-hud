@@ -1,4 +1,4 @@
-"""#54 Phases 2 and 3: the private-copy rehearsal script.
+"""#54 Phases 2, 3 and 4: the private-copy rehearsal script.
 
 Runs `scripts/check-issue54-ledger.py` against a synthetic ledger shaped
 like a real one, with committed rows still in its WAL. The source must be
@@ -484,7 +484,7 @@ PHASE4_CHECKS = {
     "phase4-direct-upgrade", "phase4-existing-session",
     "phase4-lazy-attachment", "phase4-empty-probe",
     "phase4-dispatch-sequences", "phase4-current-evidence",
-    "phase4-recipients", "phase4-evaluated-paths", "phase4-key-loss",
+    "phase4-recipients", "phase4-shell-file-identities", "phase4-key-loss",
     "phase4-end-erasure", "phase4-late-observation", "phase4-consumers",
     "phase4-crash-child", "phase4-crash-state", "phase4-foreign-keys",
     "phase4-fenced-layout", "phase4-writer-ownership",

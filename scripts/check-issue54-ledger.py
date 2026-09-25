@@ -43,7 +43,8 @@ production scenario runs on its own clone root with the directory fence
 at the historical pathname, the copy at the active pathname and that
 root's own writer lease: activation without DDL on 5401 and every
 original cell preserved; real dispatch of new, replayed, lazy, unknown-end
-and empty-ID hooks; current evidence, recipients and evaluated paths; the
+and empty-ID hooks; current evidence, recipients and unresolved shell-file
+identities with observation-local opaque labels and denials by action; the
 seven sequences through the rehearsal's designated adapter on synthetic
 sessions; end erasure, a retried and a late delivery, a failed end, and a
 replacement daemon that finds every open version-2 session unavailable;
@@ -1595,7 +1596,8 @@ _TERMINAL = (_E.CROSSING_CONFIRMED | _E.DENY_ENFORCED | _E.REWRITE_ENFORCED
 def _check_phase4_dispatch(path: Path) -> None:
     """Real production dispatch on a production-shaped clone root of the
     activated copy: genuine and replayed starts, lazy attachment, unknown
-    ends, empty probes, current evidence, recipients, evaluated paths, the
+    ends, empty probes, current evidence, recipients, unresolved shell-file
+    identities, observation-local opaque labels, denials by action, the
     seven sequences through the designated adapter, end erasure, late and
     retried deliveries, then a daemon restart that loses every key."""
     import types
@@ -1671,22 +1673,47 @@ def _check_phase4_dispatch(path: Path) -> None:
                        and r["recipient_resolution"] == "resolved"
                        for r in found), "phase4-recipients")
 
-        # Evaluated paths: two literal files, one unexpanded path.
+        # Shell identities stay unresolved, even for repeated literal paths.
         paths = _P4_PREFIX + "paths-" + uuid.uuid4().hex
         state.settings = types.SimpleNamespace(deny_read=True)
         _hook(state, "SessionStart", paths)
-        for n, command in enumerate(("cat /r/a.pem", "cat /r/b.pem",
-                                     "cat ~/c.pem")):
-            _hook(state, "PreToolUse", paths, tool_name="Bash",
-                  tool_use_id=f"p{n}", tool_input={"command": command})
-        files = [r for r in _event_rows(state, paths)
-                 if r["subject_kind"] == "file"]
-        resolved = {r["subject_id"] for r in files
-                    if r["subject_resolution"] == "resolved"}
-        _check(len(files) == 3 and len(resolved) == 2
-               and sum(1 for r in files
-                       if r["subject_resolution"] == "unresolved") == 1,
-               "phase4-evaluated-paths")
+        commands = ("cat /r/a.pem", "cat /r/b.pem",
+                    "cat ~/c.pem", "cat /r/a.pem")
+        for n, command in enumerate(commands):
+            out = _hook(state, "PreToolUse", paths, tool_name="Bash",
+                        tool_use_id=f"p{n}", tool_input={"command": command})
+            _check(out.get("hookSpecificOutput", {}).get("permissionDecision")
+                   == "deny", "phase4-shell-file-identities")
+        files = state.ledger.conn.execute(
+            "SELECT e.*, s.resolution, s.identity_hash, s.label,"
+            " s.unresolved_observation_id FROM events e"
+            " JOIN subjects s USING (session_id, subject_id)"
+            " WHERE e.session_id=? AND s.subject_kind='file'"
+            " ORDER BY e.id", (paths,)).fetchall()
+        _check(len(files) == len(commands)
+               and len({r["subject_id"] for r in files}) == len(commands)
+               and len({r["observation_id"] for r in files}) == len(commands)
+               and all(
+                   r["resolution"] == "unresolved"
+                   and r["identity_hash"] is None
+                   and r["unresolved_observation_id"] == r["observation_id"]
+                   and r["label"] == f"file {r['subject_id']}"
+                   and r["source_label"] == "local file"
+                   and r["masked_example"] is None
+                   and r["kind"] == "prevented"
+                   and r["data_type"] == "path"
+                   and r["occurrences"] == 1
+                   and _E(r["evidence"]) & _E.DENY_ISSUED
+                   and not _E(r["evidence"]) & _TERMINAL
+                   for r in files),
+               "phase4-shell-file-identities")
+        summary = state.ledger.summary(paths)
+        _check(isinstance(summary, AccountingSummary)
+               and summary.denials_issued == len(commands)
+               and summary.denials_enforced == 0
+               and summary.reads_stopped == 0
+               and summary.distinct_disclosures == 0,
+               "phase4-shell-file-identities")
         state.settings = types.SimpleNamespace(deny_read=False)
 
         _check_phase4_sequences(state)
