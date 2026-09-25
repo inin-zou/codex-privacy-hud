@@ -2,8 +2,8 @@
 
 ## 0.9.4
 
-- Recognize verified MCP and daemon ledger holders from existing or deleted canonical sibling versions of the same cached plugin during explicit runtime repair and the shared stop-only operation.
-- Retain same-user, exact-launch, recorded-interpreter, resolved-plugin-data, identity-revalidation and quiescence checks. Deleted-bundle recognition establishes ownership under the same-user trust model, not the identity of deleted code.
+- Recognize MCP and daemon ledger holders naming any canonical N.N.N sibling path under the same existing canonical plugin parent during explicit runtime repair and the shared stop-only operation, whether the version directory is present or absent. Each N is an ASCII nonnegative integer without leading zeros except zero itself. Absent version directories need never have existed or been installed; no record of prior selection is required.
+- Retain same-user, exact-launch, recorded-interpreter, resolved-plugin-data, identity-revalidation and quiescence checks. Existing version directories must contain a canonical scripts/runtime.py file; incomplete existing bundles and aliases remain refused. Recognition follows the same-user trust model and does not authenticate the Python code a process loaded.
 - Keep runtime repair explicit and unchecked egress fail-closed. Show the external-terminal repair command when hooks detect a runtime selection mismatch, including at SessionStart.
 - Clarify doctor's explicit-repair requirement and add recovery guidance to ambient runtime failures. Preserve ledger history, runtime formats, accounting generations and snapshot version 2.
 

@@ -46,7 +46,11 @@ def test_current_release_documents_explicit_upgrade_recovery():
     assert text.startswith("# Changelog\n\n" + heading)
     section = text.split(heading, 1)[1].split("\n## ", 1)[0]
 
-    assert "deleted canonical sibling versions" in section
+    assert "any canonical N.N.N sibling path" in section
+    assert "whether the version directory is present or absent" in section
+    assert "need never have existed or been installed" in section
+    assert "no record of prior selection is required" in section
+    assert "Existing version directories must contain a canonical scripts/runtime.py file" in section
     assert "MCP and daemon" in section
     assert "Keep runtime repair explicit" in section
     assert "external-terminal repair command" in section

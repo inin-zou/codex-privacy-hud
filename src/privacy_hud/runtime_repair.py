@@ -395,8 +395,13 @@ def classify_holder(identity: dict, data_dir: Path, bundle: Path, *,
     Returns `"current"` for a supported bundle-launched daemon, `"mcp"`
     for a supported bundle-launched MCP server, and `"legacy"` for a
     supported legacy daemon. Bootstrap holders may name this bundle or
-    a canonical sibling release in the same plugin cache directory,
-    including an absent version directory left by a host update.
+    any canonical N.N.N sibling path under the same existing canonical
+    plugin parent. Each N is an ASCII nonnegative integer without leading
+    zeros except zero itself. The sibling version directory may be present
+    or absent; an absent directory need never have existed or been
+    installed. No record of prior selection is required. Existing sibling
+    directories require a canonical scripts/runtime.py file; incomplete
+    existing bundles and aliases are refused.
     Every ownership rule below still applies:
 
     * the same user;

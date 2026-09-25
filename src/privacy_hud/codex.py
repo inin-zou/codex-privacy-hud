@@ -234,10 +234,14 @@ def cached_plugin_parent(
         bundle: Path, *, allow_missing: bool = False) -> Path | None:
     """The canonical cache parent of a release bundle, or None.
 
-    Existing bundles require a canonical bundled bootstrap. For holder
-    recognition, allow_missing also accepts an absent version directory
-    beneath an existing canonical plugin parent. An incomplete existing
-    bundle or a symlink is not an absent version directory.
+    Version names are three ASCII nonnegative integers separated by dots,
+    with no leading zeros except zero itself. Existing bundles require a
+    canonical bundled bootstrap. For holder recognition, allow_missing
+    also accepts any absent version directory of that form beneath an
+    existing canonical plugin parent, even if it never existed or was
+    installed. No installation or selection history is checked. An
+    incomplete existing bundle or a symlink is not an absent version
+    directory.
 
     This describes cache placement, not authentication of same-user code.
     The configured cache root may itself resolve through a user alias.

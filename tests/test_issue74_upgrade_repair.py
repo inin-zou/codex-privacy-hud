@@ -513,7 +513,8 @@ def test_stop_only_handles_a_deleted_receipt_selection(upgrade_runtime):
     receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
     receipt_path.chmod(0o600)
 
-    # One holder is the selected daemon; another predates that selection.
+    # One holder is the selected daemon. The other names a never-created
+    # sibling path; recognition does not establish prior installation.
     f.processes[424242] = f.identity(424242, command="daemon")
     f.processes[424243] = f.identity(424243, f.parent / "0.8.1")
     shutil.rmtree(f.older)
