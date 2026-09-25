@@ -471,7 +471,7 @@ def _recorded_interpreter(data_dir: Path) -> Path | None:
 
 
 def stop_holders(data_dir, holders: dict, *, deadline: float,
-                 on_signal=None) -> bool:
+                 on_signal=None, on_targets=None) -> bool:
     """Ask each classified holder to exit, and wait for it. Returns whether
     any signal was sent.
 
@@ -485,7 +485,10 @@ def stop_holders(data_dir, holders: dict, *, deadline: float,
 
     `SIGTERM` once, then waiting until `deadline`. There is no
     escalation: a process that ignores it is reported, never killed.
+    `on_targets`, if supplied, receives the nonempty frozenset of
+    revalidated target pids once, before any signal attempt. Then
     `on_signal` is called once, just before the first signal.
+    These callbacks describe attempted stops, not confirmed delivery.
     """
     current_holders = set(runtime_storage.open_holders(data_dir))
     current_holders.discard(os.getpid())
@@ -509,6 +512,8 @@ def stop_holders(data_dir, holders: dict, *, deadline: float,
     if not recheck:
         return False
 
+    if on_targets is not None:
+        on_targets(frozenset(recheck))
     if on_signal is not None:
         on_signal()
     for pid in recheck:
@@ -555,8 +560,8 @@ def _quiesce(data_dir: Path, bundle: Path, *, progress=None,
     if holders:
         interpreter = _recorded_interpreter(data_dir)
         owned: dict[int, dict] = {}
-        legacy = False
-        mcp = False
+        kinds: dict[int, str] = {}
+        targeted_kinds: set[str] = set()
         for pid in sorted(holders):
             identity = process_identity(pid)
             if identity is None:
@@ -566,23 +571,23 @@ def _quiesce(data_dir: Path, bundle: Path, *, progress=None,
                 continue
             kind = classify_holder(identity, data_dir, bundle,
                                    interpreter=interpreter)
-            legacy = legacy or kind == "legacy"
-            mcp = mcp or kind == "mcp"
+            kinds[pid] = kind
             owned[pid] = identity
 
-        def stopping() -> None:
+        def stopping(targets: frozenset[int]) -> None:
+            targeted_kinds.update(kinds[pid] for pid in targets)
             if progress is not None:
-                if legacy:
+                if "legacy" in targeted_kinds:
                     progress(runtime_messages.LEGACY_DAEMON_STOPPING)
-                if mcp:
+                if "mcp" in targeted_kinds:
                     progress(runtime_messages.MCP_STOPPING)
 
         signalled = stop_holders(data_dir, owned, deadline=deadline,
-                                 on_signal=stopping)
+                                 on_targets=stopping)
         if signalled and progress is not None:
-            if legacy:
+            if "legacy" in targeted_kinds:
                 progress(runtime_messages.LEGACY_DAEMON_STOPPED)
-            if mcp:
+            if "mcp" in targeted_kinds:
                 progress(runtime_messages.MCP_STOPPED)
 
     def waiting() -> None:
