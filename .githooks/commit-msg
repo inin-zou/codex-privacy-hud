@@ -22,4 +22,9 @@ if grep -qiE '^(assisted-by|generated-by|claude-session):|^co-authored-by:.*(cla
   echo "commit-msg: AI attribution trailer detected — remove it (see CLAUDE.md §1)." >&2
   exit 1
 fi
+# Keep this expression byte-identical to the closing-reference check in CI.
+if grep -qiE '(^|[^[:alnum:]_])(close[sd]?|fix(e[sd])?|resolve[sd]?):?[[:space:]]+([[:alnum:]_.-]+/[[:alnum:]_.-]+)?#[0-9]+([^[:alnum:]_]|$)' "$1"; then
+  echo "commit-msg: closing reference detected — use a non-closing reference." >&2
+  exit 1
+fi
 exit 0

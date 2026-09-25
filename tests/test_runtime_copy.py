@@ -455,7 +455,7 @@ def test_ambient_runtime_refusal_suppresses_numeric_line(selected):
     finally:
         _stop(server, thread)
 
-    assert wide == runtime_messages.AMBIENT_RUNTIME_MISMATCH
+    assert wide == "Privacy — runtime mismatch; run $privacy repair"
     assert narrow == runtime_messages.AMBIENT_NARROW_FALLBACK
     assert "28" not in wide and "%" not in wide
     assert "%" not in narrow
@@ -490,7 +490,7 @@ def test_runtime_mismatch_does_not_fabricate_accounting_zero(selected):
     finally:
         _stop(server, thread)
 
-    assert line == runtime_messages.AMBIENT_RUNTIME_MISMATCH
+    assert line == "Privacy — runtime mismatch; run $privacy repair"
     assert "No session on record" not in line
     assert "No session on record" not in _rendered(check)
     assert "—%" not in line

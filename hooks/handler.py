@@ -120,6 +120,12 @@ EGRESS_REFUSAL = (
     "Privacy HUD issued a denial because no compatible daemon could verify "
     "this outbound call.\n"
     "Run $privacy repair to get the recovery command.")
+RUNTIME_REPAIR_REQUIRED = (
+    "An update may require explicit runtime repair; repair is not automatic.\n"
+    "Run this command in another terminal:\n"
+    "  {repair_command}\n"
+    "This command may download dependencies and model weights."
+)
 STARTING_INGRESS = "Privacy HUD is starting — this event is unverified."
 STARTING_EGRESS = (
     "Privacy HUD issued a denial because the daemon is still starting.\n"
@@ -200,14 +206,34 @@ def _unverified(payload, starting):
     return {"systemMessage": "Privacy HUD unavailable — disclosure unverified."}
 
 
-def _runtime_refusal(payload):
-    """#66: something answered, but not a daemon of the selected build and
-    epoch -- or this hook's own bundle is not the selected one. The payload
-    was not sent. I6 still decides the shape: a warning on ingress, a
-    denial on egress. Neither claims the host enforced anything."""
-    if _looks_like_egress(payload):
-        return _deny(EGRESS_REFUSAL)
-    return {"systemMessage": INGRESS_REFUSAL}
+def _repair_command(data_dir):
+    """The external-terminal command for this hook's own bundle.
+
+    Configuration paths only, never hook payload fields. Keep shell
+    quoting equivalent to runtime_repair.format_repair_command.
+    """
+    import shlex
+
+    return shlex.join([
+        "sh", os.path.join(_bundle_root(), "install.sh"),
+        "--repair-runtime", "--plugin-data", str(data_dir), "--yes",
+    ])
+
+
+def _runtime_refusal(payload, *, repair_command=None):
+    """Warn on ingress and deny egress without claiming host enforcement.
+
+    A local selection mismatch can supply the recovery command directly.
+    Transport refusals retain their existing fixed message.
+    """
+    egress = _looks_like_egress(payload)
+    text = EGRESS_REFUSAL if egress else INGRESS_REFUSAL
+    if repair_command is not None:
+        text = text.split("\n", 1)[0] + "\n" + RUNTIME_REPAIR_REQUIRED.format(
+            repair_command=repair_command)
+    if egress:
+        return _deny(text)
+    return {"systemMessage": text}
 
 
 def _bundle_root():
@@ -563,7 +589,8 @@ def main():
     if status == "runtime_mismatch":
         # This hook's bundle is not the selected one: nothing is sent to
         # whatever daemon may be listening, and none is started.
-        return _runtime_refusal(payload)
+        return _runtime_refusal(
+            payload, repair_command=_repair_command(data_dir))
     if status != "ok":
         # No usable receipt v2 (none, v1, damaged): no daemon can be
         # verified and none is started.

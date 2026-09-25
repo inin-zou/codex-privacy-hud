@@ -19,7 +19,8 @@ def test_current_release_declarations():
     project = tomllib.loads((REPO / "pyproject.toml").read_text())
     manifest = json.loads((REPO / contract.MANIFEST_NAME).read_text())
 
-    assert contract.RELEASE == "0.9.5"
+    assert re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\."
+                        r"(0|[1-9][0-9]*)", contract.RELEASE)
     assert plugin["version"] == contract.RELEASE
     assert [entry["version"] for entry in marketplace["plugins"]
             if entry["name"] == plugin["name"]] == [contract.RELEASE]
@@ -34,6 +35,27 @@ def test_release_093_changelog():
     assert re.search(r"^Refs #74\.$", section, re.M)
     assert len([line for line in section.splitlines()
                 if line.startswith("- ")]) == 4
+    assert not re.search(
+        r"\b(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)"
+        r" #\d+", section, re.I)
+
+
+def test_release_094_documents_explicit_upgrade_recovery():
+    text = (REPO / "CHANGELOG.md").read_text()
+    assert text.startswith(f"# Changelog\n\n## {contract.RELEASE}\n")
+    heading = "## 0.9.4\n"
+    assert text.index(heading) < text.index("## 0.9.3\n")
+    section = text.split(heading, 1)[1].split("\n## ", 1)[0]
+
+    assert "any canonical N.N.N sibling path" in section
+    assert "whether the version directory is present or absent" in section
+    assert "need never have existed or been installed" in section
+    assert "no record of prior selection is required" in section
+    assert "Existing version directories must contain a canonical scripts/runtime.py file" in section
+    assert "MCP and daemon" in section
+    assert "Keep runtime repair explicit" in section
+    assert "external-terminal repair command" in section
+    assert re.search(r"^Refs #74\.$", section, re.M)
     assert not re.search(
         r"\b(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)"
         r" #\d+", section, re.I)

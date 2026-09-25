@@ -52,6 +52,28 @@ exists to stop exactly that — and the bootstrap is what resolves it.
 
 Handle this branch before anything below.
 
+A host plugin update may leave the receipt selecting a deleted bundle.
+The hook's runtime-selection warning or denial may already contain the
+external-terminal repair command. Reproduce that command verbatim when
+present. Repair is not automatic. Do not run installation or stop
+processes merely because the user requested this command-printing branch.
+After a successful repair, the user must restart the Codex app, CLI, or
+IDE integration that loaded the plugin, as the repair output instructs.
+
+Explicit repair and the shared stop-only operation can recognize MCP and
+daemon ledger holders naming any canonical N.N.N sibling path under the
+same existing canonical plugin parent, whether the version directory is
+present or absent. Each N is an ASCII nonnegative integer without leading
+zeros except zero itself. An absent version directory need never have
+existed or been installed; no record of prior selection is required.
+Existing version directories must contain a canonical scripts/runtime.py
+file; incomplete existing bundles and aliases remain refused. Recognition
+still requires the same UID, exact supported launch form, recorded
+interpreter and resolved plugin-data directory. Process identity and ledger
+ownership are rechecked before signalling. This follows the same-user
+trust model and does not authenticate the Python code a process loaded.
+Unverified holders cause refusal; there is no SIGKILL escalation.
+
 `$privacy repair` prints the recovery command for another terminal.
 Invoke the bundled launcher with `repair --print-command` and reproduce
 its output verbatim. This branch does not start installation, stop

@@ -44,7 +44,8 @@ def test_bootstrap_restates_runtime_messages(name):
 def test_runtime_message_literals():
     assert runtime_messages.RUNTIME_SETUP_FAIL.format(repair_command="CMD") == (
         "[FAIL] Runtime setup\n"
-        "No usable Privacy HUD runtime is configured.\n"
+        "No usable Privacy HUD runtime is configured. "
+        "An update may require explicit repair; repair is not automatic.\n"
         "Run this command in another terminal:\n"
         "  CMD\n"
         "Installation may download dependencies and model weights.")
