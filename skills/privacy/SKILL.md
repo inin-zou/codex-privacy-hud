@@ -135,6 +135,14 @@ accounting note and unavailable reasons; never substitute zero.
 
 Coverage separately reports recorded observation gaps. It does not establish that every event was seen, that a crossing occurred, or that the host applied an intervention.
 
+When guard-target metadata is present, preserve the renderer's wording:
+it identifies the path representation evaluated by Privacy HUD, not a
+filesystem object. A "Same evaluated target as event #N" link refers to an
+earlier event in the selected session. It does not resolve the accounting
+file subject or confirm host enforcement. Do not infer filenames, file
+contents, or execution identity from it. Null or absent metadata is not
+evidence of a different target. The IDs are not source-rule selectors.
+
 Swap the tab with `--tab Exposed` / `--tab Prevented` / `--tab "All events"`
 to show a different one.
 
@@ -249,7 +257,7 @@ the same process instead of starting a second one.
 and never installs or replaces a patched Codex binary. Do not describe
 either as doing the other's job.
 
-Privacy HUD 0.9.5 writes snapshot version 2. The native Privacy item requires
+Privacy HUD 0.10.0 writes snapshot version 2. The native Privacy item requires
 a patched Codex build containing the snapshot-v2 reader. Matching Codex
 versions and successful plugin installation do not establish that
 compatibility. Until the installed build is verified, run the bundled

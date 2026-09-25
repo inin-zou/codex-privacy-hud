@@ -25,11 +25,12 @@ import unicodedata
 import uuid
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Literal, get_args
 
 from . import ledger_schema
+from .guard_targets import read_target, record_target
 from .accounting import (
     PATH_RULE_IDS, SOURCE_LABELS, AccountingEventRow, AccountingExposureRow,
     AccountingSummary, ActionKind, Boundary, DataType, Decision, EventKind,
@@ -1111,9 +1112,28 @@ class Ledger:
         """Record one delivered observation and everything it implies —
         identities, events, first disclosures, the cached score and its
         scan gap — atomically. A delivery key already recorded in the
-        session returns its original result and writes nothing."""
+        session returns its original result and writes nothing.
+
+        Optional guard-target metadata has its own savepoint. Ordinary
+        target-write failures discard only that metadata when rollback
+        succeeds; transaction/commit failures still propagate."""
         with self._atomic_accounting_write():
-            return self._record_observation(observation, events)
+            result = self._record_observation(observation, events)
+            if observation.guard_target is not None and not result.duplicate_delivery:
+                name = f"guard_target_{uuid.uuid4().hex}"
+                self.conn.execute(f"SAVEPOINT {name}")
+                try:
+                    event_id = record_target(self.conn, observation, result)
+                except Exception:
+                    # Optional audit metadata must not discard core evidence.
+                    # Persist neither exception text nor a misleading scan gap.
+                    # Cleanup failures propagate: the transaction is not safe.
+                    self.conn.execute(f"ROLLBACK TO {name}")
+                    self.conn.execute(f"RELEASE {name}")
+                else:
+                    self.conn.execute(f"RELEASE {name}")
+                    result = replace(result, guard_target_event_id=event_id)
+            return result
 
     def _record_observation(self, observation: ObservationRecord,
                             events: Sequence[EventRecord]) -> RecordResult:
@@ -1464,6 +1484,8 @@ class Ledger:
             values["evidence"] = _stored_evidence(values["evidence"])
             values["budget_delta"] = float(values["budget_delta"])
             values["budget_cap"] = float(values["budget_cap"])
+            values["guard_target"] = read_target(
+                self.conn, session_id, values["id"])
             out.append(AccountingEventRow(**values))
         return out
 

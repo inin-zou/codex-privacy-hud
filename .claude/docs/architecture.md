@@ -2,9 +2,9 @@
 
 **Status:** Draft v0.1 · **Date:** 2026-09-03 · **Companion to:** `PRD.md`, `design.md`
 
-**Current contract — #54 Phase 4 (0.9.0).**
+**Current contract — #54 Phase 4 and #44 guard-target audit (0.10.0).**
 
-New sessions observed from a genuine SessionStart use evidence-based accounting. Existing sessions and sessions attached after their start retain legacy accounting. Observations, finding outcomes, disclosure identities, and charges are separate. Current hooks do not confirm model-context admission, transmission, or host application of interventions; unresolved evidence withholds the percentage. Historical records remain unchanged. Recipient identity does not establish delivery, inherited subagent content, or causal multi-hop flows. All shell-derived accounting file identities remain unresolved in 0.9.0, including ordinary `cat .env` reads. Observation-local opaque subjects preserve separate events without establishing distinct files or naming the denied file. #43 is addressed for new version-2 sessions only; legacy sessions and historical rows retain their limitations. #44 has pattern-merging and action-counting improvements but remains open for supported guard-target identity and I1-safe audit display. 0.10.0 is a proposed target for that remaining work, not a release commitment.
+New sessions observed from a genuine SessionStart use evidence-based accounting. Existing sessions and sessions attached after their start retain legacy accounting. Observations, finding outcomes, disclosure identities, and charges are separate. Current hooks do not confirm model-context admission, transmission, or host application of interventions; unresolved evidence withholds the percentage. Historical records remain unchanged. Recipient identity does not establish delivery, inherited subagent content, or causal multi-hop flows. All shell-derived accounting file identities remain unresolved in 0.9.0, including ordinary `cat .env` reads. Observation-local opaque subjects preserve separate events without establishing distinct files or naming the denied file. #43 is addressed for new version-2 sessions only; legacy sessions and historical rows retain their limitations. Version 0.10.0 adds separate guard-target metadata for newly recorded, keyed version-2 local shell read-guard denials. A random session-scoped target ID and fixed rule ID describe the path representation evaluated by Privacy HUD. "Same evaluated target as event #N" means exact equality of that evaluated representation, including existing home collapse; it does not mean the same filesystem object. The matching HMAC map exists only in daemon memory. SessionEnd discards it, and key loss disables new target correlation for that session. Stored IDs, rule metadata and prior links remain. No candidate path, command, basename or suffix is stored. Execution file subjects and accounting counts are unchanged. Guard-target writes are optional. When an ordinary write failure is contained by its savepoint, the observation and denial evidence still commit, but that row has no guard-target metadata and seeds no new link. Delivery retries do not backfill it. No failure text or extra coverage/scan-gap record is persisted. Failure of the core transaction or its commit remains outside this guarantee. #44 remains open for filesystem identity and independently recognizable historical filenames.
 
 Runtime selection, writer ownership, read-only readers, daemon policy RPC, and the fenced ledger layout remain required. Accounting activation runs under the daemon's current writer lease and does not change the runtime activation epoch. Generation 5402 requires the activated-accounting implementation introduced in Privacy HUD 0.9.0. A live client must also match the selected runtime build and activation epoch. Snapshot version remains 2; the native HUD does not authenticate runtime alignment.
 
@@ -758,3 +758,22 @@ This historical sequence is not the release plan for accounting activation. Acco
 - Codex configuration reference — https://learn.chatgpt.com/docs/config-file/config-reference
 - Codex App Server — https://learn.chatgpt.com/docs/app-server
 - MCP Apps inline UI not rendered in Codex Desktop — https://github.com/openai/codex/issues/21019
+
+## Guard-target audit storage (0.10.0)
+
+The optional `guard_targets` extension introduced in 0.10.0 is append-only.
+It stores only an event association, session-scoped random target ID, fixed
+rule and interpretation metadata, and an optional earlier-event link.
+It stores no matching hash or path text. The daemon creates the extension
+inside an optional-metadata savepoint within an eligible observation
+transaction. If an ordinary target-write exception can be rolled back to
+that savepoint, only the optional DDL and target row are discarded; the
+observation and denial evidence still commit. The row projects
+guard_target=None and seeds no new link. Delivery retries do not backfill
+metadata. No exception text or additional coverage/scan-gap record is stored.
+Core transaction, savepoint-cleanup and commit failures still propagate.
+Readers accept absence and never create the extension; present but
+incomplete or altered definitions are refused. Existing accounting tables
+and generations remain unchanged.
+The engine's matching map is memory-only and is cleared with session
+identity. Persisted target IDs and prior links survive SessionEnd.

@@ -204,7 +204,8 @@ EVENT_CHIPS = ("DENIAL ISSUED", "DENIAL ENFORCED", "REWRITE ISSUED",
 V2_DETAIL_LABELS = ("Subject", "Recipient", "Source", "Boundary",
                     "Observation", "Action", "Evidence",
                     "Occurrences in this observation",
-                    "Confirmed contribution", "Masked example", "Scan gap")
+                    "Confirmed contribution", "Masked example", "Scan gap",
+                    "Guard target")
 NOT_STORED = "Not stored."
 V2_ROW_NOTE = ("This row records evidence at one observation point. It does "
                "not establish a causal multi-hop flow.")
@@ -680,7 +681,13 @@ def _table(rows: Sequence[ExposureRow]) -> str:
             # recipient label, and this event's own chips.
             data.append([_title(r.data_type, r.occurrences),
                          _truncate_middle(r.source_label, 24),
-                         r.recipient_label, _status_chip(r)])
+                         r.recipient_label,
+                         (
+                             f"{_status_chip(r)} | event #{r.id}: "
+                             f"{r.guard_target.summary}"
+                             if r.guard_target is not None
+                             else _status_chip(r)
+                         )])
             continue
         if not isinstance(r, LegacyExposureRow):
             raise _unsupported()
@@ -1017,6 +1024,9 @@ def _detail_v2(row: AccountingExposureRow) -> str:
         ("Confirmed contribution", _points(row.budget_delta)),
         ("Masked example", row.masked_example or NOT_STORED),
     ]
+    if row.guard_target is not None:
+        fields.append((accounting_copy()["detail_guard_target"],
+                       row.guard_target.summary))
     if row.scan_gap is not None:
         fields.append(("Scan gap", row.scan_gap))
     lines = [_title(row.data_type, row.occurrences)]

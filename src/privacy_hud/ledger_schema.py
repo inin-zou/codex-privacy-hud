@@ -602,6 +602,9 @@ def validate_schema(conn: sqlite3.Connection
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     tables = _tables(conn)
     if version == 0:
+        if guard_target_schema_present(conn):
+            raise UnsupportedAccounting(
+                "guard-target metadata requires version-2 storage")
         if (
             "events_legacy_v1" in tables
             or (set(_NEW_TABLES) - {"events"}) & tables
@@ -637,4 +640,130 @@ def validate_schema(conn: sqlite3.Connection
         if actual.get(key) != sql:
             raise UnsupportedAccounting(
                 "the rebuilt ledger's schema does not match its version")
+    validate_guard_target_schema(conn)
     return version  # type: ignore[return-value]
+
+
+# Optional #44 decision-input metadata. Accounting generations are unchanged.
+# No matching hash, candidate text, command, basename or suffix is persisted.
+GUARD_TARGET_SCHEMA = """
+CREATE TABLE guard_targets (
+    event_id INTEGER NOT NULL PRIMARY KEY REFERENCES events(id),
+    session_id TEXT NOT NULL REFERENCES sessions(session_id),
+    target_id TEXT NOT NULL CHECK (
+        length(target_id) = 32
+        AND target_id NOT GLOB '*[^0-9a-f]*'
+    ),
+    rule_id TEXT NOT NULL CHECK (rule_id IN (
+        'path.env',
+        'path.ssh_private_key',
+        'path.key_container',
+        'path.aws_credentials',
+        'path.credentials_json',
+        'path.ssh_config'
+    )),
+    basis TEXT NOT NULL CHECK (basis = 'evaluated-path-v1'),
+    same_as_event_id INTEGER CHECK (
+        same_as_event_id IS NULL
+        OR (
+            typeof(same_as_event_id) = 'integer'
+            AND same_as_event_id > 0
+            AND same_as_event_id < event_id
+        )
+    ),
+    UNIQUE (session_id, event_id, target_id),
+    FOREIGN KEY (session_id, same_as_event_id, target_id)
+        REFERENCES guard_targets(session_id, event_id, target_id)
+);
+
+CREATE TRIGGER guard_targets_no_update
+BEFORE UPDATE ON guard_targets
+BEGIN
+    SELECT RAISE(ABORT, 'append-only guard-target history');
+END;
+
+CREATE TRIGGER guard_targets_no_delete
+BEFORE DELETE ON guard_targets
+BEGIN
+    SELECT RAISE(ABORT, 'append-only guard-target history');
+END;
+
+CREATE TRIGGER guard_targets_event_scope
+BEFORE INSERT ON guard_targets
+WHEN NOT EXISTS (
+    SELECT 1
+    FROM events e
+    JOIN observations o
+      ON o.session_id = e.session_id
+     AND o.observation_id = e.observation_id
+    JOIN subjects s
+      ON s.session_id = e.session_id
+     AND s.subject_id = e.subject_id
+    JOIN sessions x ON x.session_id = e.session_id
+    WHERE e.id = NEW.event_id
+      AND e.session_id = NEW.session_id
+      AND e.rule_id = NEW.rule_id
+      AND e.kind = 'prevented'
+      AND e.data_type = 'path'
+      AND e.source_label = 'local file'
+      AND e.boundary = 'B0'
+      AND (e.evidence & 2) <> 0
+      AND o.hook_event = 'PreToolUse'
+      AND o.action_kind = 'read'
+      AND o.decision = 'deny'
+      AND s.subject_kind = 'file'
+      AND s.resolution = 'unresolved'
+      AND s.identity_hash IS NULL
+      AND x.accounting_version = 2
+      AND x.accounting_status = 'available'
+      AND x.ended_at IS NULL
+)
+BEGIN
+    SELECT RAISE(ABORT, 'invalid guard-target event scope');
+END;
+"""
+
+_GUARD_TARGET_OBJECT_NAMES = (
+    "guard_targets",
+    "guard_targets_no_update",
+    "guard_targets_no_delete",
+    "guard_targets_event_scope",
+)
+
+
+def guard_target_statements() -> tuple[str, ...]:
+    return split_statements(GUARD_TARGET_SCHEMA)
+
+
+def guard_target_schema_present(conn: sqlite3.Connection) -> bool:
+    placeholders = ",".join("?" for _ in _GUARD_TARGET_OBJECT_NAMES)
+    return conn.execute(
+        f"SELECT 1 FROM sqlite_master WHERE name IN ({placeholders}) LIMIT 1",
+        _GUARD_TARGET_OBJECT_NAMES,
+    ).fetchone() is not None
+
+
+def validate_guard_target_schema(conn: sqlite3.Connection) -> None:
+    """Validate an optional extension; never create or repair it."""
+    if not guard_target_schema_present(conn):
+        return
+    reference = sqlite3.connect(":memory:", isolation_level=None)
+    try:
+        for statement in guard_target_statements():
+            reference.execute(statement)
+        expected = {
+            (kind, name): _norm(sql)
+            for kind, name, sql in reference.execute(
+                "SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL"
+            )
+        }
+    finally:
+        reference.close()
+    actual = {
+        (kind, name): _norm(sql)
+        for kind, name, sql in conn.execute(
+            "SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL"
+        )
+    }
+    if any(actual.get(key) != sql for key, sql in expected.items()):
+        raise UnsupportedAccounting("invalid optional guard-target schema")

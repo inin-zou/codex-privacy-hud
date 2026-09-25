@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.10.0
+
+- Add a bounded guard-decision audit for newly recorded, keyed version-2 local shell read-guard denials.
+- Identify the path representation evaluated by Privacy HUD with a random session-scoped target ID, fixed rule metadata, and an optional same-evaluated-target link to an earlier event.
+- Keep matching HMACs exclusively in daemon memory. Persist no candidate path, command, basename, suffix or matching hash. Discard matching state at SessionEnd; key loss disables new target correlation for that session.
+- Add an optional append-only guard-target table without changing accounting generations or rewriting historical rows.
+- Isolate recoverable guard-target write failures in a savepoint so observation and denial evidence remain recorded; omit failed target metadata and correlation, without backfilling delivery retries.
+- Carry the distinct guard-target meaning through typed ledger projections, MCP list/detail, terminal audit and detail, the browser audit, and privacy skill guidance.
+- Preserve unresolved shell execution subjects, accounting counts, disclosures, charges, and the distinction between issued denials and host enforcement. Keep legacy sessions and unsupported calls unchanged.
+- Keep #44 open for filesystem identity and independently recognizable historical filenames.
+
+Refs #44, #54.
+
 ## 0.9.5
 
 - Scan explicit parent delegation text from supported spawn, send-input, message, and follow-up PreToolUse hooks in Codex 0.154.0, 0.155.0, and 0.155.1.
