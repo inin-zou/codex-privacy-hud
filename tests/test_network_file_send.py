@@ -101,6 +101,30 @@ def case(tmp_path, monkeypatch, request):
     close_writer(state.ledger)
 
 
+@pytest.mark.parametrize("version", [1, 2], ids=["legacy", "v2"])
+def test_case_does_not_construct_real_model(
+        tmp_path, monkeypatch, version):
+    def forbidden_init(self, *args, **kwargs):
+        pytest.fail("network-file fixture constructed the real ModelDetector")
+
+    monkeypatch.setattr(
+        dispatch_mod.ModelDetector, "__init__", forbidden_init
+    )
+
+    # Exercise the fixture body with the constructor trap already installed.
+    fixture = case.__wrapped__(
+        tmp_path, monkeypatch, SimpleNamespace(param=version)
+    )
+    try:
+        state, actual_version = next(fixture)
+        assert actual_version == version
+        assert [type(detector) for detector in state.detectors] == [
+            PathDetector, SecretDetector,
+        ]
+    finally:
+        fixture.close()
+
+
 def send(state, command, action="a", **extra):
     return dispatch_mod.dispatch(
         state,
