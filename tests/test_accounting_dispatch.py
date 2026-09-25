@@ -853,6 +853,151 @@ def test_phase4_production_adapter_records_no_terminal_evidence(state):
     assert count(state, "disclosures") == 0
 
 
+DELEGATION_TOOLS = (
+    "spawn_agent",
+    "multi_agent_v1send_input",
+    "send_message",
+    "followup_task",
+)
+
+
+@pytest.mark.parametrize("tool", DELEGATION_TOOLS)
+def test_delegation_records_unresolved_permission_without_intervention(
+        state, monkeypatch, tool):
+    state.hook_adapter = CurrentHookAdapter()
+    start(state)
+    state.ledger.add_policy("s1", rule_type="mask", selector="email")
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("B2 must not enter egress enforcement")
+
+    monkeypatch.setattr(engine_mod, "minimize_tool_input", forbidden)
+    monkeypatch.setattr(engine_mod.Engine, "_blocked_origin", forbidden)
+    monkeypatch.setattr(
+        engine_mod.Engine, "_deep_scan_on_a_deadline", forbidden)
+
+    body = {
+        "message": f"Contact {EMAIL}; credential {CREDENTIAL}",
+        "target": "private-target-sentinel",
+        "task_name": "private-task-sentinel",
+        "agent_type": "private-role-sentinel",
+        "fork_turns": "private-fork-sentinel",
+    }
+    out = send(state, "PreToolUse", tool_name=tool, tool_input=body,
+               tool_use_id="delegation-1", key="a" * 32)
+    assert out == {}
+
+    obs = observations(state)[-1]
+    assert (obs["hook_event"], obs["action_kind"], obs["boundary"],
+            obs["decision"], obs["resolution_scope"]) == (
+        "PreToolUse", "subagent", "B2", "allow", "none")
+    assert obs["potential_crossing"] == 1
+
+    found = rows(state)
+    assert {row["data_type"] for row in found} == {"email", "credential"}
+    for row in found:
+        assert row["kind"] == "permitted"
+        assert row["boundary"] == "B2"
+        assert row["source_label"] == "tool input"
+        assert row["destination_kind"] == "subagent"
+        assert row["recipient_resolution"] == "unresolved"
+        assert E.LOCAL_DETECTION in E(row["evidence"])
+        assert E.PERMISSION_ISSUED in E(row["evidence"])
+        assert not E(row["evidence"]) & (
+            E.CROSSING_CONFIRMED | E.DENY_ISSUED | E.DENY_ENFORCED
+            | E.REWRITE_ISSUED | E.REWRITE_ENFORCED
+        )
+
+    s = summary(state)
+    assert s.confirmed_points == 0
+    assert s.percent is None
+    assert s.unresolved_actions == 1
+    assert count(state, "disclosures") == 0
+
+    dump = "\n".join(state.ledger.conn.iterdump())
+    for raw in (
+        EMAIL, CREDENTIAL, body["message"], body["target"],
+        body["task_name"], body["agent_type"], body["fork_turns"],
+    ):
+        assert raw not in dump
+
+    # Existing post-result handling supplies no crossing or identity receipt.
+    send(state, "PostToolUse", tool_name=tool, tool_input=body,
+         tool_response={"agent_id": "child-123", "task_name": "/root/child"},
+         tool_use_id="delegation-1")
+    assert count(state, "disclosures") == 0
+    assert summary(state).confirmed_points == 0
+    assert all(row["recipient_resolution"] == "unresolved"
+               for row in rows(state) if row["boundary"] == "B2")
+
+
+def test_delegation_without_findings_still_records_a_v2_observation(state):
+    state.hook_adapter = CurrentHookAdapter()
+    start(state)
+    before = len(observations(state))
+    out = send(state, "PreToolUse", tool_name="spawn_agent",
+               tool_input={"message": "Review the implementation"},
+               tool_use_id="clean-delegation")
+    assert out == {}
+    assert len(observations(state)) == before + 1
+    assert observations(state)[-1]["boundary"] == "B2"
+    assert rows(state) == []
+    assert count(state, "recipients") == 0
+    assert count(state, "disclosures") == 0
+    assert summary(state).unresolved_actions == 1
+
+
+def test_delegation_deep_scan_gap_is_not_a_b3_b4_denial(state, monkeypatch):
+    state.hook_adapter = CurrentHookAdapter()
+    state.detectors = [EmailDetector(), UnavailableDeepDetector()]
+    start(state)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("B2 must not use the egress deadline")
+
+    monkeypatch.setattr(
+        engine_mod.Engine, "_deep_scan_on_a_deadline", forbidden)
+    out = send(state, "PreToolUse", tool_name="spawn_agent",
+               tool_input={"message": f"Contact {EMAIL}"},
+               tool_use_id="gap-delegation")
+    assert out == {}
+    obs = observations(state)[-1]
+    assert obs["boundary"] == "B2"
+    assert obs["decision"] == "allow"
+    assert obs["scan_gap"] == engine_mod.GAP_UNAVAILABLE
+    assert rows(state)[0]["kind"] == "permitted"
+    assert count(state, "disclosures") == 0
+
+
+@pytest.mark.parametrize("tool", DELEGATION_TOOLS)
+def test_late_legacy_delegation_records_detection_without_charge(state, tool):
+    # Activate the split tables through a different genuine session start.
+    start(state, "v2-other")
+    out = send(state, "PreToolUse", "legacy-parent",
+               tool_name=tool,
+               tool_input={"message": f"Contact {EMAIL}; {CREDENTIAL}"},
+               tool_use_id="legacy-delegation")
+    assert out == {}
+
+    session = state.ledger.conn.execute(
+        "SELECT accounting_version, budget_score FROM sessions "
+        "WHERE session_id=?", ("legacy-parent",),
+    ).fetchone()
+    assert session["accounting_version"] == 1
+    assert session["budget_score"] == 0
+
+    found = state.ledger.conn.execute(
+        "SELECT kind, destination, boundary, budget_delta "
+        "FROM events_legacy_v1 WHERE session_id=?",
+        ("legacy-parent",),
+    ).fetchall()
+    assert len(found) == 2
+    assert all(tuple(row) == ("detected", "subagent", "B2", 0)
+               for row in found)
+    assert count(state, "observations", "legacy-parent") == 0
+    assert count(state, "disclosures", "legacy-parent") == 0
+
+
 def test_deterministic_states_do_not_construct_real_model(
         tmp_path, monkeypatch):
     from privacy_hud.detect.model import ModelDetector

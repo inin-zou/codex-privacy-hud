@@ -113,11 +113,11 @@ OBSERVED_EVENTS = frozenset({
     "PreToolUse", "SubagentStart",
 })
 
-#: The only event that can ever carry egress, and therefore the only one a
-#: failure must fail *closed* on (I6: fail open on ingress, fail closed on
-#: egress). `hooks/handler.py` restates this set as a literal for the same
-#: stdlib-only reason the socket name is restated, and `tests/test_runtime.py`
-#: compares the two.
+#: Events that can carry B3/B4 egress. This is a candidate set, not proof
+#: that every matching payload is outbound. Supported B2 delegation
+#: pre-hooks are explicitly exempted by is_b2_delegation.
+#: The stdlib-only hook client restates the event and tool-name sets;
+#: tests pin both copies.
 EGRESS_EVENTS = frozenset({"PreToolUse"})
 
 #: The harmless probe: the event the doctor's round trip sends because it
@@ -166,6 +166,52 @@ PATCH_TOOL = "apply_patch"
 #: Tool names whose `updatedInput` Codex requires to be a plain string
 #: `command` rather than a dict, per architecture.md §8's "Rewrite path".
 STRING_COMMAND_TOOLS = frozenset({SHELL_TOOL, PATCH_TOOL})
+
+
+# Hook-facing names verified in Codex 0.154.0, 0.155.0 and 0.155.1:
+# core/src/tools/handlers/multi_agents/{spawn,send_input}.rs,
+# core/src/tools/handlers/multi_agents_v2/{spawn,message_tool}.rs,
+# core/src/tools/{hook_names,mod}.rs.
+# Agent is a matcher alias, not a serialized tool name.
+SUBAGENT_TOOLS = frozenset({
+    "spawn_agent",
+    "multi_agent_v1send_input",
+    "send_message",
+    "followup_task",
+})
+
+
+def is_b2_delegation(payload: dict) -> bool:
+    """A supported explicit-delegation pre-hook, not a crossing receipt."""
+    name = payload.get("tool_name")
+    return (
+        payload.get("hook_event_name") == "PreToolUse"
+        and isinstance(name, str)
+        and name in SUBAGENT_TOOLS
+    )
+
+
+def delegated_text(tool_name: str, tool_input: dict) -> str:
+    """Extract only explicitly supplied text; never serialize metadata.
+
+    V1 supports message or UserInput text items. V2 supports message.
+    A spawn hook name alone does not identify which tool family supplied
+    it. Observing arguments does not establish that the host accepts them.
+    """
+    parts: list[str] = []
+    message = tool_input.get("message")
+    if isinstance(message, str):
+        parts.append(message)
+    if tool_name in ("spawn_agent", "multi_agent_v1send_input"):
+        items = tool_input.get("items")
+        if isinstance(items, list):
+            for item in items:
+                if not isinstance(item, dict) or item.get("type") != "text":
+                    continue
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+    return "\n".join(parts)
 
 
 def is_mcp_tool(tool_name: str) -> bool:

@@ -2259,6 +2259,36 @@ def test_daemon_shutdown_discards_registered_identity(tmp_path, monkeypatch):
         state.ledger.conn.close()
 
 
+@pytest.mark.parametrize("tool", [
+    "spawn_agent",
+    "multi_agent_v1send_input",
+    "send_message",
+    "followup_task",
+])
+def test_b2_internal_failure_warns_instead_of_denying(
+        running_daemon, monkeypatch, tool):
+    _, sock_path = running_daemon
+    _raw_call(sock_path, {
+        "hook_event_name": "SessionStart",
+        "session_id": "b2-failure",
+        "cwd": "/r",
+        "model": "gpt-5",
+    })
+
+    def boom(self, obs):
+        raise RuntimeError("synthetic scan failure")
+
+    monkeypatch.setattr(engine.Engine, "scan", boom)
+    out = _raw_call(sock_path, {
+        "hook_event_name": "PreToolUse",
+        "session_id": "b2-failure",
+        "tool_use_id": "b2-call",
+        "tool_name": tool,
+        "tool_input": {"message": "inspect https://example.test"},
+    })
+    assert out == {"systemMessage": ACCOUNTING_FAILURE}
+
+
 def test_slow_scan_fixture_does_not_construct_real_model(
         tmp_path, monkeypatch):
     from privacy_hud.detect.model import ModelDetector

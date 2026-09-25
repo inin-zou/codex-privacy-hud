@@ -18,7 +18,6 @@
   "tests/test_issue70_legacy_stop.py",
   "tests/test_issue71_quiescence.py",
   "tests/test_mcp_calls.py",
-  "tests/test_network_file_send.py",
   "tests/test_network_isolation.py",
   "tests/test_origin_rules_e2e.py",
   "tests/test_phase4_acceptance.py",

@@ -2,7 +2,7 @@
 
 Stated up front, because a privacy tool that overclaims is worse than none:
 
-**Plugin updates require explicit runtime repair.** Codex may delete the previous plugin bundle while its daemon or MCP servers remain running. Updating the plugin does not select a new Privacy HUD runtime. When the new hook bundle does not match the recorded selection, ingress continues with an unverified warning and recognized outbound calls receive a denial. The warning and denial include a shell-quoted repair command for another terminal; SessionStart uses the same warning. Repair is not automatic. The command may download dependencies and model weights. After successful repair, restart the Codex app, CLI, or IDE integration that loaded the plugin. Monitoring gaps and lost in-memory detection or accounting state cannot be reconstructed.
+**Plugin updates require explicit runtime repair.** Codex may delete the previous plugin bundle while its daemon or MCP servers remain running. Updating the plugin does not select a new Privacy HUD runtime. When the new hook bundle does not match the recorded selection, ingress continues with an unverified warning and recognized B3/B4 outbound calls receive a denial. Supported B2 delegation calls remain exempt from that denial, including when their text contains a URL; they receive an unverified warning with the repair command. The warning and denial include a shell-quoted repair command for another terminal; SessionStart uses the same warning. Repair is not automatic. The command may download dependencies and model weights. After successful repair, restart the Codex app, CLI, or IDE integration that loaded the plugin. Monitoring gaps and lost in-memory detection or accounting state cannot be reconstructed.
 
 Explicit repair and the shared stop-only operation can recognize exact MCP and daemon launch forms naming any canonical N.N.N sibling path under the same existing canonical plugin parent, whether the version directory is present or absent. Each N is an ASCII nonnegative integer without leading zeros except zero itself. An absent version directory need never have existed or been installed; recognition does not require a record of prior selection. An existing version directory must contain a canonical scripts/runtime.py file. Existing incomplete bundles, aliases and uninspectable identities remain refusals. Recognition still requires the existing same-UID, recorded-interpreter and resolved-plugin-data checks. A canonical path, the receipt's build ID, the interpreter executable and an open ledger do not prove which Python code a process loaded. This is ownership recognition under the same-user trust model, not authentication against hostile same-user processes. Process identity and ledger ownership are rechecked before signalling; no SIGKILL escalation is added.
 
@@ -11,6 +11,12 @@ The native Privacy status item does not verify runtime alignment. An old daemon 
 **Linux install/repair holder visibility.** The storage transition checks observable same-uid processes through `/proc`. It skips a process when listing its fd directory returns `EACCES`, and skips a descriptor when both stat and readlink return `EACCES`. These are inspection blind spots, not evidence that the process is unrelated to the ledger. An inaccessible process may still hold a ledger or sidecar; a successful scan does not prove that all ledger users have stopped. Close other ledger users before install or repair. A readable filesystem link whose inode cannot be checked still causes refusal, as do other inspection errors except vanished processes or descriptors. Linux remains supported within this visibility limit.
 
 A denial or rewritten input returned by Privacy HUD is not confirmation that the host applied it. Current hooks do not establish that a denied call did not run or that rewritten input reached its intended recipient.
+
+**Multi-hop flows are not reconstructed.** The legacy `flows` table has no production writer, and event detail does not retrieve a chain of hops. The audit shows finding-event rows, not an aggregated route through files, model context, subagents and external recipients.
+
+Version-2 records can associate the same exact detected value with multiple observations through a session-scoped subject identity. This establishes repeated observation of that subject, not that a value travelled between the recorded locations. Source labels are generic, recipients may be intended or unresolved, and ledger recording order does not establish execution order. No cross-observation history view is shipped.
+
+SessionEnd erases subject and recipient identity hashes and discards the session key; existing opaque IDs and joins remain. This preserves recorded associations without retaining the key needed to match new values. A legacy repetition count and version-2 occurrences within one observation are neither distinct-value counts nor hop counts.
 
 The historical headings retain their link anchors. References to blocking below describe plugin decisions or legacy classifications, not confirmed host enforcement.
 
@@ -153,9 +159,17 @@ The HUD counts denials issued by action, not confirmed stopped reads. Two separa
 
 ## 19. What a subagent inherited is not recorded.
 
-`SubagentStart` is one of the four accounting chokepoints in `architecture.md`, and the observation built for it carries no text: `dispatch.py:527` constructs it with `text=""`, so no detector ever runs on it and no row can result. A subagent is still a `destination` for data sent to it through a tool call, but the question "did the subagent inherit the `.env` the main agent had read?" — named in `PRD.md` as one the product answers — has no answer in the ledger.
+Privacy HUD 0.9.5 scans explicit delegation text delivered in the parent's `PreToolUse` hook. Supported hook-facing names in Codex 0.154.0, 0.155.0, and 0.155.1 are `spawn_agent`, `multi_agent_v1send_input`, `send_message`, and `followup_task`. It scans string `message` arguments and, for the V1-capable spawn/send-input forms, string `text` fields in items whose type is `text`. Other argument fields and non-text items are not scanned. A pre-hook establishes that arguments were observed, not that the host accepted or executed the call.
 
-This says nothing about what happens *inside* a subagent's own session, which has its own hooks and its own session id.
+Version-2 accounting records a B2 subagent observation even when scanning finds nothing. Findings carry unresolved intended recipients and issued-permission evidence; they are not confirmed disclosures and add no confirmed disclosure charge. No recipient row is invented for an observation without findings. Legacy sessions record findings as zero-cost `detected` rows, without activating version-2 accounting or changing historical records.
+
+This is an observation-only path. It does not deny or rewrite delegation. The configured `subagent = "mask"` default and saved mask or origin rules are not applied to these propagation observations. B2 does not use the B3/B4 deep-scan deadline or fail-closed fallback: client unavailability and daemon failures allow with an unverified warning, including when the delegated text contains a URL. A completed scan with a gap remains incomplete scanning, not a denial.
+
+`SubagentStart` retains `text=""` because its delivered payload contains lifecycle identity and references, but no delegated prompt or inherited history. The plugin does not open transcript paths to reconstruct that missing content. Empty text does not imply that detector methods cannot run or that no version-2 observation row can exist. A newly encountered child still follows legacy late-attachment handling because its `SubagentStart` is not a genuine `SessionStart`.
+
+Deferred work includes requested fork-mode storage, child version-2 activation and lifecycle semantics, lifecycle-only identity storage, post-result child-identity correlation, and scanning `SubagentStop.last_assistant_message`. Fork options can be present in parent arguments, but this release neither stores them nor infers inherited subjects from them. A child turn stopping is not treated as permanent session termination.
+
+Still unobserved by this feature: inherited history and its sensitive subjects; non-text items, attachments, and referenced content; actual delivery or model-context admission; whether the parent received child output; unsupported or internal agent paths; and activity during missing-hook or daemon-startup intervals. Child tool activity remains in the child's own session and is not rolled into the parent's account. "Did the subagent inherit the `.env`?" still has no answer in the ledger.
 
 ## 20. A destination is a boundary category, not a recipient.
 
@@ -163,7 +177,7 @@ Legacy accounting groups destinations by boundary category.
 
 New accounting separates boundary category from recipient identity. Supported, unambiguous MCP namespaces identify intended server configurations; multiple tools in one namespace share a recipient. A narrow parser identifies the intended endpoint of supported simple network commands. Ambiguous names, unsupported command forms, dynamic destinations, and unknown recipients remain unresolved.
 
-Intended identity does not prove transmission, backend identity, downstream forwarding, subagent inheritance, or continuity across unobserved configuration changes. Current hooks do not supply the crossing receipts needed to turn those intentions into confirmed disclosures.
+Explicit delegation observations use the B2 subagent category, but their intended recipient identities remain unresolved, including when a target argument is present. This release does not correlate those identities with spawn results or lifecycle events. Intended identity does not prove transmission, backend identity, downstream forwarding, subagent inheritance, or continuity across unobserved configuration changes. Current hooks do not supply the crossing receipts needed to turn those intentions into confirmed disclosures.
 
 ## 21. On an outbound call, the deep scan is best-effort.
 

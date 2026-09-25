@@ -95,16 +95,21 @@ This fails on three independent grounds:
 
 The model context is an *account balance*. The ledger records *transactions*. You reconstruct a balance by replaying transactions — you never need to interrogate the account.
 
-Every byte that can enter model context passes through a small, enumerable set of chokepoints, each of which is a hook:
+Delivered hooks expose selected inputs and results. These are observation points, not a complete account of model-context contents or confirmed crossings:
 
 | Direction | Chokepoint | Hook | What it carries |
 |---|---|---|---|
 | Ingress | User's own text | `UserPromptSubmit` | `prompt` |
 | Ingress | Tool results (file reads, command output, MCP responses) | `PostToolUse` | `tool_response` |
-| Propagation | Data handed to a subagent | `SubagentStart` | agent context reference |
+| Propagation | Explicit delegation arguments | Parent `PreToolUse` for supported delegation tools | String `message` and supported V1 text items |
+| Lifecycle | Subagent starts | `SubagentStart` | Lifecycle identity and references; no delegated or inherited text |
 | Egress | Arguments leaving to a tool or the network | `PreToolUse` | `tool_input` |
 
-Those four edges form a **cut of the data-flow graph**. Nothing reaches the model without crossing one — with the documented exception of hosted tools (§11). So the ledger is complete with respect to the enforceable boundary, and it is built from deterministic local scanning, with zero additional model calls.
+These hooks do not establish a complete cut of the data-flow graph. Inherited subagent history, hosted tools, and missing-hook intervals remain outside the observed content. Detection runs locally, but a detection or permitted call is not a crossing receipt.
+
+Explicit delegation uses `direction="propagate"` and destination `subagent` (B2). Version-2 findings carry unresolved intended recipients and permission evidence without confirmed disclosure charges; legacy findings classify as `detected` with zero charge. This path bypasses egress policy, consent tokens, and minimization, so it does not deny or rewrite a spawn or message. The configured subagent mask default is not applied here. Supported B2 pre-hooks are exempted from both client and daemon fail-closed fallbacks, including when their arguments contain URLs.
+
+`SubagentStart` retains empty text because its payload supplies neither the delegated task nor inherited history. It does not activate child version-2 accounting. Requested fork-mode storage, lifecycle-only identity storage, child lifecycle accounting, post-result identity correlation, and stop-message scanning are deferred. No transcript is opened to infer missing content. See `docs/known-limits.md` #19 for the full unobserved scope.
 
 ```mermaid
 sequenceDiagram
@@ -228,7 +233,7 @@ CREATE TABLE events (                     -- legacy UPDATEs: count increments; v
   kind          TEXT NOT NULL,            -- exposed|prevented|local_access|detected|retention
   data_type     TEXT NOT NULL,            -- email|credential|person|hostname|path|...
   source        TEXT NOT NULL,            -- support.log | user prompt | tool input
-  destination   TEXT NOT NULL,            -- model_context|subagent:<id>|mcp:<server>|net:<host>
+  destination   TEXT NOT NULL,            -- local|model_context|subagent|mcp_tool|external_net
   boundary      TEXT NOT NULL,            -- B0..B4
   count         INTEGER NOT NULL DEFAULT 1,
   value_hash    BLOB,                     -- salted, session-scoped; NULL after SessionEnd
@@ -239,7 +244,7 @@ CREATE TABLE events (                     -- legacy UPDATEs: count increments; v
   UNIQUE(session_id, value_hash, destination)
 );
 
-CREATE TABLE flows (                      -- multi-hop chains for the L3 flow line
+CREATE TABLE flows (                      -- retained legacy placeholder; no production writer
   id         INTEGER PRIMARY KEY,
   session_id TEXT NOT NULL,
   value_hash BLOB NOT NULL,
@@ -265,7 +270,9 @@ CREATE TABLE policy_tokens (              -- one-shot consent, §8
 );
 ```
 
-**What is deliberately absent:** no `content`, no `prompt`, no `raw_value`, no `file_snippet` column anywhere. The schema is the privacy guarantee — a column that does not exist cannot leak.
+The legacy `flows` table is retained unchanged for compatibility. No production code writes it, and event-detail retrieval does not populate hops from it. It is not the storage contract for version-2 subject associations. Current requirements do not include reconstructed causal multi-hop chains. Any future same-subject observation history should be derived read-only from version-2 records without strengthening their evidence or changing accounting.
+
+**Persistence constraint:** raw content is not stored. The absence of a content column is insufficient by itself: source labels, exemplars, identities, and other metadata must also satisfy I1. Delegation text is scanned transiently; task names, targets, roles, fork arguments, and transcript references are not added to persisted metadata.
 
 At `SessionEnd`: `UPDATE events SET value_hash = NULL WHERE session_id = ?` and the in-memory salt is destroyed. After the Phase 2 rebuild the same update targets `events_legacy_v1`.
 

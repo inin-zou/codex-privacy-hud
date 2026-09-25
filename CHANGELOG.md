@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.5
+
+- Scan explicit parent delegation text from supported spawn, send-input, message, and follow-up PreToolUse hooks in Codex 0.154.0, 0.155.0, and 0.155.1.
+- Record B2 observations and findings with unresolved intended recipients in version-2 accounting, without confirmed disclosure charges. Record legacy findings as zero-cost detections.
+- Keep delegation observation-only: no denial, rewrite, or application of saved mask or origin rules. Preserve fail-open B2 failure handling, including messages containing URLs.
+- Leave SubagentStart content and child accounting activation unchanged. Defer fork-mode storage, lifecycle identity storage, post-result identity correlation, and stop-message scanning; inherited content and actual delivery remain unobserved.
+- Preserve schema generation 5402, runtime protocol 2, snapshot version 2, and historical accounting.
+- Reconcile the flow requirements with the shipped event-based audit. Withdraw aggregated causal multi-hop chains from the current requirements and document the limits of same-subject associations. No flow writer, cross-observation history view, schema change or accounting change is introduced.
+
+Refs #47.
+
 ## 0.9.4
 
 - Recognize MCP and daemon ledger holders naming any canonical N.N.N sibling path under the same existing canonical plugin parent during explicit runtime repair and the shared stop-only operation, whether the version directory is present or absent. Each N is an ASCII nonnegative integer without leading zeros except zero itself. Absent version directories need never have existed or been installed; no record of prior selection is required.
