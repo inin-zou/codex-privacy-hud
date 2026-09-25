@@ -95,14 +95,16 @@ POLICY_PREFLIGHT_REFUSAL = (
 REPAIR_SUCCESS = (
     "Privacy HUD {release} is running from the selected plugin bundle.\n"
     "Existing ledger records were preserved.\n"
-    "Restart Codex to reload its hooks and MCP server.\n"
+    "Restart the Codex app, CLI, or IDE integration that loaded this "
+    "plugin to reload its hooks and MCP server.\n"
     "Monitoring gaps and lost in-memory detection state cannot be "
     "reconstructed."
 )
 REPAIR_SUCCESS_FRESH = (
     "Privacy HUD {release} is running from the selected plugin bundle.\n"
     "The active ledger location is configured.\n"
-    "Restart Codex to reload its hooks and MCP server.\n"
+    "Restart the Codex app, CLI, or IDE integration that loaded this "
+    "plugin to reload its hooks and MCP server.\n"
     "Monitoring gaps and lost in-memory detection state cannot be "
     "reconstructed."
 )
@@ -147,7 +149,13 @@ QUIESCENCE_AFTER_STOP = (
     "is safe to move.\n"
     "The storage transition was not completed. Existing ledger files "
     "were preserved.\n"
-    "The quiescence_refusal diagnostic line names the blocking check."
+    "The quiescence_refusal diagnostic line names the blocking check.\n"
+    "If it lists pids, inspect those processes in your operating system's "
+    "process viewer. Close the owning application only after identifying "
+    "it; a Codex app, CLI, or IDE integration may have started another "
+    "MCP server.\n"
+    "Then run this command in another terminal:\n"
+    "  {repair_command}"
 )
 
 #: Explicit repair, stopping a legacy daemon it has verified as this
@@ -162,6 +170,18 @@ LEGACY_DAEMON_STOPPED = (
     "moved safely."
 )
 
+#: Explicit repair may interrupt a host's MCP connection. Printed only
+#: after all holders have passed revalidation and before signalling.
+MCP_STOPPING = (
+    "Stopping this installation's verified Privacy HUD MCP server.\n"
+    "This disconnects its MCP tools from the Codex app, CLI, or IDE "
+    "integration using it. An in-progress tool call may fail."
+)
+MCP_STOPPED = (
+    "The verified Privacy HUD MCP server stopped. Checking that storage "
+    "can be moved safely."
+)
+
 #: A process holds the ledger and its identity could not be verified as
 #: one this installation may stop (#70). Only ever shown before any stop
 #: signal was sent in the invocation -- its second sentence says so.
@@ -169,7 +189,12 @@ HOLDER_UNVERIFIED = (
     "Privacy HUD could not verify the identity of a process using this "
     "ledger.\n"
     "No stop signal was sent. The storage transition did not start.\n"
-    "Existing ledger files were preserved."
+    "Existing ledger files were preserved.\n"
+    "If the quiescence_refusal diagnostic line lists pids, inspect those "
+    "processes in your operating system's process viewer. Close the owning "
+    "application only after identifying it.\n"
+    "Then run this command in another terminal:\n"
+    "  {repair_command}"
 )
 
 #: The operating system could not be asked who holds the ledger, or what

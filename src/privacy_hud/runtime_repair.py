@@ -392,18 +392,19 @@ def classify_holder(identity: dict, data_dir: Path, bundle: Path, *,
     """What a process holding this data directory's ledger is, or a
     refusal saying why it cannot be stopped (#70).
 
-    Returns `"current"` for this installation's bundled bootstrap serving
-    this data directory, and `"legacy"` for a supported legacy daemon of
-    this installation. Every one of astra's rules applies, and none of
-    them is a substring:
+    Returns `"current"` for this installation's bundle-launched daemon,
+    `"mcp"` for its bundle-launched MCP server, and `"legacy"` for a
+    supported legacy daemon. Every one of astra's rules applies, and
+    none of them is a substring:
 
     * the same user;
     * an identity read exactly -- executable and argument vector -- or a
       refusal (`identity`/`uninspectable`);
     * a supported launch form: the bundled bootstrap, or exactly
       `LEGACY_DAEMON_ARGS` after the interpreter;
-    * for a legacy daemon, a relationship to this installation's recorded
-      `interpreter` (`_launched_as`); with none recorded, nothing is;
+    * for every supported form, a relationship to this installation's
+      recorded `interpreter` (`_launched_as`); with none recorded,
+      nothing is;
     * a relationship to this data directory: the bootstrap names it, and
       a legacy daemon -- which took it from its environment -- was found
       holding this directory's ledger by device and inode, which is how
@@ -433,7 +434,8 @@ def classify_holder(identity: dict, data_dir: Path, bundle: Path, *,
         raise refuse("installation") from None
     if bootstrap in argv:
         if (len(argv) != 6 or argv[1:4] !=
-                ["-I", bootstrap, "--plugin-data"] or argv[5] != "daemon"):
+                ["-I", bootstrap, "--plugin-data"]
+                or argv[5] not in ("daemon", "mcp")):
             raise refuse("launch_form")
         if interpreter is None:
             raise refuse("installation")
@@ -441,7 +443,7 @@ def classify_holder(identity: dict, data_dir: Path, bundle: Path, *,
             raise refuse("interpreter")
         try:
             if Path(argv[4]).resolve() == named:
-                return "current"
+                return "mcp" if argv[5] == "mcp" else "current"
         except OSError:
             pass
         raise refuse("data_dir")
@@ -469,7 +471,7 @@ def _recorded_interpreter(data_dir: Path) -> Path | None:
 
 
 def stop_holders(data_dir, holders: dict, *, deadline: float,
-                 on_signal=None) -> bool:
+                 on_signal=None, on_targets=None) -> bool:
     """Ask each classified holder to exit, and wait for it. Returns whether
     any signal was sent.
 
@@ -483,7 +485,10 @@ def stop_holders(data_dir, holders: dict, *, deadline: float,
 
     `SIGTERM` once, then waiting until `deadline`. There is no
     escalation: a process that ignores it is reported, never killed.
+    `on_targets`, if supplied, receives the nonempty frozenset of
+    revalidated target pids once, before any signal attempt. Then
     `on_signal` is called once, just before the first signal.
+    These callbacks describe attempted stops, not confirmed delivery.
     """
     current_holders = set(runtime_storage.open_holders(data_dir))
     current_holders.discard(os.getpid())
@@ -507,6 +512,8 @@ def stop_holders(data_dir, holders: dict, *, deadline: float,
     if not recheck:
         return False
 
+    if on_targets is not None:
+        on_targets(frozenset(recheck))
     if on_signal is not None:
         on_signal()
     for pid in recheck:
@@ -553,7 +560,8 @@ def _quiesce(data_dir: Path, bundle: Path, *, progress=None,
     if holders:
         interpreter = _recorded_interpreter(data_dir)
         owned: dict[int, dict] = {}
-        legacy = False
+        kinds: dict[int, str] = {}
+        targeted_kinds: set[str] = set()
         for pid in sorted(holders):
             identity = process_identity(pid)
             if identity is None:
@@ -563,17 +571,24 @@ def _quiesce(data_dir: Path, bundle: Path, *, progress=None,
                 continue
             kind = classify_holder(identity, data_dir, bundle,
                                    interpreter=interpreter)
-            legacy = legacy or kind == "legacy"
+            kinds[pid] = kind
             owned[pid] = identity
 
-        def stopping() -> None:
-            if legacy and progress is not None:
-                progress(runtime_messages.LEGACY_DAEMON_STOPPING)
+        def stopping(targets: frozenset[int]) -> None:
+            targeted_kinds.update(kinds[pid] for pid in targets)
+            if progress is not None:
+                if "legacy" in targeted_kinds:
+                    progress(runtime_messages.LEGACY_DAEMON_STOPPING)
+                if "mcp" in targeted_kinds:
+                    progress(runtime_messages.MCP_STOPPING)
 
         signalled = stop_holders(data_dir, owned, deadline=deadline,
-                                 on_signal=stopping)
-        if signalled and legacy and progress is not None:
-            progress(runtime_messages.LEGACY_DAEMON_STOPPED)
+                                 on_targets=stopping)
+        if signalled and progress is not None:
+            if "legacy" in targeted_kinds:
+                progress(runtime_messages.LEGACY_DAEMON_STOPPED)
+            if "mcp" in targeted_kinds:
+                progress(runtime_messages.MCP_STOPPED)
 
     def waiting() -> None:
         if progress is not None:
