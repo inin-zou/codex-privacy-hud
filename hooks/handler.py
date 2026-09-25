@@ -597,10 +597,17 @@ def main():
             pass
 
 
-if __name__ == "__main__":
+def cli():
+    """The process entry point: relay `main()`'s output, or nothing at all
+    if the client itself throws (I6). Always exits 0. A function so a test
+    can drive the real stdout path in-process."""
     try:
         out = main()
     except Exception:
         out = {}
     sys.stdout.write(json.dumps(out) if out else "")
-    sys.exit(0)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(cli())

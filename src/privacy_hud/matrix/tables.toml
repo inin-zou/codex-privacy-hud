@@ -38,6 +38,7 @@ external_net   = "B4"
 # "<hook_event>/<direction>" -> event kind
 [taxonomy]
 "UserPromptSubmit/ingress" = "exposed"
+"UserPromptSubmit/blocked" = "prevented"
 "PostToolUse/ingress"      = "exposed"
 "SubagentStart/propagate"  = "exposed"
 "PreToolUse/egress"        = "exposed"

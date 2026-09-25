@@ -109,6 +109,7 @@ import os
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -131,6 +132,7 @@ from .ledger import Ledger, open_connection
 from .mask import new_salt
 from .matrix.loader import Matrix, load_matrix
 from .origin import OriginKind, extract_origin
+from .prompt_hold import confirmed_message, held_reason
 from .render import receipt as render_receipt
 from .runtime import latch_path
 from .runtime_owner import WriterLease
@@ -195,6 +197,9 @@ class State:
     # another as a Python object, and nothing else can select one.
     hook_adapter: HookEvidenceAdapter = field(
         default_factory=CurrentHookAdapter)
+    # #37: the monotonic clock every session's credential-prompt gate reads.
+    # A test may install another; nothing on the wire can select one.
+    prompt_clock: Callable[[], float] = time.monotonic
 
     # -- session reference count (daemon lifetime) --------------------- #
     # session_id -> `time.monotonic()` of the last hook event seen for it.
@@ -392,7 +397,16 @@ def _allow_with_rewrite(updated_input, message: str | None) -> dict:
     return out
 
 
-def _decision_to_output(decision) -> dict:
+def _decision_to_output(decision, *, hook_event: str | None = None) -> dict:
+    if hook_event == "UserPromptSubmit" and decision.action == "deny":
+        # #37: a prompt hold is exactly `decision` + `reason`. Codex records
+        # additional context returned alongside a valid block into model
+        # context, and refuses a block whose reason is empty (the prompt
+        # would then go through), so neither is ever sent.
+        reason = decision.reason
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("invalid prompt hold reason")
+        return {"decision": "block", "reason": reason}
     if decision.action == "deny":
         return _deny(decision.reason or decision.system_message)
     if decision.action == "rewrite":
@@ -456,7 +470,8 @@ def _get_or_start_engine(state: State, session_id: str, *, cwd: str = "",
         # late findings with NULL hashes and zero contributions.
         return Engine(
             ledger=state.ledger, matrix=state.matrix, salt=new_salt(),
-            detectors=state.detectors, settings=state.settings)
+            detectors=state.detectors, settings=state.settings,
+            prompt_clock=state.prompt_clock)
 
     engine = state.engines.get(session_id)
     if engine is not None:
@@ -474,7 +489,8 @@ def _get_or_start_engine(state: State, session_id: str, *, cwd: str = "",
                                 observed_start=False)
     state.started_at.setdefault(session_id, time.time())
     engine = Engine(ledger=state.ledger, matrix=state.matrix, salt=salt,
-                     detectors=state.detectors, settings=state.settings)
+                     detectors=state.detectors, settings=state.settings,
+                     prompt_clock=state.prompt_clock)
     state.engines[session_id] = engine
     # A session the daemon first meets here -- typically the one whose
     # SessionStart hook spawned this daemon and got no answer -- has no
@@ -832,7 +848,8 @@ def _attach_keyless_v2(state: State, session_id: str, row, *, cwd: str,
     salt = state.salts.setdefault(session_id, new_salt())
     state.started_at.setdefault(session_id, time.time())
     engine = Engine(ledger=ledger, matrix=state.matrix, salt=salt,
-                    detectors=state.detectors, settings=state.settings)
+                    detectors=state.detectors, settings=state.settings,
+                    prompt_clock=state.prompt_clock)
     state.engines[session_id] = engine
     return engine
 
@@ -864,7 +881,7 @@ def _activate_session(state: State, session_id: str, payload: dict, *,
     try:
         engine = Engine(ledger=ledger, matrix=state.matrix, salt=salt,
                         detectors=state.detectors, settings=state.settings,
-                        accounting_key=key)
+                        accounting_key=key, prompt_clock=state.prompt_clock)
         state.accounting_keys[session_id] = key
         state.salts[session_id] = salt
         state.engines[session_id] = engine
@@ -922,7 +939,8 @@ def _handle_session_start(
                 ledger.start_session(session_id, cwd=cwd, model=model)
             engine = Engine(
                 ledger=state.ledger, matrix=state.matrix, salt=salt,
-                detectors=state.detectors, settings=state.settings)
+                detectors=state.detectors, settings=state.settings,
+                prompt_clock=state.prompt_clock)
             state.salts[session_id] = salt
             state.engines[session_id] = engine
             state.started_at[session_id] = time.time()
@@ -1120,7 +1138,17 @@ def dispatch(
     `delivery_key` is the daemon-normalized protocol-2 delivery key (#54
     Phase 4); the daemon always supplies one. It identifies this delivery
     to version-2 accounting and is never read from the payload.
+
+    A `UserPromptSubmit` carrying a hold-eligible credential (#37) takes a
+    preflight between steps 1 and 2: the regex-only credential scan runs
+    unlocked, then the session's confirmation gate rules under the lock. A
+    hold is recorded and returned there, without the deep scan, so a cold
+    or busy model never delays it; an allowed prompt continues through the
+    three steps unchanged.
     """
+    # #37: when this submission arrived, before any lock wait, so a queued
+    # accidental double submit cannot pass for a deliberate resubmission.
+    submitted_at = state.prompt_clock()
     event = payload.get("hook_event_name")
     session_id = payload.get("session_id")
 
@@ -1185,10 +1213,55 @@ def dispatch(
                                 boundary=state.matrix.boundary_for(dest),
                                 findings=(), degraded=False))
             _publish_hud(state, session_id)
-        return _decision_to_output(decision)
+        return _decision_to_output(decision, hook_event=event)
 
     with state.lock:
         engine = _get_or_start_engine(state, session_id, cwd=cwd, model=model)
+
+    confirmed: tuple[str, ...] = ()
+    matches = engine.scan_prompt_credentials(obs)
+    if matches:
+        with state.lock:
+            # Re-resolved for the same reason as step 3 below: a SessionEnd
+            # may have landed since step 1.
+            engine = _get_or_start_engine(state, session_id, cwd=cwd,
+                                          model=model)
+            gate = engine.prompt_gate
+            saved = gate.snapshot()
+            verdict = gate.decide(
+                {m.finding.value: m.kind for m in matches},
+                delivery_key=delivery_key, submitted_at=submitted_at,
+                defer_confirmation=True)
+            if verdict.hold:
+                try:
+                    accounting = _accounting_for(state, session_id, payload,
+                                                 delivery_key)
+                    held = obs
+                    if accounting is not None:
+                        held = dataclasses.replace(obs, accounting=accounting,
+                                                   cwd=cwd)
+                    decision = engine.record_prompt_hold(
+                        held, matches, held_reason(m.kind for m in matches))
+                except Exception:
+                    # The credential verdict already requires a hold. Keep
+                    # its pending window and replay verdict so the stated
+                    # resubmission path still works; this grants no allow.
+                    # Writes may have committed before a later read failed.
+                    return {
+                        "decision": "block",
+                        "reason": held_reason(m.kind for m in matches) + (
+                            "\n\n  Ledger recording failed; this hold may be missing "
+                            "from the session audit.\n"
+                            "  The resubmission instructions still apply while "
+                            "this session and daemon remain active."
+                        ),
+                    }
+                except BaseException:
+                    # Process-level interruption is not a handled reply.
+                    gate.restore(saved)
+                    raise
+                _publish_hud(state, session_id)
+                return _decision_to_output(decision, hook_event=event)
 
     # Detection runs here, outside the lock. `Engine.scan()` touches no
     # sqlite and no per-session daemon state (that is the contract its
@@ -1197,7 +1270,13 @@ def dispatch(
     # the cost of the whole request. Holding `state.lock` across it made
     # every concurrent hook call in EVERY session queue behind one forward
     # pass; see daemon.Daemon's docstring for the measurement.
-    scan = engine.scan(obs)
+    try:
+        scan = engine.scan(obs)
+    except BaseException:
+        if matches:
+            with state.lock:
+                gate.finish_confirmation(delivery_key, verdict, recorded=False)
+        raise
 
     with state.lock:
         # Re-resolve rather than reusing the Engine from step 1. A
@@ -1211,17 +1290,34 @@ def dispatch(
         # legal serialization of the two operations, not a reinterpretation
         # of the scan. `_get_or_start_engine` is idempotent, so in the
         # ordinary case this is a dict lookup.
-        engine = _get_or_start_engine(state, session_id, cwd=cwd, model=model)
-        # #54 Phase 4: normalized only now, with the key current at this
-        # moment; no key or resolved identity crossed the unlocked scan.
-        accounting = _accounting_for(state, session_id, payload,
-                                     delivery_key)
-        if accounting is not None:
-            obs = dataclasses.replace(
-                obs, accounting=accounting, cwd=cwd,
-                evaluated_path=(obs.origin.evaluated_path
-                                if obs.origin is not None else None))
-        decision = engine.observe(obs, scan=scan)
+        try:
+            engine = _get_or_start_engine(state, session_id, cwd=cwd,
+                                          model=model)
+            # #54 Phase 4: normalize with the current accounting key.
+            accounting = _accounting_for(state, session_id, payload,
+                                         delivery_key)
+            if accounting is not None:
+                obs = dataclasses.replace(
+                    obs, accounting=accounting, cwd=cwd,
+                    evaluated_path=(obs.origin.evaluated_path
+                                    if obs.origin is not None else None))
+            decision = engine.observe(obs, scan=scan)
+        except BaseException:
+            if matches:
+                gate.finish_confirmation(delivery_key, verdict, recorded=False)
+            raise
+        if matches:
+            # Commit only after recording, and only on the original gate.
+            # SessionEnd may have cleared it during the unlocked scan.
+            confirmed = gate.finish_confirmation(
+                delivery_key, verdict, recorded=engine.prompt_gate is gate)
         _publish_hud(state, session_id)
 
-    return _decision_to_output(decision)
+    if confirmed:
+        # Authorizes this plugin's allow decision only; it does not establish
+        # that the prompt reached model context.
+        notice = confirmed_message(confirmed)
+        decision.system_message = (
+            notice if not decision.system_message
+            else decision.system_message + "\n\n" + notice)
+    return _decision_to_output(decision, hook_event=event)

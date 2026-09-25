@@ -192,7 +192,9 @@ def test_production_v2_hooks_write_no_legacy_rows(state, monkeypatch):
     assert calls == []
     summary = state.ledger.summary("s1")
     assert isinstance(summary, AccountingSummary)
-    assert summary.denials_issued == 1
+    # The credential prompt is held (#37) and the credential egress is
+    # denied: two issued denials, neither confirmed.
+    assert summary.denials_issued == 2
     assert summary.confirmed_points == 0
     legacy = state.ledger.conn.execute(
         "SELECT COUNT(*) FROM events_legacy_v1 WHERE session_id='s1'"

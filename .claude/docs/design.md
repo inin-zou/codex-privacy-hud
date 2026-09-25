@@ -299,6 +299,8 @@ Already disclosed data cannot be recalled from this session.
 
 ---
 
+UserPromptSubmit credential confirmation is a separate shipped path in 0.9.1: a supported credential format can hold the prompt, and a later eligible resubmission allows it. It does not issue a tool-consent token, rewrite a prompt, or establish model-context admission. See docs/known-limits.md, limit 22.
+
 ## 9. Copy rules
 
 **Required phrasings**

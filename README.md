@@ -75,7 +75,7 @@ Generation 5402 requires the activated-accounting implementation introduced in P
 Runtime mismatches produce an unverified warning on ingress and a denial for outbound calls the hook cannot verify. These are plugin decisions, not confirmation of host enforcement. Monitoring gaps and lost in-memory detection state cannot be reconstructed. Open version-2 sessions whose accounting keys were lost remain unavailable for the rest of those sessions.
 
 ```bash
-PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.9.0/plugin'
+PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.9.1/plugin'
 PRIVACY_HUD_DATA='/absolute/path/to/plugin/data'
 
 python3 "$PRIVACY_HUD_BUNDLE/scripts/runtime.py" \
@@ -253,7 +253,7 @@ A mask rule is scoped to the session and selects a detected data type across sou
 
 `$privacy <session_id>` selects a session audit. It is not an event or flow deep link. Select a row in the local browser to inspect that event; the terminal detail launcher requires separate session and event IDs. Denial messages contain no event deep link.
 
-No shipped surface offers `Allow once`, `Minimize & retry`, a minimization preview or a consent-driven retry. Internal token primitives do not make those actions available.
+No shipped surface offers `Allow once`, `Minimize & retry`, a minimization preview or a consent-token-driven tool retry. Internal token primitives do not make those actions available.
 
 The deep detector is local `openai/privacy-filter`, not Presidio. Installing its dependencies and weights is optional; without them, its detection categories are unavailable. Runtime does not download missing weights. There is no findings cache across reads or sessions: reading unchanged content can repeat scanning even when legacy accounting deduplicates the resulting row.
 
@@ -292,6 +292,14 @@ The distinction the product is built on:
 | Subagent starts without inherited-content evidence | Observation only; inheritance unresolved |
 
 The audit contains finding events with explicit outcome evidence. Observations also record actions with no findings. Disclosure identities and charges are separate from event rows. Source-to-recipient associations do not reconstruct causal multi-hop flows.
+
+### Credential prompts
+
+Privacy HUD 0.9.1 can request a hold before a user prompt enters model context when its text matches a supported credential format. To allow a held credential, wait at least 2 seconds, paste or type the message again, and submit it within 5 minutes. Editing the surrounding text is allowed. Every credential must be eligible for confirmation; a new credential holds the whole submission again.
+
+Confirmation is case-sensitive and lasts for this session while the daemon runs. Restarting the daemon loses it. Entropy findings, tier-3 NER findings, and private-key headers do not trigger prompt holds. Images and attachments are not scanned. If the daemon does not answer, including during cold startup, prompts fail open with an unverified warning.
+
+The inspected Codex 0.154.0 and 0.155.1 source clears the composer on submission and does not restore it after a hook hold; this has not been verified in a live TUI. A hold does not prevent Codex from retaining local input history. When recording succeeds, the ledger records a denial issued, not confirmed host enforcement. A recording failure after the hold decision still returns a block, with a warning that the hold may be missing from the audit. The in-memory confirmation window remains usable for a fresh eligible submission while the session and daemon remain active; replaying the same delivery stays held. Confirmation becomes reusable only after its own observation records successfully. If no usable reply reaches the client, ingress still fails open. See [limit 22](docs/known-limits.md#22-credential-prompt-holds-have-a-narrow-scope).
 
 ### The read guard
 
@@ -356,7 +364,7 @@ Stated up front, because a privacy tool that overclaims is worse than none:
 1. **The start of a session is unmonitored.** **Whatever is disclosed in those first seconds is not in the ledger, and no later reading can say what it was.** ([details](docs/known-limits.md#1-the-start-of-a-session-is-unmonitored))
 2. **"Unverified" marks the gaps it can see, and there are gaps it cannot.** So `⚠unverified` means "the ledger holds evidence of a hole"; its absence means "nothing on record contradicts a complete account", which is a weaker claim than "complete" and must not be read as the stronger one. ([details](docs/known-limits.md#2-unverified-marks-the-gaps-it-can-see-and-there-are-gaps-it-cannot))
 3. **Hosted tools bypass hooks.** WebSearch and similar do not trigger local function-tool hook paths. ([details](docs/known-limits.md#3-hosted-tools-bypass-hooks))
-4. **No `ask` decision in Codex hooks, and no interactive consent surface.** Internal token primitives exist, but no browser button, `$privacy` branch or exposed MCP tool issues consent tokens or offers a consent-driven retry. ([details](docs/known-limits.md#4-no-ask-decision-in-codex-hooks-and-no-interactive-consent-at-all))
+4. **No `ask` decision in Codex hooks, and no interactive tool-call consent surface.** Internal token primitives exist, but no browser button, `$privacy` branch or exposed MCP tool issues consent tokens or offers a consent-driven retry. Prompt resubmission is separate; see limit 22. ([details](docs/known-limits.md#4-no-ask-decision-in-codex-hooks-and-no-interactive-consent-at-all))
 5. **The status-line item lives in a separately built Codex — never in your official one.** **The plugin never modifies your official Codex binary.** ([details](docs/known-limits.md#5-the-status-line-item-lives-in-a-separately-built-codex--never-in-your-official-one))
 6. **A command that reads a file itself is not inspected.** The engine scans the *text of a tool call*, not what that call will read at runtime. ([details](docs/known-limits.md#6-a-command-that-reads-a-file-itself-is-not-inspected))
 7. **Detection is heuristic.** A determined adversary can encode around regex and NER. ([details](docs/known-limits.md#7-detection-is-heuristic))
@@ -368,12 +376,13 @@ Stated up front, because a privacy tool that overclaims is worse than none:
 13. **No policy rule can be removed within the session that wrote it.** True of the mask action since long before source rules existed. A new Codex conversation is the only clean slate. ([details](docs/known-limits.md#13-no-policy-rule-can-be-removed-within-the-session-that-wrote-it))
 14. **Only a shell command whose read the extractor recognises is stopped.** The guard sees one tool — the shell — because that is how Codex reads a file; any other tool is allowed unexamined. Within the shell, `cat .env` is stopped; `wc -l .env`, `source .env`, `cp .env /tmp/x`, `strings id_rsa`, `head -5 .env` and `python -c "open('.env')"` are not — no deny, no notice, no row. Limit 11 holds the mechanism. ([details](docs/known-limits.md#14-only-a-shell-command-whose-read-the-extractor-recognises-is-stopped))
 15. **A template file is never blocked**, even one that really holds a key. Detection still flags it. ([details](docs/known-limits.md#15-a-template-file-is-never-blocked))
-16. **Nothing is blocked until you turn it on.** The default records the read and mentions the guard once per session; it stops nothing. ([details](docs/known-limits.md#16-nothing-is-blocked-until-you-turn-it-on))
+16. **The optional read guard is off by default.** This setting controls recognized shell reads, not credential prompt holds. ([details](docs/known-limits.md#16-nothing-is-blocked-until-you-turn-it-on))
 17. Legacy rows can still collapse different outcomes. New accounting appends independent outcome evidence and counts denials issued by action. Historical rows are not reconstructed, and issued denials do not establish host enforcement. ([details](docs/known-limits.md#17-a-blocked-read-can-leave-a-record-that-says-the-opposite-in-one-sequence))
 18. Legacy rows can still merge files matching one pattern. Version-2 accounting removes pattern-based merging and counts denials issued by action, but all shell-derived file identities remain unresolved, including ordinary `cat .env` reads. Separate opaque subject IDs do not establish distinct files, and the audit does not name the denied file. Confirmed stopped reads require enforcement evidence. #44 remains open for guard-target identity and I1-safe display; 0.10.0 is a proposed target, not a commitment. ([details](docs/known-limits.md#18-a-blocked-reads-row-does-not-name-the-file))
 19. **What a subagent inherited is not recorded.** The `SubagentStart` observation carries no text, so no detector runs on it and no row results. "Did the subagent inherit the `.env`?" has no answer in the ledger. ([details](docs/known-limits.md#19-what-a-subagent-inherited-is-not-recorded))
 20. Concrete recipients are identified only where the hook and supported parser provide an unambiguous identity. Other recipients remain unresolved. Identity alone does not establish delivery or forwarding. ([details](docs/known-limits.md#20-a-destination-is-a-boundary-category-not-a-recipient))
 21. **On an outbound call, the deep scan is best-effort.** The model is serial, and a missed hook deadline on an outbound call becomes a deny (I6). Egress uses a requested timeout based on the remaining budget and an inclusive completion cutoff; neither guarantees elapsed time. See `engine.TIER3_EGRESS_BUDGET`. Measured: a call under the 1.0 s budget returned at 1.25 s. At most one egress scan worker is admitted at a time. Admission is nonblocking; the worker retains its slot until it exits, including after caller abandonment. A scan gap means an applicable deep scan supplied no accepted result; the call then proceeds on the fast tiers, the same as every outbound call before this existed. A scan gap can omit findings that would otherwise cause blocking or masking. Each observed scan gap is recorded per observation and counted per session, including observations with no event row, so the session stops reading as fully verified — but the audit cannot tell you which calls they were. ([details](docs/known-limits.md#21-on-an-outbound-call-the-deep-scan-is-best-effort))
+22. **Credential prompt holds have a narrow scope.** Only supported credential formats in prompt text can hold a submission. Confirm by resubmitting after 2 seconds and within 5 minutes. Images, attachments, entropy findings, private-key headers, and tier-3 NER findings do not trigger this hold. No daemon reply means ingress fails open. ([details](docs/known-limits.md#22-credential-prompt-holds-have-a-narrow-scope))
 
 ## Configuration
 
@@ -419,12 +428,12 @@ Stated up front, because a privacy tool that overclaims is worse than none:
 
 ## Uninstall
 
-Run the script from the exact installed 0.9.0 plugin bundle. Replace the
+Run the script from the exact installed 0.9.1 plugin bundle. Replace the
 placeholder below with that bundle's absolute directory, containing both
 `install.sh` and `scripts/runtime.py`.
 
 ```bash
-PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.9.0/plugin'
+PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.9.1/plugin'
 sh "$PRIVACY_HUD_BUNDLE/install.sh" --uninstall
 ```
 
@@ -460,7 +469,7 @@ You want this if there is no `install.sh` for your platform, if you are on Linux
 | doc | what it covers | read it when |
 |---|---|---|
 | [`docs/installing-by-hand.md`](docs/installing-by-hand.md) | Each install step run by hand, the `privacy-hud-setup` and `privacy-hud-doctor` commands, and the fallback pane. | You cannot use `install.sh`, or you want to control each step. |
-| [`docs/known-limits.md`](docs/known-limits.md) | All twenty-one limits in full, with the measurements behind them. | You are deciding how far to trust a number the HUD shows. |
+| [`docs/known-limits.md`](docs/known-limits.md) | All twenty-two limits in full, with the measurements behind them. | You are deciding how far to trust a number the HUD shows. |
 | [`patches/README.md`](patches/README.md) | The one-item Codex status-line patch and how to regenerate it against a new tag. | You want to audit or rebuild the patched Codex binary. |
 | [`.claude/docs/architecture.md`](.claude/docs/architecture.md) | Component map, process model, ledger schema, hook dispatch, and the limits of the unshipped consent workflow. | You are working on the plugin itself. |
 
