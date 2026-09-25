@@ -65,11 +65,11 @@ README_ZH_INTRO = (
 #: release number onto it. The remaining #66 paragraphs beside it are
 #: pinned by `tests/test_issue66_contract.py`.
 COMPATIBILITY = (
-    'Privacy HUD 0.8.2 retains snapshot version 2. Production sessions still use legacy accounting. Snapshot-v2 readers accept version 1 as explicitly legacy and version 2 with nullable accounting fields. Older snapshot-v1-only readers reject version 2 and show no Privacy item. Matching Codex version numbers do not establish snapshot compatibility.'
+    'Privacy HUD 0.8.3 retains snapshot version 2. Production sessions still use legacy accounting. Snapshot-v2 readers accept version 1 as explicitly legacy and version 2 with nullable accounting fields. Older snapshot-v1-only readers reject version 2 and show no Privacy item. Matching Codex version numbers do not establish snapshot compatibility.'
 )
 
 COMPATIBILITY_ZH = (
-    'Privacy HUD 0.8.2 继续使用 snapshot v2，实际会话仍采用旧版记账。支持 v2 的读取器会将 v1 明确标为旧版记账，并支持带可空记账字段的 v2。仅支持 v1 的旧读取器会拒绝 v2，不显示 Privacy 状态项。Codex 版本号相同并不代表快照兼容。'
+    'Privacy HUD 0.8.3 继续使用 snapshot v2，实际会话仍采用旧版记账。支持 v2 的读取器会将 v1 明确标为旧版记账，并支持带可空记账字段的 v2。仅支持 v1 的旧读取器会拒绝 v2，不显示 Privacy 状态项。Codex 版本号相同并不代表快照兼容。'
 )
 
 LEDGER_DOCSTRING = (
@@ -111,14 +111,14 @@ def _read(relative: str) -> str:
     return (REPO / relative).read_text(encoding="utf-8")
 
 
-def test_phase3_versions_are_0_8_2():
+def test_phase3_versions_are_0_8_3():
     plugin = json.loads(_read(".codex-plugin/plugin.json"))
     marketplace = json.loads(_read(".agents/plugins/marketplace.json"))
     project = tomllib.loads(_read("pyproject.toml"))
-    assert plugin["version"] == "0.8.2"
+    assert plugin["version"] == "0.8.3"
     assert [p["version"] for p in marketplace["plugins"]
-            if p["name"] == plugin["name"]] == ["0.8.2"]
-    assert project["project"]["version"] == "0.8.2"
+            if p["name"] == plugin["name"]] == ["0.8.3"]
+    assert project["project"]["version"] == "0.8.3"
 
 
 def test_phase3_contract_blocks_match_verbatim():
@@ -190,11 +190,11 @@ def test_phase3_summary_and_refusal_copy_is_exact():
         "disclosure or host enforcement.")
     assert accounting.PHASE3_SURFACE_UNSUPPORTED == (
         "This Privacy HUD surface does not support version-2 accounting "
-        "in 0.8.2.")
+        "in 0.8.3.")
     assert json.dumps({"error": accounting.PHASE3_SURFACE_UNSUPPORTED},
                       separators=(",", ":")) == (
         '{"error":"This Privacy HUD surface does not support version-2 '
-        'accounting in 0.8.2."}')
+        'accounting in 0.8.3."}')
 
 
 def test_phase3_source_module_documentation_matches_verbatim():
