@@ -88,7 +88,7 @@ A support engineer asks Codex to triage `support.log` and file a GitHub issue.
 1. Codex reads `support.log` → **12 customer emails enter model context.** The corresponding current HUD example is `Privacy legacy 28%`.
 2. Codex prepares a GitHub MCP call whose body contains those emails → **blocked**, exposure detail shown.
 3. User picks **Minimize & retry** → PII is replaced by stable pseudonyms; the call succeeds.
-4. In 0.9.1, a recognized `curl` command with a visible `.env` reference receives a default-on denial. Accounting records `prevented` evidence with zero additional charge; host enforcement remains unconfirmed.
+4. In 0.9.2, a recognized `curl` command with a visible `.env` reference receives a default-on denial. Accounting records `prevented` evidence with zero additional charge; host enforcement remains unconfirmed.
 5. `SessionEnd` emits a privacy receipt: 4 exposures, 2 destinations, 17 prevented.
 
 ---
@@ -408,7 +408,7 @@ Accounting activation is governed by the current contract at the top of this doc
 
 1. A controlled legacy fixture can move the HUD from `Privacy legacy 0%` to `Privacy legacy 28%`; the recorded association `support.log → model_context` does not prove admission into model context.
 2. GitHub MCP call carrying PII is blocked; audit UI explains why; `Minimize & retry` makes it succeed with pseudonymized values.
-3. 0.9.1 acceptance: `curl -d "$(cat .env)"` and the supported visible-path network forms receive a denial by default, independently of the local read guard. Matched path rules land in `Prevented` with zero additional charge. Shell-derived file identities remain unresolved, and current hooks do not confirm host enforcement. An unavailable percentage must not be rendered as 0%.
+3. 0.9.2 acceptance: `curl -d "$(cat .env)"` and the supported visible-path network forms receive a denial by default, independently of the local read guard. Matched path rules land in `Prevented` with zero additional charge. Shell-derived file identities remain unresolved, and current hooks do not confirm host enforcement. An unavailable percentage must not be rendered as 0%.
 4. `$privacy` shows all three tabs with real data from a real session.
 5. Judge asks "where does my data go?" → answer is "nowhere; here is the metadata-only ledger."
 

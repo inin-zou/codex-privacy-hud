@@ -606,7 +606,7 @@ Already disclosed data cannot be recalled from this session.
 
 UserPromptSubmit credential confirmation is a separate shipped path in 0.9.1: a supported credential format can hold the prompt, and a later eligible resubmission allows it. It does not issue a tool-consent token, rewrite a prompt, or establish model-context admission. See docs/known-limits.md, limit 22.
 
-## 8.1 Sensitive-path network denial (0.9.1)
+## 8.1 Sensitive-path network denial (0.9.2)
 
 Before existing egress policy selection, the engine applies a lexical guard to shell PreToolUse observations classified as external network calls. The guard reuses `NET_BINARIES`, `PATTERNS` and `is_sensitive_path`; it does not open files, construct a shell AST or trace payload data flow. Punctuation-aware tokenization recognizes network programs in pipelines, including pipelines without surrounding spaces.
 

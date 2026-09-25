@@ -15,12 +15,12 @@ def test_prompt_hold_release_and_schema():
     plugin = json.loads((ROOT / ".codex-plugin/plugin.json").read_text())
     market = json.loads((ROOT / ".agents/plugins/marketplace.json").read_text())
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())
-    assert plugin["version"] == "0.9.1"
+    assert plugin["version"] == "0.9.2"
     assert [
         p["version"] for p in market["plugins"] if p["name"] == plugin["name"]
-    ] == ["0.9.1"]
-    assert project["project"]["version"] == "0.9.1"
-    assert runtime_contract.RELEASE == "0.9.1"
+    ] == ["0.9.2"]
+    assert project["project"]["version"] == "0.9.2"
+    assert runtime_contract.RELEASE == "0.9.2"
     assert ledger_schema.ACTIVATED_VERSION == 5402
     assert load_matrix().classify("UserPromptSubmit", "blocked") == "prevented"
     assert load_matrix().classify("UserPromptSubmit", "ingress") == "exposed"

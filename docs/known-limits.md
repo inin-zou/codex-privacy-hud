@@ -38,7 +38,7 @@ UserPromptSubmit credential holds now have a separate resubmission confirmation 
 
 ## 6. A command that reads a file itself is not inspected.
 
-The engine does not inspect file contents referenced by a command. In 0.9.1, a default-on lexical network guard denies an observed shell command when a recognized network-program token and a known-sensitive-path fragment occur together. It reuses the existing path rules and template suffix exemptions. It does not open files or rewrite uploads.
+The engine does not inspect file contents referenced by a command. In 0.9.2, a default-on lexical network guard denies an observed shell command when a recognized network-program token and a known-sensitive-path fragment occur together. It reuses the existing path rules and template suffix exemptions. It does not open files or rewrite uploads.
 
 This covers visible sensitive paths in curl command substitutions, backticks, process substitutions, `@file` arguments, `--data-urlencode name@file`, form uploads, `-T`/`--upload-file`, stdin redirection and pipelines. It also covers visible sensitive paths accompanying the other recognized network programs, including wget, scp and rsync.
 

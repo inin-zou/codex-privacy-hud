@@ -17,7 +17,7 @@ Generation 5402 requires the activated-accounting implementation introduced in P
 Runtime mismatches produce an unverified warning on ingress and a denial for outbound calls the hook cannot verify. These are plugin decisions, not confirmation of host enforcement. Monitoring gaps and lost in-memory detection state cannot be reconstructed. Open version-2 sessions whose accounting keys were lost remain unavailable for the rest of those sessions.
 
 ```bash
-PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.9.1/plugin'
+PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.9.2/plugin'
 PRIVACY_HUD_DATA='/absolute/path/to/plugin/data'
 
 python3 "$PRIVACY_HUD_BUNDLE/scripts/runtime.py" \

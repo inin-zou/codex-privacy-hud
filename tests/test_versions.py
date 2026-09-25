@@ -57,14 +57,14 @@ def test_version_is_plain_semver():
     assert re.fullmatch(r"\d+\.\d+\.\d+", _plugin_version())
 
 
-def test_network_file_send_release_is_0_9_1():
+def test_network_file_send_release_is_0_9_2():
     from privacy_hud import runtime_contract
 
-    assert _plugin_version() == "0.9.1"
-    assert _marketplace_version() == "0.9.1"
-    assert _pyproject_version() == "0.9.1"
-    assert runtime_contract.RELEASE == "0.9.1"
+    assert _plugin_version() == "0.9.2"
+    assert _marketplace_version() == "0.9.2"
+    assert _pyproject_version() == "0.9.2"
+    assert runtime_contract.RELEASE == "0.9.2"
     manifest = json.loads(
         (REPO / runtime_contract.MANIFEST_NAME).read_text(encoding="utf-8")
     )
-    assert manifest["release"] == "0.9.1"
+    assert manifest["release"] == "0.9.2"

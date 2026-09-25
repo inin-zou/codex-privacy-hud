@@ -26,7 +26,7 @@ Codex Privacy HUD 是一个本地优先的 Codex 插件。它把收到的 hook �
 
 0.9.0 为收到真正 SessionStart 的新会话启用基于证据的记账，并继续使用 0.8.0 引入的运行时选择机制和隔离后的账本。已有会话和开始后才接入的会话仍采用旧版记账；历史记录不会被回填或重新计分。
 
-0.9.1 新增默认开启的网络命令词法防护。已识别的网络命令如果包含已知敏感路径引用，会收到拒绝决定，不受本地读取防护开关影响。插件不会打开或改写文件内容。从 shell 命令推断的文件身份以及宿主是否执行拒绝仍保持未确定状态；详见已知限制第 6 条。
+0.9.2 新增默认开启的网络命令词法防护。已识别的网络命令如果包含已知敏感路径引用，会收到拒绝决定，不受本地读取防护开关影响。插件不会打开或改写文件内容。从 shell 命令推断的文件身份以及宿主是否执行拒绝仍保持未确定状态；详见已知限制第 6 条。
 
 ```text
 Token HUD:    How much context has been consumed?
@@ -76,7 +76,7 @@ Privacy HUD 从所选插件包加载 Python 代码，已记录的 Python 环境�
 运行时不匹配时，入站事件继续执行并显示未经验证的提示；对于 hook 无法验证的出站调用，插件会返回拒绝决定。这些决定不能证明宿主实际执行了干预。监测空档和丢失的内存检测状态无法恢复。尚未结束的新版会话如果丢失记账密钥，其记账会在该会话余下时间保持不可用。
 
 ```bash
-PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.9.1/plugin'
+PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.9.2/plugin'
 PRIVACY_HUD_DATA='/absolute/path/to/plugin/data'
 
 python3 "$PRIVACY_HUD_BUNDLE/scripts/runtime.py" \
@@ -334,7 +334,7 @@ flowchart TD
 13. **任何策略规则都无法在写入它的会话中移除。** 早在来源规则出现之前，脱敏规则就已如此。只有新建 Codex 对话才能从没有这些规则的状态开始。（[详情](docs/known-limits.md#13-no-policy-rule-can-be-removed-within-the-session-that-wrote-it)）
 14. **可选的本地读取防护只能识别部分 shell 读取。** 来源提取的限制仍然存在；独立且默认开启的网络防护见第 6 条。（[详情](docs/known-limits.md#14-only-a-shell-command-whose-read-the-extractor-recognises-is-stopped)）
 15. **模板后缀只豁免基于路径的拒绝。** 其他发现仍可能触发拒绝，包括命令参数中直接出现的凭据。插件不会检查所引用文件的内容。（[详情](docs/known-limits.md#15-a-template-file-is-never-blocked)）
-16. **可选的读取防护默认关闭。** 此设置只控制能够识别的 shell 读取，不控制提示词中的凭据暂缓。（[详情](docs/known-limits.md#16-nothing-is-blocked-until-you-turn-it-on)）
+16. **可选的读取防护默认关闭。** 此设置控制能够识别的 shell 读取。提示词中的凭据暂缓、默认开启的网络防护，以及现有的基于凭据的出站策略，均独立于此设置运行。返回的暂缓或拒绝决定不能证明宿主实际执行了干预。（[详情](docs/known-limits.md#16-nothing-is-blocked-until-you-turn-it-on)）
 17. 旧版记录仍可能合并不同结果。新版记账会追加独立的结果证据，并按操作统计发出的拒绝。历史记录不会重建，发出拒绝也不能证明宿主执行了拒绝。（[详情](docs/known-limits.md#17-a-blocked-read-can-leave-a-record-that-says-the-opposite-in-one-sequence)）
 18. 旧版记录仍可能合并匹配同一模式的文件。新版记账不再按模式合并，并按操作统计发出的拒绝，但所有从 shell 命令推断的文件身份均保持未解析，包括普通的 `cat .env` 读取。不同的不透明主体 ID 不能证明是不同文件，审计记录也不显示被拒绝读取的文件名。确认读取已停止需要执行证据。#44 仍保持开放，后续需要实现防护目标的身份识别和符合 I1 的审计展示；0.10.0 只是建议目标，不是发布承诺。（[详情](docs/known-limits.md#18-a-blocked-reads-row-does-not-name-the-file)）
 19. **子智能体继承了什么，没有记录。** `SubagentStart` 的观测事件不携带文本，因此不会运行任何检测器，也不会产生账本记录。“子智能体是否继承了 `.env`？”这个问题在账本中没有答案。（[详情](docs/known-limits.md#19-what-a-subagent-inherited-is-not-recorded)）
@@ -365,10 +365,10 @@ flowchart TD
 
 ## 卸载
 
-运行已安装的 0.9.1 插件包中的脚本。将下面的占位路径替换为该插件包的绝对目录；该目录必须同时包含 `install.sh` 和 `scripts/runtime.py`。
+运行已安装的 0.9.2 插件包中的脚本。将下面的占位路径替换为该插件包的绝对目录；该目录必须同时包含 `install.sh` 和 `scripts/runtime.py`。
 
 ```bash
-PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.9.1/plugin'
+PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.9.2/plugin'
 sh "$PRIVACY_HUD_BUNDLE/install.sh" --uninstall
 ```
 

@@ -26,7 +26,7 @@ Detection runs locally; the plugin sends no prompt, file, or secret to a remote 
 
 Version 0.9.0 activates evidence-based accounting for new sessions observed from a genuine SessionStart, using the selected runtime and fenced ledger introduced in 0.8.0. Existing and late-attached sessions retain legacy accounting; historical records are not backfilled or rescored.
 
-Version 0.9.1 adds a default-on lexical network guard. Recognized network commands containing known-sensitive-path references receive a denial independently of the local read guard. No file contents are opened or rewritten. Shell-derived file identities and host enforcement remain unresolved; see known limit 6.
+Version 0.9.2 adds a default-on lexical network guard. Recognized network commands containing known-sensitive-path references receive a denial independently of the local read guard. No file contents are opened or rewritten. Shell-derived file identities and host enforcement remain unresolved; see known limit 6.
 
 ```text
 Token HUD:    How much context has been consumed?
@@ -77,7 +77,7 @@ Generation 5402 requires the activated-accounting implementation introduced in P
 Runtime mismatches produce an unverified warning on ingress and a denial for outbound calls the hook cannot verify. These are plugin decisions, not confirmation of host enforcement. Monitoring gaps and lost in-memory detection state cannot be reconstructed. Open version-2 sessions whose accounting keys were lost remain unavailable for the rest of those sessions.
 
 ```bash
-PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.9.1/plugin'
+PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.9.2/plugin'
 PRIVACY_HUD_DATA='/absolute/path/to/plugin/data'
 
 python3 "$PRIVACY_HUD_BUNDLE/scripts/runtime.py" \
@@ -378,7 +378,7 @@ Stated up front, because a privacy tool that overclaims is worse than none:
 13. **No policy rule can be removed within the session that wrote it.** True of the mask action since long before source rules existed. A new Codex conversation is the only clean slate. ([details](docs/known-limits.md#13-no-policy-rule-can-be-removed-within-the-session-that-wrote-it))
 14. **The optional local read guard recognizes only some shell reads.** Its origin-extraction limits remain; the independent default-on network guard is described in limit 6. ([details](docs/known-limits.md#14-only-a-shell-command-whose-read-the-extractor-recognises-is-stopped))
 15. **Template suffixes exempt path-based denial.** Other findings, including literal credentials in command arguments, can still cause denial. Referenced file contents are not inspected. ([details](docs/known-limits.md#15-a-template-file-is-never-blocked))
-16. **The optional read guard is off by default.** This setting controls recognized shell reads, not credential prompt holds. ([details](docs/known-limits.md#16-nothing-is-blocked-until-you-turn-it-on))
+16. **The optional read guard is off by default.** This setting controls recognized shell reads. Credential prompt holds, the default-on network guard, and existing credential-based egress policy operate independently of it. Returned holds and denials do not confirm host enforcement. ([details](docs/known-limits.md#16-nothing-is-blocked-until-you-turn-it-on))
 17. Legacy rows can still collapse different outcomes. New accounting appends independent outcome evidence and counts denials issued by action. Historical rows are not reconstructed, and issued denials do not establish host enforcement. ([details](docs/known-limits.md#17-a-blocked-read-can-leave-a-record-that-says-the-opposite-in-one-sequence))
 18. Legacy rows can still merge files matching one pattern. Version-2 accounting removes pattern-based merging and counts denials issued by action, but all shell-derived file identities remain unresolved, including ordinary `cat .env` reads. Separate opaque subject IDs do not establish distinct files, and the audit does not name the denied file. Confirmed stopped reads require enforcement evidence. #44 remains open for guard-target identity and I1-safe display; 0.10.0 is a proposed target, not a commitment. ([details](docs/known-limits.md#18-a-blocked-reads-row-does-not-name-the-file))
 19. **What a subagent inherited is not recorded.** The `SubagentStart` observation carries no text, so no detector runs on it and no row results. "Did the subagent inherit the `.env`?" has no answer in the ledger. ([details](docs/known-limits.md#19-what-a-subagent-inherited-is-not-recorded))
@@ -430,12 +430,12 @@ Stated up front, because a privacy tool that overclaims is worse than none:
 
 ## Uninstall
 
-Run the script from the exact installed 0.9.1 plugin bundle. Replace the
+Run the script from the exact installed 0.9.2 plugin bundle. Replace the
 placeholder below with that bundle's absolute directory, containing both
 `install.sh` and `scripts/runtime.py`.
 
 ```bash
-PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.9.1/plugin'
+PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.9.2/plugin'
 sh "$PRIVACY_HUD_BUNDLE/install.sh" --uninstall
 ```
 
