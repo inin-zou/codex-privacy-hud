@@ -319,6 +319,7 @@ def test_receipt_retains_unresolved_state_after_end(led):
 
 def test_accounting_copy_is_the_static_catalog():
     copy = render.accounting_copy()
+    assert copy["detail_guard_target"] == "Guard target"
     assert isinstance(copy, dict) and all(
         isinstance(v, str) for v in copy.values())
     values = set(copy.values())

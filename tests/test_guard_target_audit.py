@@ -134,6 +134,53 @@ def browser_projection(tmp_path, base, index):
     return output["elements"]
 
 
+@pytest.mark.parametrize("surface", ["terminal", "browser"])
+def test_guard_target_detail_label_uses_shared_copy(
+    guarded, tmp_path, monkeypatch, surface,
+):
+    deny(guarded, "/synthetic-private-team/secret-alpha.pem", "label-action")
+    row = public_rows(guarded)[0]
+    assert row.guard_target is not None
+
+    label = "Synthetic target label"
+    original_copy = render.accounting_copy
+
+    def shared_copy():
+        return {**original_copy(), "detail_guard_target": label}
+
+    monkeypatch.setattr(render, "accounting_copy", shared_copy)
+    # The server imports this function by alias, so patch that binding too.
+    monkeypatch.setattr(
+        local_ui_server, "render_accounting_copy", shared_copy,
+    )
+
+    if surface == "terminal":
+        text = render.detail(row)
+        assert any(
+            line.startswith(label + " ")
+            and line.endswith(row.guard_target.summary)
+            for line in text.splitlines()
+        )
+        return
+
+    ui = local_ui_server.serve("s1", print_url=False)
+    host, port = ui.socket.getsockname()[:2]
+    base = f"http://{host}:{port}"
+    try:
+        status, payload = _fetch(base, "/api/copy")
+        assert status == 200
+        assert payload["accounting"]["detail_guard_target"] == label
+
+        elements = browser_projection(tmp_path, base, 0)
+        html = elements["detailFields"]["html"]
+        assert f'<span class="field-label">{label}</span>' in html
+        assert row.guard_target.summary in html
+        assert '<span class="field-label">Guard target</span>' not in html
+    finally:
+        ui.shutdown()
+        ui.server_close()
+
+
 def test_hook_to_every_projection(guarded, tmp_path, monkeypatch):
     state = guarded
     first_path = "/synthetic-private-team/private-person/secret-alpha.pem"
