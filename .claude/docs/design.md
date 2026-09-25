@@ -20,8 +20,8 @@ A privacy tool that interrupts constantly gets disabled within a day. Level 1 is
 **P2 — Honest accounting beats alarming.**
 Never show a number that conflates "we detected something" with "something left the machine." A scanner that screams about every email in every file is noise. The product's credibility rests on the `detected` / `exposed` / `prevented` distinction being visible everywhere.
 
-**P3 — Show flows, not findings.** *(Intent. The `flows` table is created and nothing writes it, so what ships renders one row per crossing — `docs/known-limits.md` #20 and issue #47 item 11.)*
-`support.log → main agent → GitHub MCP` answers the user's actual question. "Found 12 emails" does not.
+**P3 — Show recorded evidence and its limits.**
+The audit presents finding-event rows and their recorded source, intended destination, boundary and outcome evidence. Matching a subject across observations does not establish that a value travelled between them. Aggregated causal multi-hop chains are not a requirement of the current implementation. No flow writer or cross-observation history view is shipped.
 
 **P4 — Never imply recall.**
 Disclosed data is gone. Every affordance that looks like undo must be labeled as forward-looking policy. This is a copy rule with teeth — see §9.
@@ -43,7 +43,7 @@ Level 1  AMBIENT          one line, always visible, zero interaction
 Level 2  SESSION AUDIT    summary tiles + tabbed event table
    │      "what crossed, from where, to where?"
    ▼  click a row
-Level 3  EXPOSURE DETAIL  one flow, its evidence, its remedies
+Level 3  EXPOSURE DETAIL  one event, its evidence, its policy options
           "what exactly was this, and what can I do now?"
 ```
 
@@ -241,12 +241,9 @@ Already disclosed data cannot be recalled from this session.
 
 **Fields.** Stored type and repetition count, source/destination association, timestamps when available, `Legacy intervention`, masked exemplar, and `Legacy contribution`. The accounting note accompanies the detail. Terminal text does not save policy.
 
-**The flow line is the hero.** For multi-hop flows it renders the full chain with each hop's boundary — *designed, never built; no multi-hop chain is assembled today, and a `×N` count is N hits on one dedupe key*:
+**Recorded association, not a reconstructed chain.** Level 3 describes one selected event. Legacy detail shows its stored source-to-destination association. Version-2 detail shows its subject, intended recipient, source label, boundary and observation evidence. Neither view assembles multi-hop chains. The earlier boundary-labelled chain illustration is withdrawn from the current requirements.
 
-```text
-support.log → main agent → GitHub MCP
-   B0            B1            B3
-```
+A legacy `×N` is the stored repetition count on one deduplication key. Version-2 `occurrences` counts matches within one observation. Neither count measures distinct values, recipients or hops.
 
 **Browser actions.** The local browser POSTs rules to `/api/policy`; `privacy.update_policy` is a separate MCP writer. The terminal detail view has no policy buttons.
 - `Save mask rule for detected <type>` — the browser POSTs a `mask` rule to `/api/policy`. The rule selects a data type, not a source. The former label `Protect future occurrences` claimed an outcome that saving a rule cannot guarantee. Matching requires detection; types other than `path` and `credential` require an accepted deep-scan result. Host application is not confirmed.
