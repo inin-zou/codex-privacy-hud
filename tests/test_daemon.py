@@ -738,9 +738,12 @@ def slow_scan_daemon(tmp_path):
     deadline = time.monotonic() + 2.0
     while not sock_path.exists() and time.monotonic() < deadline:
         time.sleep(0.01)
-    yield daemon, sock_path, slow
-    daemon.stop()
-    thread.join(timeout=5.0)
+    try:
+        yield daemon, sock_path, slow
+    finally:
+        daemon.stop()
+        thread.join(timeout=5.0)
+        assert not thread.is_alive(), "slow-scan daemon did not stop"
 
 
 def test_a_slow_scan_does_not_block_another_sessions_ledger_work(slow_scan_daemon):
@@ -2275,3 +2278,4 @@ def test_slow_scan_fixture_does_not_construct_real_model(
         assert daemon.state.detectors[-1] is slow
     finally:
         setup.close()
+    assert daemon._closed, "closing the fixture must shut down the daemon"
