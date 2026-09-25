@@ -604,6 +604,24 @@ Already disclosed data cannot be recalled from this session.
 
 ---
 
+UserPromptSubmit credential confirmation is a separate shipped path in 0.9.1: a supported credential format can hold the prompt, and a later eligible resubmission allows it. It does not issue a tool-consent token, rewrite a prompt, or establish model-context admission. See docs/known-limits.md, limit 22.
+
+## 8.1 Sensitive-path network denial (0.9.2)
+
+Before existing egress policy selection, the engine applies a lexical guard to shell PreToolUse observations classified as external network calls. The guard reuses `NET_BINARIES`, `PATTERNS` and `is_sensitive_path`; it does not open files, construct a shell AST or trace payload data flow. Punctuation-aware tokenization recognizes network programs in pipelines, including pipelines without surrounding spaces.
+
+A recognized network-program token together with a sensitive-path fragment causes denial. Tokenization failure with a recognizable network-program token also causes denial. The guard is independent of the optional local read setting, and mask rules and internal consent tokens cannot bypass it. Ordinary non-sensitive uploads remain eligible for existing policy checks. The template suffix exemptions apply only to path-based denial.
+
+This deliberately conservative co-occurrence check can deny a sensitive-path reference in a header, literal argument, URL or unrelated command segment. Variables, aliases, configuration files, generated paths, wrapper bodies and execution effects are not resolved. A localhost-looking argument does not exempt a recognized network program. See known limit 6 for the supported forms and remaining gaps.
+
+The scan result carries only matched path-rule indexes, or an empty tuple for a parse-failure denial without a recovered sensitive path. It never carries a new persisted path or file identity. Legacy accounting writes zero-charge prevented rule markers, subject to legacy deduplication. Version 2 writes one unresolved file-reference subject per matched rule and observation, with source `tool input`, an allowlisted rule ID, no exemplar, no suffix and no identity hash. These groups do not identify or count files. Other detected data types retain their existing accounting.
+
+A parse-failure denial without a recovered path or detector finding has no fabricated finding event. Version 2 still records the denial observation. Issued denial evidence is not confirmed enforcement; no crossing receipt or resolution scope is invented, no disclosure is charged, and the percentage can remain unavailable.
+
+No file-upload rewrite is added. The existing statement in §8 that no `privacy-minimize` executable is shipped remains applicable.
+
+---
+
 ## 9. MCP server and UI delivery
 
 Local stdio MCP server, declared in `.codex-plugin/plugin.json` as `mcpServers`
@@ -677,6 +695,8 @@ The MCP tools return structured JSON regardless, so when Codex renders MCP UI th
 **Cheap scanning and classification.** `PathDetector` and `SecretDetector` scan the full observation text without the deep-scan size cap. Shell destination classification is a separate heuristic over command text, not a structural parse of every tool result. An oversized applicable observation skips the entire deep scan; no prefix is scanned.
 
 **Scan-gap recording.** Each observed scan gap is recorded per observation in the append-only `scan_gaps` table and counted per session by `Ledger.coverage`. An observation with no findings can have a scan gap without producing an event row. The audit reports incomplete scanning through its scan-gap banners; the stored gap count does not identify which calls had gaps. See `design.md` §5 and `docs/known-limits.md` #21.
+
+**Credential prompt preflight (#37).** A `UserPromptSubmit` takes one extra step between resolving the engine and the deep scan. Unlocked, `Engine.scan_prompt_credentials` runs only `SecretDetector`'s hold-eligible, regex-only formats; it reads no ledger and no session state, and never consults tier 3. When it matches, `dispatch` retakes `State.lock`, re-resolves the engine and asks that session's in-memory `PromptGate` for a verdict, using the arrival time captured before any lock wait. A hold is recorded under the same lock (an issued denial for version 2, a `prevented` row with no dedupe hash for legacy) and returned at once as exactly `decision` and `reason`; the held submission is never deep-scanned, so a cold or busy model cannot delay it. If preparing or recording a decided hold raises an ordinary exception, dispatch still returns a block with the fixed held copy and a recording-failure warning; some rows may already have committed. Pending timestamps and the held delivery verdict remain in memory, so replay stays held and a fresh eligible submission can confirm. This grants no reusable authorization and fabricates no audit entry. Only a process-level BaseException restores the hold-path snapshot and propagates. An allowed prompt continues through the unlocked scan and locked `observe`. New confirmations remain provisional and cannot authorize other deliveries until `observe` succeeds; scan or observation failure discards only that delivery's reservation and replay verdict, without restoring its consumed hold window or overwriting concurrent gate changes. A concurrent delivery may therefore be held while confirmation is still being recorded. SessionEnd clears reservations too, and a late completion cannot revive the cleared gate or emit a confirmation notice. A successfully recorded confirmation on the original gate gains a `systemMessage`. None of this changes the client: when no usable daemon reply arrives, ingress still fails open. See `docs/known-limits.md` #22.
 
 ---
 

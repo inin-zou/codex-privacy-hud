@@ -55,3 +55,16 @@ def test_version_is_plain_semver():
     compares it as a string; a suffix like `-dev` or a leading `v` would
     make that comparison miss a copy that is really the same release."""
     assert re.fullmatch(r"\d+\.\d+\.\d+", _plugin_version())
+
+
+def test_declarations_agree_on_the_current_release():
+    from privacy_hud import runtime_contract
+
+    release = runtime_contract.RELEASE
+    assert _plugin_version() == release
+    assert _marketplace_version() == release
+    assert _pyproject_version() == release
+    manifest = json.loads(
+        (REPO / runtime_contract.MANIFEST_NAME).read_text(encoding="utf-8")
+    )
+    assert manifest["release"] == release

@@ -227,7 +227,7 @@ def test_phase4_copy_catalog_matches_verbatim():
 def test_phase4_limits_preserve_anchors_and_legacy_caveats():
     limits = _read("docs/known-limits.md")
     headings = re.findall(r"^## (\d+)\. (.*)$", limits, re.M)
-    assert [n for n, _ in headings] == [str(i) for i in range(1, 22)]
+    assert [n for n, _ in headings] == [str(i) for i in range(1, 23)]
     assert dict(headings)["17"] == ("A blocked read can leave a record that "
                                     "says the opposite, in one sequence.")
     assert dict(headings)["18"] == "A blocked read's row does not name the file."
@@ -282,7 +282,7 @@ def test_phase4_does_not_claim_unbuilt_consent_or_export():
     readme = _flowed(_read("README.md"))
     for sentence in (
             "No shipped surface offers `Allow once`, `Minimize & retry`, a "
-            "minimization preview or a consent-driven retry.",
+            "minimization preview or a consent-token-driven tool retry.",
             "it does not save a Markdown receipt file",
             "It is not an event or flow deep link."):
         assert _flowed(sentence) in readme, sentence
@@ -376,6 +376,7 @@ def test_phase4_changelog_preserves_prior_releases():
     rest = text.split(historical, 1)[1]
     assert rest.startswith("## 0.8.3\n")
     assert hashlib.sha256(rest.encode()).hexdigest() == PRIOR_CHANGELOG_SHA256
-    section = CHANGELOG_090
-    assert not re.search(r"\b(close|closes|closed|fix|fixes|fixed|resolve|"
-                         r"resolves|resolved) #\d+", section, re.I)
+    assert not re.search(
+        r"\b(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved) #\d+",
+        CHANGELOG_090, re.I,
+    )

@@ -9,6 +9,28 @@
 
 Refs #74.
 
+## 0.9.2
+
+- Add a default-on lexical denial for recognized shell network commands containing known-sensitive-path references, including curl substitutions and upload forms, pipelines, wget, scp and rsync.
+- Keep this guard independent of the optional local read setting; mask rules and internal consent tokens cannot bypass it.
+- Reuse the existing sensitive-path rules and template suffix exemptions. Ordinary non-sensitive uploads remain eligible for existing policy checks.
+- Deny recognizable network commands when tokenization fails. Document conservative co-occurrence false positives and unresolved expansion, configuration and wrapper-script cases.
+- Keep shell-derived file identities unresolved. Record zero-charge prevented rule evidence without persisted paths, filenames, suffixes or file identity hashes; issued denials do not establish host enforcement.
+- No file contents are opened and no upload rewrite or helper executable is added. Preserve schema generations, protocol versions, snapshot version 2 and historical accounting.
+
+Refs #47.
+
+## 0.9.1
+
+- Request UserPromptSubmit holds for supported credential formats before deep scanning.
+- Allow confirmation by resubmitting the same case-sensitive credential after 2 seconds and within 5 minutes; keep authorization in session-scoped daemon memory only.
+- Exclude entropy findings, private-key headers, and tier-3 NER findings from prompt holds. Images and attachments are not scanned.
+- Record prompt denials as zero-cost prevention with issued-denial evidence, without claiming host enforcement or model-context admission.
+- Keep ingress fail-open behavior, including the existing daemon cold-start window.
+- Preserve Phase 4 accounting activation, legacy sessions, schema generation 5402, runtime protocol 2, and snapshot version 2.
+
+Refs #37.
+
 ## 0.9.0
 
 - Activate evidence-based accounting only for new sessions observed from a genuine SessionStart. Existing sessions and late attachments retain legacy accounting.

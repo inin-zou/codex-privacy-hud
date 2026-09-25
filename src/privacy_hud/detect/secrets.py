@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
+from dataclasses import dataclass
 
 from .base import Cost, DetectorProfile, Finding
 
@@ -22,6 +23,23 @@ KEY_PATTERNS = [
         r"|-----BEGIN PGP PRIVATE KEY BLOCK-----"
     ),
 ]
+
+# #37: one fixed, reviewed label per KEY_PATTERNS entry, in the same order,
+# and whether a match may hold a user prompt. A label names the FORMAT that
+# matched and never any part of the value. The private-key header is not
+# hold-eligible: the header recognizes a shape shared by every key of its
+# kind, not the key itself, so authorizing it would authorize unrelated keys.
+KEY_PATTERN_LABELS: tuple[tuple[str, bool], ...] = (
+    ("API key format", True),
+    ("AWS access key ID format", True),
+    ("GitHub token format", True),
+    ("JSON Web Token format", True),
+    ("Database connection string with password", True),
+    ("Private key header", False),
+)
+
+ASSIGNMENT_LABEL = "High-entropy secret assignment"
+GENERIC_QUOTED_LABEL = "High-entropy quoted string"
 
 # Keyword-gated: a recognizable secret-ish name immediately left of the
 # value. Quotes optional — this also covers unquoted shell/env-style
@@ -77,8 +95,22 @@ def _is_hex_digest(candidate: str) -> bool:
     return len(candidate) in HEX_DIGEST_LENGTHS and bool(_HEX_ONLY.match(candidate))
 
 
-def _overlaps_existing(out: list[Finding], start: int, end: int) -> bool:
-    return any(f.start <= start < f.end for f in out)
+def _overlaps_existing(out: list[CredentialMatch], start: int,
+                       end: int) -> bool:
+    return any(m.finding.start <= start < m.finding.end for m in out)
+
+
+@dataclass(frozen=True)
+class CredentialMatch:
+    """One tier-1 finding with the fixed label of the pattern kind that
+    produced it (#37). `finding` is exactly what `scan()` returns; `kind`
+    is a reviewed label, never derived from the value; `hold_eligible` says
+    whether this match may hold a user prompt (well-formed formats only,
+    never the entropy backstop or a bare key header)."""
+
+    finding: Finding
+    kind: str
+    hold_eligible: bool
 
 
 class SecretDetector:
@@ -88,10 +120,18 @@ class SecretDetector:
     profile = DetectorProfile(tier=1, cost=Cost.CHEAP)
 
     def scan(self, text: str, ctx: dict) -> list[Finding]:
-        out: list[Finding] = []
-        for pat in KEY_PATTERNS:
+        return [match.finding for match in self.scan_labeled(text, ctx)]
+
+    def scan_labeled(self, text: str, ctx: dict) -> list[CredentialMatch]:
+        """`scan()`'s findings, in the same order, each with its pattern
+        kind's fixed label and hold eligibility (#37)."""
+        out: list[CredentialMatch] = []
+        for pat, (label, eligible) in zip(KEY_PATTERNS, KEY_PATTERN_LABELS,
+                                             strict=True):
             for m in pat.finditer(text):
-                out.append(Finding("credential", m.group(0), m.start(), m.end()))
+                out.append(CredentialMatch(
+                    Finding("credential", m.group(0), m.start(), m.end()),
+                    label, eligible))
         for pat in (ASSIGNMENT, GENERIC_QUOTED):
             for m in pat.finditer(text):
                 candidate = m.group(1)
@@ -103,5 +143,9 @@ class SecretDetector:
                     continue
                 if _overlaps_existing(out, m.start(1), m.end(1)):
                     continue
-                out.append(Finding("credential", candidate, m.start(1), m.end(1)))
+                label = (ASSIGNMENT_LABEL if pat is ASSIGNMENT
+                         else GENERIC_QUOTED_LABEL)
+                out.append(CredentialMatch(
+                    Finding("credential", candidate, m.start(1), m.end(1)),
+                    label, False))
         return out

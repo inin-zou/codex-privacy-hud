@@ -111,7 +111,7 @@ from __future__ import annotations
 import posixpath
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import get_args
 
@@ -127,13 +127,17 @@ from .accounting import (
     coalesce_value_findings,
 )
 from .accounting import Decision as AccountingDecision
+from . import codex
 from .detect.paths import PATTERNS, is_sensitive_path
+from .detect.secrets import CredentialMatch, SecretDetector
+from .detect.shell import network_file_rules
 from .hook_evidence import HookEvidence, classify_evidence
 from .identity import file_identity, safe_masked_example
 from .mask import mask, value_hash
 from .matrix.loader import HARD_BLOCKED_DATA_TYPES, UnknownKey
 from .minimize import consume_token, minimize_tool_input
 from .origin import Origin, OriginKind, origin_phrase
+from .prompt_hold import PromptGate
 
 # --- Ruling 4: cap the deep scan's input size ---------------------------
 #
@@ -474,6 +478,10 @@ class ScanResult:
     # reader that only asks "is this partial?" should not have to know the
     # taxonomy. `Ledger.record_scan_gap` is the reader that does.
     degraded_reason: str | None = None
+    # None: no network-file denial. Empty tuple: parse failure without a
+    # recovered sensitive path. Otherwise: indexes into PATTERNS only.
+    # Never carries a path, command, filename, suffix or file identity.
+    network_file_rules: tuple[int, ...] | None = None
 
 
 @dataclass
@@ -575,6 +583,14 @@ READ_BLOCK_TEMPLATE = (
     "  Run `$privacy read off` to turn off this read guard."
 )
 
+NETWORK_FILE_BLOCK_TEMPLATE = (
+    "PRIVACY HUD issued a network-call denial.\n"
+    "The command references a known-sensitive path or could not be parsed "
+    "reliably. File contents were not inspected.\n"
+    "Host enforcement is not confirmed.\n"
+    "Run $privacy to review the ledger."
+)
+
 # Shown once per session, not once per path: this is how the feature is
 # discovered, and a line on every read would be noise.
 #: Present tense, because this is emitted from `PreToolUse` and the read has
@@ -601,7 +617,8 @@ class _PermissiveSettings:
 
 class Engine:
     def __init__(self, *, ledger, matrix, salt: bytes, detectors: list,
-                 settings=None, accounting_key: bytes | None = None):
+                 settings=None, accounting_key: bytes | None = None,
+                 prompt_clock: Callable[[], float] = time.monotonic):
         self.ledger = ledger
         #: #54 Phase 4: this session's version-2 accounting key, installed
         #: by the daemon only after the session's activation committed, or
@@ -642,6 +659,11 @@ class Engine:
         #: `_origins` above, and for the same reason: it lives on the
         #: Engine because `dispatch` builds one Engine per session.
         self._read_notice_shown = False
+        #: #37: this session's credential-prompt confirmation state, in
+        #: memory only and keyed with this engine's enforcement salt. Same
+        #: per-session lifetime as `_origins`: a replacement engine starts
+        #: empty and holds again, which fails safe.
+        self.prompt_gate = PromptGate(salt=salt, clock=prompt_clock)
 
     def clear_session_identity(self) -> None:
         """Discard this engine's session identity (#54 Phase 4): the
@@ -653,6 +675,7 @@ class Engine:
         self.accounting_key = None
         self.salt = b""
         self._origins.clear()
+        self.prompt_gate.clear()
         self._identity_cleared = True
 
     # -- Ruling 2: destination normalization --------------------------
@@ -941,10 +964,81 @@ class Engine:
         # I2: UnknownKey propagates; never caught-and-defaulted.
         boundary = self.matrix.boundary_for(dest_kind)
 
+        file_rules = None
+        if (obs.hook_event == "PreToolUse"
+                and obs.direction == "egress"
+                and obs.tool_name == codex.SHELL_TOOL
+                and dest_kind == "external_net"):
+            file_rules = network_file_rules(obs.text)
+
         findings, gap = self._scan(obs, dest_kind, boundary)
-        return ScanResult(dest_kind=dest_kind, boundary=boundary,
-                          findings=tuple(findings), degraded=gap is not None,
-                          degraded_reason=gap)
+        return ScanResult(
+            dest_kind=dest_kind, boundary=boundary,
+            findings=tuple(findings), degraded=gap is not None,
+            degraded_reason=gap, network_file_rules=file_rules)
+
+    # -- #37: credential prompt holds ------------------------------------
+    def scan_prompt_credentials(self, obs: Observation
+                                ) -> tuple[CredentialMatch, ...]:
+        """The hold-eligible tier-1 credential matches in a user prompt.
+
+        Only `SecretDetector`'s well-formed formats can hold a prompt: never
+        its entropy backstop or a bare key header, and never a tier-3
+        finding, whatever data type it reports. Regex-only, so it does not
+        wait for the model. Like `scan`, it reads no ledger and no session
+        state, so it is safe outside `State.lock`."""
+        if obs.hook_event != "UserPromptSubmit":
+            return ()
+        matches: list[CredentialMatch] = []
+        for d in self.detectors:
+            if isinstance(d, SecretDetector):
+                matches.extend(
+                    m for m in d.scan_labeled(obs.text, {"source": obs.source})
+                    if m.hold_eligible)
+        return tuple(matches)
+
+    def record_prompt_hold(self, obs: Observation,
+                           matches: Sequence[CredentialMatch],
+                           reason: str) -> Decision:
+        """Record a held prompt as a prevention and return the hold.
+        Caller holds the lock.
+
+        Only the eligible credential findings are recorded: the held
+        submission is not deep-scanned, which is out of scope rather than a
+        scan gap. Version 2 records an issued denial (`DENY_ISSUED`), never
+        confirmed enforcement or crossing. Legacy writes one `prevented` row
+        per distinct credential with no dedupe hash, so it cannot absorb a
+        later permitted crossing of the same value, and no masked example."""
+        if self._identity_cleared:
+            raise RuntimeError("this engine's session identity was cleared")
+        dest_kind = self._normalize_destination(obs.destination)
+        boundary = self.matrix.boundary_for(dest_kind)
+        findings = tuple(m.finding for m in matches)
+        scan = ScanResult(dest_kind=dest_kind, boundary=boundary,
+                          findings=findings, degraded=False)
+        if obs.accounting is not None:
+            return self._observe_v2(
+                obs, scan, action="deny", blocked_origin=None,
+                read_block=None, notice=None, prompt_reason=reason)
+
+        kind = self.matrix.classify(obs.hook_event, "blocked")
+        seen: set[str] = set()
+        for f in findings:
+            if f.value in seen:
+                continue
+            seen.add(f.value)
+            self.ledger.record(
+                obs.session_id, turn_id=obs.turn_id, kind=kind,
+                data_type=f.data_type, source=obs.source,
+                destination=dest_kind, value_hash=None,
+                masked_example=None, tool_name=None, protection="blocked",
+                source_kind=None)
+        summary = self.ledger.summary(obs.session_id)
+        pct = getattr(summary, "legacy_percent", None)
+        return self._decision(obs, findings, action="deny",
+                              blocked_origin=None, read_block=None,
+                              notice=None, pct=pct, degraded=False,
+                              dest_kind=dest_kind, prompt_reason=reason)
 
     def observe(self, obs: Observation, *, scan: ScanResult | None = None) -> Decision:
         """Phase 2: rule on `obs` and record it. Caller must hold the lock.
@@ -1027,7 +1121,8 @@ class Engine:
         hard_blocked = any(f.data_type in HARD_BLOCKED_DATA_TYPES
                            for f in findings)
 
-        action = "allow"
+        network_block = scan.network_file_rules is not None
+        action = "deny" if network_block else "allow"
         blocked_origin = None
         read_block: str | None = None
         notice: str | None = None
@@ -1064,9 +1159,11 @@ class Engine:
 
         # Task 8 policy-fix: a user-written `mask` rule outranks the
         # built-in default. Egress-only (Ruling 3's own logic extends
-        # unchanged to user-written policy — an ingress observation's
-        # bytes are already in context, so no policy check applies to it
-        # either). It rewrites only when there is something matching to
+        # unchanged to user-written policy — by the time an ingress
+        # observation reaches this accounting phase its bytes are treated as
+        # already in context, so no policy check applies to it either; a
+        # user prompt's credential hold is decided earlier, in dispatch's
+        # preflight, #37). It rewrites only when there is something matching to
         # mask; otherwise this falls through, unchanged, to the
         # Matrix.default_action() logic below.
         #
@@ -1118,7 +1215,7 @@ class Engine:
         # fills with fixed labels ("tool input" on every egress call), so it
         # matched nothing or denied every outbound call. `apply_policy` no
         # longer writes one; a row an older ledger still holds decides nothing.
-        if is_egress:
+        if is_egress and not network_block:
             blocked_origin = self._blocked_origin(obs.session_id, findings)
             if blocked_origin is not None:
                 action = "deny"
@@ -1130,7 +1227,9 @@ class Engine:
         if action == "allow" and is_egress and hard_blocked:
             # Ruling 3: default_action is an egress-only policy. An ingress
             # observation never reaches this branch, no matter what it
-            # contains — the bytes are already in context.
+            # contains — in this phase its bytes are treated as already in
+            # context (a PostToolUse result, or a prompt that passed #37's
+            # hold preflight).
             policy_action = self.matrix.default_action(dest_kind)
             if policy_action == "block":
                 # Task 12: before finalizing a deny, honor a single-use
@@ -1176,7 +1275,21 @@ class Engine:
         kind = self.matrix.classify(obs.hook_event, classify_direction)
         protection = {"deny": "blocked", "rewrite": "masked"}.get(action)
 
+        # Legacy markers identify a policy rule, never a file or its bytes.
+        # The namespace prevents collision with prior detector values.
+        for index in scan.network_file_rules or ():
+            self.ledger.record(
+                obs.session_id, turn_id=obs.turn_id, kind=kind,
+                data_type="path", source="tool input",
+                destination=dest_kind,
+                value_hash=value_hash(
+                    self.salt, "network-file-rule:" + PATH_RULES[index]),
+                masked_example=None, tool_name=obs.tool_name,
+                protection=protection, source_kind=None)
+
         for f in findings:
+            if network_block and f.data_type == "path":
+                continue
             self.ledger.record(
                 obs.session_id, turn_id=obs.turn_id, kind=kind,
                 data_type=f.data_type, source=obs.source,
@@ -1190,20 +1303,35 @@ class Engine:
         # Display only; a decision never reads it.
         summary = self.ledger.summary(obs.session_id)
         pct = getattr(summary, "legacy_percent", None)
-        return self._decision(obs, findings, action=action,
-                              blocked_origin=blocked_origin,
-                              read_block=read_block, notice=notice, pct=pct,
-                              degraded=degraded, dest_kind=dest_kind)
+        return self._decision(
+            obs, findings, action=action,
+            blocked_origin=blocked_origin,
+            read_block=read_block, notice=notice, pct=pct,
+            degraded=degraded, dest_kind=dest_kind,
+            network_block=network_block)
 
     def _decision(self, obs: Observation, findings: Sequence[Finding], *,
                   action: str, blocked_origin: Origin | None,
                   read_block: str | None, notice: str | None,
                   pct: int | None, degraded: bool, dest_kind: str,
-                  updated_input: str | dict | None = None) -> Decision:
+                  network_block: bool = False,
+                  updated_input: str | dict | None = None,
+                  prompt_reason: str | None = None) -> Decision:
         """The hook decision for a ruled observation: the same templates and
         shapes for either accounting. `updated_input` is passed in when the
         caller has already constructed the rewrite (version 2 builds it
-        before recording that a rewrite was issued)."""
+        before recording that a rewrite was issued). A prompt hold (#37)
+        carries its own fixed reason and no `system_message`: a hold's
+        output must be exactly decision and reason."""
+        if action == "deny" and prompt_reason is not None:
+            return Decision(action, reason=prompt_reason, budget_percent=pct,
+                            degraded=degraded)
+        if action == "deny" and network_block:
+            return Decision(
+                action, reason=NETWORK_FILE_BLOCK_TEMPLATE,
+                system_message=NETWORK_FILE_BLOCK_TEMPLATE,
+                budget_percent=pct, degraded=degraded)
+
         if action == "deny" and read_block is not None:
             # #36: the read guard's own template -- takes `tool`/`path`, not
             # the egress templates' `label`/`destination`/`origin_phrase`.
@@ -1256,7 +1384,8 @@ class Engine:
 
     def _observe_v2(self, obs: Observation, scan: ScanResult, *, action: str,
                     blocked_origin: Origin | None, read_block: str | None,
-                    notice: str | None) -> Decision:
+                    notice: str | None,
+                    prompt_reason: str | None = None) -> Decision:
         """Record one version-2 observation and return the unchanged hook
         decision.
 
@@ -1283,8 +1412,13 @@ class Engine:
             updated_input = minimize_tool_input(
                 self.salt, obs.tool_name or "", ti, findings, text=obs.text)
 
+        # PreToolUse issues a permission decision; a prompt hold (#37) issues
+        # a denial. Every other hook's decision is "none".
         decision: AccountingDecision = (
-            action if obs.hook_event == "PreToolUse" else "none")  # type: ignore[assignment]
+            action
+            if (obs.hook_event == "PreToolUse"
+                or (obs.hook_event == "UserPromptSubmit" and action == "deny"))
+            else "none")  # type: ignore[assignment]
         issued = _ISSUED.get(decision, Evidence(0))
 
         session = self.ledger.conn.execute(
@@ -1308,8 +1442,11 @@ class Engine:
         # A guarded read's path findings are matches against the command's
         # own text -- the detector pattern, not a file. The file is the
         # guarded subject below.
-        values = [f for f in findings
-                  if not (guarded and f.data_type == "path")]
+        network_block = scan.network_file_rules is not None
+        values = [
+            f for f in findings
+            if not ((guarded or network_block) and f.data_type == "path")
+        ]
         value_findings = (coalesce_value_findings(profile, key, values)
                           if key is not None
                           else _unresolved_value_findings(profile, values))
@@ -1331,6 +1468,15 @@ class Engine:
                 rule_id=_path_rule_id(obs.origin.value), occurrences=1,
                 source_label="local file", masked_example=None))
 
+        # One unresolved reference group per matched rule, not per file.
+        # Shell text supplies neither file identity nor execution evidence.
+        for index in scan.network_file_rules or ():
+            drafts.append(_Draft(
+                subject=SubjectInput(
+                    subject_kind="file", identity_hash=None),
+                recipient=recipient, evidence=issued, data_type="path",
+                rule_id=PATH_RULES[index], occurrences=1,
+                source_label="tool input", masked_example=None))
         for receipt in acc.receipt_events:
             if key is None and (receipt.subject.identity_hash is not None
                                 or receipt.recipient.identity_hash
@@ -1385,12 +1531,13 @@ class Engine:
         # Display only; a decision never reads it.
         summary = self.ledger.summary(obs.session_id)
         pct = getattr(summary, "percent", None)
-        return self._decision(obs, findings, action=action,
-                              blocked_origin=blocked_origin,
-                              read_block=read_block, notice=notice, pct=pct,
-                              degraded=scan.degraded,
-                              dest_kind=scan.dest_kind,
-                              updated_input=updated_input)
+        return self._decision(
+            obs, findings, action=action,
+            blocked_origin=blocked_origin,
+            read_block=read_block, notice=notice, pct=pct,
+            degraded=scan.degraded, dest_kind=scan.dest_kind,
+            network_block=network_block, updated_input=updated_input,
+            prompt_reason=prompt_reason)
 
 
 # --------------------------------------------------------------------- #
@@ -1398,7 +1545,8 @@ class Engine:
 # --------------------------------------------------------------------- #
 
 #: The evidence a PreToolUse decision issues. Only PreToolUse returns a
-#: permission decision; every other hook's decision is "none".
+#: permission decision, and a UserPromptSubmit hold (#37) a denial; every
+#: other hook's decision is "none".
 _ISSUED: dict[str, Evidence] = {
     "allow": Evidence.PERMISSION_ISSUED,
     "deny": Evidence.DENY_ISSUED,

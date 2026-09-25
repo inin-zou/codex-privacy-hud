@@ -88,7 +88,7 @@ A support engineer asks Codex to triage `support.log` and file a GitHub issue.
 1. Codex reads `support.log` → **12 customer emails enter model context.** The corresponding current HUD example is `Privacy legacy 28%`.
 2. Codex prepares a GitHub MCP call whose body contains those emails → **blocked**, exposure detail shown.
 3. User picks **Minimize & retry** → PII is replaced by stable pseudonyms; the call succeeds.
-4. Codex attempts `curl` of `.env` to an external endpoint → **blocked**, logged as `Prevented`.
+4. In 0.9.2, a recognized `curl` command with a visible `.env` reference receives a default-on denial. Accounting records `prevented` evidence with zero additional charge; host enforcement remains unconfirmed.
 5. `SessionEnd` emits a privacy receipt: 4 exposures, 2 destinations, 17 prevented.
 
 ---
@@ -319,6 +319,8 @@ For example, a detected email in an MCP argument can be replaced with a session-
 
 ---
 
+UserPromptSubmit credential confirmation is a separate shipped path in 0.9.1: a supported credential format can hold the prompt, and a later eligible resubmission allows it. It does not issue a tool-consent token, rewrite a prompt, or establish model-context admission. See docs/known-limits.md, limit 22.
+
 ## 8. Where the UI actually lives
 
 The native Privacy status item is supplied by a separately patched Codex build. Stock Codex does not gain a plugin-owned status item merely by installing this plugin.
@@ -341,7 +343,7 @@ The native status item displays accounting snapshots; it does not verify runtime
 ## 9. Platform limitations (state these in the demo)
 
 1. **Hosted tools bypass hooks.** WebSearch and similar hosted tools do not trigger local function-tool hook paths. Privacy HUD is a practical guardrail, not a mathematically complete enforcement boundary.
-2. **No interactive consent surface.** The proposed consent workflow is not shipped. Internal token primitives exist, but no browser button, `$privacy` branch or exposed MCP tool issues consent tokens (§7.6).
+2. **No interactive tool-call consent surface.** The proposed consent workflow is not shipped. Internal token primitives exist, but no browser button, `$privacy` branch or exposed MCP tool issues consent tokens (§7.6).
 3. **Stock Codex has no plugin-owned Privacy status item.** The native item requires a compatible separately patched build; the companion pane is the fallback (§8).
 4. **Model-context accounting is inferential for file reads.** A tool result does not establish admission into model context. Phase 1 retains the legacy charge and labels it; evidence-based accounting is not activated.
 5. **Prompt-injection resistance is out of scope.** A hostile repo could try to talk the agent out of using the tool; the hook layer is not bypassable by the model, which is precisely why enforcement lives there.
@@ -406,7 +408,7 @@ Accounting activation is governed by the current contract at the top of this doc
 
 1. A controlled legacy fixture can move the HUD from `Privacy legacy 0%` to `Privacy legacy 28%`; the recorded association `support.log → model_context` does not prove admission into model context.
 2. GitHub MCP call carrying PII is blocked; audit UI explains why; `Minimize & retry` makes it succeed with pseudonymized values.
-3. `.env` exfil via `curl` is blocked and lands in `Prevented`, contributing **0%** to the budget.
+3. 0.9.2 acceptance: `curl -d "$(cat .env)"` and the supported visible-path network forms receive a denial by default, independently of the local read guard. Matched path rules land in `Prevented` with zero additional charge. Shell-derived file identities remain unresolved, and current hooks do not confirm host enforcement. An unavailable percentage must not be rendered as 0%.
 4. `$privacy` shows all three tabs with real data from a real session.
 5. Judge asks "where does my data go?" → answer is "nowhere; here is the metadata-only ledger."
 

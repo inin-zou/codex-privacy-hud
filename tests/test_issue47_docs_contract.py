@@ -205,26 +205,23 @@ PRD_MINIMIZATION = PRD_MINIMIZATION_HEADING + "\n\n" + (
 )
 
 PRD_LIMIT_2 = (
-    "2. **No interactive consent surface.** The proposed consent workflow "
+    "2. **No interactive tool-call consent surface.** The proposed consent workflow "
     "is not shipped. Internal token primitives exist, but no browser "
     "button, `$privacy` branch or exposed MCP tool issues consent tokens "
     "(§7.6)."
 )
 
 README_LIMIT_4 = (
-    "4. **No `ask` decision in Codex hooks, and no interactive consent "
-    "surface.** Internal token primitives exist, but no browser button, "
+    "4. **No `ask` decision in Codex hooks, and no interactive tool-call "
+    "consent surface.** Internal token primitives exist, but no browser button, "
     "`$privacy` branch or exposed MCP tool issues consent tokens or offers "
-    "a consent-driven retry. ([details](docs/known-limits.md"
+    "a consent-driven retry. Prompt resubmission is separate; see limit 22. "
+    "([details](docs/known-limits.md"
     "#4-no-ask-decision-in-codex-hooks-and-no-interactive-consent-at-all))"
 )
 
 README_ZH_LIMIT_4 = (
-    "4. **Codex hook 不支持 `ask` 决策，插件也没有交互式授权入口。** "
-    "内部已实现令牌的签发和消费逻辑，但浏览器按钮、`$privacy` 分支和已公开的 "
-    "MCP 工具都不能签发授权令牌，也不提供授权后重试的操作。"
-    "（[详情](docs/known-limits.md"
-    "#4-no-ask-decision-in-codex-hooks-and-no-interactive-consent-at-all)）"
+    '4. **Codex hook 不支持 `ask` 决策，插件也没有工具调用的交互式授权入口。** 内部已实现令牌逻辑，但浏览器按钮、`$privacy` 分支和已公开的 MCP 工具都不能签发授权令牌，也不提供基于令牌的重试。提示词重新提交确认是独立机制，见限制 22。（[详情](docs/known-limits.md#4-no-ask-decision-in-codex-hooks-and-no-interactive-consent-at-all)）'
 )
 
 README_ARCH_CONTENTS = (
@@ -758,6 +755,9 @@ DESIGN_DIRECT_ACCESS = (
     "offer the session audit and contain no event deep link."
 )
 
+#: #37: the credential prompt preflight, appended to architecture §10.
+ARCH_PROMPT_PREFLIGHT = "**Credential prompt preflight (#37).** A `UserPromptSubmit` takes one extra step between resolving the engine and the deep scan. Unlocked, `Engine.scan_prompt_credentials` runs only `SecretDetector`'s hold-eligible, regex-only formats; it reads no ledger and no session state, and never consults tier 3. When it matches, `dispatch` retakes `State.lock`, re-resolves the engine and asks that session's in-memory `PromptGate` for a verdict, using the arrival time captured before any lock wait. A hold is recorded under the same lock (an issued denial for version 2, a `prevented` row with no dedupe hash for legacy) and returned at once as exactly `decision` and `reason`; the held submission is never deep-scanned, so a cold or busy model cannot delay it. If preparing or recording a decided hold raises an ordinary exception, dispatch still returns a block with the fixed held copy and a recording-failure warning; some rows may already have committed. Pending timestamps and the held delivery verdict remain in memory, so replay stays held and a fresh eligible submission can confirm. This grants no reusable authorization and fabricates no audit entry. Only a process-level BaseException restores the hold-path snapshot and propagates. An allowed prompt continues through the unlocked scan and locked `observe`. New confirmations remain provisional and cannot authorize other deliveries until `observe` succeeds; scan or observation failure discards only that delivery's reservation and replay verdict, without restoring its consumed hold window or overwriting concurrent gate changes. A concurrent delivery may therefore be held while confirmation is still being recorded. SessionEnd clears reservations too, and a late completion cannot revive the cleared gate or emit a confirmation notice. A successfully recorded confirmation on the original gate gains a `systemMessage`. None of this changes the client: when no usable daemon reply arrives, ingress still fails open. See `docs/known-limits.md` #22."
+
 README_LEVEL_3_START = "**Level 3 — Exposure detail.**"
 README_PUBLIC = (
     "A mask rule is scoped to the session and selects a detected data type "
@@ -774,7 +774,7 @@ README_PUBLIC = (
     "event IDs. Denial messages contain no event deep link."
     "\n\n"
     "No shipped surface offers `Allow once`, `Minimize & retry`, a "
-    "minimization preview or a consent-driven retry. Internal token "
+    "minimization preview or a consent-token-driven tool retry. Internal token "
     "primitives do not make those actions available."
     "\n\n"
     "The deep detector is local `openai/privacy-filter`, not Presidio. "
@@ -804,8 +804,7 @@ README_ZH_PUBLIC = (
     "在本地浏览器中选择一行可查看该事件；"
     "终端详情命令需要分别提供会话 ID 和事件 ID。拒绝消息不包含事件详情链接。"
     "\n\n"
-    "当前没有任何已提供的入口支持 `Allow once`、`Minimize & retry`、"
-    "脱敏预览或授权后重试。内部存在令牌逻辑，并不代表用户能够执行这些操作。"
+    '没有已发布的入口提供工具调用的 `Allow once`、`Minimize & retry`、脱敏预览或基于授权令牌的重试。内部存在令牌逻辑，并不代表用户能够执行这些操作。'
     "\n\n"
     "深度检测使用本地运行的 `openai/privacy-filter`，不使用 Presidio。"
     "可以选择不安装其依赖和权重，但这样就无法检测该模型负责的数据类型。"
@@ -880,6 +879,7 @@ def test_issue47_surrounding_claims_match_the_corrected_contract():
         ARCH_CAP,
         cheap_scanning,
         gap_recording,
+        ARCH_PROMPT_PREFLIGHT,
     ])
     assert _section(ARCH, ARCH_PERFORMANCE_HEADING) == expected_performance
 

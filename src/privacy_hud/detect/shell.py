@@ -10,6 +10,8 @@ import re
 import shlex
 import unicodedata
 
+from .paths import PATTERNS, is_sensitive_path
+
 NET_BINARIES = {"curl", "wget", "scp", "rsync", "sftp", "ssh", "nc", "netcat",
                 "telnet", "ftp", "http", "httpie"}
 URL = re.compile(r"\b[a-z][a-z0-9+.-]*://([^\s/\"']+)")
@@ -92,7 +94,7 @@ def destination_hosts(command: str) -> list[str]:
 
 def extract_destinations(command: str) -> list[str]:
     try:
-        toks = shlex.split(command)
+        toks = _policy_words(command)
     except ValueError:
         # Unbalanced quotes etc. — we cannot prove this command is local.
         # Fail closed rather than falling back to a lenient tokenization
@@ -287,3 +289,56 @@ def intended_network_recipient(command: str) -> str | None:
     if len(rest) != 1 or rest[0].startswith("-"):
         return None
     return _canonical_endpoint(rest[0])
+
+
+# Policy recognition only. This is not a shell AST or identity evidence.
+_PATH_FRAGMENTS = re.compile(r"""[\s"'`$(){}<>|;&=@,:\\]+""")
+
+
+def _policy_words(command: str) -> list[str]:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    return list(lexer)
+
+
+def network_file_rules(command: str) -> tuple[int, ...] | None:
+    """Rules supporting a lexical network denial, or None.
+
+    An empty tuple means a recognized network command could not be
+    tokenized. Nonempty tuples contain indexes into paths.PATTERNS,
+    deduplicated within this observation. No path survives this return.
+
+    This deliberately checks co-occurrence, not payload data flow.
+    Quotes do not establish that a filename-looking argument is harmless.
+    Missing matches do not establish that a command sends no sensitive
+    data: expansion, configuration and execution remain unobserved.
+    """
+    parse_failed = False
+    try:
+        words = _policy_words(command)
+    except ValueError:
+        # Recover only enough lexical evidence to decide whether this is
+        # a recognized network command. Never evaluate or execute text.
+        words = _PATH_FRAGMENTS.split(command)
+        parse_failed = True
+
+    if not any(word.rsplit("/", 1)[-1] in NET_BINARIES for word in words):
+        return None
+
+    matched: set[int] = set()
+    for word in words:
+        # curl's attached upload operand: -T.env. Other requested attached
+        # forms expose their operand through @ or = below.
+        candidate = word[2:] if word.startswith("-T") else word
+        for fragment in _PATH_FRAGMENTS.split(candidate):
+            if not is_sensitive_path(fragment):
+                continue
+            matched.update(
+                index for index, pattern in enumerate(PATTERNS)
+                if pattern.search(fragment)
+            )
+
+    if matched or parse_failed:
+        return tuple(sorted(matched))
+    return None
