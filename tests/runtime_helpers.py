@@ -227,6 +227,30 @@ def writer_state(data_dir, *, selected=None, keep: bool = False):
         writer_lease=writer_lease(data_dir, selected=selected, keep=keep))
 
 
+def writer_state_with_detectors(
+        data_dir, *, detectors: list, selected=None, keep: bool = False):
+    """Build a real leased state with an explicitly supplied test stack.
+
+    Only use where the test previously replaced the entire detector stack
+    immediately after writer_state. The temporary model placeholder never
+    reaches an engine. Ordinary writer_state retains the production stack.
+
+    The construction patch is process-global while active: call this during
+    setup, before starting a daemon thread.
+    """
+    from unittest.mock import patch
+
+    from privacy_hud import dispatch as dispatch_mod
+    from privacy_hud.detect.model import StubModelDetector
+
+    with patch.object(
+            dispatch_mod, "ModelDetector",
+            return_value=StubModelDetector([])):
+        state = writer_state(data_dir, selected=selected, keep=keep)
+        state.detectors = detectors
+    return state
+
+
 # --------------------------------------------------------------------- #
 # a daemon to write policy to (#66 Pair 6)
 # --------------------------------------------------------------------- #

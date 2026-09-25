@@ -35,7 +35,7 @@ from privacy_hud.dispatch import dispatch
 from privacy_hud.runtime import LATCH_NAME
 from privacy_hud.runtime_contract import load_activation
 from runtime_helpers import make_bundle, write_receipt_v2
-from runtime_helpers import writer_state
+from runtime_helpers import writer_state, writer_state_with_detectors
 from runtime_helpers import writer_ledger
 from runtime_helpers import activation as _activation
 
@@ -722,12 +722,12 @@ def slow_scan_daemon(tmp_path):
     from privacy_hud.detect.paths import PathDetector
     from privacy_hud.detect.secrets import SecretDetector
 
-    state = writer_state(tmp_path / "data")
-    # Keep the real tiers 0-2 (they are what makes an egress PreToolUse
-    # deny) and swap only tier 3 for the slow stand-in — the same shape the
-    # daemon has in production, with the one slow component made explicit.
+    # Keep the existing cheap detectors and the explicit slow tier 3.
+    # The production model would be discarded before the daemon starts.
     slow = _SlowTier3Detector(1.0)
-    state.detectors = [PathDetector(), SecretDetector(), slow]
+    state = writer_state_with_detectors(
+        tmp_path / "data",
+        detectors=[PathDetector(), SecretDetector(), slow])
 
     sock_dir = tempfile.mkdtemp(prefix="phd")   # short path; see running_daemon
     sock_path = Path(sock_dir) / "d.sock"
@@ -738,9 +738,12 @@ def slow_scan_daemon(tmp_path):
     deadline = time.monotonic() + 2.0
     while not sock_path.exists() and time.monotonic() < deadline:
         time.sleep(0.01)
-    yield daemon, sock_path, slow
-    daemon.stop()
-    thread.join(timeout=5.0)
+    try:
+        yield daemon, sock_path, slow
+    finally:
+        daemon.stop()
+        thread.join(timeout=5.0)
+        assert not thread.is_alive(), "slow-scan daemon did not stop"
 
 
 def test_a_slow_scan_does_not_block_another_sessions_ledger_work(slow_scan_daemon):
@@ -2284,3 +2287,25 @@ def test_b2_internal_failure_warns_instead_of_denying(
         "tool_input": {"message": "inspect https://example.test"},
     })
     assert out == {"systemMessage": ACCOUNTING_FAILURE}
+
+
+def test_slow_scan_fixture_does_not_construct_real_model(
+        tmp_path, monkeypatch):
+    from privacy_hud.detect.model import ModelDetector
+    from privacy_hud.detect.paths import PathDetector
+    from privacy_hud.detect.secrets import SecretDetector
+
+    def forbidden_init(self, *args, **kwargs):
+        pytest.fail("slow-scan fixture constructed the real model")
+
+    monkeypatch.setattr(ModelDetector, "__init__", forbidden_init)
+    setup = slow_scan_daemon.__wrapped__(tmp_path)
+    try:
+        daemon, _, slow = next(setup)
+        assert [type(detector) for detector in daemon.state.detectors] == [
+            PathDetector, SecretDetector, _SlowTier3Detector,
+        ]
+        assert daemon.state.detectors[-1] is slow
+    finally:
+        setup.close()
+    assert daemon._closed, "closing the fixture must shut down the daemon"
