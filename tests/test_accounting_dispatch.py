@@ -374,22 +374,39 @@ def _guard(state, deny: bool) -> None:
     state.settings = types.SimpleNamespace(deny_read=deny)
 
 
-def test_guarded_file_subject_is_not_detector_pattern(state):
+@pytest.mark.parametrize("paths", [
+    ("/r/keys/a.pem", "/r/keys/b.pem"),
+    ("/r/keys/a.pem", "/r/keys/a.pem"),
+])
+def test_guarded_file_subject_is_not_detector_pattern(state, paths):
     _guard(state, True)
     start(state)
-    for n, path in enumerate(("/r/keys/a.pem", "/r/keys/b.pem")):
+    for n, path in enumerate(paths):
         out = egress(state, "s1", f"cat {path}", f"t{n}")
         assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
     found = rows(state)
     assert [r["subject_kind"] for r in found] == ["file", "file"]
     assert len({r["subject_id"] for r in found}) == 2
+    assert len({r["observation_id"] for r in found}) == 2
     for r in found:
         assert (r["kind"], r["data_type"], r["occurrences"],
                 r["masked_example"], r["rule_id"], r["source_label"]) == \
             ("prevented", "path", 1, None, "path.key_container", "local file")
-        assert r["subject_resolution"] == "resolved"
+        assert r["subject_resolution"] == "unresolved"
+        assert r["subject_hash"] is None
+
+    labels = {
+        row[0] for row in state.ledger.conn.execute(
+            "SELECT label FROM subjects WHERE session_id='s1'")
+    }
+    assert labels == {f"file {r['subject_id']}" for r in found}
+
     s = summary(state)
-    assert s.denials_issued == 2 and s.distinct_disclosures == 0
+    assert s.denials_issued == 2
+    assert s.distinct_disclosures == 0
+    assert s.denials_enforced == 0
+    assert s.reads_stopped == 0
 
 
 def test_guarded_file_without_detector_hit_is_recorded(state):

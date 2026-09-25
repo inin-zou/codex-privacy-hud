@@ -443,10 +443,12 @@ def _literal_path(path: str) -> str | None:
 def _one_literal_operand(command: str, program: str,
                          positionals: list[_Positional], options: set[str],
                          skip: int) -> bool:
-    """Whether the read verb's path operand is the only file it evaluates,
-    with nothing left to shell interpretation. Conservative: a doubt means
-    False, and the file identity then stays unresolved rather than being
-    claimed from the first plausible operand."""
+    """Legacy syntactic filter, unused for accounting identity in 0.9.0.
+
+    A True result does not attest executable provenance, the effective
+    environment, program configuration, or which files execution reads.
+    Shell-derived accounting file identities remain unresolved.
+    """
     if (program in _RECURSIVE_BY_DEFAULT
             or any(c in _SHELL_META or ord(c) < 0x20 or ord(c) == 0x7f
                    for c in command)
@@ -530,13 +532,11 @@ def extract_origin(tool_name: str, tool_input: dict) -> Origin | None:
         if len(positionals) > skip:
             candidate = positionals[skip]
             if candidate.trusted and _looks_like_a_path(candidate.value):
-                evaluated = None
-                if _one_literal_operand(command, program, positionals,
-                                        options, skip):
-                    evaluated = _literal_path(candidate.value)
+                # Command text does not attest the executable, shell aliases,
+                # inherited environment, or program configuration. Keep the
+                # display origin, but do not infer an accounting file identity.
                 return Origin(value=_collapse_home(candidate.value),
-                              kind=OriginKind.PATH,
-                              evaluated_path=evaluated)
+                              kind=OriginKind.PATH)
 
     if program in SUBCOMMAND_PROGRAMS and positionals:
         if positionals[0].trusted and _SUBCOMMAND.match(positionals[0].value):
