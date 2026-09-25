@@ -230,17 +230,22 @@ def plugin_cache_root() -> Path:
     return codex_home() / "plugins" / "cache"
 
 
-def cached_plugin_parent(bundle: Path) -> Path | None:
-    """The canonical cache parent of an existing release bundle, or None.
+def cached_plugin_parent(
+        bundle: Path, *, allow_missing: bool = False) -> Path | None:
+    """The canonical cache parent of a release bundle, or None.
+
+    Existing bundles require a canonical bundled bootstrap. For holder
+    recognition, allow_missing also accepts an absent version directory
+    beneath an existing canonical plugin parent. An incomplete existing
+    bundle or a symlink is not an absent version directory.
 
     This describes cache placement, not authentication of same-user code.
-    Require an ordinary numeric release and a canonical bundled bootstrap.
     The configured cache root may itself resolve through a user alias.
     """
     try:
         root = plugin_cache_root().resolve(strict=True)
         path = Path(bundle)
-        if not path.is_absolute() or path.resolve(strict=True) != path:
+        if not path.is_absolute() or path.resolve(strict=False) != path:
             return None
         relative = path.relative_to(root)
         if len(relative.parts) != 3:
@@ -251,6 +256,12 @@ def cached_plugin_parent(bundle: Path) -> Path | None:
         if re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\."
                         r"(0|[1-9][0-9]*)", version) is None:
             return None
+        if path.parent.resolve(strict=True) != path.parent:
+            return None
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return path.parent if allow_missing else None
         bootstrap = path / "scripts" / "runtime.py"
         if (not bootstrap.is_file()
                 or bootstrap.resolve(strict=True) != bootstrap):

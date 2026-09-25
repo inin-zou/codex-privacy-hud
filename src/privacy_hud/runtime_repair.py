@@ -392,12 +392,12 @@ def classify_holder(identity: dict, data_dir: Path, bundle: Path, *,
     """What a process holding this data directory's ledger is, or a
     refusal saying why it cannot be stopped (#70).
 
-    Returns `"current"` for this installation's bundle-launched daemon,
-    `"mcp"` for its selected-bundle MCP server or an MCP server from an
-    existing canonical sibling release in the same plugin cache directory,
-    and `"legacy"` for a supported legacy daemon. Other-version daemons
-    remain unsupported. Every one of astra's rules applies, and
-    none of them is a substring:
+    Returns `"current"` for a supported bundle-launched daemon, `"mcp"`
+    for a supported bundle-launched MCP server, and `"legacy"` for a
+    supported legacy daemon. Bootstrap holders may name this bundle or
+    a canonical sibling release in the same plugin cache directory,
+    including an absent version directory left by a host update.
+    Every ownership rule below still applies:
 
     * the same user;
     * an identity read exactly -- executable and argument vector -- or a
@@ -436,11 +436,13 @@ def classify_holder(identity: dict, data_dir: Path, bundle: Path, *,
         raise refuse("installation") from None
     if (bootstrap not in argv and len(argv) == 6
             and argv[1] == "-I" and argv[3] == "--plugin-data"
-            and argv[5] == "mcp"):
+            and argv[5] in ("daemon", "mcp")):
         candidate = Path(argv[2]).parent.parent
-        selected_parent = codex.cached_plugin_parent(Path(bundle))
+        selected_parent = codex.cached_plugin_parent(
+            Path(bundle), allow_missing=True)
         if (selected_parent is not None
-                and codex.cached_plugin_parent(candidate) == selected_parent
+                and codex.cached_plugin_parent(
+                    candidate, allow_missing=True) == selected_parent
                 and str(candidate / "scripts" / "runtime.py") == argv[2]):
             bootstrap = argv[2]
     if bootstrap in argv:
