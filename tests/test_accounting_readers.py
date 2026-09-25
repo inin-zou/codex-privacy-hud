@@ -50,7 +50,7 @@ ROW_KEYS = [
     "subject_resolution", "subject_label", "recipient_id",
     "recipient_resolution", "destination_kind", "recipient_label",
     "source_label", "source_kind", "boundary", "masked_example",
-    "budget_delta", "scan_gap", "budget_cap",
+    "budget_delta", "scan_gap", "budget_cap", "guard_target",
 ]
 
 
