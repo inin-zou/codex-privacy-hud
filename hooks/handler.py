@@ -42,13 +42,20 @@ TIMEOUT = 2.0  # seconds -- ONE budget: connect, hello, event and reply
 # Codex builds -- see architecture.md's platform-drift note) while comfortably
 # covering slower/larger payloads up to MAX_TIER3_CHARS.
 
-# The client half of I6: the events a failure must fail *closed* on. The
-# daemon's half is `privacy_hud/codex.py`'s `EGRESS_EVENTS`, which is where
-# everything this project knows about Codex the platform lives; this file is
-# stdlib-only and never imports the package, so it restates the set and
-# `tests/test_runtime.py` compares the two -- checked rather than trusted,
-# the same treatment `daemon.sock` and the receipt literals below get.
+# Candidate events for B3/B4 failure handling. Supported B2 delegation
+# names are exempted before inspecting argument URLs. Both sets are
+# restated from codex.py because this hook client stays stdlib-only;
+# tests pin their agreement.
 EGRESS_EVENTS = {"PreToolUse"}
+
+# Restated from codex.SUBAGENT_TOOLS because this client is stdlib-only.
+# B2 delegation must not become B3/B4 merely because its text has a URL.
+SUBAGENT_TOOLS = (
+    "spawn_agent",
+    "multi_agent_v1send_input",
+    "send_message",
+    "followup_task",
+)
 
 # --- lazy daemon start ------------------------------------------------------
 # These literals are the contract with `privacy_hud/runtime.py` and
@@ -167,6 +174,8 @@ def _looks_like_egress(payload):
     # applies the same predicate as `codex.is_mcp_tool`, so the two ends
     # cannot disagree about which call this is.
     if payload.get("hook_event_name") not in EGRESS_EVENTS:
+        return False
+    if payload.get("tool_name") in SUBAGENT_TOOLS:
         return False
     ti = payload.get("tool_input") or {}
     blob = json.dumps(ti) if isinstance(ti, dict) else str(ti)
