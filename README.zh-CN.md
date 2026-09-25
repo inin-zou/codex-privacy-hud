@@ -61,7 +61,7 @@ Privacy HUD:  What does this session's legacy accounting record?
 
 ## 安装
 
-Privacy HUD 0.8.2 继续使用 snapshot v2，实际会话仍采用旧版记账。支持 v2 的读取器会将 v1 明确标为旧版记账，并支持带可空记账字段的 v2。仅支持 v1 的旧读取器会拒绝 v2，不显示 Privacy 状态项。Codex 版本号相同并不代表快照兼容。
+Privacy HUD 0.8.3 继续使用 snapshot v2，实际会话仍采用旧版记账。支持 v2 的读取器会将 v1 明确标为旧版记账，并支持带可空记账字段的 v2。仅支持 v1 的旧读取器会拒绝 v2，不显示 Privacy 状态项。Codex 版本号相同并不代表快照兼容。
 
 支持 snapshot v2 的 Codex 0.154.0、0.155.0 和 0.155.1 补丁构建已于 2026-09-22 重新发布。如果此前安装过这些版本，本机二进制仍可能包含旧读取器。更新插件不会替换该二进制；Privacy HUD 0.8.1 本身不需要再次发布 Codex 补丁构建。
 
@@ -329,10 +329,10 @@ flowchart TD
 
 ## 卸载
 
-运行已安装的 0.8.2 插件包中的脚本。将下面的占位路径替换为该插件包的绝对目录；该目录必须同时包含 `install.sh` 和 `scripts/runtime.py`。
+运行已安装的 0.8.3 插件包中的脚本。将下面的占位路径替换为该插件包的绝对目录；该目录必须同时包含 `install.sh` 和 `scripts/runtime.py`。
 
 ```bash
-PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.8.2/plugin'
+PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.8.3/plugin'
 sh "$PRIVACY_HUD_BUNDLE/install.sh" --uninstall
 ```
 

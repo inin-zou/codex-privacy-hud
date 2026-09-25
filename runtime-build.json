@@ -1,12 +1,12 @@
 {
-  "build_id": "9fbbf3dbbfb286c0726746b4af811d811ca8e73110813cc275b48c0613fe2533",
+  "build_id": "af6bfd611b8488282460a74c7fff75cdc74f0f12d3f68ea7a3440a782e981dda",
   "format": 1,
   "protocol": 2,
   "readable_schemas": [
     0,
     5401
   ],
-  "release": "0.8.2",
+  "release": "0.8.3",
   "snapshot_versions": [
     2
   ],

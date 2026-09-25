@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.3
+
+- Stop this installation's verified bundle-launched MCP server during explicit runtime repair and the shared stop-only operation.
+- Announce the MCP interruption and require a host restart after successful repair; refuse any replacement ledger holder found by the quiescence checks.
+- Give unverified-holder refusals a process-inspection step and the exact repair command.
+- Check the plugin-data root in doctor for both historical and fenced ledger layouts.
+- Keep version-2 accounting inactive, the prepared schema at generation 5401 and snapshot version 2.
+
+Refs #74.
+
 ## 0.8.2
 
 - Stop a verified legacy Privacy HUD daemon during explicit runtime repair, and complete the storage transition in the same invocation.
