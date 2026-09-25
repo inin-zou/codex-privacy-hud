@@ -315,6 +315,39 @@ def test_transition_recheck_catches_late_mcp_holder(
     assert f.sent == [(424242, signal.SIGTERM)]
 
 
+@pytest.mark.parametrize("check, reason", [
+    ("socket", "not_socket"),
+    ("socket", "live_listener"),
+    ("heartbeat", None),
+])
+def test_pidless_refusal_makes_process_inspection_conditional(
+        monkeypatch, check, reason):
+    refusal = storage.QuiescenceRefusal(check, reason=reason)
+
+    def refuse(*args, **kwargs):
+        raise refusal
+
+    monkeypatch.setattr(repair, "repair_runtime", refuse)
+    out, err = io.StringIO(), io.StringIO()
+
+    assert repair.main([
+        "--bundle-root", "/bundle", "--plugin-data", "/data",
+    ], out=out, err=err) == 1
+
+    diagnostic = json.loads(err.getvalue())
+    assert diagnostic["check"] == check
+    assert diagnostic["reason"] == reason
+    assert diagnostic["pids"] == []
+    assert diagnostic["signalled"] is False
+    assert (
+        "If the quiescence_refusal diagnostic line lists pids, inspect those "
+        "processes" in out.getvalue()
+    )
+    assert "Use the pids in" not in out.getvalue()
+    assert "sh /bundle/install.sh --repair-runtime --plugin-data /data --yes" \
+        in out.getvalue()
+
+
 def test_unknown_holder_copy_formats_the_actual_repair_command(fake_runtime):
     f = fake_runtime
     refusal = storage.QuiescenceRefusal(

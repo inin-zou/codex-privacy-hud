@@ -182,9 +182,9 @@ HOLDER_UNVERIFIED = (
     "ledger.\n"
     "No stop signal was sent. The storage transition did not start.\n"
     "Existing ledger files were preserved.\n"
-    "Use the pids in the quiescence_refusal diagnostic line to inspect "
-    "the processes in your operating system's process viewer. Close the "
-    "owning application only after identifying it.\n"
+    "If the quiescence_refusal diagnostic line lists pids, inspect those "
+    "processes in your operating system's process viewer. Close the owning "
+    "application only after identifying it.\n"
     "Then run this command in another terminal:\n"
     "  {repair_command}"
 )
