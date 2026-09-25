@@ -459,16 +459,12 @@ def check_plugin_data() -> Check:
     raw = os.environ.get("PLUGIN_DATA")
     candidates = _codex_data_candidates()
 
-    # `not raw`, not `raw is None`: `PLUGIN_DATA=` (exported empty, which a
-    # half-written shell profile or a `env PLUGIN_DATA= ...` produces) is set
-    # and useless. Every resolver in the package already treats it as unset
-    # -- `runtime.plugin_data_dir` (a.k.a. `local_ui_server.resolve_data_dir`)
-    # tests `if env:` -- so this check
-    # took the "it is set" branch and then called `.parent` on the `None`
-    # that `_ledger_path()` correctly returned, crashing the one check whose
-    # whole job is to explain this state.
-    ledger = _ledger_path()
-    if not raw or ledger is None:
+    # Empty and unset PLUGIN_DATA remain a FAIL even when the resolver
+    # can discover a candidate. Guard None before accessing the path.
+    # Resolve the installation root directly: a fenced ledger's parent
+    # is the ledger subdirectory, not the plugin-data directory.
+    data_dir = runtime.plugin_data_dir()
+    if not raw or data_dir is None:
         return Check(
             "PLUGIN_DATA", FAIL,
             "not set — nothing is written until it is",
@@ -478,7 +474,6 @@ def check_plugin_data() -> Check:
             fixes=_plugin_data_export_fix(candidates),
         )
 
-    data_dir = ledger.parent
     if not data_dir.is_dir():
         return Check(
             "PLUGIN_DATA", FAIL,
