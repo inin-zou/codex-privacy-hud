@@ -77,7 +77,7 @@ Disclosure is irreversible, so the budget never decreases within a session. Ther
 No UI copy, log message, or API name may suggest disclosed data can be withdrawn. Forbidden words in user-facing text: "undo", "revoke", "remove from context", "your data is protected", "100% secure".
 
 **I6 — Fail open on ingress, fail closed on egress.**
-Engine timeout on a read path: allow with an "unverified" warning. Engine timeout on an outbound call crossing B3/B4: deny. Never block Codex because of our own crash — the hook client exits 0 with empty stdout if it throws. The daemon's half of the egress set is `EGRESS_EVENTS` in `codex.py`; the client's half is in `hooks/handler.py`.
+Engine timeout on a read path: allow with an "unverified" warning. Engine timeout on an outbound call crossing B3/B4: deny. An ingress failure without a completed hold verdict must not create a denial. Once the credential prompt gate has decided to hold, an ordinary exception while preparing or recording that hold preserves the block and its in-memory pending/replay state, with a fixed warning that recording failed and the hold may be missing from the audit. This is a narrow exception to ingress fail-open; it does not classify UserPromptSubmit as egress. The hook client still exits 0 with empty stdout if it throws. The daemon's half of the egress set is `EGRESS_EVENTS` in `codex.py`; the client's half is in `hooks/handler.py`.
 
 **I7 — The tool survives its own audit, on stated inputs.**
 On the committed self-audit corpus, the clean half must produce zero findings and the planted half must produce the values planted in it. Neither may be reached by exempting this repository or by raising the budget cap.
