@@ -263,7 +263,9 @@ def test_unsupported_launch_form_is_never_signalled(install, tail):
         code, out, diagnostics = _run_main(install)
         assert _alive(daemon), "an unverified holder was signalled"
     assert code == 1
-    assert runtime_messages.HOLDER_UNVERIFIED in out
+    assert runtime_messages.HOLDER_UNVERIFIED.format(
+        repair_command=repair.format_repair_command(
+            install.bundle, install.data)) in out
     assert [d["check"] for d in diagnostics] == ["unverified"]
     assert diagnostics[0]["reason"] == "launch_form"
     assert diagnostics[0]["pids"] == [daemon.pid]
@@ -280,7 +282,9 @@ def test_other_interpreter_is_never_signalled(install):
         code, out, diagnostics = _run_main(install)
         assert _alive(daemon)
     assert code == 1
-    assert runtime_messages.HOLDER_UNVERIFIED in out
+    assert runtime_messages.HOLDER_UNVERIFIED.format(
+        repair_command=repair.format_repair_command(
+            install.bundle, install.data)) in out
     assert diagnostics[0]["reason"] == "interpreter"
     _assert_untouched(install)
 
@@ -293,7 +297,9 @@ def test_no_recorded_interpreter_is_never_signalled(install):
         code, out, diagnostics = _run_main(install, python=install.python)
         assert _alive(daemon)
     assert code == 1
-    assert runtime_messages.HOLDER_UNVERIFIED in out
+    assert runtime_messages.HOLDER_UNVERIFIED.format(
+        repair_command=repair.format_repair_command(
+            install.bundle, install.data)) in out
     assert diagnostics[0]["reason"] == "installation"
     assert not storage.is_fenced(install.data)
 
@@ -320,7 +326,9 @@ def test_unknown_holder_blocks_every_signal(install):
         reader.terminate()
         reader.wait(timeout=30)
     assert code == 1 and signals == []
-    assert runtime_messages.HOLDER_UNVERIFIED in out
+    assert runtime_messages.HOLDER_UNVERIFIED.format(
+        repair_command=repair.format_repair_command(
+            install.bundle, install.data)) in out
     assert diagnostics[0]["pids"] == [reader.pid]
     _assert_untouched(install)
 
@@ -349,7 +357,9 @@ def test_identity_change_before_signalling_sends_nothing(install,
         code, out, diagnostics = _run_main(install)
         assert _alive(daemon)
     assert code == 1 and signals == []
-    assert runtime_messages.HOLDER_UNVERIFIED in out
+    assert runtime_messages.HOLDER_UNVERIFIED.format(
+        repair_command=repair.format_repair_command(
+            install.bundle, install.data)) in out
     assert diagnostics[0]["check"] == "unverified"
     assert diagnostics[0]["reason"] == "changed"
     _assert_untouched(install)
@@ -391,7 +401,9 @@ def test_stop_timeout_is_reported_without_escalation(install, monkeypatch):
     assert code == 1
     assert signals == [(daemon.pid, signal.SIGTERM)]
     assert runtime_messages.HOLDER_STOP_TIMEOUT in out
-    assert runtime_messages.HOLDER_UNVERIFIED not in out
+    assert runtime_messages.HOLDER_UNVERIFIED.format(
+        repair_command=repair.format_repair_command(
+            install.bundle, install.data)) not in out
     assert diagnostics[0]["check"] == "stop_timeout"
     assert diagnostics[0]["signalled"] is True
     _assert_untouched(install)
@@ -567,7 +579,12 @@ def test_legacy_stop_copy_is_astras():
         "Privacy HUD could not verify the identity of a process using this "
         "ledger.\n"
         "No stop signal was sent. The storage transition did not start.\n"
-        "Existing ledger files were preserved.")
+        "Existing ledger files were preserved.\n"
+        "Use the pids in the quiescence_refusal diagnostic line to inspect "
+        "the processes in your operating system's process viewer. Close the "
+        "owning application only after identifying it.\n"
+        "Then run this command in another terminal:\n"
+        "  {repair_command}")
     assert runtime_messages.HOLDER_INSPECTION_FAILED == (
         "Privacy HUD could not inspect processes using this ledger.\n"
         "The storage transition did not start. Existing ledger files were "
@@ -594,7 +611,13 @@ def test_no_signal_copy_is_not_used_after_a_signal():
         "is safe to move.\n"
         "The storage transition was not completed. Existing ledger files "
         "were preserved.\n"
-        "The quiescence_refusal diagnostic line names the blocking check.")
+        "The quiescence_refusal diagnostic line names the blocking check.\n"
+        "If it lists pids, inspect those processes in your operating system's "
+        "process viewer. Close the owning application only after identifying "
+        "it; a Codex app, CLI, or IDE integration may have started another "
+        "MCP server.\n"
+        "Then run this command in another terminal:\n"
+        "  {repair_command}")
 
 
 @pytest.mark.parametrize("case, reason", [
@@ -714,7 +737,9 @@ def test_post_signal_refusal_has_specific_copy_and_diagnostic(
         ["--bundle-root", str(tmp_path), "--plugin-data", str(tmp_path)],
         out=out, err=err)
     assert code == 1
-    assert out.getvalue() == runtime_messages.QUIESCENCE_AFTER_STOP + "\n"
+    assert out.getvalue() == runtime_messages.QUIESCENCE_AFTER_STOP.format(
+        repair_command=repair.format_repair_command(
+            tmp_path, tmp_path)) + "\n"
     assert "Activation may be incomplete" not in out.getvalue()
     assert "No stop signal was sent" not in out.getvalue()
     lines = err.getvalue().splitlines()
