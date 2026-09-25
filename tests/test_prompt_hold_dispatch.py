@@ -278,7 +278,8 @@ def test_hold_surfaces_and_persistence_contain_no_credential(harness):
     assert "DENIAL ISSUED" in report
     snap = read_snapshot(state.data_dir, "s", ignore_staleness=True)
     assert snap is not None
-    assert "1 denial issued" in hud_line(snap, 200)
+    # Phase 4's fixed counter label ("N denials issued"), unchanged here.
+    assert "1 denials issued" in hud_line(snap, 200)
     assert "denials issued: 1" in receipt("s", summary, [], None).lower()
 
     dump = "\n".join(state.ledger.conn.iterdump())

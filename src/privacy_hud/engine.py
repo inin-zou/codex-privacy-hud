@@ -111,7 +111,7 @@ from __future__ import annotations
 import posixpath
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import get_args
 
@@ -128,12 +128,14 @@ from .accounting import (
 )
 from .accounting import Decision as AccountingDecision
 from .detect.paths import PATTERNS, is_sensitive_path
+from .detect.secrets import CredentialMatch, SecretDetector
 from .hook_evidence import HookEvidence, classify_evidence
 from .identity import file_identity, safe_masked_example
 from .mask import mask, value_hash
 from .matrix.loader import HARD_BLOCKED_DATA_TYPES, UnknownKey
 from .minimize import consume_token, minimize_tool_input
 from .origin import Origin, OriginKind, origin_phrase
+from .prompt_hold import PromptGate
 
 # --- Ruling 4: cap the deep scan's input size ---------------------------
 #
@@ -601,7 +603,8 @@ class _PermissiveSettings:
 
 class Engine:
     def __init__(self, *, ledger, matrix, salt: bytes, detectors: list,
-                 settings=None, accounting_key: bytes | None = None):
+                 settings=None, accounting_key: bytes | None = None,
+                 prompt_clock: Callable[[], float] = time.monotonic):
         self.ledger = ledger
         #: #54 Phase 4: this session's version-2 accounting key, installed
         #: by the daemon only after the session's activation committed, or
@@ -642,6 +645,11 @@ class Engine:
         #: `_origins` above, and for the same reason: it lives on the
         #: Engine because `dispatch` builds one Engine per session.
         self._read_notice_shown = False
+        #: #37: this session's credential-prompt confirmation state, in
+        #: memory only and keyed with this engine's enforcement salt. Same
+        #: per-session lifetime as `_origins`: a replacement engine starts
+        #: empty and holds again, which fails safe.
+        self.prompt_gate = PromptGate(salt=salt, clock=prompt_clock)
 
     def clear_session_identity(self) -> None:
         """Discard this engine's session identity (#54 Phase 4): the
@@ -653,6 +661,7 @@ class Engine:
         self.accounting_key = None
         self.salt = b""
         self._origins.clear()
+        self.prompt_gate.clear()
         self._identity_cleared = True
 
     # -- Ruling 2: destination normalization --------------------------
@@ -946,6 +955,69 @@ class Engine:
                           findings=tuple(findings), degraded=gap is not None,
                           degraded_reason=gap)
 
+    # -- #37: credential prompt holds ------------------------------------
+    def scan_prompt_credentials(self, obs: Observation
+                                ) -> tuple[CredentialMatch, ...]:
+        """The hold-eligible tier-1 credential matches in a user prompt.
+
+        Only `SecretDetector`'s well-formed formats can hold a prompt: never
+        its entropy backstop or a bare key header, and never a tier-3
+        finding, whatever data type it reports. Regex-only, so it does not
+        wait for the model. Like `scan`, it reads no ledger and no session
+        state, so it is safe outside `State.lock`."""
+        if obs.hook_event != "UserPromptSubmit":
+            return ()
+        matches: list[CredentialMatch] = []
+        for d in self.detectors:
+            if isinstance(d, SecretDetector):
+                matches.extend(
+                    m for m in d.scan_labeled(obs.text, {"source": obs.source})
+                    if m.hold_eligible)
+        return tuple(matches)
+
+    def record_prompt_hold(self, obs: Observation,
+                           matches: Sequence[CredentialMatch],
+                           reason: str) -> Decision:
+        """Record a held prompt as a prevention and return the hold.
+        Caller holds the lock.
+
+        Only the eligible credential findings are recorded: the held
+        submission is not deep-scanned, which is out of scope rather than a
+        scan gap. Version 2 records an issued denial (`DENY_ISSUED`), never
+        confirmed enforcement or crossing. Legacy writes one `prevented` row
+        per distinct credential with no dedupe hash, so it cannot absorb a
+        later permitted crossing of the same value, and no masked example."""
+        if self._identity_cleared:
+            raise RuntimeError("this engine's session identity was cleared")
+        dest_kind = self._normalize_destination(obs.destination)
+        boundary = self.matrix.boundary_for(dest_kind)
+        findings = tuple(m.finding for m in matches)
+        scan = ScanResult(dest_kind=dest_kind, boundary=boundary,
+                          findings=findings, degraded=False)
+        if obs.accounting is not None:
+            return self._observe_v2(
+                obs, scan, action="deny", blocked_origin=None,
+                read_block=None, notice=None, prompt_reason=reason)
+
+        kind = self.matrix.classify(obs.hook_event, "blocked")
+        seen: set[str] = set()
+        for f in findings:
+            if f.value in seen:
+                continue
+            seen.add(f.value)
+            self.ledger.record(
+                obs.session_id, turn_id=obs.turn_id, kind=kind,
+                data_type=f.data_type, source=obs.source,
+                destination=dest_kind, value_hash=None,
+                masked_example=None, tool_name=None, protection="blocked",
+                source_kind=None)
+        summary = self.ledger.summary(obs.session_id)
+        pct = getattr(summary, "legacy_percent", None)
+        return self._decision(obs, findings, action="deny",
+                              blocked_origin=None, read_block=None,
+                              notice=None, pct=pct, degraded=False,
+                              dest_kind=dest_kind, prompt_reason=reason)
+
     def observe(self, obs: Observation, *, scan: ScanResult | None = None) -> Decision:
         """Phase 2: rule on `obs` and record it. Caller must hold the lock.
 
@@ -1064,9 +1136,11 @@ class Engine:
 
         # Task 8 policy-fix: a user-written `mask` rule outranks the
         # built-in default. Egress-only (Ruling 3's own logic extends
-        # unchanged to user-written policy — an ingress observation's
-        # bytes are already in context, so no policy check applies to it
-        # either). It rewrites only when there is something matching to
+        # unchanged to user-written policy — by the time an ingress
+        # observation reaches this accounting phase its bytes are treated as
+        # already in context, so no policy check applies to it either; a
+        # user prompt's credential hold is decided earlier, in dispatch's
+        # preflight, #37). It rewrites only when there is something matching to
         # mask; otherwise this falls through, unchanged, to the
         # Matrix.default_action() logic below.
         #
@@ -1130,7 +1204,9 @@ class Engine:
         if action == "allow" and is_egress and hard_blocked:
             # Ruling 3: default_action is an egress-only policy. An ingress
             # observation never reaches this branch, no matter what it
-            # contains — the bytes are already in context.
+            # contains — in this phase its bytes are treated as already in
+            # context (a PostToolUse result, or a prompt that passed #37's
+            # hold preflight).
             policy_action = self.matrix.default_action(dest_kind)
             if policy_action == "block":
                 # Task 12: before finalizing a deny, honor a single-use
@@ -1199,11 +1275,17 @@ class Engine:
                   action: str, blocked_origin: Origin | None,
                   read_block: str | None, notice: str | None,
                   pct: int | None, degraded: bool, dest_kind: str,
-                  updated_input: str | dict | None = None) -> Decision:
+                  updated_input: str | dict | None = None,
+                  prompt_reason: str | None = None) -> Decision:
         """The hook decision for a ruled observation: the same templates and
         shapes for either accounting. `updated_input` is passed in when the
         caller has already constructed the rewrite (version 2 builds it
-        before recording that a rewrite was issued)."""
+        before recording that a rewrite was issued). A prompt hold (#37)
+        carries its own fixed reason and no `system_message`: a hold's
+        output must be exactly decision and reason."""
+        if action == "deny" and prompt_reason is not None:
+            return Decision(action, reason=prompt_reason, budget_percent=pct,
+                            degraded=degraded)
         if action == "deny" and read_block is not None:
             # #36: the read guard's own template -- takes `tool`/`path`, not
             # the egress templates' `label`/`destination`/`origin_phrase`.
@@ -1256,7 +1338,8 @@ class Engine:
 
     def _observe_v2(self, obs: Observation, scan: ScanResult, *, action: str,
                     blocked_origin: Origin | None, read_block: str | None,
-                    notice: str | None) -> Decision:
+                    notice: str | None,
+                    prompt_reason: str | None = None) -> Decision:
         """Record one version-2 observation and return the unchanged hook
         decision.
 
@@ -1283,8 +1366,13 @@ class Engine:
             updated_input = minimize_tool_input(
                 self.salt, obs.tool_name or "", ti, findings, text=obs.text)
 
+        # PreToolUse issues a permission decision; a prompt hold (#37) issues
+        # a denial. Every other hook's decision is "none".
         decision: AccountingDecision = (
-            action if obs.hook_event == "PreToolUse" else "none")  # type: ignore[assignment]
+            action
+            if (obs.hook_event == "PreToolUse"
+                or (obs.hook_event == "UserPromptSubmit" and action == "deny"))
+            else "none")  # type: ignore[assignment]
         issued = _ISSUED.get(decision, Evidence(0))
 
         session = self.ledger.conn.execute(
@@ -1390,7 +1478,8 @@ class Engine:
                               read_block=read_block, notice=notice, pct=pct,
                               degraded=scan.degraded,
                               dest_kind=scan.dest_kind,
-                              updated_input=updated_input)
+                              updated_input=updated_input,
+                              prompt_reason=prompt_reason)
 
 
 # --------------------------------------------------------------------- #
@@ -1398,7 +1487,8 @@ class Engine:
 # --------------------------------------------------------------------- #
 
 #: The evidence a PreToolUse decision issues. Only PreToolUse returns a
-#: permission decision; every other hook's decision is "none".
+#: permission decision, and a UserPromptSubmit hold (#37) a denial; every
+#: other hook's decision is "none".
 _ISSUED: dict[str, Evidence] = {
     "allow": Evidence.PERMISSION_ISSUED,
     "deny": Evidence.DENY_ISSUED,
