@@ -51,7 +51,7 @@ from privacy_hud.runtime_storage import acquire_transition, prepare_storage
 from runtime_helpers import (
     REPO, activation, bundle_build_id, close_writer, make_bundle,
     policy_daemon, short_data_dir, write_manifest, write_receipt_v2,
-    writer_state,
+    writer_state_with_detectors,
 )
 
 M = load_matrix()
@@ -71,6 +71,16 @@ def cheap(state, adapter=None):
     """The daemon's state with cheap, deterministic detectors (no model)
     and, when given, the test adapter."""
     state.detectors = [PathDetector(), SecretDetector(), EmailDetector()]
+    if adapter is not None:
+        state.hook_adapter = adapter
+    return state
+
+
+def cheap_state(data_dir, adapter=None):
+    """Construct the existing deterministic stack without loading a model."""
+    state = writer_state_with_detectors(
+        data_dir,
+        detectors=[PathDetector(), SecretDetector(), EmailDetector()])
     if adapter is not None:
         state.hook_adapter = adapter
     return state
@@ -229,7 +239,7 @@ def test_phase4_new_start_to_end_contract(tmp_path, monkeypatch):
     is the committed summary, and SessionEnd erases identity."""
     monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))
     seed_prepared_legacy(tmp_path / "ledger.db")
-    state = cheap(writer_state(tmp_path))
+    state = cheap_state(tmp_path)
     assert isinstance(state.hook_adapter, CurrentHookAdapter)
     sid = "p4-new"
     try:
@@ -315,7 +325,7 @@ def test_phase4_mixed_legacy_and_v2_sessions(tmp_path, monkeypatch):
     path, and neither is converted."""
     monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))
     adapter = ScriptedAdapter()
-    state = cheap(writer_state(tmp_path), adapter)
+    state = cheap_state(tmp_path, adapter)
     legacy, new = "legacy-open", "v2-new"
     try:
         # the legacy session is met lazily, before any activation
@@ -382,7 +392,7 @@ def test_phase4_retry_conflict_and_restart_contract(tmp_path, monkeypatch):
     and cannot charge the session again."""
     monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))
     adapter = ScriptedAdapter()
-    state = cheap(writer_state(tmp_path), adapter)
+    state = cheap_state(tmp_path, adapter)
     sid = "p4-retry"
     try:
         start(state, sid)
@@ -414,7 +424,7 @@ def test_phase4_retry_conflict_and_restart_contract(tmp_path, monkeypatch):
 
         # restart: a new daemon state, without SessionEnd
         close_writer(state.ledger)
-        state = cheap(writer_state(tmp_path), adapter)
+        state = cheap_state(tmp_path, adapter)
         conn = state.ledger.conn
         row = conn.execute("SELECT accounting_status, ended_at FROM sessions"
                            " WHERE session_id=?", (sid,)).fetchone()
@@ -449,7 +459,7 @@ def test_phase4_no_sensitive_identity_in_artifacts(tmp_path, monkeypatch,
     caplog.set_level(logging.DEBUG)
     monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))
     adapter = ScriptedAdapter()
-    state = cheap(writer_state(tmp_path), adapter)
+    state = cheap_state(tmp_path, adapter)
     sid = "p4-canary"
     tool_use = "toolu_PLANTEDcanary7f3a"
     turn = "turn_PLANTEDcanary91c2"

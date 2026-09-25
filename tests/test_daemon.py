@@ -35,7 +35,7 @@ from privacy_hud.dispatch import dispatch
 from privacy_hud.runtime import LATCH_NAME
 from privacy_hud.runtime_contract import load_activation
 from runtime_helpers import make_bundle, write_receipt_v2
-from runtime_helpers import writer_state
+from runtime_helpers import writer_state, writer_state_with_detectors
 from runtime_helpers import writer_ledger
 from runtime_helpers import activation as _activation
 
@@ -722,12 +722,12 @@ def slow_scan_daemon(tmp_path):
     from privacy_hud.detect.paths import PathDetector
     from privacy_hud.detect.secrets import SecretDetector
 
-    state = writer_state(tmp_path / "data")
-    # Keep the real tiers 0-2 (they are what makes an egress PreToolUse
-    # deny) and swap only tier 3 for the slow stand-in — the same shape the
-    # daemon has in production, with the one slow component made explicit.
+    # Keep the existing cheap detectors and the explicit slow tier 3.
+    # The production model would be discarded before the daemon starts.
     slow = _SlowTier3Detector(1.0)
-    state.detectors = [PathDetector(), SecretDetector(), slow]
+    state = writer_state_with_detectors(
+        tmp_path / "data",
+        detectors=[PathDetector(), SecretDetector(), slow])
 
     sock_dir = tempfile.mkdtemp(prefix="phd")   # short path; see running_daemon
     sock_path = Path(sock_dir) / "d.sock"
