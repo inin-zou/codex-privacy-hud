@@ -319,6 +319,8 @@ For example, a detected email in an MCP argument can be replaced with a session-
 
 ---
 
+UserPromptSubmit credential confirmation is a separate shipped path in 0.9.1: a supported credential format can hold the prompt, and a later eligible resubmission allows it. It does not issue a tool-consent token, rewrite a prompt, or establish model-context admission. See docs/known-limits.md, limit 22.
+
 ## 8. Where the UI actually lives
 
 The native Privacy status item is supplied by a separately patched Codex build. Stock Codex does not gain a plugin-owned status item merely by installing this plugin.
@@ -341,7 +343,7 @@ The native status item displays accounting snapshots; it does not verify runtime
 ## 9. Platform limitations (state these in the demo)
 
 1. **Hosted tools bypass hooks.** WebSearch and similar hosted tools do not trigger local function-tool hook paths. Privacy HUD is a practical guardrail, not a mathematically complete enforcement boundary.
-2. **No interactive consent surface.** The proposed consent workflow is not shipped. Internal token primitives exist, but no browser button, `$privacy` branch or exposed MCP tool issues consent tokens (§7.6).
+2. **No interactive tool-call consent surface.** The proposed consent workflow is not shipped. Internal token primitives exist, but no browser button, `$privacy` branch or exposed MCP tool issues consent tokens (§7.6).
 3. **Stock Codex has no plugin-owned Privacy status item.** The native item requires a compatible separately patched build; the companion pane is the fallback (§8).
 4. **Model-context accounting is inferential for file reads.** A tool result does not establish admission into model context. Phase 1 retains the legacy charge and labels it; evidence-based accounting is not activated.
 5. **Prompt-injection resistance is out of scope.** A hostile repo could try to talk the agent out of using the tool; the hook layer is not bypassable by the model, which is precisely why enforcement lives there.

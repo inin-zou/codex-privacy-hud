@@ -221,7 +221,7 @@ README_LIMIT_4 = (
 )
 
 README_ZH_LIMIT_4 = (
-    '4. **Codex hook 不支持 `ask` 决策，插件也没有工具调用的交互式授权入口。** 内部已实现令牌逻辑，但浏览器按钮、`$privacy` 分支和已公开的 MCP 工具都不能签发授权令牌，也不提供基于令牌的重试。提示词重新提交确认是独立机制，见限制 22。（[详情](docs/known-limits.md#4-no-ask-decision-in-codex-hooks-and-no-interactive-consent-at-all)）\n\n16. **可选的读取防护默认关闭。** 此设置只控制能够识别的 shell 读取，不控制提示词中的凭据暂缓。（[详情](docs/known-limits.md#16-nothing-is-blocked-until-you-turn-it-on)）\n\n22. **提示词凭据暂缓的范围有限。** 只有提示词文本中受支持的凭据格式才会触发暂缓。等待至少 2 秒，并在 5 分钟内重新提交，即可确认。图片、附件、熵检测结果、私钥头部和第三级 NER 检测结果不会触发此暂缓。守护进程没有响应时，入站提示词仍会放行。（[详情](docs/known-limits.md#22-credential-prompt-holds-have-a-narrow-scope)）'
+    '4. **Codex hook 不支持 `ask` 决策，插件也没有工具调用的交互式授权入口。** 内部已实现令牌逻辑，但浏览器按钮、`$privacy` 分支和已公开的 MCP 工具都不能签发授权令牌，也不提供基于令牌的重试。提示词重新提交确认是独立机制，见限制 22。（[详情](docs/known-limits.md#4-no-ask-decision-in-codex-hooks-and-no-interactive-consent-at-all)）'
 )
 
 README_ARCH_CONTENTS = (
@@ -755,6 +755,9 @@ DESIGN_DIRECT_ACCESS = (
     "offer the session audit and contain no event deep link."
 )
 
+#: #37: the credential prompt preflight, appended to architecture §10.
+ARCH_PROMPT_PREFLIGHT = "**Credential prompt preflight (#37).** A `UserPromptSubmit` takes one extra step between resolving the engine and the deep scan. Unlocked, `Engine.scan_prompt_credentials` runs only `SecretDetector`'s hold-eligible, regex-only formats; it reads no ledger and no session state, and never consults tier 3. When it matches, `dispatch` retakes `State.lock`, re-resolves the engine and asks that session's in-memory `PromptGate` for a verdict, using the arrival time captured before any lock wait. A hold is recorded under the same lock (an issued denial for version 2, a `prevented` row with no dedupe hash for legacy) and returned at once as exactly `decision` and `reason`; the held submission is never deep-scanned, so a cold or busy model cannot delay it. If recording fails, the gate's memory is restored before the error propagates. An allowed prompt continues through the unchanged unlocked scan and locked `observe`, and a newly confirmed one gains a `systemMessage`. None of this changes the client: when no usable daemon reply arrives, ingress still fails open. See `docs/known-limits.md` #22."
+
 README_LEVEL_3_START = "**Level 3 — Exposure detail.**"
 README_PUBLIC = (
     "A mask rule is scoped to the session and selects a detected data type "
@@ -876,6 +879,7 @@ def test_issue47_surrounding_claims_match_the_corrected_contract():
         ARCH_CAP,
         cheap_scanning,
         gap_recording,
+        ARCH_PROMPT_PREFLIGHT,
     ])
     assert _section(ARCH, ARCH_PERFORMANCE_HEADING) == expected_performance
 

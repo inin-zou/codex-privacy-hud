@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.1
+
+- Request UserPromptSubmit holds for supported credential formats before deep scanning.
+- Allow confirmation by resubmitting the same case-sensitive credential after 2 seconds and within 5 minutes; keep authorization in session-scoped daemon memory only.
+- Exclude entropy findings, private-key headers, and tier-3 NER findings from prompt holds. Images and attachments are not scanned.
+- Record prompt denials as zero-cost prevention with issued-denial evidence, without claiming host enforcement or model-context admission.
+- Keep ingress fail-open behavior, including the existing daemon cold-start window.
+- Preserve Phase 4 accounting activation, legacy sessions, schema generation 5402, runtime protocol 2, and snapshot version 2.
+
+Refs #37.
+
 ## 0.9.0
 
 - Activate evidence-based accounting only for new sessions observed from a genuine SessionStart. Existing sessions and late attachments retain legacy accounting.

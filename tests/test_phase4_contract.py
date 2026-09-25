@@ -227,7 +227,7 @@ def test_phase4_copy_catalog_matches_verbatim():
 def test_phase4_limits_preserve_anchors_and_legacy_caveats():
     limits = _read("docs/known-limits.md")
     headings = re.findall(r"^## (\d+)\. (.*)$", limits, re.M)
-    assert [n for n, _ in headings] == [str(i) for i in range(1, 22)]
+    assert [n for n, _ in headings] == [str(i) for i in range(1, 23)]
     assert dict(headings)["17"] == ("A blocked read can leave a record that "
                                     "says the opposite, in one sequence.")
     assert dict(headings)["18"] == "A blocked read's row does not name the file."

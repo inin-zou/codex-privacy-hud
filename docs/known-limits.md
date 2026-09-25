@@ -28,9 +28,9 @@ WebSearch and similar do not trigger local function-tool hook paths. This is a p
 
 ## 4. No `ask` decision in Codex hooks, and no interactive consent at all.
 
-A hook can allow or deny. It cannot ask. The design's answer was a deny → review → one-shot-token → retry loop rather than a modal, and **that loop cannot be entered**: the engine's half exists — `Engine.observe` calls `consume_token` and handles `allow_once` — but no surface mints a token. Not `$privacy`, not the audit UI, not an MCP tool. See limit 13, which says the same thing from the other end.
+This historical heading describes tool-call consent. Codex hooks have no ask decision, and no shipped browser button, $privacy branch, or exposed MCP tool issues a consent token for a denied tool call.
 
-So in practice a denied call stays denied for the session. Until a mint site exists, read any description of the retry loop — in `design.md` §8 or `architecture.md` §8 — as design intent, not as behaviour.
+UserPromptSubmit credential holds now have a separate resubmission confirmation path, described in limit 22. It neither issues tool-consent tokens nor changes saved tool policies.
 
 ## 5. The status-line item lives in a separately built Codex — never in your official one.
 
@@ -111,7 +111,7 @@ And within the paths it does resolve: the pattern behind `.env` requires a start
 
 ## 16. Nothing is blocked until you turn it on.
 
-The default records the read and mentions the guard once per session; it stops nothing. `$privacy read status` says which state you are in.
+This historical heading concerns the optional shell-read guard. That guard is off by default; $privacy read status reports its setting. Credential prompt holds are separate and do not depend on this setting.
 
 ## 17. A blocked read can leave a record that says the opposite, in one sequence.
 
@@ -166,6 +166,22 @@ What is still missing is *which* calls: the gap count is per session, and no ind
 How often this happens has not been measured on real sessions. The `busy` history means nonblocking egress admission fails. A timeout can occur before inference, when the worker cannot start inference within its deadline, including model-lock contention; when the caller’s wait returns `False`, whether work is pending, running or completed; or when the wait returns `True`, but an otherwise successful result has no completion timestamp or completed after the deadline. A timeout does not require contention or slow inference.
 
 Missing or incomplete model weights leave tier 3 unavailable; the plugin does not fetch replacements. A process that already imported the ML stack in online mode also leaves tier 3 unavailable and must be restarted to load it offline.
+
+## 22. Credential prompt holds have a narrow scope.
+
+Prompt holds inspect only text supplied to UserPromptSubmit. Images and attachments are not scanned. Supported well-formed formats mean the first five KEY_PATTERNS in SecretDetector: API keys, AWS access key IDs, GitHub tokens, JWT-shaped strings, and database connection strings with passwords. Matching a format does not establish that a credential is valid. ASSIGNMENT and GENERIC_QUOTED entropy findings, private-key headers, and tier-3 NER findings never trigger this hold.
+
+Confirmation is case-sensitive and matches the complete detected credential, not the surrounding prompt. All credentials not already allowed must have been held, and the next submission must arrive at least 2 seconds after the hold and no later than 300 seconds after it. A new or expired credential holds the whole submission and starts a new window for its not-yet-allowed credentials. An early repeat remains held without resetting that window. No credential is partially authorized while another credential holds the submission.
+
+Confirmation state consists of salted hashes and timing metadata in daemon memory. It is not persisted or recovered from the ledger. Allowed credentials remain allowed for that session while the daemon runs. A replacement daemon holds them again when it can answer. During startup or whenever no usable daemon reply arrives, prompts fail open under I6 with an unverified warning. A client crash can instead produce empty hook output. The current startup loads the model before binding the socket, so the existing cold-start gap remains.
+
+Once the daemon answers, the hold decision runs before deep scanning and does not wait for the model. Held submissions skip deep scanning. Allowed submissions retain normal scanning and its existing failure behavior. This is not a guarantee that socket, scheduling, or ledger work always completes before the client deadline.
+
+The inspected Codex 0.154.0 and 0.155.1 source clears the composer during submission preparation and does not restore it on hook completion. This is source inspection, not a live TUI test. Paste or type the message again to resubmit. Codex may retain local input history even when a submission is held out of model context.
+
+A hold returns only decision and reason. Additional context returned alongside a valid block would still enter model context in both inspected versions. Confirmation messages use systemMessage, which those versions display as hook output without adding it to model context.
+
+Version-2 accounting records an issued denial as prevented with zero points, while host enforcement remains unresolved. Resubmission authorization does not establish model-context admission. Legacy held rows use no deduplication hash so a later permitted crossing can be recorded separately. Other legacy deduplication limitations remain.
 
 ## Note on tests
 

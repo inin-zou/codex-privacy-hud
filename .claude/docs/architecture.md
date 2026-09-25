@@ -604,6 +604,8 @@ Already disclosed data cannot be recalled from this session.
 
 ---
 
+UserPromptSubmit credential confirmation is a separate shipped path in 0.9.1: a supported credential format can hold the prompt, and a later eligible resubmission allows it. It does not issue a tool-consent token, rewrite a prompt, or establish model-context admission. See docs/known-limits.md, limit 22.
+
 ## 9. MCP server and UI delivery
 
 Local stdio MCP server, declared in `.codex-plugin/plugin.json` as `mcpServers`
@@ -677,6 +679,8 @@ The MCP tools return structured JSON regardless, so when Codex renders MCP UI th
 **Cheap scanning and classification.** `PathDetector` and `SecretDetector` scan the full observation text without the deep-scan size cap. Shell destination classification is a separate heuristic over command text, not a structural parse of every tool result. An oversized applicable observation skips the entire deep scan; no prefix is scanned.
 
 **Scan-gap recording.** Each observed scan gap is recorded per observation in the append-only `scan_gaps` table and counted per session by `Ledger.coverage`. An observation with no findings can have a scan gap without producing an event row. The audit reports incomplete scanning through its scan-gap banners; the stored gap count does not identify which calls had gaps. See `design.md` §5 and `docs/known-limits.md` #21.
+
+**Credential prompt preflight (#37).** A `UserPromptSubmit` takes one extra step between resolving the engine and the deep scan. Unlocked, `Engine.scan_prompt_credentials` runs only `SecretDetector`'s hold-eligible, regex-only formats; it reads no ledger and no session state, and never consults tier 3. When it matches, `dispatch` retakes `State.lock`, re-resolves the engine and asks that session's in-memory `PromptGate` for a verdict, using the arrival time captured before any lock wait. A hold is recorded under the same lock (an issued denial for version 2, a `prevented` row with no dedupe hash for legacy) and returned at once as exactly `decision` and `reason`; the held submission is never deep-scanned, so a cold or busy model cannot delay it. If recording fails, the gate's memory is restored before the error propagates. An allowed prompt continues through the unchanged unlocked scan and locked `observe`, and a newly confirmed one gains a `systemMessage`. None of this changes the client: when no usable daemon reply arrives, ingress still fails open. See `docs/known-limits.md` #22.
 
 ---
 
