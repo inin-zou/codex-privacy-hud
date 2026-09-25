@@ -67,3 +67,10 @@ def drain_the_egress_deep_scan_slot():
     assert engine._TIER3_EGRESS_SLOT.acquire(timeout=10), (
         "an egress deep scan never released its admission slot")
     engine._TIER3_EGRESS_SLOT.release()
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(items):
+    from tier_policy import mark_slow_items
+
+    mark_slow_items(items)
