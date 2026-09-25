@@ -125,13 +125,21 @@ class PromptGate:
         self.allowed: set[bytes] = set()
         #: delivery key -> the verdict that delivery received.
         self.deliveries: dict[str, Verdict] = {}
+        #: Unrecorded confirmations, reserved by delivery; never reusable.
+        self._confirmations: dict[str, frozenset[bytes]] = {}
 
     def decide(self, values: Mapping[str, str], *, delivery_key: str,
-               submitted_at: float) -> Verdict:
+               submitted_at: float, defer_confirmation: bool = False) -> Verdict:
         """Rule on one submission. `values` maps each eligible credential
         found in it to its fixed label; it is hashed at once and not kept.
         `submitted_at` is when the submission arrived, on the gate's clock,
-        captured before any lock wait."""
+        captured before any lock wait.
+
+        With defer_confirmation, consume the eligible pending hashes but
+        reserve them for this delivery instead of adding them to allowed.
+        The caller must finish_confirmation under the same external lock
+        after recording succeeds or fails. Other deliveries cannot borrow
+        this unrecorded authorization."""
         previous = self.deliveries.get(delivery_key)
         if previous is not None:
             return previous
@@ -154,16 +162,50 @@ class PromptGate:
         else:
             for key in unapproved:
                 del self.pending[key]
-            self.allowed |= unapproved
+            if defer_confirmation:
+                self._confirmations[delivery_key] = frozenset(unapproved)
+            else:
+                self.allowed |= unapproved
             verdict = Verdict(hold=False, confirmed=tuple(
                 sorted({labels[key] for key in unapproved})))
         self.deliveries[delivery_key] = verdict
         return verdict
 
+    def finish_confirmation(self, delivery_key: str, verdict: Verdict, *,
+                            recorded: bool) -> tuple[str, ...]:
+        """Finish only this delivery's provisional confirmation.
+
+        Caller holds the external state lock. Success makes the reserved
+        hashes reusable; failure forgets the reservation and replay verdict
+        without restoring consumed pending windows or touching other
+        deliveries. A concurrent hold therefore survives failure. Verdict
+        identity rejects stale completions after an abort, replacement or
+        clear. Once a duplicate has recorded successfully, another
+        duplicate's failure cannot revoke that authorization.
+
+        Return notice labels only for a successfully recorded, still-live
+        confirmation. No values or hashes leave the gate.
+        """
+        if self.deliveries.get(delivery_key) is not verdict:
+            return ()
+        keys = self._confirmations.pop(delivery_key, None)
+        if keys is not None:
+            if not recorded:
+                del self.deliveries[delivery_key]
+                return ()
+            self.allowed.update(keys)
+            for key in keys:
+                self.pending.pop(key, None)
+        return verdict.confirmed if recorded else ()
+
     def snapshot(self) -> tuple[dict[bytes, float], set[bytes],
                                 dict[str, Verdict]]:
-        """A copy of the gate's memory, for `restore` when recording the
-        decision it is about to make fails."""
+        """Snapshot the collections a held decision can change.
+
+        Take, decide, record and restore within one external lock hold.
+        Held decisions do not change provisional confirmations. Never use
+        this snapshot to roll back across an unlocked scan.
+        """
         return dict(self.pending), set(self.allowed), dict(self.deliveries)
 
     def restore(self, saved: tuple[dict[bytes, float], set[bytes],
@@ -180,4 +222,5 @@ class PromptGate:
         self.pending.clear()
         self.allowed.clear()
         self.deliveries.clear()
+        self._confirmations.clear()
         self._salt = b""

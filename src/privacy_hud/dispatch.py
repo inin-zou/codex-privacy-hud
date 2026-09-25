@@ -1230,7 +1230,8 @@ def dispatch(
             saved = gate.snapshot()
             verdict = gate.decide(
                 {m.finding.value: m.kind for m in matches},
-                delivery_key=delivery_key, submitted_at=submitted_at)
+                delivery_key=delivery_key, submitted_at=submitted_at,
+                defer_confirmation=True)
             if verdict.hold:
                 try:
                     accounting = _accounting_for(state, session_id, payload,
@@ -1248,7 +1249,6 @@ def dispatch(
                     raise
                 _publish_hud(state, session_id)
                 return _decision_to_output(decision, hook_event=event)
-            confirmed = verdict.confirmed
 
     # Detection runs here, outside the lock. `Engine.scan()` touches no
     # sqlite and no per-session daemon state (that is the contract its
@@ -1257,7 +1257,13 @@ def dispatch(
     # the cost of the whole request. Holding `state.lock` across it made
     # every concurrent hook call in EVERY session queue behind one forward
     # pass; see daemon.Daemon's docstring for the measurement.
-    scan = engine.scan(obs)
+    try:
+        scan = engine.scan(obs)
+    except BaseException:
+        if matches:
+            with state.lock:
+                gate.finish_confirmation(delivery_key, verdict, recorded=False)
+        raise
 
     with state.lock:
         # Re-resolve rather than reusing the Engine from step 1. A
@@ -1271,17 +1277,27 @@ def dispatch(
         # legal serialization of the two operations, not a reinterpretation
         # of the scan. `_get_or_start_engine` is idempotent, so in the
         # ordinary case this is a dict lookup.
-        engine = _get_or_start_engine(state, session_id, cwd=cwd, model=model)
-        # #54 Phase 4: normalized only now, with the key current at this
-        # moment; no key or resolved identity crossed the unlocked scan.
-        accounting = _accounting_for(state, session_id, payload,
-                                     delivery_key)
-        if accounting is not None:
-            obs = dataclasses.replace(
-                obs, accounting=accounting, cwd=cwd,
-                evaluated_path=(obs.origin.evaluated_path
-                                if obs.origin is not None else None))
-        decision = engine.observe(obs, scan=scan)
+        try:
+            engine = _get_or_start_engine(state, session_id, cwd=cwd,
+                                          model=model)
+            # #54 Phase 4: normalize with the current accounting key.
+            accounting = _accounting_for(state, session_id, payload,
+                                         delivery_key)
+            if accounting is not None:
+                obs = dataclasses.replace(
+                    obs, accounting=accounting, cwd=cwd,
+                    evaluated_path=(obs.origin.evaluated_path
+                                    if obs.origin is not None else None))
+            decision = engine.observe(obs, scan=scan)
+        except BaseException:
+            if matches:
+                gate.finish_confirmation(delivery_key, verdict, recorded=False)
+            raise
+        if matches:
+            # Commit only after recording, and only on the original gate.
+            # SessionEnd may have cleared it during the unlocked scan.
+            confirmed = gate.finish_confirmation(
+                delivery_key, verdict, recorded=engine.prompt_gate is gate)
         _publish_hud(state, session_id)
 
     if confirmed:
