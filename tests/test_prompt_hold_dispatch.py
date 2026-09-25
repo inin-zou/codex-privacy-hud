@@ -263,6 +263,204 @@ def test_session_end_discards_gate_memory(harness):
     assert gate.deliveries == {}
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("failure_site", ["accounting", "record", "after_record"])
+def test_hold_recording_failure_blocks_on_wire_and_keeps_resubmission(
+    harness, monkeypatch, legacy, failure_site
+):
+    import io
+    import json
+    import sqlite3
+    from types import SimpleNamespace
+
+    from privacy_hud.daemon import _Handler
+    from privacy_hud.runtime_client import hello_request
+    from privacy_hud.runtime_contract import PROTOCOL_VERSION
+    from runtime_helpers import activation
+
+    state, clock = harness
+    if legacy:
+        state.ledger.start_session("s", cwd="/synthetic", model="test")
+    send(state, "SessionStart")
+    gate = state.engines["s"].prompt_gate
+    selected = activation()
+    payload = {
+        "hook_event_name": "UserPromptSubmit", "session_id": "s", "prompt": A
+    }
+    expected = {
+        "decision": "block",
+        "reason": HELD + (
+            "\n\n  Ledger recording failed; this hold may be missing "
+            "from the session audit.\n"
+            "  The resubmission instructions still apply while "
+            "this session and daemon remain active."
+        ),
+    }
+
+    def wire(key):
+        request = {
+            "v": PROTOCOL_VERSION, "op": "event",
+            "build_id": selected.identity.build_id,
+            "activation_epoch": selected.epoch,
+            "payload": payload, "delivery_key": key,
+        }
+        handler = object.__new__(_Handler)
+        handler.server = SimpleNamespace(state=state, activation=selected)
+        handler.rfile = io.BytesIO(b"".join(
+            (json.dumps(frame) + "\n").encode()
+            for frame in (hello_request(selected), request)
+        ))
+        handler.wfile = io.BytesIO()
+        handler.handle()
+        frames = [
+            json.loads(line)
+            for line in handler.wfile.getvalue().splitlines()
+        ]
+        assert len(frames) == 2 and frames[0]["ok"] is True
+        assert frames[1] == {
+            "v": PROTOCOL_VERSION, "op": "event", "ok": True,
+            "output": expected,
+        }
+        assert A not in handler.wfile.getvalue().decode()
+
+    original = dispatch_mod.Engine.record_prompt_hold
+
+    def fail(*args, **kwargs):
+        if failure_site == "after_record":
+            original(*args, **kwargs)
+        # Exception text must never enter the reply or a persistent sink.
+        raise sqlite3.OperationalError(A)
+
+    before = "\n".join(state.ledger.conn.iterdump())
+    with monkeypatch.context() as patch:
+        if failure_site == "accounting":
+            patch.setattr(dispatch_mod, "_accounting_for", fail)
+        else:
+            patch.setattr(dispatch_mod.Engine, "record_prompt_hold", fail)
+        wire("a1" * 16)
+        dump = "\n".join(state.ledger.conn.iterdump())
+        if failure_site != "after_record":
+            assert dump == before
+        else:
+            assert len(state.ledger.list_events("s", "prevented")) == 1
+        assert A not in dump
+        pending = dict(gate.pending)
+        assert len(pending) == 1
+        assert set(pending.values()) == {clock.now}
+        assert gate.allowed == set()
+        assert gate._confirmations == {}
+
+        clock.now += 1
+        wire("b2" * 16)  # Early repeat must not reset the window.
+        assert gate.pending == pending
+        clock.now += 1
+        wire("a1" * 16)  # A replay cannot become a confirmation.
+        assert gate.pending == pending
+        assert gate.deliveries["a1" * 16].hold
+        assert gate.allowed == set()
+
+    # A fresh submission, after recovery, can use the original window.
+    assert dispatch_mod.dispatch(
+        state, payload, delivery_key="c3" * 16
+    ) == {"systemMessage": CONFIRMED}
+    assert len(gate.allowed) == 1
+    assert gate.pending == {}
+    assert dispatch_mod.dispatch(
+        state, payload, delivery_key="a1" * 16
+    ) == {"decision": "block", "reason": HELD}
+    assert len(gate.allowed) == 1
+    assert prompt(state, A) == {}
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("failure_site", ["scan", "observe"])
+def test_confirmation_after_unrecorded_hold_remains_provisional(
+    harness, monkeypatch, legacy, failure_site
+):
+    import sqlite3
+
+    state, clock = harness
+    if legacy:
+        state.ledger.start_session("s", cwd="/synthetic", model="test")
+    send(state, "SessionStart")
+    gate = state.engines["s"].prompt_gate
+
+    def fail(*args, **kwargs):
+        raise sqlite3.OperationalError("synthetic failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(dispatch_mod.Engine, "record_prompt_hold", fail)
+        assert prompt(state, A)["decision"] == "block"
+    clock.now += 2
+    payload = {
+        "hook_event_name": "UserPromptSubmit", "session_id": "s", "prompt": A
+    }
+    before = "\n".join(state.ledger.conn.iterdump())
+    with monkeypatch.context() as patch:
+        patch.setattr(dispatch_mod.Engine, failure_site, fail)
+        with pytest.raises(sqlite3.OperationalError):
+            dispatch_mod.dispatch(state, payload, delivery_key="d4" * 16)
+    assert "\n".join(state.ledger.conn.iterdump()) == before
+    assert gate.allowed == set()
+    assert gate.pending == {}
+    assert gate._confirmations == {}
+    assert "d4" * 16 not in gate.deliveries
+
+    assert dispatch_mod.dispatch(
+        state, payload, delivery_key="d4" * 16
+    ) == {"decision": "block", "reason": HELD}
+    clock.now += 2
+    assert prompt(state, A) == {"systemMessage": CONFIRMED}
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("end_fails", [False, True])
+def test_session_end_clears_unrecorded_hold_and_replay(
+    harness, monkeypatch, legacy, end_fails
+):
+    import sqlite3
+
+    state, clock = harness
+    if legacy:
+        state.ledger.start_session("s", cwd="/synthetic", model="test")
+    send(state, "SessionStart")
+    gate = state.engines["s"].prompt_gate
+    payload = {
+        "hook_event_name": "UserPromptSubmit", "session_id": "s", "prompt": A
+    }
+
+    def fail(*args, **kwargs):
+        raise sqlite3.OperationalError("synthetic failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(dispatch_mod.Engine, "record_prompt_hold", fail)
+        assert dispatch_mod.dispatch(
+            state, payload, delivery_key="e5" * 16
+        )["decision"] == "block"
+    assert gate.pending
+    assert gate.deliveries["e5" * 16].hold
+    with monkeypatch.context() as patch:
+        if end_fails:
+            patch.setattr(state.ledger, "end_session", fail)
+            with pytest.raises(sqlite3.OperationalError):
+                send(state, "SessionEnd")
+        else:
+            send(state, "SessionEnd")
+    assert "s" not in state.engines
+    assert gate.pending == {}
+    assert gate.allowed == set()
+    assert gate.deliveries == {}
+    assert gate._confirmations == {}
+    assert gate._salt == b""
+
+    clock.now += 2
+    assert dispatch_mod.dispatch(
+        state, payload, delivery_key="e5" * 16
+    ) == {"decision": "block", "reason": HELD}
+    assert gate.pending == {}
+    assert gate.deliveries == {}
+
+
 @pytest.mark.parametrize("failure_site", ["scan", "observe"])
 @pytest.mark.parametrize("legacy", [False, True])
 def test_failed_confirmation_requires_a_new_hold(
