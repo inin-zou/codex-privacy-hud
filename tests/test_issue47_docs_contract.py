@@ -205,26 +205,23 @@ PRD_MINIMIZATION = PRD_MINIMIZATION_HEADING + "\n\n" + (
 )
 
 PRD_LIMIT_2 = (
-    "2. **No interactive consent surface.** The proposed consent workflow "
+    "2. **No interactive tool-call consent surface.** The proposed consent workflow "
     "is not shipped. Internal token primitives exist, but no browser "
     "button, `$privacy` branch or exposed MCP tool issues consent tokens "
     "(§7.6)."
 )
 
 README_LIMIT_4 = (
-    "4. **No `ask` decision in Codex hooks, and no interactive consent "
-    "surface.** Internal token primitives exist, but no browser button, "
+    "4. **No `ask` decision in Codex hooks, and no interactive tool-call "
+    "consent surface.** Internal token primitives exist, but no browser button, "
     "`$privacy` branch or exposed MCP tool issues consent tokens or offers "
-    "a consent-driven retry. ([details](docs/known-limits.md"
+    "a consent-driven retry. Prompt resubmission is separate; see limit 22. "
+    "([details](docs/known-limits.md"
     "#4-no-ask-decision-in-codex-hooks-and-no-interactive-consent-at-all))"
 )
 
 README_ZH_LIMIT_4 = (
-    "4. **Codex hook 不支持 `ask` 决策，插件也没有交互式授权入口。** "
-    "内部已实现令牌的签发和消费逻辑，但浏览器按钮、`$privacy` 分支和已公开的 "
-    "MCP 工具都不能签发授权令牌，也不提供授权后重试的操作。"
-    "（[详情](docs/known-limits.md"
-    "#4-no-ask-decision-in-codex-hooks-and-no-interactive-consent-at-all)）"
+    '4. **Codex hook 不支持 `ask` 决策，插件也没有工具调用的交互式授权入口。** 内部已实现令牌逻辑，但浏览器按钮、`$privacy` 分支和已公开的 MCP 工具都不能签发授权令牌，也不提供基于令牌的重试。提示词重新提交确认是独立机制，见限制 22。（[详情](docs/known-limits.md#4-no-ask-decision-in-codex-hooks-and-no-interactive-consent-at-all)）\n\n16. **可选的读取防护默认关闭。** 此设置只控制能够识别的 shell 读取，不控制提示词中的凭据暂缓。（[详情](docs/known-limits.md#16-nothing-is-blocked-until-you-turn-it-on)）\n\n22. **提示词凭据暂缓的范围有限。** 只有提示词文本中受支持的凭据格式才会触发暂缓。等待至少 2 秒，并在 5 分钟内重新提交，即可确认。图片、附件、熵检测结果、私钥头部和第三级 NER 检测结果不会触发此暂缓。守护进程没有响应时，入站提示词仍会放行。（[详情](docs/known-limits.md#22-credential-prompt-holds-have-a-narrow-scope)）'
 )
 
 README_ARCH_CONTENTS = (
@@ -774,7 +771,7 @@ README_PUBLIC = (
     "event IDs. Denial messages contain no event deep link."
     "\n\n"
     "No shipped surface offers `Allow once`, `Minimize & retry`, a "
-    "minimization preview or a consent-driven retry. Internal token "
+    "minimization preview or a consent-token-driven tool retry. Internal token "
     "primitives do not make those actions available."
     "\n\n"
     "The deep detector is local `openai/privacy-filter`, not Presidio. "
@@ -804,8 +801,7 @@ README_ZH_PUBLIC = (
     "在本地浏览器中选择一行可查看该事件；"
     "终端详情命令需要分别提供会话 ID 和事件 ID。拒绝消息不包含事件详情链接。"
     "\n\n"
-    "当前没有任何已提供的入口支持 `Allow once`、`Minimize & retry`、"
-    "脱敏预览或授权后重试。内部存在令牌逻辑，并不代表用户能够执行这些操作。"
+    '没有已发布的入口提供工具调用的 `Allow once`、`Minimize & retry`、脱敏预览或基于授权令牌的重试。内部存在令牌逻辑，并不代表用户能够执行这些操作。'
     "\n\n"
     "深度检测使用本地运行的 `openai/privacy-filter`，不使用 Presidio。"
     "可以选择不安装其依赖和权重，但这样就无法检测该模型负责的数据类型。"

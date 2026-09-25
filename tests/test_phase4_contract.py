@@ -20,7 +20,7 @@ from privacy_hud import runtime_contract as contract
 from privacy_hud.matrix.loader import load_matrix
 
 REPO = Path(__file__).resolve().parents[1]
-RELEASE = "0.9.0"
+RELEASE = "0.9.1"
 
 #: The CHANGELOG below the 0.9.0 section, exactly as 0.8.2 published it.
 PRIOR_CHANGELOG_SHA256 = (
@@ -55,7 +55,7 @@ INSTALL_BLOCK = 'Privacy HUD 0.9.0 retains snapshot version 2. New sessions obse
 
 INSTALL_BLOCK_ZH = 'Privacy HUD 0.9.0 继续使用 snapshot v2。收到真正 SessionStart 的新会话采用新版记账；已有会话和开始后才接入的会话仍采用旧版记账。支持 v2 的读取器会将 v1 明确标为旧版，并支持 v2 中可为空的记账字段。仅支持 snapshot v1 的旧读取器会拒绝 v2，不显示 Privacy 状态项。Codex 版本号相同并不代表快照兼容。\n\n支持 snapshot v2 的 Codex 0.154.0、0.155.0 和 0.155.1 补丁构建已于 2026-09-22 重新发布。此前安装的同版本二进制文件可能仍包含旧读取器。更新插件不会替换该二进制文件；仅发布 Privacy HUD 0.9.0 不需要再次发布 Codex 补丁构建。\n\n原生 Privacy 状态项只显示记账快照，不验证运行时是否一致。修复之前，旧守护进程可能仍在刷新旧版读数。请使用插件内置启动器的 doctor 命令检查一致性。独立 ambient 启动器在运行时检查失败时显示错误，不显示百分比。\n\nPrivacy HUD 从所选插件包加载 Python 代码，已记录的 Python 环境只提供依赖。运行 $privacy repair 可获取在另一个终端执行的完整修复命令。显式安装可能下载依赖和模型权重；运行时检查和离线修复不会下载。\n\n修复后的当前账本位于 $PLUGIN_DATA/ledger/active.db。$PLUGIN_DATA/ledger.db 是用于隔离旧路径的目录，请勿将其替换为文件或符号链接。修复保留账本代次和已记录的值，不启用新版记账。只有所选守护进程收到尚无记录会话的真正 SessionStart 时，才会启用新版记账。\n\n账本代次 5402 需要 Privacy HUD 0.9.0 引入的已启用记账实现。运行中的客户端还必须与所选运行时构建及激活纪元一致。结构不受支持或被改动的账本会被保留并拒绝使用。本项目不提供降级迁移。\n\n运行时不匹配时，入站事件继续执行并显示未经验证的提示；对于 hook 无法验证的出站调用，插件会返回拒绝决定。这些决定不能证明宿主实际执行了干预。监测空档和丢失的内存检测状态无法恢复。尚未结束的新版会话如果丢失记账密钥，其记账会在该会话余下时间保持不可用。'
 
-COMMANDS = 'PRIVACY_HUD_BUNDLE=\'/absolute/path/to/installed/0.9.0/plugin\'\nPRIVACY_HUD_DATA=\'/absolute/path/to/plugin/data\'\n\npython3 "$PRIVACY_HUD_BUNDLE/scripts/runtime.py" \\\n  --plugin-data "$PRIVACY_HUD_DATA" doctor\n\npython3 "$PRIVACY_HUD_BUNDLE/scripts/runtime.py" \\\n  --plugin-data "$PRIVACY_HUD_DATA" repair --print-command\n\npython3 "$PRIVACY_HUD_BUNDLE/scripts/runtime.py" \\\n  --plugin-data "$PRIVACY_HUD_DATA" ambient --watch'
+COMMANDS = 'PRIVACY_HUD_BUNDLE=\'/absolute/path/to/installed/0.9.1/plugin\'\nPRIVACY_HUD_DATA=\'/absolute/path/to/plugin/data\'\n\npython3 "$PRIVACY_HUD_BUNDLE/scripts/runtime.py" \\\n  --plugin-data "$PRIVACY_HUD_DATA" doctor\n\npython3 "$PRIVACY_HUD_BUNDLE/scripts/runtime.py" \\\n  --plugin-data "$PRIVACY_HUD_DATA" repair --print-command\n\npython3 "$PRIVACY_HUD_BUNDLE/scripts/runtime.py" \\\n  --plugin-data "$PRIVACY_HUD_DATA" ambient --watch'
 
 GENERATIONS = '- 0: legacy storage.\n- 5401: prepared storage. Legacy sessions retain their accounting;\n  the private synthetic constructor exercises V2 without activation.\n- 5402: activated storage. Genuine starts for absent sessions use V2;\n  existing sessions and late attachments retain their own accounting.\n  Generation 5402 requires the activated-accounting implementation\n  introduced in Privacy HUD 0.9.0. A live client must also match the\n  selected runtime build and activation epoch.'
 
@@ -139,7 +139,7 @@ def _paragraphs(text: str) -> list[str]:
 # versions
 # --------------------------------------------------------------------- #
 
-def test_phase4_versions_are_0_9_0():
+def test_current_release_preserves_phase4_version_alignment():
     plugin = json.loads(_read(".codex-plugin/plugin.json"))
     marketplace = json.loads(_read(".agents/plugins/marketplace.json"))
     project = tomllib.loads(_read("pyproject.toml"))
@@ -282,7 +282,7 @@ def test_phase4_does_not_claim_unbuilt_consent_or_export():
     readme = _flowed(_read("README.md"))
     for sentence in (
             "No shipped surface offers `Allow once`, `Minimize & retry`, a "
-            "minimization preview or a consent-driven retry.",
+            "minimization preview or a consent-token-driven tool retry.",
             "it does not save a Markdown receipt file",
             "It is not an event or flow deep link."):
         assert _flowed(sentence) in readme, sentence
@@ -371,11 +371,14 @@ def test_phase4_commands_use_selected_bundle_launcher():
 
 def test_phase4_changelog_preserves_prior_releases():
     text = _read("CHANGELOG.md")
-    head = "# Changelog\n\n" + CHANGELOG_090 + "\n\n"
-    assert text.startswith(head)
-    rest = text[len(head):]
+    start = text.index("## 0.9.0\n")
+    preserved = text[start:]
+    head = CHANGELOG_090 + "\n\n"
+    assert preserved.startswith(head)
+    rest = preserved[len(head):]
     assert rest.startswith("## 0.8.2\n")
     assert hashlib.sha256(rest.encode()).hexdigest() == PRIOR_CHANGELOG_SHA256
-    section = CHANGELOG_090
-    assert not re.search(r"\b(close|closes|closed|fix|fixes|fixed|resolve|"
-                         r"resolves|resolved) #\d+", section, re.I)
+    assert not re.search(
+        r"\b(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved) #\d+",
+        CHANGELOG_090, re.I,
+    )
