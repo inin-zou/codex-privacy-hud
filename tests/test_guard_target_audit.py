@@ -453,21 +453,114 @@ def test_target_metadata_vocabulary_is_closed():
             GuardTarget(**{**valid, **changes})
 
 
-def test_cross_session_correlation_link_is_refused(guarded):
+def test_cross_session_correlation_link_is_refused(guarded, monkeypatch):
     deny(guarded, "/r/a.pem", "one")
     first = public_rows(guarded)[0]
+    assert first.guard_target is not None
     start(guarded, "s2")
-    deny(guarded, "/r/b.pem", "two", sid="s2")
-    second = public_rows(guarded, "s2")[0]
+
+    suppressed = []
+
+    def suppress_target(conn, observation, result):
+        assert observation.session_id == "s2"
+        assert observation.guard_target is not None
+        assert not result.duplicate_delivery
+        suppressed.append(result.observation_id)
+
+    # Preserve the real keyed denial, observation, subject and event.
+    # An outer ledger transaction also defers Engine's post-commit
+    # correlation publication, which requires a recorded target row.
+    with monkeypatch.context() as patch:
+        patch.setattr(ledger_mod, "record_target", suppress_target)
+        with guarded.ledger._write_transaction():
+            deny(guarded, "/r/b.pem", "two", sid="s2")
+
+    assert len(suppressed) == 1
+    rows = public_rows(guarded, "s2")
+    assert len(rows) == 1
+    second = rows[0]
+    assert second.guard_target is None
+    assert 0 < first.id < second.id
+
     conn = guarded.ledger.conn
-    # An attempted extra row cannot use another session's correlation root.
-    with pytest.raises(sqlite3.IntegrityError):
-        conn.execute(
-            "INSERT INTO guard_targets"
-            "(event_id,session_id,target_id,rule_id,basis,same_as_event_id)"
-            " VALUES(?,?,?,?,?,?)",
-            (
-                -1, "s2", first.guard_target.target_id,
-                second.rule_id, "evaluated-path-v1", first.id,
-            ),
-        )
+    assert not conn.in_transaction
+    assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT session_id,observation_id FROM events WHERE id=?",
+        (second.id,),
+    ).fetchone()[:] == ("s2", suppressed[0])
+    assert conn.execute(
+        "SELECT 1 FROM guard_targets WHERE event_id=?", (second.id,),
+    ).fetchone() is None
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    ledger_schema.validate_guard_target_schema(conn)
+
+    statement = (
+        "INSERT INTO guard_targets"
+        "(event_id,session_id,target_id,rule_id,basis,same_as_event_id)"
+        " VALUES(?,?,?,?,?,?)"
+    )
+    values = (
+        second.id, "s2", first.guard_target.target_id,
+        second.rule_id, "evaluated-path-v1", first.id,
+    )
+    # Capture the synthetic database before either attempted insert.
+    dump = "\n".join(conn.iterdump())
+
+    def assert_cross_session_refused(connection):
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match=r"^FOREIGN KEY constraint failed$",
+        ):
+            connection.execute(statement, values)
+
+    assert_cross_session_refused(conn)
+    assert conn.execute(
+        "SELECT 1 FROM guard_targets WHERE event_id=?", (second.id,),
+    ).fetchone() is None
+
+    # Change ONLY the link. This proves the event, session, rule, target,
+    # basis, primary key and event-scope trigger all permit the insert.
+    positive = (*values[:-1], None)
+    conn.execute(statement, positive)
+    assert conn.execute(
+        "SELECT event_id,session_id,target_id,rule_id,basis,same_as_event_id"
+        " FROM guard_targets WHERE event_id=?",
+        (second.id,),
+    ).fetchone()[:] == positive
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    # Mutation control: remove ONLY the composite link FK from a
+    # disposable in-memory copy. Production schema/code stays untouched.
+    link_fk = (
+        ",\n    FOREIGN KEY (session_id, same_as_event_id, target_id)"
+        "\n        REFERENCES guard_targets(session_id, event_id, target_id)"
+    )
+    assert dump.count(link_fk) == 1
+    scratch = sqlite3.connect(":memory:", isolation_level=None)
+    try:
+        # Load the dump before enabling FKs: dump table order need not
+        # put referenced tables first. Enforce FKs for every probe below.
+        scratch.executescript(dump.replace(link_fk, "", 1))
+        scratch.execute("PRAGMA foreign_keys=ON")
+        assert scratch.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert scratch.execute("PRAGMA foreign_key_check").fetchall() == []
+
+        with pytest.raises(
+            ledger_schema.UnsupportedAccounting,
+            match=r"^invalid optional guard-target schema$",
+        ):
+            ledger_schema.validate_guard_target_schema(scratch)
+
+        # RED proof: the exact refusal assertion fails on the mutant.
+        with pytest.raises(pytest.fail.Exception, match="DID NOT RAISE"):
+            assert_cross_session_refused(scratch)
+
+        assert scratch.execute(
+            "SELECT event_id,session_id,target_id,rule_id,basis,same_as_event_id"
+            " FROM guard_targets WHERE event_id=?",
+            (second.id,),
+        ).fetchone() == values
+        assert scratch.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        scratch.close()
