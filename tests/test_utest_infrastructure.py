@@ -306,6 +306,26 @@ def test_staged_configuration_lints_snapshot(staged_repo):
     assert json.loads(case.log.read_text())[-1] == "."
 
 
+@pytest.mark.parametrize("operation", ["delete", "rename"])
+def test_removed_configuration_lints_snapshot(staged_repo, operation):
+    case = staged_repo
+    config = case.root / "ruff.toml"
+    config.write_text('target-version = "py311"\n')
+    case.git("add", "ruff.toml")
+    case.git(
+        "-c", "user.name=utest", "-c", "user.email=utest@example.invalid",
+        "-c", "commit.gpgsign=false", "commit", "-q", "-m", "configuration",
+    )
+    if operation == "delete":
+        case.git("rm", "ruff.toml")
+    else:
+        case.git("mv", "ruff.toml", "archived-config.toml")
+
+    assert case.check().returncode == 0
+    assert case.log.is_file(), "configuration removal must invoke Ruff"
+    assert json.loads(case.log.read_text())[-1] == "."
+
+
 def test_wrong_or_missing_ruff_fails(staged_repo):
     case = staged_repo
     case.env["UTEST_RUFF_VERSION"] = "ruff 0.14.11"

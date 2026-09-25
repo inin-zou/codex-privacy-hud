@@ -36,9 +36,16 @@ def main():
         ).split(b"\0")
         if name
     ]
+    config_paths = [
+        os.fsdecode(name)
+        for name in git_output(
+            root, "diff", "--cached", "--name-only", "--no-renames", "-z",
+        ).split(b"\0")
+        if name
+    ]
     config_changed = any(
         Path(name).name in {"pyproject.toml", "ruff.toml", ".ruff.toml"}
-        for name in changed
+        for name in config_paths
     )
     targets = ["."] if config_changed else [
         name for name in changed
