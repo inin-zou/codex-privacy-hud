@@ -6,12 +6,14 @@ imports nothing from the package.
 
 Three generations, recorded in `PRAGMA user_version`:
 
-- 0: the legacy schema. `events` is the legacy table.
-- 5401: prepared. The legacy events table is preserved as
-  `events_legacy_v1`. Production sessions remain legacy-accounted;
-  isolated synthetic tests and the private-copy rehearsal may exercise
-  version-2 accounting without activating production session creation.
-- 5402: activated (#54 Phase 4). A daemon of this version refuses it.
+- 0: legacy storage.
+- 5401: prepared storage. Legacy sessions retain their accounting;
+  the private synthetic constructor exercises V2 without activation.
+- 5402: activated storage. Genuine starts for absent sessions use V2;
+  existing sessions and late attachments retain their own accounting.
+  Generation 5402 requires the activated-accounting implementation
+  introduced in Privacy HUD 0.9.0. A live client must also match the
+  selected runtime build and activation epoch.
 
 The rebuild is the one structural change CLAUDE.md §4 permits. It runs
 only inside a write transaction the daemon owns at a genuine new-session

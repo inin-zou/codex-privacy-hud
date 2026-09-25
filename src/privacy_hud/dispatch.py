@@ -102,8 +102,10 @@ No raw sensitive value is ever logged or printed anywhere in this module.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -111,12 +113,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import codex, runtime_storage
+from . import codex, ledger_schema, runtime_storage
+from .accounting import ObservationRecord, ScoringProfile
 from .detect.model import ModelDetector
 from .detect.paths import PathDetector
 from .detect.secrets import SecretDetector
 from .detect.shell import extract_destinations
-from .engine import Engine, Observation
+from .engine import Engine, Observation, ScanResult
+from .hook_evidence import (
+    DELIVERY_KEY_ABSENT,
+    CurrentHookAdapter,
+    HookEvidenceAdapter,
+    normalize_delivery_key,
+)
 from .hud_snapshot import HudPublisher
 from .ledger import Ledger, open_connection
 from .mask import new_salt
@@ -176,6 +185,16 @@ class State:
     salts: dict[str, bytes] = field(default_factory=dict)
     engines: dict[str, Engine] = field(default_factory=dict)
     started_at: dict[str, float] = field(default_factory=dict)
+    # #54 Phase 4: this daemon's version-2 accounting keys, one per session
+    # whose activation this process committed. The daemon is the only
+    # production owner of these keys; none is ever persisted, logged or
+    # recreated. Discarded at SessionEnd and at shutdown.
+    accounting_keys: dict[str, bytes] = field(default_factory=dict)
+    # How a delivered hook is normalized into accounting evidence. The
+    # production adapter claims nothing terminal; a test may install
+    # another as a Python object, and nothing else can select one.
+    hook_adapter: HookEvidenceAdapter = field(
+        default_factory=CurrentHookAdapter)
 
     # -- session reference count (daemon lifetime) --------------------- #
     # session_id -> `time.monotonic()` of the last hook event seen for it.
@@ -226,19 +245,29 @@ def new_state(data_dir, *, writer_lease: WriterLease) -> State:
     # both exist: `prepare_storage` retires one as it publishes the other.
     path = runtime_storage.resolved_ledger_path(data_dir)
     ledger = Ledger(path, matrix, writer_lease=writer_lease)
-    _allow_cross_thread_access(ledger, path)
-    _record_unobserved_hooks(ledger, data_dir)
-    detectors = [PathDetector(), SecretDetector(), ModelDetector()]
-    hud = HudPublisher(data_dir)
-    settings = Settings(data_dir)
+    try:
+        _allow_cross_thread_access(ledger, path)
+        _record_unobserved_hooks(ledger, data_dir)
+        detectors = [PathDetector(), SecretDetector(), ModelDetector()]
+        hud = HudPublisher(data_dir)
+        settings = Settings(data_dir)
+        state = State(data_dir=data_dir, matrix=matrix, ledger=ledger,
+                      detectors=detectors, hud=hud, settings=settings)
+        # #54 Phase 4: before this daemon publishes anything or accepts a
+        # hook. A failure here fails startup: open version-2 sessions must
+        # never be served as available by a process that has none of their
+        # keys.
+        _invalidate_missing_accounting_keys(state)
+    except BaseException:
+        ledger.conn.close()
+        raise
     try:
         hud.sweep()
         hud.mark_daemon(unattributed_gaps=bool(ledger.unattributed_gaps()))
     except Exception as exc:
         # I6: housekeeping for a display surface never blocks the daemon.
         _log.debug("hud startup housekeeping failed: %s", type(exc).__name__)
-    return State(data_dir=data_dir, matrix=matrix, ledger=ledger,
-                 detectors=detectors, hud=hud, settings=settings)
+    return state
 
 
 def _record_unobserved_hooks(ledger: Ledger, data_dir: Path) -> None:
@@ -419,7 +448,7 @@ def _get_or_start_engine(state: State, session_id: str, *, cwd: str = "",
     here (after a `SessionEnd`, say).
     """
     session = state.ledger.conn.execute(
-        "SELECT ended_at FROM sessions WHERE session_id=?",
+        "SELECT * FROM sessions WHERE session_id=?",
         (session_id,)).fetchone()
     if session is not None and session["ended_at"] is not None:
         # Enforcement can run after end, but this engine and its randomness
@@ -431,6 +460,14 @@ def _get_or_start_engine(state: State, session_id: str, *, cwd: str = "",
 
     engine = state.engines.get(session_id)
     if engine is not None:
+        return engine
+    if _is_version_2(session):
+        # #54 Phase 4: a version-2 session first met here after a restart.
+        # Its key is gone; its accounting is marked unavailable before
+        # anything is recorded, and no key is generated.
+        engine = _attach_keyless_v2(state, session_id, session, cwd=cwd,
+                                    model=model, observed_start=False)
+        _publish_hud(state, session_id)
         return engine
     salt = state.salts.setdefault(session_id, new_salt())
     state.ledger.start_session(session_id, cwd=cwd, model=model,
@@ -715,15 +752,151 @@ def _publish_hud(state: State, session_id: str) -> None:
         _log.debug("hud publish failed: %s", type(exc).__name__)
 
 
-def _handle_session_start(state: State, session_id: str, payload: dict) -> dict:
+def _invalidate_missing_accounting_keys(state: State) -> None:
+    """Mark every open, available version-2 session unavailable (#54
+    Phase 4). Runs during fresh daemon-state initialization, before any
+    snapshot is published or hook accepted: a new process holds none of
+    those sessions' keys, and a key is never recreated, so their accounting
+    stays unavailable for the rest of each session. Ended sessions keep
+    their final status.
+
+    One owned write transaction; a failure propagates and fails startup.
+    Afterwards each such session's inherited snapshot is retired, so an old
+    available reading is neither served as current nor heartbeated."""
+    ledger = state.ledger
+    with state.lock:
+        with ledger._write_transaction():
+            # Only activated storage can hold a session a daemon activated
+            # and keyed: activation always commits generation 5402. The
+            # version-2 sessions of a prepared (5401) ledger are the private
+            # synthetic constructor's, which no daemon ever keyed.
+            if ledger_schema.validate_schema(ledger.conn) != \
+                    ledger_schema.ACTIVATED_VERSION:
+                return
+            open_v2 = [row[0] for row in ledger.conn.execute(
+                "SELECT session_id FROM sessions WHERE accounting_version=2"
+                " AND ended_at IS NULL ORDER BY session_id")]
+            for session_id in open_v2:
+                if session_id not in state.accounting_keys:
+                    ledger.mark_accounting_unavailable(session_id)
+        for session_id in open_v2:
+            if session_id in state.accounting_keys:
+                continue
+            try:
+                state.hud.retire(session_id)
+            except Exception as exc:
+                # It is not in this publisher's heartbeat set, so an
+                # unretirable file goes stale rather than staying current.
+                _log.debug("hud retire failed: %s", type(exc).__name__)
+
+
+def _discard_session_identity(state: State, session_id: str) -> None:
+    """Drop everything that identifies `session_id` in this process: clear
+    its registered engine first, then remove the engine, its accounting
+    key, its enforcement salt and its start time (#54 Phase 4). Requires
+    `State.lock`. Writes nothing to the ledger, and is idempotent.
+
+    Discards references; it does not promise that Python memory is
+    wiped."""
+    if not state.lock.locked():
+        raise RuntimeError("session identity is discarded under State.lock")
+    engine = state.engines.get(session_id)
+    if engine is not None:
+        engine.clear_session_identity()
+    state.engines.pop(session_id, None)
+    state.accounting_keys.pop(session_id, None)
+    state.salts.pop(session_id, None)
+    state.started_at.pop(session_id, None)
+
+
+def _is_version_2(row) -> bool:
+    return (row is not None and "accounting_version" in row.keys()
+            and row["accounting_version"] == 2)
+
+
+def _attach_keyless_v2(state: State, session_id: str, row, *, cwd: str,
+                       model: str, observed_start: bool) -> Engine:
+    """Register an enforcement engine for an open version-2 session this
+    process holds no key for. Caller holds `state.lock`.
+
+    Its accounting is marked unavailable first, before anything else is
+    recorded, and no key is generated: a lost key is never replaced. The
+    engine enforces with its own salt and carries no accounting key. This
+    observer's coverage is recorded as for any other session."""
+    ledger = state.ledger
+    if row["accounting_status"] == "available" \
+            and session_id not in state.accounting_keys:
+        ledger.mark_accounting_unavailable(session_id)
+    ledger.start_session(session_id, cwd=cwd, model=model,
+                         observed_start=observed_start)
+    salt = state.salts.setdefault(session_id, new_salt())
+    state.started_at.setdefault(session_id, time.time())
+    engine = Engine(ledger=ledger, matrix=state.matrix, salt=salt,
+                    detectors=state.detectors, settings=state.settings)
+    state.engines[session_id] = engine
+    return engine
+
+
+def _activate_session(state: State, session_id: str, payload: dict, *,
+                      delivery_key: str) -> None:
+    """Activate version-2 accounting for the genuine start of an absent
+    session. Caller holds `state.lock` and has confirmed the session is
+    absent.
+
+    The key and salt are candidates until `start_accounted_session`
+    returns True, which it does only after its own outer COMMIT; only then
+    are they installed. A failure before that installs nothing. If
+    installation itself fails after the COMMIT, the candidates are
+    discarded and the session's accounting is marked unavailable before
+    anything else can be recorded for it."""
+    ledger = state.ledger
+    key = os.urandom(32)
+    salt = new_salt()
+    evidence = state.hook_adapter.normalize(
+        payload=payload, delivery_key=delivery_key, accounting_key=key)
+    start = _lifecycle_record(session_id, evidence)
+    if not ledger.start_accounted_session(
+            session_id, cwd=payload.get("cwd", "") or "",
+            model=payload.get("model", "") or "",
+            profile=ScoringProfile.from_matrix(state.matrix),
+            start_observation=start):
+        return
+    try:
+        engine = Engine(ledger=ledger, matrix=state.matrix, salt=salt,
+                        detectors=state.detectors, settings=state.settings,
+                        accounting_key=key)
+        state.accounting_keys[session_id] = key
+        state.salts[session_id] = salt
+        state.engines[session_id] = engine
+        state.started_at[session_id] = time.time()
+    except BaseException:
+        _discard_session_identity(state, session_id)
+        ledger.mark_accounting_unavailable(session_id)
+        raise
+
+
+def _handle_session_start(
+    state: State,
+    session_id: str,
+    payload: dict,
+    *,
+    delivery_key: str,
+) -> dict:
     """A genuine `SessionStart`. For a session the ledger does not hold yet,
     this is the one place #54's structural rebuild may run: it and the new
     session commit in one write transaction, or neither does. A replayed
-    start for a known session changes nothing structural."""
+    start for a known session changes nothing structural.
+
+    An absent session is activated under version-2 accounting (#54 Phase
+    4) and its key installed after COMMIT; an existing
+    version-2 session without a key here stays unavailable. An empty or
+    non-string session ID is a probe and writes nothing."""
+    if not isinstance(session_id, str) or not session_id:
+        return _allow()
     with state.lock:
         ledger = state.ledger
         session = ledger.conn.execute(
-            "SELECT ended_at FROM sessions WHERE session_id=?",
+            "SELECT * FROM sessions WHERE session_id=?",
             (session_id,)).fetchone()
         if session is not None and session["ended_at"] is not None:
             return _allow()
@@ -731,19 +904,28 @@ def _handle_session_start(state: State, session_id: str, payload: dict) -> dict:
             # A replay must not replace an existing live matching namespace.
             return _allow()
 
-        salt = new_salt()
-        with ledger._write_transaction():
-            if not ledger.session_exists(session_id):
-                ledger.prepare_session_boundary(session_id)
-            ledger.start_session(session_id,
-                                 cwd=payload.get("cwd", "") or "",
-                                 model=payload.get("model", "") or "")
-        engine = Engine(
-            ledger=state.ledger, matrix=state.matrix, salt=salt,
-            detectors=state.detectors, settings=state.settings)
-        state.salts[session_id] = salt
-        state.engines[session_id] = engine
-        state.started_at[session_id] = time.time()
+        cwd = payload.get("cwd", "") or ""
+        model = payload.get("model", "") or ""
+        if session is None:
+            _activate_session(state, session_id, payload,
+                              delivery_key=delivery_key)
+        elif _is_version_2(session):
+            # A version-2 session this process holds no key for: a restart
+            # lost it. Never replaced.
+            _attach_keyless_v2(state, session_id, session, cwd=cwd,
+                               model=model, observed_start=True)
+        else:
+            salt = new_salt()
+            with ledger._write_transaction():
+                if not ledger.session_exists(session_id):
+                    ledger.prepare_session_boundary(session_id)
+                ledger.start_session(session_id, cwd=cwd, model=model)
+            engine = Engine(
+                ledger=state.ledger, matrix=state.matrix, salt=salt,
+                detectors=state.detectors, settings=state.settings)
+            state.salts[session_id] = salt
+            state.engines[session_id] = engine
+            state.started_at[session_id] = time.time()
         _publish_hud(state, session_id)
     # Outside the lock: `live_lock` and `lock` are never nested (State's
     # `live_lock` comment states the ordering rule this keeps true).
@@ -751,7 +933,13 @@ def _handle_session_start(state: State, session_id: str, payload: dict) -> dict:
     return _allow()
 
 
-def _handle_session_end(state: State, session_id: str, payload: dict) -> dict:
+def _handle_session_end(
+    state: State,
+    session_id: str,
+    payload: dict,
+    *,
+    delivery_key: str,
+) -> dict:
     """Retire a session and return its receipt as hook output.
 
     `summary` is a `ledger.py` summary variant, and the raw legacy rows are
@@ -766,28 +954,60 @@ def _handle_session_end(state: State, session_id: str, payload: dict) -> dict:
     Reading afterwards would narrow the window at the exact moment the receipt
     is being written, so a gap that occurred during the session's final seconds
     could drop out of the very artifact meant to account for it.
-    """
-    with state.lock:
-        summary = state.ledger.summary(session_id)
-        coverage = state.ledger.coverage(session_id)
-        rows = [r.to_exposure()
-                for r in state.ledger.list_events(session_id, "exposed")]
-        started = state.started_at.pop(session_id, None)
-        state.ledger.end_session(session_id)
-        # Discard the session's salt and Engine now — SessionEnd is the one
-        # place a salt is destroyed, per the session/salt lifecycle
-        # contract above. A hook event for this session_id that arrives
-        # after this point is enforced with a temporary engine whose salt
-        # never becomes session state (`_get_or_start_engine`), and its
-        # findings are recorded with a NULL hash and no charge.
-        state.salts.pop(session_id, None)
-        state.engines.pop(session_id, None)
-        try:
-            state.hud.retire(session_id)
-        except Exception as exc:
-            _log.debug("hud retire failed: %s", type(exc).__name__)
 
+    For a version-2 session (#54 Phase 4) the SessionEnd lifecycle
+    observation, the pre-end coverage reading and `end_session` (with its
+    identity-hash erasure) are one outer write transaction: they commit
+    together or roll back together. The receipt is rendered only from the
+    committed summary. Identity destruction and snapshot retirement are in
+    a `finally` that covers every step, reads included, and liveness is
+    released in an outer `finally`, outside the lock. A failure propagates
+    to the daemon's exception boundary; no receipt is fabricated.
+    """
     try:
+        with state.lock:
+            try:
+                ledger = state.ledger
+                session = ledger.conn.execute(
+                    "SELECT * FROM sessions WHERE session_id=?",
+                    (session_id,)).fetchone()
+                if _is_version_2(session):
+                    evidence = state.hook_adapter.normalize(
+                        payload=payload, delivery_key=delivery_key,
+                        accounting_key=_usable_key(state, session_id,
+                                                   session))
+                    with ledger._atomic_accounting_write():
+                        ledger.record_observation(
+                            _lifecycle_record(session_id, evidence), ())
+                        coverage = ledger.coverage(session_id)
+                        ledger.end_session(session_id)
+                    summary = ledger.summary(session_id)
+                    rows = [r.to_exposure() for r in
+                            ledger.list_events(session_id, "exposed")]
+                else:
+                    summary = ledger.summary(session_id)
+                    coverage = ledger.coverage(session_id)
+                    rows = [r.to_exposure() for r in
+                            ledger.list_events(session_id, "exposed")]
+                    ledger.end_session(session_id)
+                started = state.started_at.get(session_id)
+            finally:
+                # Discard the session's salt, accounting key and Engine now
+                # -- SessionEnd is the one place a session's identity is
+                # destroyed, per the session/salt lifecycle contract above,
+                # and it is destroyed whether or not the end persisted. A
+                # hook event for this session_id that arrives after this
+                # point is enforced with a temporary engine whose salt never
+                # becomes session state (`_get_or_start_engine`), and its
+                # findings are recorded with a NULL hash and no charge. A
+                # version-2 session whose end failed is marked unavailable
+                # on its next touch.
+                _discard_session_identity(state, session_id)
+                try:
+                    state.hud.retire(session_id)
+                except Exception as exc:
+                    _log.debug("hud retire failed: %s", type(exc).__name__)
+
         minutes = None
         if started is not None:
             minutes = max(0, int((time.time() - started) // 60))
@@ -809,7 +1029,69 @@ def _handle_session_end(state: State, session_id: str, payload: dict) -> dict:
         release_session(state, session_id)
 
 
-def dispatch(state: State, payload: dict) -> dict:
+def _usable_key(state: State, session_id: str, session) -> bytes | None:
+    """This process's accounting key for `session_id`, or None when the
+    session is ended, its accounting is unavailable, or no key is held.
+    Read under `State.lock`, at the moment it is used."""
+    if (session is None or session["ended_at"] is not None
+            or session["accounting_status"] != "available"):
+        return None
+    return state.accounting_keys.get(session_id)
+
+
+def _lifecycle_record(session_id: str, evidence) -> ObservationRecord:
+    return ObservationRecord(
+        session_id=session_id, delivery_key=evidence.delivery_key,
+        action_id=evidence.action_id, turn_id=evidence.turn_id,
+        ts=int(time.time()), hook_event=evidence.hook_event,
+        phase=evidence.phase, action_kind=evidence.action_kind,
+        boundary=evidence.boundary, decision="none",
+        evidence=evidence.evidence,
+        resolution_scope=evidence.resolution_scope,
+        potential_crossing=evidence.potential_crossing, scan_gap=None)
+
+
+def _accounting_for(state: State, session_id: str, payload: dict,
+                    delivery_key: str):
+    """The delivery's version-2 evidence, normalized now with the session's
+    current key, or None for a session that is not version-2 accounted.
+    Caller holds `State.lock`; nothing here is carried across scanning."""
+    session = state.ledger.conn.execute(
+        "SELECT * FROM sessions WHERE session_id=?",
+        (session_id,)).fetchone()
+    if not _is_version_2(session):
+        return None
+    return state.hook_adapter.normalize(
+        payload=payload, delivery_key=delivery_key,
+        accounting_key=_usable_key(state, session_id, session))
+
+
+def _metadata_observation(event: str, session_id: str,
+                          payload: dict) -> Observation:
+    """A registered hook with no legacy observation mapping -- a local
+    command, a non-shell tool, a lifecycle or subagent-stop event -- as a
+    zero-text observation, so a version-2 session still records that it
+    was delivered. Nothing is scanned for it."""
+    tool_name = payload.get("tool_name")
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        tool_input = {}
+    destination = "subagent" if event == "SubagentStop" else "local"
+    direction = "local" if event == "PreToolUse" else "lifecycle"
+    return Observation(
+        session_id=session_id, turn_id=payload.get("turn_id"),
+        hook_event=event, direction=direction, source="lifecycle",
+        destination=destination, text="",
+        tool_name=tool_name if isinstance(tool_name, str) else None,
+        tool_input=tool_input)
+
+
+def dispatch(
+    state: State,
+    payload: dict,
+    *,
+    delivery_key: str | None = None,
+) -> dict:
     """Route one hook payload to the right handler and return hook-output
     JSON. Never raises `UnknownKey`/`KeyError` silently — an observation
     whose destination the matrix cannot classify propagates, which is a
@@ -834,14 +1116,30 @@ def dispatch(state: State, payload: dict) -> dict:
          no event row.
       3. locked, milliseconds: `Engine.observe(obs, scan=...)`. Every ledger
          read and write for this observation, in one critical section.
+
+    `delivery_key` is the daemon-normalized protocol-2 delivery key (#54
+    Phase 4); the daemon always supplies one. It identifies this delivery
+    to version-2 accounting and is never read from the payload.
     """
     event = payload.get("hook_event_name")
-    session_id = payload.get("session_id") or ""
+    session_id = payload.get("session_id")
 
+    if not isinstance(session_id, str) or not session_id:
+        # A probe, not a session (the doctor's round trip; #54 Phase 4): no
+        # session, observation, coverage or liveness is written for it. An
+        # outbound call that names no session cannot be attributed or
+        # verified, so it keeps the fail-closed answer (I6).
+        if event in codex.EGRESS_EVENTS:
+            return _deny(None)
+        return _allow()
+    if delivery_key is None:
+        delivery_key = normalize_delivery_key(DELIVERY_KEY_ABSENT)
     if event == "SessionStart":
-        return _handle_session_start(state, session_id, payload)
+        return _handle_session_start(state, session_id, payload,
+                                     delivery_key=delivery_key)
     if event == "SessionEnd":
-        return _handle_session_end(state, session_id, payload)
+        return _handle_session_end(state, session_id, payload,
+                                   delivery_key=delivery_key)
 
     # Everything else is evidence that `session_id` is still alive, and is
     # counted as such BEFORE the `_KNOWN_EVENTS` filter and before
@@ -855,15 +1153,39 @@ def dispatch(state: State, payload: dict) -> dict:
     # a session, and must not keep the daemon alive.
     note_session_live(state, session_id)
 
-    if event not in _KNOWN_EVENTS:
-        return _allow()
-
-    obs = _build_observation(event, session_id, payload)
-    if obs is None:
-        return _allow()
+    obs = (_build_observation(event, session_id, payload)
+           if event in _KNOWN_EVENTS else None)
 
     cwd = payload.get("cwd", "") or ""
     model = payload.get("model", "") or ""
+    if not isinstance(cwd, str):
+        cwd = ""
+
+    if obs is None:
+        # Nothing to score -- but a version-2 session still records that a
+        # registered hook was delivered (#54 Phase 4). Anything else keeps
+        # the empty allow, and an unknown session is not created for it.
+        if event not in codex.KNOWN_EVENTS:
+            return _allow()
+        with state.lock:
+            session = state.ledger.conn.execute(
+                "SELECT * FROM sessions WHERE session_id=?",
+                (session_id,)).fetchone()
+            if not _is_version_2(session):
+                return _allow()
+            engine = _get_or_start_engine(state, session_id, cwd=cwd,
+                                          model=model)
+            accounting = _accounting_for(state, session_id, payload,
+                                         delivery_key)
+            meta = _metadata_observation(event, session_id, payload)
+            dest = meta.destination
+            decision = engine.observe(
+                dataclasses.replace(meta, accounting=accounting, cwd=cwd),
+                scan=ScanResult(dest_kind=dest,
+                                boundary=state.matrix.boundary_for(dest),
+                                findings=(), degraded=False))
+            _publish_hud(state, session_id)
+        return _decision_to_output(decision)
 
     with state.lock:
         engine = _get_or_start_engine(state, session_id, cwd=cwd, model=model)
@@ -890,6 +1212,15 @@ def dispatch(state: State, payload: dict) -> dict:
         # of the scan. `_get_or_start_engine` is idempotent, so in the
         # ordinary case this is a dict lookup.
         engine = _get_or_start_engine(state, session_id, cwd=cwd, model=model)
+        # #54 Phase 4: normalized only now, with the key current at this
+        # moment; no key or resolved identity crossed the unlocked scan.
+        accounting = _accounting_for(state, session_id, payload,
+                                     delivery_key)
+        if accounting is not None:
+            obs = dataclasses.replace(
+                obs, accounting=accounting, cwd=cwd,
+                evaluated_path=(obs.origin.evaluated_path
+                                if obs.origin is not None else None))
         decision = engine.observe(obs, scan=scan)
         _publish_hud(state, session_id)
 

@@ -644,3 +644,58 @@ def test_a_slow_daemon_is_not_mistaken_for_a_dead_one(tmp_path):
     assert code == 0
     assert "unverified" in out          # it did fall through, correctly
     assert not marker.exists(), "a busy daemon was replaced by a rival"
+
+
+def test_handler_generates_one_delivery_key_per_invocation(tmp_path):
+    """#54 Phase 4: each hook-client invocation generates one delivery key,
+    once, and sends it in the event frame only. Separate invocations differ."""
+    import re
+    import socketserver
+    import tempfile
+    import threading
+
+    build_id = json.loads((REPO / "runtime-build.json").read_text())["build_id"]
+    epoch = "0123456789abcdef0123456789abcdef"
+    frames: list[tuple[dict, dict]] = []
+
+    class _Handler(socketserver.StreamRequestHandler):
+        def handle(self):
+            hello = json.loads(self.rfile.readline())
+            self.wfile.write((json.dumps(
+                {"v": 2, "op": "hello", "ok": True, "release": "0.9.0",
+                 "build_id": build_id, "activation_epoch": epoch,
+                 "storage_generation": 1, "schema_version": 0,
+                 "ready": True}) + "\n").encode())
+            self.wfile.flush()
+            event = json.loads(self.rfile.readline())
+            frames.append((hello, event))
+            self.wfile.write((json.dumps(
+                {"v": 2, "op": "event", "ok": True, "output": {}}) + "\n")
+                .encode())
+
+    short = Path(tempfile.mkdtemp(prefix="phh"))
+    script, marker = _fake_interpreter(tmp_path)
+    _write_receipt(short, script)
+    server = socketserver.ThreadingUnixStreamServer(str(short / "daemon.sock"),
+                                                    _Handler)
+    thread = threading.Thread(target=server.serve_forever,
+                              kwargs={"poll_interval": 0.02}, daemon=True)
+    thread.start()
+    try:
+        for payload in (INGRESS, INGRESS, EGRESS):
+            code, _out = run(payload, {"PLUGIN_DATA": str(short)})
+            assert code == 0
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+        _kill_marked(marker)
+
+    assert len(frames) == 3
+    keys = []
+    for hello, event in frames:
+        assert "delivery_key" not in hello
+        key = event.get("delivery_key")
+        assert isinstance(key, str) and re.fullmatch(r"[0-9a-f]{32}", key)
+        keys.append(key)
+    assert len(set(keys)) == 3

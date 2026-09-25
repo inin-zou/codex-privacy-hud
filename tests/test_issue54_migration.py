@@ -126,7 +126,10 @@ def test_migration_preserves_every_legacy_cell(legacy):
 
     raw = _raw(legacy)
     try:
-        assert _version(raw) == 5401
+        # #54 Phase 4: the genuine start upgrades generation 0 directly to
+        # activated storage and is itself version-2 accounted; the Phase 2
+        # rebuild inside that upgrade still preserves every legacy cell.
+        assert _version(raw) == 5402
         assert NEW_TABLES <= _tables(raw)
         assert _cells(raw, "events_legacy_v1") == before_events
         sessions = _cells(raw, "sessions")
@@ -134,9 +137,9 @@ def test_migration_preserves_every_legacy_cell(legacy):
         assert [s[:width] for s in sessions[:len(before_sessions)]] == \
             before_sessions
         new = raw.execute(
-            "SELECT accounting_version, accounting_status, profile_id"
+            "SELECT accounting_version, accounting_status"
             " FROM sessions WHERE session_id='new1'").fetchone()
-        assert new == (1, "legacy", None)
+        assert new == (2, "available")
     finally:
         raw.close()
 
@@ -491,14 +494,30 @@ def test_malformed_or_future_schema_is_rejected(legacy, tmp_path):
     raw.close()
 
 
-def test_phase2_rejects_activated_writer_downgrade(legacy):
+def test_phase2_boundary_is_not_redone_on_an_activated_ledger(legacy):
+    """#54 Phase 4 replaces the Phase 2 refusal of generation 5402: the
+    0.9.0 writer opens an activated ledger without DDL, and a later
+    boundary leaves it activated rather than rebuilding it."""
     _boundary(legacy)
     raw = _raw(legacy)
     raw.execute("PRAGMA user_version=5402")
+    before = sorted(tuple(r) for r in raw.execute(
+        "SELECT type, name, sql FROM sqlite_master"))
     raw.close()
-    with pytest.raises(Exception) as caught:
-        writer_ledger(legacy, M)
-    assert type(caught.value).__name__ == "UnsupportedAccounting"
+    led = writer_ledger(legacy, M)
+    try:
+        with led._write_transaction():
+            led.prepare_session_boundary("later")
+            led.start_session("later", cwd="", model="")
+    finally:
+        led.conn.close()
+    raw = _raw(legacy)
+    try:
+        assert _version(raw) == 5402
+        assert sorted(tuple(r) for r in raw.execute(
+            "SELECT type, name, sql FROM sqlite_master")) == before
+    finally:
+        raw.close()
 
 
 def test_reader_open_never_rebuilds_or_changes_pragmas(legacy):

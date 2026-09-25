@@ -901,3 +901,47 @@ def test_classifier_refuses_other_user_without_image(tmp_path):
     assert refusal.value.reason == "user"
     assert refusal.value.pids == (4242,)
     assert refusal.value.signalled is False
+
+
+# --------------------------------------------------------------------- #
+# #54 Phase 4: the same stop and quiescence rules for activated storage
+# --------------------------------------------------------------------- #
+
+def test_repair_5402_preserves_verified_stop_and_heartbeat_wait(install):
+    """An activated (5402) ledger held by a verified legacy daemon: repair
+    stops it once with SIGTERM, waits out the heartbeat it left, and
+    publishes the store with its generation and every cell unchanged."""
+    import sqlite3
+
+    from privacy_hud import ledger_schema
+    from test_accounting_activation import image, seed_activated_ledger
+
+    path = storage.legacy_path(install.data)
+    seed_activated_ledger(path, lease_root=install.root / "seed-owner")
+    before = image(path)
+    assert before[0] == ledger_schema.ACTIVATED_VERSION
+    write_receipt_v1(install.data, python=install.python)
+    progress: list[str] = []
+    with legacy_daemon(install) as daemon:
+        try:
+            repair.repair_runtime(install.bundle, install.data,
+                                  allow_degraded=True,
+                                  progress=progress.append)
+        finally:
+            stopped = _terminated_by_sigterm(daemon)
+            stop_runtime(install.data)
+    assert stopped
+    assert runtime_messages.LEGACY_DAEMON_STOPPING in progress
+    assert storage.is_fenced(install.data)
+    active = storage.active_path(install.data)
+    after = image(active)
+    assert after[0] == ledger_schema.ACTIVATED_VERSION
+    assert after[1] == before[1]
+    conn = sqlite3.connect(f"{active.resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM observations"
+                            ).fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM sessions"
+                            " WHERE accounting_version=2").fetchone()[0] == 1
+    finally:
+        conn.close()

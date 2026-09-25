@@ -27,10 +27,11 @@ historical pathname. It is not a security boundary: same-user code that
 deliberately opens `ledger/active.db` is not prevented by any of this.
 
 **What the transition does and does not do.** It preserves. A
-generation-0 database stays generation 0; a prepared 5401 one keeps every
-object and every cell. Nothing here migrates accounting — that stays with
-the daemon, at a genuine new-session boundary (#54 phase 2). An
-unsupported or altered schema is preserved and refused, never repaired.
+generation-0 database stays generation 0; a prepared 5401 or activated
+5402 one keeps every object and every cell. Nothing here migrates or
+activates accounting — that stays with the daemon, at a genuine
+new-session boundary (#54 phases 2 and 4). An unsupported or altered
+schema is preserved and refused, never repaired.
 
 **Crash recovery reads the filesystem, not just the journal.** A crash can
 land between a rename and the journal write that records it, so every step
@@ -133,7 +134,7 @@ _stage_failpoint = None
 
 @dataclass(frozen=True)
 class CutoverResult:
-    schema_version: Literal[0, 5401]
+    schema_version: Literal[0, 5401, 5402]
     preserved_existing: bool
     transition_id: str
 
@@ -422,7 +423,7 @@ def _transition_id(journal: JSONObject | None) -> str:
     return secrets.token_hex(16)
 
 
-def validate_existing_ledger(data_dir) -> Literal[0, 5401]:
+def validate_existing_ledger(data_dir) -> Literal[0, 5401, 5402]:
     """Read-only preflight; prepare_storage repeats it under both locks."""
     root = Path(data_dir)
     source = _source(legacy_path(root))
@@ -973,7 +974,7 @@ def _chmod_private(path: Path) -> None:
         pass
 
 
-def _validated_version(path: Path) -> Literal[0, 5401]:
+def _validated_version(path: Path) -> Literal[0, 5401, 5402]:
     """The schema generation of an existing database, read on its own
     read-only connection, refusing anything this build cannot write.
 

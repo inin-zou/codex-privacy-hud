@@ -54,9 +54,11 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from .accounting import (
-    PHASE3_SURFACE_UNSUPPORTED,
+    ACCOUNTING_NOTE,
+    ACCOUNTING_SCORE_LABEL,
     AccountingExposureRow,
     AccountingSummary,
+    Evidence,
 )
 from .ledger import (
     LEGACY_ACCOUNTING_NOTE,
@@ -163,21 +165,182 @@ _EMPTY_UNRECORDED = (
 )
 
 
-def _refuse_v2(summary: SessionSummary | None = None,
-               rows: Sequence[ExposureRow] = ()) -> None:
-    """These terminal renderers describe legacy and unrecorded sessions only
-    (#54 Phase 3). A version-2 summary or row is refused with the fixed
-    Phase 3 error before any legacy field is read, never rendered through a
-    legacy or unrecorded branch."""
-    if isinstance(summary, AccountingSummary) or any(
-            isinstance(row, AccountingExposureRow) for row in rows):
-        raise UnsupportedAccounting(PHASE3_SURFACE_UNSUPPORTED)
+#: The version-2 presentation catalog (#54 Phase 4, §C). Every surface --
+#: the terminal audit, detail and receipt, and the browser through
+#: `/api/copy` -- takes its words from here.
+V2_TILE_LABELS = ("confirmed points", "distinct disclosures",
+                  "confirmed recipients", "denials issued")
+PERCENT_AVAILABLE = ("Disclosure percentage: {P}% of the session's frozen "
+                     "disclosure budget.")
+PERCENT_UNAVAILABLE = "Disclosure percentage: unavailable."
+REASON_KEY_LOSS = ("Accounting is unavailable for the rest of this session "
+                   "because its identity key is unavailable.")
+REASON_ONE_UNRESOLVED = ("1 unresolved action. Percentage unavailable until "
+                         "the required evidence is available.")
+REASON_N_UNRESOLVED = ("{N} unresolved actions. Percentage unavailable until "
+                       "the required evidence is available.")
+REASON_SUBJECTS = "Some finding events have unresolved subject identities."
+REASON_RECIPIENTS = ("Some finding events have unresolved recipient "
+                     "identities.")
+ZERO_CONFIRMED = "0 confirmed points does not mean no disclosure occurred."
+V2_TAB_LABELS = {
+    "Exposed": "Confirmed crossings",
+    "Prevented": "Interventions",
+    "All events": "All finding events",
+}
+_V2_EMPTY_MESSAGES = {
+    "Exposed": "No confirmed crossing events recorded for this session.",
+    "Prevented": ("No intervention finding events recorded for this session. "
+                  "Actions without findings are included in the summary."),
+    "All events": ("No finding events recorded for this session. Delivered "
+                   "actions may still be recorded in the observation count."),
+}
+V2_EMPTY_UNRESOLVED = ("Unresolved actions remain. An empty table does not "
+                       "establish that no disclosure occurred.")
+#: Event chips, every applicable one, in this order.
+EVENT_CHIPS = ("DENIAL ISSUED", "DENIAL ENFORCED", "REWRITE ISSUED",
+               "REWRITE APPLIED", "REJECTED BEFORE CROSSING", "EXPOSED",
+               "PERMITTED", "LOCAL ACCESS", "DETECTED", "RETENTION")
+V2_DETAIL_LABELS = ("Subject", "Recipient", "Source", "Boundary",
+                    "Observation", "Action", "Evidence",
+                    "Occurrences in this observation",
+                    "Confirmed contribution", "Masked example", "Scan gap")
+NOT_STORED = "Not stored."
+V2_ROW_NOTE = ("This row records evidence at one observation point. It does "
+               "not establish a causal multi-hop flow.")
+OPAQUE_SOURCE = "A source rule cannot be saved from this opaque label."
+ACCOUNTING_READ_ERROR = ("Privacy HUD accounting could not be read. No "
+                         "percentage or counts are available.")
+_V2_RECEIPT_CLOSING = (
+    "This score is a versioned policy index over evidenced disclosures, not "
+    "a measurement of harm.",
+    "Current hooks do not confirm transmission or host application of a "
+    "denial or rewrite.",
+    "Transcript retention is outside this ledger's account.",
+    "This ledger stores metadata, not file contents, prompts, or raw values.",
+)
 
 
-def _legacy_rows(rows: Sequence[ExposureRow]) -> list[LegacyExposureRow]:
-    """`rows`, after `_refuse_v2` has refused any version-2 row."""
-    _refuse_v2(rows=rows)
-    return [row for row in rows if isinstance(row, LegacyExposureRow)]
+def _unsupported() -> UnsupportedAccounting:
+    """An accounting type or version these renderers cannot describe. Never
+    rendered through another variant's branch."""
+    return UnsupportedAccounting("unsupported accounting version")
+
+
+def _is_v2(summary: SessionSummary | None) -> bool:
+    return isinstance(summary, AccountingSummary)
+
+
+def _check_rows(summary: SessionSummary | None,
+                rows: Sequence[ExposureRow]) -> None:
+    """Rows must belong to the summary's accounting: version-2 rows with a
+    version-2 summary, legacy rows otherwise. A mix is refused."""
+    v2 = _is_v2(summary)
+    for row in rows:
+        if isinstance(row, AccountingExposureRow) != v2 or not isinstance(
+                row, (AccountingExposureRow, LegacyExposureRow)):
+            raise _unsupported()
+    if summary is not None and not isinstance(
+            summary, (AccountingSummary, LegacySessionSummary)) and \
+            summary.accounting_version != 0:
+        raise _unsupported()
+
+
+def _points(value: float) -> str:
+    """Two decimal places, trailing zeroes and a trailing point removed. A
+    display format only: the stored value is not rounded."""
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def accounting_percentage_line(summary: AccountingSummary) -> str:
+    if summary.percent is None:
+        return PERCENT_UNAVAILABLE
+    _check_band(summary.percent)
+    return PERCENT_AVAILABLE.format(P=summary.percent)
+
+
+def accounting_reason_lines(
+    summary: AccountingSummary,
+) -> tuple[str, ...]:
+    """One line per unavailable reason, in the summary's reason order.
+    Incomplete coverage has no line here: the coverage banner states it."""
+    lines = []
+    for reason in summary.percentage_unavailable_reasons:
+        if reason == "accounting_unavailable":
+            lines.append(REASON_KEY_LOSS)
+        elif reason == "unresolved_actions":
+            n = summary.unresolved_actions
+            lines.append(REASON_ONE_UNRESOLVED if n == 1
+                         else REASON_N_UNRESOLVED.format(N=n))
+        elif reason == "unresolved_subjects":
+            lines.append(REASON_SUBJECTS)
+        elif reason == "unresolved_recipients":
+            lines.append(REASON_RECIPIENTS)
+    return tuple(lines)
+
+
+def _zero_confirmed(summary: AccountingSummary) -> bool:
+    return summary.confirmed_points == 0 and summary.unresolved_actions > 0
+
+
+def accounting_event_chips(
+    row: AccountingExposureRow,
+) -> tuple[str, ...]:
+    """The chips one event's own evidence supports, in `EVENT_CHIPS` order.
+    Never another pair's or the observation's evidence, and never a
+    cross-observation conflict marker."""
+    ev = row.evidence
+    applies = {
+        "DENIAL ISSUED": Evidence.DENY_ISSUED in ev,
+        "DENIAL ENFORCED": Evidence.DENY_ENFORCED in ev,
+        "REWRITE ISSUED": Evidence.REWRITE_ISSUED in ev,
+        "REWRITE APPLIED": Evidence.REWRITE_ENFORCED in ev,
+        "REJECTED BEFORE CROSSING": Evidence.REJECTED_BEFORE_CROSSING in ev,
+        "EXPOSED": (Evidence.CROSSING_CONFIRMED in ev
+                    and row.boundary != "B0"),
+        "PERMITTED": Evidence.PERMISSION_ISSUED in ev,
+        "LOCAL ACCESS": (Evidence.EXECUTION_OBSERVED in ev
+                         and row.boundary == "B0"),
+        "DETECTED": Evidence.LOCAL_DETECTION in ev,
+        "RETENTION": Evidence.PERSISTENCE_OBSERVED in ev,
+    }
+    return tuple(chip for chip in EVENT_CHIPS if applies[chip])
+
+
+def accounting_copy() -> dict[str, str]:
+    """The static version-2 strings and templates, for the browser's
+    `/api/copy`. Templates keep their `{P}`/`{N}` placeholders."""
+    copy = {
+        "score_label": ACCOUNTING_SCORE_LABEL,
+        "accounting_note": ACCOUNTING_NOTE,
+        "percentage_available": PERCENT_AVAILABLE,
+        "percentage_unavailable": PERCENT_UNAVAILABLE,
+        "reason_accounting_unavailable": REASON_KEY_LOSS,
+        "reason_unresolved_action": REASON_ONE_UNRESOLVED,
+        "reason_unresolved_actions": REASON_N_UNRESOLVED,
+        "reason_unresolved_subjects": REASON_SUBJECTS,
+        "reason_unresolved_recipients": REASON_RECIPIENTS,
+        "zero_confirmed": ZERO_CONFIRMED,
+        "not_stored": NOT_STORED,
+        "row_note": V2_ROW_NOTE,
+        "opaque_source": OPAQUE_SOURCE,
+        "policy_surface": _POLICY_SURFACE,
+        "irreversible": _IRREVERSIBLE,
+        "error": ACCOUNTING_READ_ERROR,
+    }
+    for key, label in zip(("points", "disclosures", "recipients", "denials"),
+                          V2_TILE_LABELS, strict=True):
+        copy[f"tile_{key}"] = label
+    for tab, key in (("Exposed", "exposed"), ("Prevented", "prevented"),
+                     ("All events", "all")):
+        # Tab labels only: an empty-state line depends on the session, so
+        # it comes with that session's rows (`/api/exposures`), never here.
+        copy[f"tab_{key}"] = V2_TAB_LABELS[tab]
+    for chip in EVENT_CHIPS:
+        copy["chip_" + chip.lower().replace(" ", "_")] = chip
+    for label in V2_DETAIL_LABELS:
+        copy["detail_" + label.lower().replace(" ", "_")] = label
+    return copy
 
 
 def empty_message(tab: str, coverage: SessionCoverage | None, *,
@@ -202,7 +365,16 @@ def empty_message(tab: str, coverage: SessionCoverage | None, *,
     - `None` → the tab's line alone, which is what a caller with no coverage
       reading is entitled to and no more.
     """
-    _refuse_v2(summary)
+    _check_rows(summary, ())
+    if isinstance(summary, AccountingSummary):
+        # Version 2 (#54 Phase 4): what the tab records, whether actions
+        # remain unresolved, and the incomplete-coverage warning too.
+        parts = [_V2_EMPTY_MESSAGES.get(tab, "No events to show.")]
+        if summary.unresolved_actions > 0:
+            parts.append(V2_EMPTY_UNRESOLVED)
+        if coverage is not None and not coverage.verified:
+            parts.append(_EMPTY_UNVERIFIED)
+        return " ".join(parts)
     if summary is not None and summary.accounting_version == 0:
         return _EMPTY_UNRECORDED
     if coverage is not None and not coverage.verified:
@@ -403,7 +575,10 @@ _LEGACY_CHIP_UNKNOWN = "LEGACY UNKNOWN"
 
 
 def _status_chip(row: ExposureRow) -> str:
-    _refuse_v2(rows=(row,))
+    if isinstance(row, AccountingExposureRow):
+        return " ".join(f"[{chip}]" for chip in accounting_event_chips(row))
+    if not isinstance(row, LegacyExposureRow):
+        raise _unsupported()
     return f"[{_LEGACY_CHIPS.get(row.kind, _LEGACY_CHIP_UNKNOWN)}]"
 
 
@@ -430,7 +605,15 @@ def _tiles_block(summary: SessionSummary) -> str:
     labels (#54): the score counts permitted crossings, and its rows may
     collapse different outcomes, so none of them is a confirmed-disclosure
     figure. An unrecorded summary has no numbers at all."""
-    _refuse_v2(summary)
+    _check_rows(summary, ())
+    if isinstance(summary, AccountingSummary):
+        # Version 2: one line per tile, value first, in §C's order.
+        values = (_points(summary.confirmed_points),
+                  str(summary.distinct_disclosures),
+                  str(summary.concrete_recipients),
+                  str(summary.denials_issued))
+        return "\n".join(f"{value}  {label}" for value, label
+                         in zip(values, V2_TILE_LABELS, strict=True))
     if isinstance(summary, LegacySessionSummary):
         pct = int(summary.legacy_percent)
         _check_band(pct)  # same fail-loud validation as hud_line
@@ -471,11 +654,12 @@ _UNAVAILABLE = "—"
 
 
 def _tab_bar(exposed_n: int | None, prevented_n: int | None,
-             all_n: int | None, tab: str) -> str:
+             all_n: int | None, tab: str,
+             labels: dict[str, str] = TAB_LABELS) -> str:
     """The tab bar. A count that is not known prints `—`, never 0."""
     segs = [("Exposed", exposed_n), ("Prevented", prevented_n),
             ("All events", all_n)]
-    texts = [f"{TAB_LABELS[name]} {_UNAVAILABLE if n is None else n}"
+    texts = [f"{labels[name]} {_UNAVAILABLE if n is None else n}"
              for name, n in segs]
     sep = "      "
     line = " " + sep.join(texts)
@@ -490,7 +674,16 @@ def _tab_bar(exposed_n: int | None, prevented_n: int | None,
 def _table(rows: Sequence[ExposureRow]) -> str:
     headers = ["SENSITIVE DATA", "SOURCE", "DESTINATION", "STATUS"]
     data = []
-    for r in _legacy_rows(rows):
+    for r in rows:
+        if isinstance(r, AccountingExposureRow):
+            # Version 2: occurrences inside this observation, the opaque
+            # recipient label, and this event's own chips.
+            data.append([_title(r.data_type, r.occurrences),
+                         _truncate_middle(r.source_label, 24),
+                         r.recipient_label, _status_chip(r)])
+            continue
+        if not isinstance(r, LegacyExposureRow):
+            raise _unsupported()
         title = _title(r.data_type, r.count)
         source = _truncate_middle(r.source, 24)
         dest = r.destination
@@ -622,8 +815,11 @@ def audit(summary: SessionSummary, rows: Sequence[ExposureRow],
     `_subtitle`. Without `resolved`, a supplied `session_id` renders
     `Session <id>`; otherwise the subtitle is `Session ID unknown`.
     """
-    _refuse_v2(summary, rows)
-    legacy_rows = _legacy_rows(rows)
+    _check_rows(summary, rows)
+    if isinstance(summary, AccountingSummary):
+        return _audit_v2(summary, rows, tab, coverage=coverage,
+                         resolved=resolved, session_id=session_id)
+    legacy_rows = [r for r in rows if isinstance(r, LegacyExposureRow)]
     legacy = isinstance(summary, LegacySessionSummary)
     exposed_n: int | None = None
     prevented_n: int | None = None
@@ -676,6 +872,38 @@ def audit(summary: SessionSummary, rows: Sequence[ExposureRow],
     else:
         lines.append(_table(ordered))
 
+    return "\n".join(lines)
+
+
+def _audit_v2(summary: AccountingSummary, rows: Sequence[ExposureRow],
+              tab: str, *, coverage: SessionCoverage | None,
+              resolved: "ResolvedSession | None",
+              session_id: str | None) -> str:
+    """The version-2 audit (#54 Phase 4, §C): the four tiles, the
+    percentage line, the unavailable reasons, the zero-points line and the
+    accounting note, then the three tabs counted from the summary, the
+    coverage banner, and the tab's rows in event-ID order or its empty
+    state. A null percentage draws no number, bar or band."""
+    lines = ["Privacy Audit", _subtitle(resolved, session_id=session_id), ""]
+    lines.append(_tiles_block(summary))
+    lines.append("")
+    lines.append(accounting_percentage_line(summary))
+    lines += accounting_reason_lines(summary)
+    if _zero_confirmed(summary):
+        lines.append(ZERO_CONFIRMED)
+    lines += ["", ACCOUNTING_NOTE, ""]
+    lines.append(_tab_bar(summary.exposure_events, summary.intervention_events,
+                          summary.event_rows, tab, V2_TAB_LABELS))
+    lines.append("")
+    banner = coverage_banner(coverage)
+    if banner is not None:
+        lines += [banner, ""]
+    ordered = sorted((r for r in rows if isinstance(r, AccountingExposureRow)),
+                     key=lambda r: r.id)
+    if not ordered:
+        lines.append(empty_message(tab, coverage, summary=summary))
+    else:
+        lines.append(_table(ordered))
     return "\n".join(lines)
 
 
@@ -732,10 +960,15 @@ def detail(row: ExposureRow) -> str:
     `budget_cap`; fabricating a constant here would go stale the moment
     tables.toml's budget_cap is retuned.
 
-    A version-2 row is refused with the fixed Phase 3 error (#54).
+    A version-2 row renders its own fields (#54 Phase 4): the opaque
+    subject and recipient labels, the observation and action, this event's
+    evidence, its occurrences and its confirmed contribution. It offers no
+    source rule: an opaque label is not a selector.
     """
-    _refuse_v2(rows=(row,))
-    assert isinstance(row, LegacyExposureRow)
+    if isinstance(row, AccountingExposureRow):
+        return _detail_v2(row)
+    if not isinstance(row, LegacyExposureRow):
+        raise _unsupported()
     lines = [_title(row.data_type, row.count)]
 
     flow = (" → ".join(row.hops) if row.hops
@@ -768,6 +1001,31 @@ def detail(row: ExposureRow) -> str:
     return "\n".join(lines)
 
 
+_V2_LABEL_W = len("Occurrences in this observation") + 2
+
+
+def _detail_v2(row: AccountingExposureRow) -> str:
+    fields = [
+        ("Subject", row.subject_label),
+        ("Recipient", row.recipient_label),
+        ("Source", row.source_label),
+        ("Boundary", row.boundary),
+        ("Observation", row.observation_id),
+        ("Action", row.action_id),
+        ("Evidence", " · ".join(accounting_event_chips(row)) or "none"),
+        ("Occurrences in this observation", str(row.occurrences)),
+        ("Confirmed contribution", _points(row.budget_delta)),
+        ("Masked example", row.masked_example or NOT_STORED),
+    ]
+    if row.scan_gap is not None:
+        fields.append(("Scan gap", row.scan_gap))
+    lines = [_title(row.data_type, row.occurrences)]
+    lines += [f"{label:<{_V2_LABEL_W}}{value}" for label, value in fields]
+    lines += ["", V2_ROW_NOTE, "", ACCOUNTING_NOTE, "", OPAQUE_SOURCE,
+              _POLICY_SURFACE, "", _IRREVERSIBLE]
+    return "\n".join(lines)
+
+
 _RECEIPT_FINAL = ("This ledger stores metadata, not file contents, prompts, "
                   "or raw values.")
 
@@ -790,11 +1048,15 @@ def receipt(session_id: str, summary: SessionSummary,
     `coverage` (a `ledger.SessionCoverage`, or `None` for "not asked") adds a
     banner at the top of a legacy receipt when the record is not verified.
 
-    A version-2 summary or row is refused with the fixed Phase 3 error
-    before the unrecorded branch, including for an empty session (#54).
+    A version-2 receipt (#54 Phase 4) prints §C's counts, the percentage
+    line, the unavailable reasons, the zero-points line and the coverage
+    banner when they apply, then the fixed closing paragraph. Zero enforced
+    counts mean no such evidence was recorded.
     """
-    _refuse_v2(summary, rows)
-    legacy_rows = _legacy_rows(rows)
+    _check_rows(summary, rows)
+    if isinstance(summary, AccountingSummary):
+        return _receipt_v2(session_id, summary, minutes, coverage=coverage)
+    legacy_rows = [r for r in rows if isinstance(r, LegacyExposureRow)]
     if not isinstance(summary, LegacySessionSummary):
         return "\n".join([
             f"PRIVACY RECEIPT · {session_id}",
@@ -836,4 +1098,34 @@ def receipt(session_id: str, summary: SessionSummary,
         lines.append(f"  {title:<22}{source:<18}→ {r.destination}")
 
     lines += ["", _RECEIPT_FINAL]
+    return "\n".join(lines)
+
+
+def _receipt_v2(session_id: str, summary: AccountingSummary,
+                minutes: int | None, *,
+                coverage: SessionCoverage | None) -> str:
+    header = f"PRIVACY RECEIPT · {session_id}"
+    if minutes is not None:
+        header += f" · {minutes} min"
+    lines = [
+        header, "",
+        f"confirmed points: {_points(summary.confirmed_points)}",
+        f"distinct disclosures: {summary.distinct_disclosures}",
+        f"confirmed recipients: {summary.concrete_recipients}",
+        f"denials issued: {summary.denials_issued}",
+        f"denials enforced: {summary.denials_enforced}",
+        f"reads stopped: {summary.reads_stopped}",
+        f"rewrites issued: {summary.rewrite_actions_issued}",
+        f"rewrites applied: {summary.rewrite_actions_enforced}",
+        f"unresolved actions: {summary.unresolved_actions}",
+        "",
+        accounting_percentage_line(summary),
+    ]
+    lines += accounting_reason_lines(summary)
+    if _zero_confirmed(summary):
+        lines.append(ZERO_CONFIRMED)
+    if coverage is not None and not coverage.verified:
+        lines.append(_coverage_banner(coverage))
+    lines.append("")
+    lines += _V2_RECEIPT_CLOSING
     return "\n".join(lines)

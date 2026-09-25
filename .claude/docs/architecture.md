@@ -2,9 +2,11 @@
 
 **Status:** Draft v0.1 · **Date:** 2026-09-03 · **Companion to:** `PRD.md`, `design.md`
 
-**Current contract — #54 Phase 3 (0.8.1).**
+**Current contract — #54 Phase 4 (0.9.0).**
 
-The new accounting core is implemented and tested but is not active for production sessions. Production session creation still selects legacy accounting. Prepared-schema migration remains unchanged. No historical rows are backfilled or rescored. Runtime selection, writer ownership, and the fenced ledger layout introduced in 0.8.0 remain required. #43, #44, and the related #47 accounting limitations remain unresolved in production.
+New sessions observed from a genuine SessionStart use evidence-based accounting. Existing sessions and sessions attached after their start retain legacy accounting. Observations, finding outcomes, disclosure identities, and charges are separate. Current hooks do not confirm model-context admission, transmission, or host application of interventions; unresolved evidence withholds the percentage. Historical records remain unchanged. Recipient identity does not establish delivery, inherited subagent content, or causal multi-hop flows. All shell-derived accounting file identities remain unresolved in 0.9.0, including ordinary `cat .env` reads. Observation-local opaque subjects preserve separate events without establishing distinct files or naming the denied file. #43 is addressed for new version-2 sessions only; legacy sessions and historical rows retain their limitations. #44 has pattern-merging and action-counting improvements but remains open for supported guard-target identity and I1-safe audit display. 0.10.0 is a proposed target for that remaining work, not a release commitment.
+
+Runtime selection, writer ownership, read-only readers, daemon policy RPC, and the fenced ledger layout remain required. Accounting activation runs under the daemon's current writer lease and does not change the runtime activation epoch. Generation 5402 requires the activated-accounting implementation introduced in Privacy HUD 0.9.0. A live client must also match the selected runtime build and activation epoch. Snapshot version remains 2; the native HUD does not authenticate runtime alignment.
 
 ---
 
@@ -135,7 +137,7 @@ Each observation is scanned from its own text. There is no content-hash findings
 
 Dispatch separates scanning from policy and ledger work. It computes one `ScanResult` outside the ledger lock and passes that result into `Engine.observe` while holding the lock. This avoids scanning the same observation twice; it does not reuse results from earlier observations or other sessions.
 
-Production sessions still use legacy accounting. Legacy deduplication uses `(session_id, value_hash, destination)` and can increment an existing row's repetition count instead of adding a new contribution. That accounting deduplication happens after detection and is not a computational cache. It can also collapse different outcomes; this section does not resolve #47 items 3, 4 or 8.
+Legacy-accounted sessions and historical rows keep legacy deduplication. It uses `(session_id, value_hash, destination)` and can increment an existing row's repetition count instead of adding a new contribution. That accounting deduplication happens after detection and is not a computational cache. It can also collapse different outcomes; this section does not resolve #47 items 3, 4 or 8.
 
 Processing is incremental over observed payloads rather than a rescan of the full conversation. There is no O(1) unchanged-file reread guarantee. Detection misses and recorded scan gaps remain possible.
 
@@ -523,6 +525,8 @@ What the fence is and is not: it stops supported legacy entry points opening the
 
 Writes go through the compatible daemon, which holds an exclusive lease on `runtime-writer.lock` for as long as it owns the ledger; every other surface opens `mode=ro`. An unsupported or altered schema is preserved and refused before any writable open, and no downgrade migration exists.
 
+Readers open existing ledgers read-only, without initialization, migration, or activation. Browser and MCP policy actions use the matching daemon's policy RPC. The daemon remains the sole production ledger writer.
+
 `scripts/check-issue66-runtime.py` rehearses the whole transition on a private copy of a real ledger, including a crash at every durable stage and the actual historical initializer against the fence.
 
 
@@ -716,7 +720,7 @@ The original implementation sequence was ledger and budget functions, detection,
 
 The shipped deep detector is local `openai/privacy-filter`, not Presidio. Internal consent-token primitives exist, but no shipped surface issues consent tokens. Both the patched-Codex status item and the companion pane exist. Session receipts are text returned through hook `systemMessage`, not Markdown exports.
 
-This historical sequence is not the release plan for accounting activation. Production sessions remain legacy-accounted under the current contract at the top of this document.
+This historical sequence is not the release plan for accounting activation. Accounting is governed by the current contract at the top of this document.
 
 ---
 

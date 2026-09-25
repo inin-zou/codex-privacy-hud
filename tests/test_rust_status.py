@@ -88,3 +88,35 @@ def test_rust_reader_unit_tests_pass(tmp_path):
         text=True, timeout=900,
         env={**os.environ, "CARGO_TARGET_DIR": str(tmp_path / "target")})
     assert proc.returncode == 0, proc.stdout[-4000:] + proc.stderr[-4000:]
+
+
+def test_phase4_published_v2_snapshot_matches_the_reader_golden(tmp_path):
+    """P4-C13 release compatibility: what the 0.9.0 publisher writes for a
+    version-2 session has exactly the fields and snapshot version of the
+    golden's version-2 cases, which the published patched builds embed. No
+    snapshot version is added."""
+    import json
+
+    from accounting_fakes import prepared_ledger, start_v2
+
+    from privacy_hud import hud_snapshot as hs
+    from runtime_helpers import close_writer
+
+    golden = json.loads((MATRIX / "hud_reading_golden.json").read_text(
+        encoding="utf-8"))
+    shapes = {frozenset(case["snapshot"]) for case in golden["cases"].values()
+              if isinstance(case.get("snapshot"), dict)
+              and case["snapshot"].get("accounting_version") == 2}
+    versions = {case["snapshot"].get("v") for case in golden["cases"].values()
+                if isinstance(case.get("snapshot"), dict)}
+    led = prepared_ledger(tmp_path / "ledger.db")
+    try:
+        sid = start_v2(led)
+        publisher = hs.HudPublisher(tmp_path / "hud-root")
+        publisher.publish(sid, summary=led.summary(sid), unverified=False)
+    finally:
+        close_writer(led)
+    doc = json.loads(hs.snapshot_path(tmp_path / "hud-root", sid)
+                     .read_text(encoding="utf-8"))
+    assert doc["v"] == 2 and max(versions) == 2
+    assert frozenset(doc) in shapes

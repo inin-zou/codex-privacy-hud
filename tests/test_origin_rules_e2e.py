@@ -173,7 +173,11 @@ def _leak_credential_over_mcp(state):
 # --------------------------------------------------------------------- #
 
 def test_blocking_the_file_a_secret_came_from_denies_sending_it(state, ui):
-    _hook(state, "SessionStart")
+    # A source rule is saved from a legacy row, whose `source` names a real
+    # origin (#40). A genuine SessionStart is version-2 accounted since #54
+    # Phase 4, whose opaque labels are never a source-rule selector, so this
+    # runs on a legacy-accounted session, as 0.8.x recorded one.
+    state.ledger.start_session(SID, cwd="/w", model="gpt-5")
     _read_secret_through_bash(state)          # cat .env -> PostToolUse
 
     rows = _get(ui, "/api/exposures", tab="Exposed")["rows"]

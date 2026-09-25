@@ -3,6 +3,64 @@ import pytest
 from privacy_hud.origin import Origin, OriginKind, extract_origin
 
 
+@pytest.mark.parametrize("command", [
+    "grep -eKEY /r/other .env",
+    "grep -eKEY -- /r/other .env",
+    "grep /r/other -eKEY .env",
+    "egrep -eKEY /r/other .env",
+    'bat --pager="cat /r/other" --paging=always .env',
+    'bat --pager "cat /r/other" --paging always .env',
+    'bat --pager="/bin/cat /r/other" --paging=always .env',
+    'bat --paging=always --pager="head -n5 /r/other" .env',
+])
+def test_hidden_additional_operands_leave_accounting_path_unresolved(command):
+    origin = extract_origin("Bash", {"command": command})
+    assert origin is not None
+    assert origin.kind is OriginKind.PATH
+    assert origin.value == ".env"
+    assert origin.evaluated_path is None
+
+
+@pytest.mark.parametrize("command", [
+    "grep --regexp=KEY .env",
+    "egrep -e KEY .env",
+    "bat --paging=never .env",
+    "bat --language=json .env",
+])
+def test_option_forms_without_execution_evidence_stay_unresolved(command):
+    origin = extract_origin("Bash", {"command": command})
+    assert origin is not None
+    assert origin.evaluated_path is None
+
+
+@pytest.mark.parametrize("command", [
+    "grep -f/r/patterns -e KEY .env",
+    "grep -f /r/patterns -e KEY .env",
+    "less -k/r/keys .env",
+    "less -k /r/keys .env",
+    "less -T/r/tags .env",
+    "less -T /r/tags .env",
+])
+def test_additional_file_options_leave_accounting_path_unresolved(command):
+    origin = extract_origin("Bash", {"command": command})
+    assert origin is not None
+    assert origin.kind is OriginKind.PATH
+    assert origin.value == ".env"
+    assert origin.evaluated_path is None
+
+
+@pytest.mark.parametrize("command", [
+    "cat .env",
+    "head -n5 .env",
+    "grep -e KEY .env",
+    "less -N .env",
+])
+def test_single_operand_without_execution_evidence_stays_unresolved(command):
+    origin = extract_origin("Bash", {"command": command})
+    assert origin is not None
+    assert origin.evaluated_path is None
+
+
 def _bash(command: str):
     return extract_origin("Bash", {"command": command})
 
@@ -233,3 +291,68 @@ def test_a_path_outside_home_is_unchanged(monkeypatch):
     monkeypatch.setenv("HOME", "/Users/jordan")
     assert _bash("head -n 5 /etc/passwd") == \
         Origin("/etc/passwd", OriginKind.PATH)
+
+
+# --- #54 Phase 4: the evaluated path, separate from the display value ----
+
+def test_evaluated_path_survives_home_display_collapse(monkeypatch):
+    """`Origin.value` collapses your home for display; the transient
+    `evaluated_path` keeps the literal the guard evaluated, so a file
+    identity is hashed from the path and never from the display text."""
+    from privacy_hud.identity import file_identity
+
+    key = bytes(range(32))
+    monkeypatch.setenv("HOME", "/Users/jordan")
+    for origin in (
+            extract_origin("Read", {"file_path": "/Users/jordan/p/.env"}),):
+        assert origin is not None
+        assert origin.value == "~/p/.env"
+        assert origin.evaluated_path == "/Users/jordan/p/.env"
+        assert "/Users/jordan" not in repr(origin)
+        assert file_identity(key, origin.evaluated_path, "/elsewhere") == \
+            file_identity(key, "/Users/jordan/p/.env", "/")
+        with pytest.raises(ValueError):
+            file_identity(key, origin.value, "/elsewhere")
+    # Display equality and enforcement semantics are unchanged.
+    assert _bash("cat /Users/jordan/p/.env") == \
+        Origin("~/p/.env", OriginKind.PATH)
+    assert _bash("cat config/.env").evaluated_path is None
+
+
+@pytest.mark.parametrize("command", [
+    "cat $HOME/.env",
+    "cat ${HOME}/.env",
+    "cat `pwd`/.env",
+    "cat $(pwd)/.env",
+    "cat ~/.env",
+    "cat *.pem",
+    "cat key?.pem",
+    "cat [ab].pem",
+    "cat {a,b}.pem",
+    "cat a.pem b.pem",
+    "grep KEY a.env b.env",
+    "grep -r KEY config/",
+    "grep -f patterns.txt secret.env",
+    "cat a.pem; cat b.pem",
+    "cat a.pem && cat b.pem",
+    "cat a.pem | tee b.pem",
+    "cat < a.pem",
+    "cat a.pem > b.pem",
+    "cat a.pem # b.pem",
+    "cat 'a.pem",
+    "rg KEY config/.env",
+    "tail --format x /var/log/app.log",
+    "cat a\\ b.pem",
+])
+def test_ambiguous_shell_path_is_unresolved(command):
+    origin = _bash(command)
+    assert origin is None or origin.evaluated_path is None, command
+    # Literal operands also lack evidence about the actual execution.
+    for literal in ("cat a.pem", "head -n 5 /etc/passwd",
+                    "grep -i KEY config/.env", "cat -- .env",
+                    "cat 'dir with space/k.pem'"):
+        assert _bash(literal).evaluated_path is None, literal
+    for tool_input in ({"file_path": "~/k.pem"}, {"file_path": "$HOME/k"},
+                       {"file_path": "a\x00b"}, {"path": "*.pem"}):
+        origin = extract_origin("Read", tool_input)
+        assert origin is not None and origin.evaluated_path is None

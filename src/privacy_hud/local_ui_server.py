@@ -66,10 +66,11 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import mcp_tools, runtime, runtime_commands
-from .accounting import PHASE3_SURFACE_UNSUPPORTED
-from .ledger import Ledger
+from .ledger import Ledger, UnsupportedAccounting
 from .matrix.loader import load_matrix
 from .render import _ACRONYMS as _RENDER_ACRONYMS
+from .render import ACCOUNTING_READ_ERROR
+from .render import accounting_copy as render_accounting_copy
 from .render import audit as render_audit
 from .render import coverage_banner as render_coverage_banner
 from .render import empty_message as render_empty_message
@@ -253,21 +254,26 @@ class _Handler(BaseHTTPRequestHandler):
             # empty-state line is now decided per session by
             # `render.empty_message` and delivered by `/api/exposures`. There
             # is deliberately no second source for it to fall back to.
-            self._send_json(200, {"acronyms": _RENDER_ACRONYMS})
+            # `accounting`: the static version-2 catalog (#54 Phase 4),
+            # from `render`, the one owner of the approved strings.
+            self._send_json(200, {"acronyms": _RENDER_ACRONYMS,
+                                  "accounting": render_accounting_copy()})
             return
 
         if parsed.path in _ACCOUNTING_ENDPOINTS:
-            sid = self._session_id(query)
-            with ledger._read_transaction():
-                version = ledger._accounting_version(sid) if sid else 0
-            if version == 2:
-                # #54 Phase 3: the browser renders legacy and unrecorded
-                # sessions only. A version-2 session gets the fixed refusal
-                # and no partial data.
-                self._send_json(409, {"error": PHASE3_SURFACE_UNSUPPORTED})
-                return
+            # Corrupt or unsupported accounting is one fixed, explicit
+            # failure: never a partial reading, a legacy or unrecorded
+            # relabelling, or an exception's own text (#54 Phase 4).
+            try:
+                self._accounting_get(parsed.path, query, ledger)
+            except UnsupportedAccounting:
+                self._send_json(409, {"error": ACCOUNTING_READ_ERROR})
+            return
 
-        if parsed.path == "/api/summary":
+        self._send_json(404, {"error": "not found"})
+
+    def _accounting_get(self, path: str, query: dict, ledger: Ledger) -> None:
+        if path == "/api/summary":
             sid = self._session_id(query)
             if not sid:
                 self._send_json(404, {"error": "no session"})
@@ -276,30 +282,38 @@ class _Handler(BaseHTTPRequestHandler):
             # unknown session is an unrecorded summary with HTTP 200, not a
             # 404: "no record" is an answer. Coverage is here because the
             # tiles alone cannot say whether a legacy account is complete.
-            payload = mcp_tools.get_session_summary(ledger, sid).as_dict()
-            payload["coverage"] = \
-                mcp_tools.get_session_coverage(ledger, sid).as_dict()
+            # One read transaction: the summary and the coverage that
+            # qualifies it are one reading.
+            with ledger._read_transaction():
+                payload = mcp_tools.get_session_summary(ledger, sid).as_dict()
+                payload["coverage"] = \
+                    mcp_tools.get_session_coverage(ledger, sid).as_dict()
             self._send_json(200, payload)
             return
 
-        if parsed.path == "/api/exposures":
+        if path == "/api/exposures":
             sid = self._session_id(query)
             tab = query.get("tab", ["Exposed"])[0]
             if not sid:
                 self._send_json(404, {"error": "no session"})
                 return
-            try:
-                rows = mcp_tools.list_exposures(ledger, sid, tab)
-            except ValueError as exc:
-                self._send_json(400, {"error": str(exc)})
-                return
-            summary = mcp_tools.get_session_summary(ledger, sid)
-            coverage = mcp_tools.get_session_coverage(ledger, sid)
-            # The exact "All events" count for the tab bar, from the list
-            # itself. An approximation from the summary omits kinds.
-            all_events = (len(rows) if tab == "All events" else
-                          len(mcp_tools.list_exposures(ledger, sid,
-                                                       "All events")))
+            # Rows, counts, summary and coverage from one read transaction
+            # (#54 Phase 4), so a concurrent observation cannot put rows of
+            # one moment beside a summary of another.
+            with ledger._read_transaction():
+                try:
+                    rows = mcp_tools.list_exposures(ledger, sid, tab)
+                except ValueError as exc:
+                    self._send_json(400, {"error": str(exc)})
+                    return
+                summary = mcp_tools.get_session_summary(ledger, sid)
+                coverage = mcp_tools.get_session_coverage(ledger, sid)
+                # The exact "All events" count for the tab bar, from the
+                # list itself. An approximation from the summary omits
+                # kinds.
+                all_events = (len(rows) if tab == "All events" else
+                              len(mcp_tools.list_exposures(ledger, sid,
+                                                           "All events")))
             # `rows` goes to the browser as JSON and to `render_audit` as
             # typed rows -- the same values, serialized once, on purpose.
             #
@@ -317,7 +331,7 @@ class _Handler(BaseHTTPRequestHandler):
             # session-independent and fetched once per page load, while
             # coverage is per session. The decision belongs to `render`, which
             # owns the approved strings -- see `render.empty_message`.
-            self._send_json(200, {
+            reply: dict[str, object] = {
                 "rows": [r.as_dict() for r in rows],
                 "text": render_audit(summary, rows, tab, coverage=coverage,
                                      session_id=sid,
@@ -325,10 +339,16 @@ class _Handler(BaseHTTPRequestHandler):
                 "empty_message": render_empty_message(tab, coverage,
                                                       summary=summary),
                 "coverage_banner": render_coverage_banner(coverage),
-            })
+            }
+            if summary.accounting_version == 2:
+                # The version-2 page renders from this summary, read with
+                # these rows, rather than from a separate `/api/summary`.
+                reply["summary"] = {**summary.as_dict(),
+                                    "coverage": coverage.as_dict()}
+            self._send_json(200, reply)
             return
 
-        if parsed.path == "/api/detail":
+        if path == "/api/detail":
             sid = self._session_id(query)
             event_id_raw = query.get("id", [None])[0]
             if not sid or event_id_raw is None:
@@ -343,8 +363,6 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"row": row.as_dict(),
                                   "text": render_detail(row)})
             return
-
-        self._send_json(404, {"error": "not found"})
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)

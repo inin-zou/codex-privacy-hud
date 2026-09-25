@@ -32,7 +32,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 from . import codex
@@ -249,10 +249,19 @@ class Origin:
     Frozen for `DetectorProfile`'s reason: an `Origin` is stored as a value
     in the engine's per-session taint map and read back later, and a mutable
     one could stop being what was recorded.
+
+    `evaluated_path` (#54 Phase 4) is the literal path operand the guard
+    evaluated, before `value`'s home collapse, set only when that operand
+    is the one file read with nothing left to shell interpretation. It is
+    transient input to a file identity: excluded from equality and `repr`,
+    so enforcement semantics and anything printed are unchanged, and never
+    persisted.
     """
 
     value: str
     kind: OriginKind
+    evaluated_path: str | None = field(default=None, compare=False,
+                                       repr=False)
 
 
 def _tokens(command: str) -> list[str] | None:
@@ -398,6 +407,73 @@ def _looks_like_a_path(token: str) -> bool:
     return token.startswith("~") or "/" in token or "." in token
 
 
+#: Text the shell or the tool would still have expanded: a path carrying
+#: one of these was not the file actually evaluated.
+_UNEVALUATED_PATH = re.compile(r"[$`*?\[\]{}]|^~")
+
+#: Characters that make a shell do more than split words: expansion,
+#: globbing, operators, redirection, comments, history and escapes.
+_SHELL_META = frozenset(";&|<>()$`\\*?[]{}~!#")
+
+#: Options that make a read verb evaluate further files or directories
+#: beside its operand -- recursion, pattern files, include/exclude lists,
+#: preprocessors. With any of them the operand is not the one file read.
+_MULTI_FILE_OPTIONS = frozenset({
+    "-r", "-R", "--recursive", "-d", "--directories", "-D", "--devices",
+    "-f", "--file", "--from-file", "--slurpfile", "--rawfile",
+    "--exclude-from", "--include", "--exclude", "--exclude-dir",
+    "--ignore-file", "--pre",
+})
+
+#: Read verbs that search a directory operand recursively by default, so
+#: one operand never establishes one file.
+_RECURSIVE_BY_DEFAULT = frozenset({"rg"})
+
+
+def _literal_path(path: str) -> str | None:
+    """`path` as the literal the guard evaluated, or None when it still
+    holds something a shell or tool would expand, or a control character.
+    Transient: never persisted, displayed or logged (I1)."""
+    if (not path or _UNEVALUATED_PATH.search(path)
+            or any(ord(c) < 0x20 or ord(c) == 0x7f for c in path)):
+        return None
+    return path
+
+
+def _one_literal_operand(command: str, program: str,
+                         positionals: list[_Positional], options: set[str],
+                         skip: int) -> bool:
+    """Legacy syntactic filter, unused for accounting identity in 0.9.0.
+
+    A True result does not attest executable provenance, the effective
+    environment, program configuration, or which files execution reads.
+    Shell-derived accounting file identities remain unresolved.
+    """
+    if (program in _RECURSIVE_BY_DEFAULT
+            or any(c in _SHELL_META or ord(c) < 0x20 or ord(c) == 0x7f
+                   for c in command)
+            or len(positionals) != skip + 1
+            or not all(p.trusted for p in positionals)):
+        return False
+    value_options = VALUE_OPTIONS.get(program, {})
+    known = BOOLEAN_OPTIONS.get(program, frozenset()) | set(value_options)
+    for name in options:
+        option = (name[:2] if _attached_short_value(name, value_options)
+                  else name)
+        if option in _MULTI_FILE_OPTIONS or (
+                program == "less" and option in {"-k", "-T"}) or (
+                program == "bat" and option == "--pager"):
+            return False
+        # The legacy display parser does not count attached patterns as
+        # pattern options, so its skipped positional may be another file.
+        if option in PATTERN_OPTIONS and option != name:
+            return False
+        if name not in known and not _attached_short_value(name,
+                                                           value_options):
+            return False
+    return True
+
+
 def origin_phrase(value: str, kind: OriginKind) -> str:
     """How user-facing copy names an origin of each kind.
 
@@ -426,7 +502,8 @@ def extract_origin(tool_name: str, tool_input: dict) -> Origin | None:
     for key in PATH_KEYS:
         value = tool_input.get(key)
         if isinstance(value, str) and value:
-            return Origin(value=_collapse_home(value), kind=OriginKind.PATH)
+            return Origin(value=_collapse_home(value), kind=OriginKind.PATH,
+                          evaluated_path=_literal_path(value))
 
     # Only the shell tool carries a command to parse. `codex.SHELL_TOOL`
     # holds why that is also the only tool a *read* can arrive through.
@@ -455,6 +532,9 @@ def extract_origin(tool_name: str, tool_input: dict) -> Origin | None:
         if len(positionals) > skip:
             candidate = positionals[skip]
             if candidate.trusted and _looks_like_a_path(candidate.value):
+                # Command text does not attest the executable, shell aliases,
+                # inherited environment, or program configuration. Keep the
+                # display origin, but do not infer an accounting file identity.
                 return Origin(value=_collapse_home(candidate.value),
                               kind=OriginKind.PATH)
 

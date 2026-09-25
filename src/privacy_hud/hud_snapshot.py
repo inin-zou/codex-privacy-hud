@@ -211,15 +211,30 @@ class HudPublisher:
         converted or defaulted: the document is validated before it is
         written, and an invalid one raises rather than reaching a reader.
 
-        A version-2 summary is refused with the fixed Phase 3 error before
-        any snapshot state is read or written (#54 Phase 3): it is never
-        published as accounting 0.
+        A version-2 summary (#54 Phase 4) publishes accounting 2 with its
+        nullable percentage, confirmed points, denials issued and unresolved
+        actions, exactly as the summary holds them. Key loss changes the
+        percentage, never `unverified`, which stays the coverage flag.
         """
+        fields: dict[str, int | float | bool | None]
         if summary.accounting_version == 2:
-            from .accounting import PHASE3_SURFACE_UNSUPPORTED
-            from .ledger_schema import UnsupportedAccounting
-            raise UnsupportedAccounting(PHASE3_SURFACE_UNSUPPORTED)
-        fields: dict[str, int | bool | None]
+            from .accounting import AccountingSummary
+            if not isinstance(summary, AccountingSummary):
+                raise ValueError("snapshot does not satisfy contract A")
+            doc = {"v": SNAPSHOT_VERSION, "accounting_version": 2,
+                   "percent": summary.percent,
+                   "confirmed_points": summary.confirmed_points,
+                   "denials_issued": summary.denials_issued,
+                   "legacy_prevented_rows": None,
+                   "unresolved_actions": summary.unresolved_actions,
+                   "unverified": bool(unverified),
+                   "hidden": self._current_hidden(session_id),
+                   "updated_at": time.time()}
+            if _parse(doc) is None:
+                raise ValueError("snapshot does not satisfy contract A")
+            self._write(snapshot_path(self.data_dir, session_id), doc)
+            self._published.add(session_id)
+            return
         if summary.accounting_version == 1:
             fields = {"accounting_version": 1,
                       "percent": summary.legacy_percent,

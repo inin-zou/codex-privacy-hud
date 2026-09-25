@@ -72,6 +72,14 @@ STARTING_EGRESS = (
     "Retry after startup completes."
 )
 
+#: #54 Phase 4: a matching daemon could not normalize or record an ingress
+#: event (an invalid delivery key, a failed accounting write, any internal
+#: error). Ingress still proceeds (I6); egress keeps its fail-closed denial.
+#: Fixed text: never an exception message, payload, path, key or SQL.
+ACCOUNTING_INGRESS_FAILURE = (
+    "Privacy HUD could not record this event — this event is unverified."
+)
+
 #: A policy mutation refused before anything was sent or written: the MCP
 #: tool and the local browser's `/api/policy`. "No policy rule was saved"
 #: is a fact in this branch and only in this branch — the refusal happens

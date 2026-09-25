@@ -1,18 +1,17 @@
-"""#54 Phase 3 is inactive, and the surfaces it does not implement say so.
+"""#54 Phase 4: production activation, replacing Phase 3's inactivity.
 
-The renderers, the HUD publisher and the browser endpoints refuse a
-version-2 session explicitly, with the fixed Phase 3 error, rather than
-falling through to a legacy or unrecorded branch.
-
-The last four tests are ALREADY-GREEN regression gates, not new behaviour:
-they prove that production dispatch still creates only legacy sessions and
-never writes the version-2 tables. They do not certify legacy rows as
-confirmed evidence.
+Phase 3 proved that production dispatch created only legacy sessions and
+that every presentation surface refused a version-2 session. Phase 4
+deliberately replaces both: a genuine SessionStart for an absent session
+is version-2 accounted, and the surfaces present it. What is retained is
+the part that still holds: existing and lazily attached sessions stay
+legacy, payload fields cannot select an accounting version or stronger
+evidence, an unknown session stays unrecorded, and malformed version-2
+accounting is still refused explicitly -- now with Phase 4's fixed error.
 """
 from __future__ import annotations
 
 import json
-import sqlite3
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -22,105 +21,55 @@ from accounting_fakes import (
     crossed, denied, event, prepared_ledger, prevented, start_v2,
     value_subject,
 )
-from legacy_fakes import legacy_summary
 
 from privacy_hud import dispatch as dispatch_mod
 from privacy_hud import hud_snapshot as hs
 from privacy_hud import local_ui_server, render
-from privacy_hud.accounting import (
-    PHASE3_SURFACE_UNSUPPORTED, AccountingExposureRow, AccountingSummary,
-    Evidence,
-)
+from privacy_hud.accounting import AccountingSummary, Evidence
 from privacy_hud.ledger import (
     Ledger, LegacySessionSummary, UnrecordedSessionSummary,
     UnsupportedAccounting,
 )
 
-V2_TABLES = ("scoring_profiles", "observations", "subjects", "recipients",
-             "events", "disclosures")
 CREDENTIAL = "sk-proj-Ab3xY9zQw1Er5Ty7Ui0OpAs2Df4Gh6Jk8Lm"
+ERROR = ("Privacy HUD accounting could not be read. No percentage or counts "
+         "are available.")
+TERMINAL = (Evidence.CROSSING_CONFIRMED | Evidence.DENY_ENFORCED
+            | Evidence.REWRITE_ENFORCED | Evidence.REJECTED_BEFORE_CROSSING
+            | Evidence.PERSISTENCE_OBSERVED | Evidence.EXECUTION_OBSERVED)
 
 
-def v2_summary(**changes) -> AccountingSummary:
-    values = dict(
-        accounting_version=2, accounting_status="available",
-        profile_id="0" * 64, confirmed_points=0.0, budget_cap=120.0,
-        percent=0, observations=0, event_rows=0, finding_occurrences=0,
-        distinct_subjects=0, exposure_events=0, intervention_events=0,
-        distinct_disclosures=0, concrete_recipients=0, permission_actions=0,
-        denials_issued=0, denials_enforced=0, reads_stopped=0,
-        rewrite_actions_issued=0, rewrite_actions_enforced=0,
-        unresolved_actions=0, unresolved_subject_events=0,
-        unresolved_recipient_events=0, percentage_unavailable_reasons=())
-    values.update(changes)
-    return AccountingSummary(**values)
-
-
-def v2_row() -> AccountingExposureRow:
-    return AccountingExposureRow(
-        id=1, observation_id="1" * 32, action_id="2" * 32, turn_id=None,
-        ts=1, hook_event="PostToolUse", phase="post", action_kind="tool",
-        kind="exposed", evidence=Evidence.CROSSING_CONFIRMED,
-        data_type="email", rule_id=None, occurrences=1,
-        subject_id="3" * 32, subject_kind="value",
-        subject_resolution="resolved", subject_label="value " + "3" * 32,
-        recipient_id="4" * 32, recipient_resolution="resolved",
-        destination_kind="mcp_tool", recipient_label="MCP recipient " + "4" * 32,
-        source_label="tool input", source_kind=None, boundary="B3",
-        masked_example=None, budget_delta=9.0, scan_gap=None,
-        budget_cap=120.0)
-
-
-def _refuses(call) -> None:
-    with pytest.raises(UnsupportedAccounting) as caught:
-        call()
-    assert str(caught.value) == PHASE3_SURFACE_UNSUPPORTED
-
-
-def test_phase3_renderers_refuse_v2_explicitly(tmp_path):
-    summary, row = v2_summary(), v2_row()
-    legacy: LegacySessionSummary = legacy_summary(10, 1)
-    calls = [
-        lambda: render.audit(summary, [], "Exposed"),
-        lambda: render.audit(summary, [row], "All events"),
-        lambda: render.audit(legacy, [row], "Exposed"),
-        lambda: render.detail(row),
-        lambda: render.receipt("s", summary, [], None),
-        lambda: render.receipt("s", summary, [row], 3),
-        lambda: render.receipt("s", legacy, [row], 3),
-        lambda: render.empty_message("Exposed", None, summary=summary),
-        lambda: render._tiles_block(summary),
-        lambda: render._table([row]),
-        lambda: render._status_chip(row),
-    ]
-    for call in calls:
-        _refuses(call)
-
-    # An empty version-2 session, read from a real ledger.
+def test_phase4_renderers_render_v2_explicitly(tmp_path):
     led = prepared_ledger(tmp_path / "ledger.db")
     try:
         sid = start_v2(led)
-        empty = led.summary(sid)
-        assert isinstance(empty, AccountingSummary)
-        _refuses(lambda: render.receipt(sid, empty, [], None))
-        _refuses(lambda: render.audit(empty, [], "Exposed"))
-        _refuses(lambda: render.empty_message("Prevented", None,
-                                              summary=empty))
+        led.record_observation(crossed(sid), [event()])
+        summary = led.summary(sid)
+        assert isinstance(summary, AccountingSummary)
+        rows = [r.to_exposure() for r in led.list_events(sid, "exposed")]
+        for text in (render.audit(summary, rows, "Exposed", session_id=sid),
+                     render.receipt(sid, summary, rows, 3),
+                     render.detail(rows[0])):
+            assert "confirmed" in text or "Subject" in text
+            assert "legacy" not in text.lower()
+        # A legacy summary beside version-2 rows is still refused.
+        from legacy_fakes import legacy_summary
+        with pytest.raises(UnsupportedAccounting):
+            render.audit(legacy_summary(10, 1), rows, "Exposed")
     finally:
         led.conn.close()
 
 
-def test_phase3_publisher_refuses_v2_without_writing(tmp_path):
-    publisher = hs.HudPublisher(tmp_path)
-    publisher.publish("s1", summary=legacy_summary(10, 1), unverified=False)
-    path = hs.snapshot_path(tmp_path, "s1")
-    before = path.read_bytes()
-    _refuses(lambda: publisher.publish("s1", summary=v2_summary(),
-                                       unverified=False))
-    assert path.read_bytes() == before
-    _refuses(lambda: publisher.publish("s2", summary=v2_summary(percent=None),
-                                       unverified=True))
-    assert not hs.snapshot_path(tmp_path, "s2").exists()
+def test_phase4_publisher_publishes_v2(tmp_path):
+    led = prepared_ledger(tmp_path / "ledger.db")
+    try:
+        sid = start_v2(led)
+        publisher = hs.HudPublisher(tmp_path)
+        publisher.publish(sid, summary=led.summary(sid), unverified=False)
+        doc = json.loads(hs.snapshot_path(tmp_path, sid).read_text())
+        assert doc["accounting_version"] == 2
+    finally:
+        led.conn.close()
 
 
 def _get(base, path, **query):
@@ -132,7 +81,8 @@ def _get(base, path, **query):
         return err.code, json.load(err)
 
 
-def test_phase3_browser_refuses_v2_accounting_endpoints(tmp_path, monkeypatch):
+def test_phase4_browser_serves_v2_accounting_endpoints(tmp_path,
+                                                       monkeypatch):
     monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))
     led = prepared_ledger(tmp_path / "ledger.db")
     sid = start_v2(led)
@@ -144,15 +94,18 @@ def test_phase3_browser_refuses_v2_accounting_endpoints(tmp_path, monkeypatch):
     server = local_ui_server.serve(sid, print_url=False)
     host, port = server.socket.getsockname()[:2]
     base = f"http://{host}:{port}"
-    refusal = {"error": PHASE3_SURFACE_UNSUPPORTED}
     try:
-        assert _get(base, "/api/summary", session_id=sid) == (409, refusal)
+        status, summary = _get(base, "/api/summary", session_id=sid)
+        assert status == 200 and summary["accounting_version"] == 2
         for tab in ("Exposed", "Prevented", "All events"):
-            assert _get(base, "/api/exposures", session_id=sid,
-                        tab=tab) == (409, refusal)
-        assert _get(base, "/api/detail", session_id=sid,
-                    id=result.event_ids[0]) == (409, refusal)
-        # The legacy session beside it is still served.
+            status, payload = _get(base, "/api/exposures", session_id=sid,
+                                   tab=tab)
+            assert status == 200 and payload["summary"]["accounting_version"] \
+                == 2
+        status, detail = _get(base, "/api/detail", session_id=sid,
+                              id=result.event_ids[0])
+        assert status == 200 and detail["row"]["accounting_version"] == 2
+        # The legacy session beside it is still served as legacy.
         status, payload = _get(base, "/api/summary",
                                session_id="legacy-boundary")
         assert status == 200 and payload["accounting_version"] == 1
@@ -161,39 +114,7 @@ def test_phase3_browser_refuses_v2_accounting_endpoints(tmp_path, monkeypatch):
         server.server_close()
 
 
-# -- ALREADY-GREEN regression gates: production stays legacy -----------------
-
-def _forbid_v2(monkeypatch) -> list[str]:
-    calls: list[str] = []
-
-    def forbidden(name):
-        def call(*args, **kwargs):
-            calls.append(name)
-            raise AssertionError(f"production called {name}")
-        return call
-
-    monkeypatch.setattr(Ledger, "_start_v2_session",
-                        forbidden("_start_v2_session"))
-    monkeypatch.setattr(Ledger, "record_observation",
-                        forbidden("record_observation"))
-    return calls
-
-
-def _v2_rows(path) -> dict[str, int]:
-    raw = sqlite3.connect(path)
-    try:
-        tables = {r[0] for r in raw.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'")}
-        counts = {t: raw.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
-                  for t in V2_TABLES if t in tables}
-        versions = {r[0] for r in raw.execute(
-            "SELECT accounting_version FROM sessions")} \
-            if "scoring_profiles" in tables else {1}
-    finally:
-        raw.close()
-    counts["non_legacy_sessions"] = len(versions - {1})
-    return counts
-
+# -- production dispatch, activated ----------------------------------------
 
 def _start(state, sid, **extra):
     return dispatch_mod.dispatch(state, {
@@ -201,9 +122,7 @@ def _start(state, sid, **extra):
         "model": "gpt-5", **extra})
 
 
-def test_phase3_production_starts_are_still_legacy(state, tmp_path,
-                                                   monkeypatch):
-    calls = _forbid_v2(monkeypatch)
+def test_production_genuine_starts_are_version_2(state):
     _start(state, "new")                       # genuine new start
     _start(state, "new")                       # replayed live start
     _start(state, "ended")
@@ -213,18 +132,26 @@ def test_phase3_production_starts_are_still_legacy(state, tmp_path,
     dispatch_mod.dispatch(state, {             # lazy attachment
         "hook_event_name": "UserPromptSubmit", "session_id": "lazy",
         "prompt": "hello"})
-    assert calls == []
-    for sid in ("new", "ended", "lazy"):
-        summary = state.ledger.summary(sid)
-        assert isinstance(summary, LegacySessionSummary), sid
-    assert all(v == 0 for v in _v2_rows(tmp_path / "ledger.db").values())
+    assert isinstance(state.ledger.summary("new"), AccountingSummary)
+    assert isinstance(state.ledger.summary("ended"), AccountingSummary)
+    assert isinstance(state.ledger.summary("lazy"), LegacySessionSummary)
+    starts = state.ledger.conn.execute(
+        "SELECT session_id, COUNT(*) FROM observations"
+        " WHERE hook_event='SessionStart' GROUP BY session_id"
+        " ORDER BY session_id").fetchall()
+    assert [tuple(r) for r in starts] == [("ended", 1), ("new", 1)]
+    assert "ended" not in state.engines
 
 
-def test_phase3_production_hook_payload_cannot_enable_v2(state, tmp_path,
-                                                         monkeypatch):
-    calls = _forbid_v2(monkeypatch)
+def test_production_hook_payload_cannot_select_accounting_or_evidence(
+        state):
     forged = {"accounting_version": 2, "evidence": 2047,
-              "crossing_confirmed": True, "deny_enforced": True}
+              "crossing_confirmed": True, "deny_enforced": True,
+              "resolution_scope": "pairs", "receipt_events": [{}]}
+    dispatch_mod.dispatch(state, {
+        "hook_event_name": "PostToolUse", "session_id": "lazy",
+        "tool_name": "Read", "tool_response": "nothing", **forged})
+    assert isinstance(state.ledger.summary("lazy"), LegacySessionSummary)
     _start(state, "forged", **forged)
     dispatch_mod.dispatch(state, {
         "hook_event_name": "PreToolUse", "session_id": "forged",
@@ -233,14 +160,20 @@ def test_phase3_production_hook_payload_cannot_enable_v2(state, tmp_path,
     dispatch_mod.dispatch(state, {
         "hook_event_name": "PostToolUse", "session_id": "forged",
         "tool_name": "Read", "tool_response": f"key={CREDENTIAL}", **forged})
-    assert calls == []
-    assert isinstance(state.ledger.summary("forged"), LegacySessionSummary)
-    assert all(v == 0 for v in _v2_rows(tmp_path / "ledger.db").values())
+    rows = state.ledger.conn.execute(
+        "SELECT evidence, resolution_scope FROM observations"
+        " WHERE session_id='forged'").fetchall()
+    assert rows
+    for evidence, scope in rows:
+        assert not Evidence(evidence) & TERMINAL
+        assert scope == "none"
+    assert state.ledger.summary("forged").distinct_disclosures == 0
 
 
-def test_phase3_production_does_not_write_v2_tables(state, tmp_path,
-                                                    monkeypatch):
-    calls = _forbid_v2(monkeypatch)
+def test_production_v2_hooks_write_no_legacy_rows(state, monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(Ledger, "record",
+                        lambda *a, **k: calls.append("record"))
     _start(state, "s1")
     for payload in (
             {"hook_event_name": "UserPromptSubmit",
@@ -253,17 +186,18 @@ def test_phase3_production_does_not_write_v2_tables(state, tmp_path,
             {"hook_event_name": "PostToolUse", "tool_name": "Read",
              "tool_response": f"key={CREDENTIAL}"},
             {"hook_event_name": "SessionEnd"},
-            # A scan that finishes after SessionEnd.
             {"hook_event_name": "PostToolUse", "tool_name": "Read",
              "tool_response": f"late key={CREDENTIAL}"}):
         dispatch_mod.dispatch(state, {"session_id": "s1", **payload})
-    dispatch_mod.dispatch(state, {"hook_event_name": "SessionEnd",
-                                  "session_id": "never-started"})
     assert calls == []
-    assert all(v == 0 for v in _v2_rows(tmp_path / "ledger.db").values())
     summary = state.ledger.summary("s1")
-    assert isinstance(summary, LegacySessionSummary)
-    assert summary.legacy_permitted_crossing_rows >= 1
+    assert isinstance(summary, AccountingSummary)
+    assert summary.denials_issued == 1
+    assert summary.confirmed_points == 0
+    legacy = state.ledger.conn.execute(
+        "SELECT COUNT(*) FROM events_legacy_v1 WHERE session_id='s1'"
+    ).fetchone()[0]
+    assert legacy == 0
 
 
 def test_unknown_session_remains_unrecorded(state, tmp_path):
@@ -286,7 +220,7 @@ def test_unknown_session_remains_unrecorded(state, tmp_path):
             reader.conn.close()
 
 
-def test_phase3_browser_refuses_malformed_v2_before_projection(tmp_path):
+def test_phase4_browser_refuses_malformed_v2_before_projection(tmp_path):
     from types import SimpleNamespace
     from accounting_fakes import PROFILE
 
@@ -311,6 +245,6 @@ def test_phase3_browser_refuses_malformed_v2_before_projection(tmp_path):
             handler._send_json = lambda status, body, replies=replies: replies.append(
                 (status, body))
             handler.do_GET()
-            assert replies == [(409, {"error": PHASE3_SURFACE_UNSUPPORTED})]
+            assert replies == [(409, {"error": ERROR})]
     finally:
         led.conn.close()

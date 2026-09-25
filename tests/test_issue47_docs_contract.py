@@ -424,8 +424,8 @@ ARCH_INCREMENTAL = ARCH_INCREMENTAL_HEADING + "\n\n" + (
     "observation twice; it does not reuse results from earlier observations "
     "or other sessions."
     "\n\n"
-    "Production sessions still use legacy accounting. Legacy deduplication "
-    "uses `(session_id, value_hash, destination)` and can increment an "
+    "Legacy-accounted sessions and historical rows keep legacy "
+    "deduplication. It uses `(session_id, value_hash, destination)` and can increment an "
     "existing row's repetition count instead of adding a new contribution. "
     "That accounting deduplication happens after detection and is not a "
     "computational cache. It can also collapse different outcomes; this "
@@ -474,9 +474,8 @@ PRD_BUILD_ORDER = PRD_BUILD_ORDER_HEADING + "\n\n" + (
     "interactive consent workflow was delivered.\n"
     "6. Patched-Codex status item, companion pane and text receipt.\n"
     "\n"
-    "Current production accounting remains legacy. The inactive accounting "
-    "core and its activation work are governed by the current contract at "
-    "the top of this document."
+    "Accounting activation is governed by the current contract at the top "
+    "of this document."
 )
 ARCH_BUILD_ORDER_HEADING = "## 13. Historical build order"
 ARCH_BUILD_ORDER = ARCH_BUILD_ORDER_HEADING + "\n\n" + (
@@ -491,8 +490,8 @@ ARCH_BUILD_ORDER = ARCH_BUILD_ORDER_HEADING + "\n\n" + (
     "hook `systemMessage`, not Markdown exports."
     "\n\n"
     "This historical sequence is not the release plan for accounting "
-    "activation. Production sessions remain legacy-accounted under the "
-    "current contract at the top of this document."
+    "activation. Accounting is governed by the current contract at the top "
+    "of this document."
 )
 DESIGN_PREVIEW_QUESTION = (
     "4. **Unshipped minimization preview:** a future preview would need a "
@@ -712,8 +711,8 @@ PRD_DELIVERY = PRD_DELIVERY_HEADING + "\n\n" + (
     "separate interface to the underlying audit and policy operations."
     "\n\n"
     "The native status item displays accounting snapshots; it does not "
-    "verify runtime alignment. Production sessions still use legacy "
-    "accounting. No delivery surface establishes complete monitoring, "
+    "verify runtime alignment. No delivery surface establishes complete "
+    "monitoring, "
     "confirmed disclosure or host enforcement."
 )
 PRD_LIMIT_3 = (

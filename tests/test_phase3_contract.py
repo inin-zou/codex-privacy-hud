@@ -14,10 +14,9 @@ from __future__ import annotations
 
 import json
 import re
-import tomllib
 from pathlib import Path
 
-from privacy_hud import accounting, hud_snapshot, ledger, ledger_schema
+from privacy_hud import accounting, hud_snapshot, ledger_schema
 from privacy_hud.matrix.loader import load_matrix
 
 REPO = Path(__file__).resolve().parents[1]
@@ -65,11 +64,11 @@ README_ZH_INTRO = (
 #: release number onto it. The remaining #66 paragraphs beside it are
 #: pinned by `tests/test_issue66_contract.py`.
 COMPATIBILITY = (
-    'Privacy HUD 0.8.3 retains snapshot version 2. Production sessions still use legacy accounting. Snapshot-v2 readers accept version 1 as explicitly legacy and version 2 with nullable accounting fields. Older snapshot-v1-only readers reject version 2 and show no Privacy item. Matching Codex version numbers do not establish snapshot compatibility.'
+    'Privacy HUD 0.8.2 retains snapshot version 2. Production sessions still use legacy accounting. Snapshot-v2 readers accept version 1 as explicitly legacy and version 2 with nullable accounting fields. Older snapshot-v1-only readers reject version 2 and show no Privacy item. Matching Codex version numbers do not establish snapshot compatibility.'
 )
 
 COMPATIBILITY_ZH = (
-    'Privacy HUD 0.8.3 继续使用 snapshot v2，实际会话仍采用旧版记账。支持 v2 的读取器会将 v1 明确标为旧版记账，并支持带可空记账字段的 v2。仅支持 v1 的旧读取器会拒绝 v2，不显示 Privacy 状态项。Codex 版本号相同并不代表快照兼容。'
+    'Privacy HUD 0.8.2 继续使用 snapshot v2，实际会话仍采用旧版记账。支持 v2 的读取器会将 v1 明确标为旧版记账，并支持带可空记账字段的 v2。仅支持 v1 的旧读取器会拒绝 v2，不显示 Privacy 状态项。Codex 版本号相同并不代表快照兼容。'
 )
 
 LEDGER_DOCSTRING = (
@@ -111,57 +110,6 @@ def _read(relative: str) -> str:
     return (REPO / relative).read_text(encoding="utf-8")
 
 
-def test_phase3_versions_are_0_8_3():
-    plugin = json.loads(_read(".codex-plugin/plugin.json"))
-    marketplace = json.loads(_read(".agents/plugins/marketplace.json"))
-    project = tomllib.loads(_read("pyproject.toml"))
-    assert plugin["version"] == "0.8.3"
-    assert [p["version"] for p in marketplace["plugins"]
-            if p["name"] == plugin["name"]] == ["0.8.3"]
-    assert project["project"]["version"] == "0.8.3"
-
-
-def test_phase3_contract_blocks_match_verbatim():
-    for relative in CONTRACT_DOCS:
-        text = _read(relative)
-        assert text.count(CONTRACT_BLOCK) == 1, relative
-        assert "Current contract — #54 Phase 2" not in text, relative
-        lines = text.split("\n")
-        assert lines[4] == CONTRACT_BLOCK.split("\n")[0], relative
-        assert lines[0].startswith("# Codex Privacy HUD"), relative
-        assert lines[2].startswith("**Status:**"), relative
-
-
-def test_phase3_readme_introductions_match_verbatim():
-    english, chinese = _read("README.md"), _read("README.zh-CN.md")
-    assert english.count(README_INTRO) == 1
-    assert chinese.count(README_ZH_INTRO) == 1
-    assert "Version 0.7.9 prepares" not in english
-    assert "0.7.9 会在新会话开始时" not in chinese
-
-
-def test_phase3_install_notes_match_verbatim():
-    for relative in COMPATIBILITY_DOCS:
-        text = _read(relative)
-        assert text.count(COMPATIBILITY) == 1, relative
-        assert "Privacy HUD 0.7.9 retains" not in text, relative
-    chinese = _read("README.zh-CN.md")
-    assert chinese.count(COMPATIBILITY_ZH) == 1
-    assert "Privacy HUD 0.7.9 继续使用" not in chinese
-    assert "0.7.10" not in "".join(_read(r) for r in COMPATIBILITY_DOCS)
-
-
-def test_phase3_does_not_retire_production_limits():
-    readme = _read("README.md")
-    limits = _read("docs/known-limits.md")
-    for number in (17, 18, 19, 20):
-        assert re.search(rf"^{number}\. \*\*", readme, re.M), number
-        assert f"#{number}-" in readme, number
-        assert re.search(rf"^#+ {number}\.", limits, re.M), number
-    assert "still use legacy accounting" in readme
-    assert "仍采用旧版记账" in _read("README.zh-CN.md")
-
-
 def test_phase3_wire_and_schema_versions_are_unchanged():
     assert ledger_schema.PREPARED_VERSION == 5401
     assert ledger_schema.ACTIVATED_VERSION == 5402
@@ -188,19 +136,26 @@ def test_phase3_summary_and_refusal_copy_is_exact():
         "not a measurement of harm. Permission, a returned denial, a returned "
         "rewrite, and a successful tool result do not by themselves confirm "
         "disclosure or host enforcement.")
-    assert accounting.PHASE3_SURFACE_UNSUPPORTED == (
-        "This Privacy HUD surface does not support version-2 accounting "
-        "in 0.8.3.")
-    assert json.dumps({"error": accounting.PHASE3_SURFACE_UNSUPPORTED},
+    # #54 Phase 4 retired the Phase 3 surface refusal: version-2 sessions
+    # are presented, and corrupt accounting has Phase 4's fixed error.
+    assert not hasattr(accounting, "PHASE3_SURFACE_UNSUPPORTED")
+    from privacy_hud import render
+    assert json.dumps({"error": render.ACCOUNTING_READ_ERROR},
                       separators=(",", ":")) == (
-        '{"error":"This Privacy HUD surface does not support version-2 '
-        'accounting in 0.8.3."}')
+        '{"error":"Privacy HUD accounting could not be read. No percentage '
+        'or counts are available."}')
 
 
-def test_phase3_source_module_documentation_matches_verbatim():
-    source = _read("src/privacy_hud/ledger.py")
-    assert source.startswith(LEDGER_DOCSTRING + "\n")
-    assert ledger.__doc__ is not None
-    schema = _read("src/privacy_hud/ledger_schema.py")
-    assert SCHEMA_5401 in schema
-    assert "- 5402: activated" in schema
+def test_phase3_current_texts_are_superseded_by_phase4():
+    """#54 Phase 4 (0.9.0) replaced every Phase 3 current-contract text;
+    `tests/test_phase4_contract.py` pins their replacements. The Phase 3
+    inactive wording must not survive beside them."""
+    for relative in CONTRACT_DOCS:
+        assert CONTRACT_BLOCK not in _read(relative), relative
+    assert README_INTRO not in _read("README.md")
+    assert README_ZH_INTRO not in _read("README.zh-CN.md")
+    for relative in COMPATIBILITY_DOCS:
+        assert COMPATIBILITY not in _read(relative), relative
+    assert COMPATIBILITY_ZH not in _read("README.zh-CN.md")
+    assert LEDGER_DOCSTRING not in _read("src/privacy_hud/ledger.py")
+    assert SCHEMA_5401 not in _read("src/privacy_hud/ledger_schema.py")

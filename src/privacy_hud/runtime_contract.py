@@ -57,7 +57,7 @@ FailureCode = Literal[
 
 #: The release this bundle is. `runtime-build.json` repeats it, and the
 #: manifest builder takes it from here.
-RELEASE = "0.8.3"
+RELEASE = "0.9.0"
 
 #: Socket envelope version (`"v"` on every frame). Protocol 1 clients are
 #: refused; see `daemon._Handler`.
@@ -67,9 +67,12 @@ PROTOCOL_VERSION = 2
 #: accounting schema and the snapshot version.
 STORAGE_GENERATION = 1
 
-#: Ledger `user_version` values this build reads and writes. 5402 is refused.
-READABLE_SCHEMAS: tuple[int, ...] = (0, 5401)
-WRITABLE_SCHEMAS: tuple[int, ...] = (0, 5401)
+#: Ledger `user_version` values this build reads and writes. Generation
+#: 5402 requires the activated-accounting implementation introduced in
+#: Privacy HUD 0.9.0. A live client must also match the selected runtime
+#: build and activation epoch.
+READABLE_SCHEMAS: tuple[int, ...] = (0, 5401, 5402)
+WRITABLE_SCHEMAS: tuple[int, ...] = (0, 5401, 5402)
 
 #: HUD snapshot versions this build publishes. Snapshot v3 does not exist.
 SNAPSHOT_VERSIONS: tuple[int, ...] = (2,)

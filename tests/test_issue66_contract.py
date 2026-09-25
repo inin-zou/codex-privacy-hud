@@ -33,7 +33,9 @@ from privacy_hud.matrix.loader import load_matrix
 from runtime_helpers import shared_bundle, short_data_dir, write_receipt_v2
 
 REPO = Path(__file__).resolve().parents[1]
-RELEASE = "0.8.3"
+#: The release now shipping. #66's contract is carried forward by every
+#: release; the paragraphs that name a release follow the current one.
+RELEASE = contract.RELEASE
 
 PLUGIN_JSON = REPO / ".codex-plugin" / "plugin.json"
 MARKETPLACE_JSON = REPO / ".agents" / "plugins" / "marketplace.json"
@@ -49,45 +51,27 @@ CHANGELOG = REPO / "CHANGELOG.md"
 #: #66's contract into it. Deleting it is how a document comes to describe
 #: a release that no longer checks runtime alignment.
 CURRENT_CONTRACT_REQUIREMENT = (
-    "Runtime selection, writer ownership, and the fenced ledger layout "
-    "introduced in 0.8.0 remain required."
+    "Runtime selection, writer ownership, read-only readers, daemon policy "
+    "RPC, and the fenced ledger layout remain required."
 )
 
-#: The replacement compatibility paragraphs, in order, for `README.md`,
-#: `docs/installing-by-hand.md` and `patches/README.md`.
+#: The compatibility paragraphs for `README.md`,
+#: `docs/installing-by-hand.md` and `patches/README.md`. #66's own wording
+#: was superseded, release by release; since #54 Phase 4 (0.9.0) the
+#: block is §C's, pinned in full by `tests/test_phase4_contract.py`. What
+#: #66 needs from it -- the fence, the repair command, the mismatch
+#: behaviour, snapshot compatibility -- is asserted here.
 COMPATIBILITY = [
-    "Privacy HUD 0.8.3 retains snapshot version 2. Production sessions still "
-    "use legacy accounting. Snapshot-v2 readers accept version 1 as "
-    "explicitly legacy and version 2 with nullable accounting fields. Older "
-    "snapshot-v1-only readers reject version 2 and show no Privacy item. "
     "Matching Codex version numbers do not establish snapshot "
     "compatibility.",
-    "The snapshot-v2 patched Codex builds for 0.154.0, 0.155.0, and 0.155.1 "
-    "were re-released on 2026-09-22. An earlier installation of one of those "
-    "versions may still contain the older reader. Updating the plugin does "
-    "not replace that binary. No additional patched-Codex release is "
-    "required for Privacy HUD 0.8.1.",
-    "The native Privacy item displays accounting snapshots; it does not "
-    "verify runtime alignment. Before repair, an old daemon may continue "
-    "refreshing a legacy reading. Use doctor to check alignment. The bundled "
-    "ambient launcher reports runtime failure instead of displaying a "
-    "percentage.",
-    "Privacy HUD loads its Python code from the selected plugin bundle. The "
-    "recorded Python environment supplies dependencies. Run `$privacy "
-    "repair` to obtain the exact recovery command for another terminal. "
-    "Explicit installation may download dependencies and model weights; "
-    "runtime checks and offline repair do not.",
-    "Repair preserves recorded ledger values and moves the active store to "
-    "`$PLUGIN_DATA/ledger/active.db`. `$PLUGIN_DATA/ledger.db` becomes a "
-    "directory that fences the historical pathname. Do not replace it with "
-    "a file or symlink. Repair does not perform the accounting rebuild; the "
-    "compatible daemon retains the genuine new-session migration boundary. "
-    "Unsupported or altered schemas are preserved and refused. No downgrade "
-    "migration is provided.",
+    "The active ledger is $PLUGIN_DATA/ledger/active.db after repair. "
+    "$PLUGIN_DATA/ledger.db is a directory that fences the historical "
+    "pathname. Do not replace it with a file or symlink.",
+    "Run $privacy repair to obtain the exact recovery command for another "
+    "terminal.",
     "Runtime mismatches produce an unverified warning on ingress and a "
-    "denial for outbound calls the hook cannot verify. These are plugin "
-    "decisions, not confirmation of host enforcement. Monitoring gaps and "
-    "lost in-memory detection state cannot be reconstructed.",
+    "denial for outbound calls the hook cannot verify.",
+    "Privacy HUD loads Python code from the selected plugin bundle.",
 ]
 
 #: The interim review's replacement hazard paragraph. It is the only
@@ -111,46 +95,32 @@ HAZARD = (
     "deliberately opening the active pathname."
 )
 
+#: The current release sentence. #66's 0.8.0 sentence was replaced by #54
+#: Phase 4's, which keeps its statement that 0.8.0 introduced the selected
+#: runtime and the fenced ledger.
 RELEASE_SENTENCE = (
-    "Version 0.8.0 checks runtime alignment and fences the active ledger "
-    "from historical entry points. The daemon still prepares the accounting "
-    "schema at a genuine new-session boundary, and production sessions still "
-    "use legacy accounting. Historical records and stored scores are not "
-    "backfilled or rescored."
+    "Version 0.9.0 activates evidence-based accounting for new sessions "
+    "observed from a genuine SessionStart, using the selected runtime and "
+    "fenced ledger introduced in 0.8.0. Existing and late-attached sessions "
+    "retain legacy accounting; historical records are not backfilled or "
+    "rescored."
 )
 
 #: astra's Chinese text, published as written. It is not translated here
 #: and must not be paraphrased in review.
 COMPATIBILITY_ZH = [
-    "Privacy HUD 0.8.3 继续使用 snapshot v2，实际会话仍采用旧版记账。支持 v2 "
-    "的读取器会将 v1 明确标为旧版记账，并支持带可空记账字段的 v2。仅支持 v1 "
-    "的旧读取器会拒绝 v2，不显示 Privacy 状态项。Codex 版本号相同并不代表快照"
-    "兼容。",
-    "支持 snapshot v2 的 Codex 0.154.0、0.155.0 和 0.155.1 补丁构建已于 "
-    "2026-09-22 重新发布。如果此前安装过这些版本，本机二进制仍可能包含旧读取"
-    "器。更新插件不会替换该二进制；Privacy HUD 0.8.1 本身不需要再次发布 Codex "
-    "补丁构建。",
-    "Codex 内的 Privacy 状态项只显示记账快照，不验证运行时是否一致。完成修复之"
-    "前，旧守护进程可能仍在刷新旧版读数。请用 doctor 检查运行时一致性。插件内置"
-    "的独立 HUD 启动器会在运行时检查失败时显示错误，而不显示百分比。",
-    "Privacy HUD 从所选插件包加载 Python 代码，已记录的 Python 环境只提供依赖。"
-    "运行 `$privacy repair` 可获取在另一个终端执行的完整修复命令。显式安装可能"
-    "下载依赖和模型权重；运行时检查和离线修复不会下载。",
-    "修复保留账本中已有的记录值，并将当前账本移至 "
-    "`$PLUGIN_DATA/ledger/active.db`。原路径 `$PLUGIN_DATA/ledger.db` 会成为目"
-    "录，阻止旧程序通过该路径打开当前账本。请勿将此目录替换为文件或符号链接。修"
-    "复不执行记账结构迁移；迁移仍由兼容的守护进程在收到真正的新会话开始事件时执"
-    "行。如果账本结构不受支持，或与版本标记不一致，程序会保留文件并拒绝使用，不"
-    "会自动改写历史。本项目不提供降级迁移。",
+    "Codex 版本号相同并不代表快照兼容。",
+    "修复后的当前账本位于 $PLUGIN_DATA/ledger/active.db。$PLUGIN_DATA/ledger.db "
+    "是用于隔离旧路径的目录，请勿将其替换为文件或符号链接。",
+    "运行 $privacy repair 可获取在另一个终端执行的完整修复命令。",
     "运行时不匹配时，入站事件继续执行并显示未经验证的提示；对于 hook 无法验证的"
-    "出站调用，插件会返回拒绝决定。这些决定不能证明宿主实际执行了干预。监测空档"
-    "中的事件以及重启时丢失的内存检测状态无法恢复。",
+    "出站调用，插件会返回拒绝决定。",
 ]
 
 RELEASE_SENTENCE_ZH = (
-    "0.8.0 会检查运行时一致性，并阻止旧版入口通过原路径访问当前账本。守护进程仍"
-    "只在真正的新会话开始时准备记账结构，实际会话仍采用旧版记账。历史记录和已存"
-    "分数不会被回填或重新计算。"
+    "0.9.0 为收到真正 SessionStart 的新会话启用基于证据的记账，并继续使用 0.8.0 "
+    "引入的运行时选择机制和隔离后的账本。已有会话和开始后才接入的会话仍采用旧版"
+    "记账；历史记录不会被回填或重新计分。"
 )
 
 #: The exact `$privacy repair` branch.
@@ -188,7 +158,7 @@ def _flowed(text: str) -> str:
 # versions
 # --------------------------------------------------------------------- #
 
-def test_issue66_versions_are_0_8_3():
+def test_issue66_versions_agree_on_the_current_release():
     """Four declarations, one release. Codex caches an installed plugin
     by version, so a bump that reaches three of them ships nothing."""
     assert json.loads(_text(PLUGIN_JSON))["version"] == RELEASE
@@ -407,6 +377,9 @@ def test_issue66_skill_commands_execute(tmp_path):
               if "runtime.py" in block or "$HUD" in block]
     assert blocks, "the skill runs nothing through the bundled launcher"
     for block in blocks:
+        if "ambient --watch" in block:
+            # #54 Phase 4's fallback pane: one reading, not a watch loop.
+            block = block.replace("ambient --watch", "ambient --once")
         if " ui " in block:
             # The browser block backgrounds a server that stays up until
             # it is stopped; it is run, its one line is read, and it is

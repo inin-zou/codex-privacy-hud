@@ -436,31 +436,24 @@ def build_app():
     def get_session_summary(session_id: str) -> dict:
         """Read the selected session's accounting summary.
 
-        accounting_version=1 returns legacy_score, legacy_cap, legacy_percent,
-        legacy_permitted_crossing_rows, legacy_boundary_kinds,
-        legacy_prevented_rows, score_label, and accounting_note.
-        legacy_percent is the existing score divided by its stored cap,
-        rounded and capped at 100. It is not a probability or a fraction of
-        data disclosed. Row counts are not call counts, and boundary kinds are
-        not concrete recipients. Historical accounting includes permitted
-        crossings and may collapse different outcomes. It does not establish
-        confirmed disclosure.
+        accounting_version=2 returns confirmed disclosure points, the frozen budget
+        cap, observation and finding counts, distinct disclosures and recipients,
+        issued and enforced intervention counts, unresolved counts, and
+        percentage_unavailable_reasons. percent is null when accounting, identities,
+        action outcomes, or recorded coverage are incomplete. Zero confirmed points
+        with unresolved actions does not mean no disclosure occurred.
 
-        accounting_version=2 returns confirmed_points, budget_cap, a nullable
-        percent, profile_id, accounting_status, observation/event/disclosure
-        counts, action outcome counts, and percentage_unavailable_reasons.
-        Its score_label is "confirmed disclosure points". Evidence gaps or
-        unavailable accounting withhold percent without subtracting charges.
-        Production sessions remain legacy-accounted in Phase 3; version 2
-        is exercised only in isolated synthetic tests and private copies.
+        accounting_version=1 returns the explicitly prefixed legacy fields and the
+        legacy accounting note. Historical permitted-crossing scores are not
+        confirmed-disclosure percentages.
 
-        accounting_version=0 returns percent=null, score_label="No session on
-        record", and accounting_note. No numeric score, cap, or counts are
-        available for that session.
+        accounting_version=0 returns percent=null and no numeric score, cap, or
+        counts.
 
-        Report score_label and accounting_note with the result. Do not replace
-        null with zero. The old percent, exposed_items, destinations, and
-        prevented fields are not returned for legacy summaries.
+        Report score_label, accounting_note, and unavailable reasons. Never replace
+        null with zero. This is a policy index, not a probability or measurement of
+        harm. The tool does not establish unobserved transmission, host enforcement,
+        subagent inheritance, or downstream forwarding.
         """
         with tool_access():
             return mcp_tools.get_session_summary(
@@ -468,25 +461,23 @@ def build_app():
 
     @app.tool(name="privacy.list_exposures")
     def list_exposures(session_id: str, tab: str) -> list[dict]:
-        """Read public event rows for the selected session. Accepted tab
-        values are "Exposed", "Prevented", and "All events".
+        """Read public finding-event rows for the selected session. Accepted tab values
+        are "Exposed", "Prevented", and "All events".
 
-        For accounting_version=1, "Exposed" selects legacy permitted-crossing
-        rows, not confirmed deliveries. "Prevented" selects legacy prevented
-        rows, not confirmed host-enforced interventions. count is the stored
-        legacy repetition count, not a distinct-value or call count.
-        Different outcomes may have collapsed into one row.
+        For accounting_version=2, "Exposed" selects confirmed crossing events;
+        "Prevented" selects prevention evidence and issued rewrites; "All events"
+        includes detection, local access, permission, exposure, prevention, and
+        retention. Evidence names distinguish issued interventions from confirmed
+        application. occurrences counts matches inside one observation, not calls
+        or distinct disclosures. Actions with no findings appear in summary counts,
+        not in this list.
 
-        For accounting_version=2, the tabs select exposed events, prevented
-        events, or all six event kinds, including permitted. Evidence is a
-        list of symbolic names. occurrences counts findings, not calls or
-        distinct disclosures. budget_delta is nonzero only on the event
-        that first incurred a disclosure charge; repeats remain visible.
-        A prevented event can record issuance without host enforcement.
-        Production sessions remain legacy-accounted in Phase 3.
+        For accounting_version=1, tabs retain legacy meanings: permitted-crossing
+        rows, legacy prevented rows, and all legacy rows. Legacy outcomes may have
+        collapsed.
 
-        An unrecorded session returns an empty list. That is not evidence that
-        no events occurred. Raw values and identity hashes are not returned.
+        An unrecorded session returns an empty list. An empty list does not establish
+        that no events occurred. Raw values and identity hashes are not returned.
         """
         with tool_access():
             return [r.as_dict()
@@ -495,22 +486,20 @@ def build_app():
 
     @app.tool(name="privacy.get_exposure_detail")
     def get_exposure_detail(session_id: str, event_id: int) -> dict:
-        """Read one public event row by session_id and event_id. The lookup
-        is scoped to both identifiers and the session's accounting version.
+        """Read one public finding-event row scoped to both session_id and event_id.
 
-        For accounting_version=1, the stored classification, intervention
-        label, repetition count, and budget contribution retain legacy
-        meanings. They do not establish delivery, host enforcement, or a
-        multi-hop flow. first_seen and budget_cap are included when available.
+        accounting_version=2 returns the observation and action identifiers,
+        subject and recipient labels, outcome evidence, occurrences, scan-gap
+        metadata, and the contribution charged at this event. A repeated confirmed
+        crossing can have zero contribution because the disclosure was charged
+        earlier. An intended recipient label is not proof of delivery.
 
-        For accounting_version=2, the row includes symbolic evidence,
-        observation/action IDs, opaque subject/recipient metadata,
-        occurrences, and the first-disclosure budget_delta. Issuance,
-        execution, host enforcement, and crossing are separate evidence.
-        Production sessions remain legacy-accounted in Phase 3.
+        accounting_version=1 retains legacy classifications, repetition counts,
+        intervention labels, and contributions. These do not establish confirmed
+        delivery or host enforcement.
 
-        An unknown event or an event outside the selected session is an error.
-        An unrecorded session has no event detail. This tool reads metadata;
+        Neither variant reconstructs a causal multi-hop flow. An unknown event or an
+        event outside the selected session is an error. This tool reads metadata;
         it does not save a policy rule.
         """
         with tool_access():

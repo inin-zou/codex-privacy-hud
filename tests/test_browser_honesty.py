@@ -159,7 +159,10 @@ def test_a_verified_session_carries_no_banner(state):
         server.shutdown()
         server.server_close()
     assert payload["coverage_banner"] is None, payload
-    assert payload["empty_message"] == render.empty_message("Exposed", VERIFIED)
+    # A genuine start is version-2 accounted since #54 Phase 4: the served
+    # line is the verified version-2 one for this session.
+    assert payload["empty_message"] == render.empty_message(
+        "Exposed", VERIFIED, summary=state.ledger.summary(SID))
 
 
 def test_the_browser_reads_the_servers_empty_message_and_banner():

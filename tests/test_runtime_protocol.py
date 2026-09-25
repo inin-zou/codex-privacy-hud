@@ -473,3 +473,235 @@ def test_runtime_client_round_trip_and_refusal(real_daemon, data_dir):
         connect_runtime(data_dir, activation=activation(build_id=OTHER_BUILD),
                         timeout=5.0)
     assert refused.value.code == "runtime_mismatch"
+
+
+# --------------------------------------------------------------------- #
+# #54 Phase 4: the delivery key rides the protocol-2 event frame
+# --------------------------------------------------------------------- #
+
+import re  # noqa: E402
+
+DELIVERY = "0123456789abcdef0123456789abcdef"
+ACCOUNTING_FAILURE = ("Privacy HUD could not record this event — this "
+                      "event is unverified.")
+EVENT_OK = {"v": 2, "op": "event", "ok": True, "output": {}}
+
+
+def _sessions(daemon) -> list[str]:
+    with daemon.state.lock:
+        return [r[0] for r in daemon.state.ledger.conn.execute(
+            "SELECT session_id FROM sessions ORDER BY session_id")]
+
+
+def _record_dispatch(monkeypatch) -> list[tuple[dict, object]]:
+    import privacy_hud.daemon as daemon_mod
+    calls: list[tuple[dict, object]] = []
+
+    def recording(state, payload, *, delivery_key=None):
+        calls.append((payload, delivery_key))
+        return {}
+
+    monkeypatch.setattr(daemon_mod, "dispatch", recording)
+    return calls
+
+
+def test_protocol2_event_carries_delivery_key_after_hello(data_dir):
+    server = Scripted(data_dir / "daemon.sock", [hello_ok(), EVENT_OK])
+    try:
+        run_hook(data_dir, INGRESS)
+    finally:
+        server.close()
+    lines = [json.loads(line) for line in server.traffic.split(b"\n")
+             if line]
+    assert len(lines) == 2
+    assert lines[0] == hello()
+    frame = lines[1]
+    assert set(frame) == {"v", "op", "build_id", "activation_epoch",
+                          "delivery_key", "payload"}
+    assert frame["v"] == 2 and frame["op"] == "event"
+    assert frame["build_id"] == REPO_BUILD
+    assert frame["activation_epoch"] == TEST_EPOCH
+    assert re.fullmatch(r"[0-9a-f]{32}", frame["delivery_key"])
+    assert frame["payload"] == INGRESS
+    assert b"delivery_key" not in server.traffic.split(b"\n", 1)[0]
+
+
+def test_protocol2_event_accepts_optional_delivery_key(real_daemon, data_dir):
+    daemon = real_daemon(data_dir)
+    sock_path = data_dir / "daemon.sock"
+    keyed = {**SESSION_START, "session_id": "keyed"}
+    keyless = {**SESSION_START, "session_id": "keyless"}
+    replies = raw_exchange(sock_path, hello(),
+                           {**event(keyed), "delivery_key": DELIVERY})
+    assert replies[0]["ok"] is True
+    assert replies[1] == EVENT_OK
+    assert raw_exchange(sock_path, hello(), event(keyless))[1] == EVENT_OK
+    assert {"keyed", "keyless"} <= set(daemon.state.live)
+    before = _ledger_counts(daemon)
+    for index, extra in enumerate(({"extra": 1}, {"session_id": "x"},
+                                   {"delivery_key": DELIVERY, "extra": 1},
+                                   {"accounting": {}})):
+        frame = {**event({**SESSION_START, "session_id": f"extra{index}"}),
+                 **extra}
+        assert raw_exchange(sock_path, hello(), frame)[1] is None, extra
+    missing = event(SESSION_START)
+    del missing["payload"]
+    assert raw_exchange(sock_path, hello(),
+                        {**missing, "delivery_key": DELIVERY})[1] is None
+    assert not any(s.startswith("extra") for s in daemon.state.live)
+    assert _ledger_counts(daemon) == before
+
+
+def test_protocol1_delivery_envelope_still_refused(real_daemon, data_dir):
+    daemon = real_daemon(data_dir)
+    sock_path = data_dir / "daemon.sock"
+    before = _ledger_counts(daemon)
+    old = {"v": 1, "op": "event", "delivery_key": DELIVERY,
+           "payload": SESSION_START}
+    assert raw_exchange(sock_path, old) == [None]
+    replies = raw_exchange(sock_path, hello(), old)
+    assert replies[0]["ok"] is True and replies[1] is None
+    assert daemon.state.live == {}
+    assert _ledger_counts(daemon) == before
+
+
+@pytest.mark.parametrize("payload, egress", [(INGRESS, False),
+                                             (EGRESS, True)])
+def test_runtime_mismatch_sends_no_delivery_or_payload(data_dir, payload,
+                                                       egress):
+    for reply in (hello_ok(build=OTHER_BUILD), hello_ok(epoch=OTHER_EPOCH),
+                  {"v": 2, "op": "hello", "ok": False,
+                   "code": "runtime_mismatch"}):
+        server = Scripted(data_dir / "daemon.sock", [reply, EVENT_OK])
+        try:
+            out, _ = run_hook(data_dir, payload)
+        finally:
+            server.close()
+            (data_dir / "daemon.sock").unlink()
+        assert b"delivery_key" not in server.traffic
+        assert CANARY.encode() not in server.traffic
+        if egress:
+            assert out["hookSpecificOutput"]["permissionDecisionReason"] \
+                == EGRESS_REFUSAL
+        else:
+            assert out == {"systemMessage": INGRESS_REFUSAL}
+
+
+@pytest.mark.parametrize("bad", [None, "", "X" * 32, DELIVERY.upper(),
+                                 DELIVERY[:-1], 7, ["k"]])
+def test_invalid_envelope_key_uses_existing_failure_policy(real_daemon,
+                                                           data_dir, bad):
+    daemon = real_daemon(data_dir)
+    sock_path = data_dir / "daemon.sock"
+    before = _ledger_counts(daemon)
+    start = {**SESSION_START, "session_id": "badkey"}
+    replies = raw_exchange(sock_path, hello(),
+                           {**event(start), "delivery_key": bad})
+    assert replies[1] is not None, "an invalid key was met with silence"
+    assert replies[1]["ok"] is True
+    assert replies[1]["output"] == {"systemMessage": ACCOUNTING_FAILURE}
+    replies = raw_exchange(sock_path, hello(),
+                           {**event(EGRESS), "delivery_key": bad})
+    assert _is_deny(replies[1]["output"])
+    assert "badkey" not in _sessions(daemon)
+    assert _ledger_counts(daemon) == before
+
+
+def test_matching_protocol2_envelope_without_key_gets_request_local_key(
+        real_daemon, data_dir, monkeypatch):
+    calls = _record_dispatch(monkeypatch)
+    real_daemon(data_dir)
+    sock_path = data_dir / "daemon.sock"
+    for _ in range(2):
+        assert raw_exchange(sock_path, hello(), event(INGRESS))[1] == EVENT_OK
+    assert raw_exchange(sock_path, hello(),
+                        {**event(INGRESS), "delivery_key": DELIVERY})[1] \
+        == EVENT_OK
+    keys = [key for _payload, key in calls]
+    assert len(keys) == 3
+    assert all(isinstance(k, str) and re.fullmatch(r"[0-9a-f]{32}", k)
+               for k in keys)
+    assert keys[0] != keys[1]
+    assert keys[2] == DELIVERY
+    assert DELIVERY not in keys[:2]
+
+
+def test_new_accounting_failure_warns_on_ingress(real_daemon, data_dir,
+                                                 monkeypatch):
+    import privacy_hud.engine as engine_mod
+
+    def boom(self, obs, **_kw):
+        raise RuntimeError(f"simulated accounting failure {CANARY}")
+
+    monkeypatch.setattr(engine_mod.Engine, "observe", boom)
+    real_daemon(data_dir)
+    sock_path = data_dir / "daemon.sock"
+    start = {**SESSION_START, "session_id": "s1"}
+    assert raw_exchange(sock_path, hello(), event(start))[1] == EVENT_OK
+    reply = raw_exchange(sock_path, hello(), event(INGRESS))[1]
+    assert reply["output"] == {"systemMessage": ACCOUNTING_FAILURE}
+    assert CANARY not in json.dumps(reply)
+    reply = raw_exchange(sock_path, hello(), event(EGRESS))[1]
+    assert _is_deny(reply["output"])
+    # The hook client relays the warning unchanged.
+    out, _ = run_hook(data_dir, INGRESS)
+    assert out == {"systemMessage": ACCOUNTING_FAILURE}
+
+
+# --------------------------------------------------------------------- #
+# #54 Phase 4: generation 5402 capability, and stale identity
+# --------------------------------------------------------------------- #
+
+def test_5402_capabilities_agree_across_manifest_and_hook(data_dir):
+    from privacy_hud import runtime_contract
+    values = _handler_literals()
+    manifest = json.loads((REPO / "runtime-build.json").read_text())
+    assert runtime_contract.READABLE_SCHEMAS == (0, 5401, 5402)
+    assert runtime_contract.WRITABLE_SCHEMAS == (0, 5401, 5402)
+    assert values["READABLE_SCHEMAS"] == (0, 5401, 5402)
+    assert manifest["readable_schemas"] == [0, 5401, 5402]
+    assert manifest["writable_schemas"] == [0, 5401, 5402]
+    # The stdlib client accepts a matching hello from an activated ledger.
+    relayed = {"v": 2, "op": "event", "ok": True,
+               "output": {"systemMessage": "from an activated daemon"}}
+    server = Scripted(data_dir / "daemon.sock",
+                      [{**hello_ok(), "schema_version": 5402}, relayed])
+    try:
+        out, _ = run_hook(data_dir, INGRESS)
+    finally:
+        server.close()
+    assert out == {"systemMessage": "from an activated daemon"}
+
+
+def test_stale_build_and_epoch_cannot_dispatch_after_selection(
+        real_daemon, data_dir, tmp_path):
+    """A daemon whose selection moved on (repair selected another build or
+    epoch) writes nothing for a hook that still reaches it: no activation,
+    observation or policy row. A hook of a stale identity is refused at the
+    hello."""
+    from runtime_helpers import write_receipt_v2 as reselect
+
+    daemon = real_daemon(data_dir)
+    sock_path = data_dir / "daemon.sock"
+    state_dir = tmp_path / "state"
+    before = _ledger_counts(daemon)
+    # A stale hook identity: refused before any dispatch.
+    for build, epoch in ((OTHER_BUILD, TEST_EPOCH), (REPO_BUILD, OTHER_EPOCH)):
+        replies = raw_exchange(sock_path, hello(build, epoch))
+        assert replies[0]["ok"] is False
+    # The daemon's own selection moves: its writer lease is no longer
+    # current, so a matching hook's start writes nothing.
+    reselect(state_dir, bundle=REPO, python="/usr/bin/python3",
+             build_id=REPO_BUILD, epoch=OTHER_EPOCH)
+    replies = raw_exchange(sock_path, hello(), event(SESSION_START))
+    assert replies[1]["output"] == {"systemMessage": ACCOUNTING_FAILURE}
+    policy = {"v": 2, "op": "policy_update", "build_id": REPO_BUILD,
+              "activation_epoch": TEST_EPOCH, "session_id": "legacy",
+              "rule_type": "mask", "selector": "email"}
+    assert raw_exchange(sock_path, hello(), policy)[1] is None
+    assert _ledger_counts(daemon) == before
+    with daemon.state.lock:
+        version = daemon.state.ledger.conn.execute(
+            "PRAGMA user_version").fetchone()[0]
+    assert version == 0
+    assert daemon.state.accounting_keys == {}

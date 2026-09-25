@@ -39,6 +39,8 @@ from runtime_helpers import writer_state
 from runtime_helpers import writer_ledger
 from runtime_helpers import activation as _activation
 
+ACCOUNTING_FAILURE = ("Privacy HUD could not record this event — this "
+                      "event is unverified.")
 CREDENTIAL = "sk-proj-Ab3xY9zQw1Er5Ty7Ui0OpAs2Df4Gh6Jk8Lm"
 
 
@@ -68,7 +70,9 @@ def _start(st, session_id="s1"):
 def test_session_start_creates_session(tmp_path):
     st = writer_state(tmp_path)
     _start(st)
-    assert st.ledger.summary("s1").legacy_percent == 0
+    # A genuine start is version-2 accounted since #54 Phase 4.
+    summary = st.ledger.summary("s1")
+    assert summary.accounting_version == 2 and summary.percent == 0
 
 
 def test_session_start_returns_empty_hook_output(tmp_path):
@@ -100,7 +104,8 @@ def test_pretooluse_bash_local_command_is_allowed(tmp_path):
         "hook_event_name": "PreToolUse", "session_id": "s1", "turn_id": "t1",
         "tool_name": "Bash", "tool_input": {"command": "ls -la"}})
     assert out == {}
-    assert st.ledger.summary("s1").legacy_permitted_crossing_rows == 0
+    summary = st.ledger.summary("s1")
+    assert summary.event_rows == 0 and summary.exposure_events == 0
 
 
 def test_pretooluse_mcp_tool_classifies_as_mcp_destination(tmp_path):
@@ -135,7 +140,10 @@ def test_posttooluse_records_an_exposure(tmp_path):
     _start(st)
     dispatch(st, {"hook_event_name": "PostToolUse", "session_id": "s1",
                   "tool_name": "Read", "tool_response": f"key={CREDENTIAL}"})
-    assert st.ledger.summary("s1").legacy_permitted_crossing_rows >= 1
+    # Version 2 records the finding event; a tool result alone confirms no
+    # crossing, so nothing is an exposure yet (#54 Phase 4).
+    summary = st.ledger.summary("s1")
+    assert summary.event_rows >= 1 and summary.exposure_events == 0
 
 
 def test_userpromptsubmit_is_ingress_to_model_context(tmp_path):
@@ -145,7 +153,7 @@ def test_userpromptsubmit_is_ingress_to_model_context(tmp_path):
                         "session_id": "s1",
                         "prompt": f"here is my key {CREDENTIAL}"})
     assert "deny" not in json.dumps(out)
-    assert st.ledger.summary("s1").legacy_permitted_crossing_rows >= 1
+    assert st.ledger.summary("s1").event_rows >= 1
 
 
 def test_subagentstart_propagates_without_denying(tmp_path):
@@ -564,14 +572,19 @@ def test_daemon_still_allows_non_pretooluse_when_dispatch_raises_internally(
     out = _raw_call(sock_path, {"hook_event_name": "PostToolUse",
                                 "session_id": "sockfail3", "tool_name": "Read",
                                 "tool_response": "contact jordan@acme.com"})
-    assert out == {}
+    # #54 Phase 4: fail open, but no longer silently -- the fixed ingress
+    # warning says the event went unrecorded.
+    assert out == {"systemMessage": ACCOUNTING_FAILURE}
 
 
 def test_concurrent_calls_for_the_same_session_do_not_corrupt_the_ledger(running_daemon):
     daemon, sock_path = running_daemon
-    _raw_call(sock_path, {"hook_event_name": "SessionStart",
-                          "session_id": "sockc", "cwd": "/r",
-                          "model": "gpt-5"})
+    # A legacy-accounted session, as 0.8.x recorded one: the legacy writer's
+    # budget read-modify-write is what this test holds under concurrency. A
+    # genuine SessionStart would be version-2 accounted (#54 Phase 4), whose
+    # concurrency is covered by tests/test_accounting_dispatch.py.
+    with daemon.state.lock:
+        daemon.state.ledger.start_session("sockc", cwd="/r", model="gpt-5")
 
     errors = []
 
@@ -641,8 +654,9 @@ def test_concurrent_calls_for_the_same_session_do_not_corrupt_the_ledger(running
     score = conn.execute(
         "SELECT budget_score FROM sessions WHERE session_id=?",
         ("sockc",)).fetchone()[0]
+    table = daemon.state.ledger._legacy_events_table()
     delta_sum = conn.execute(
-        "SELECT COALESCE(SUM(budget_delta), 0) FROM events_legacy_v1"
+        f"SELECT COALESCE(SUM(budget_delta), 0) FROM {table}"
         " WHERE session_id=?",
         ("sockc",)).fetchone()[0]
     assert score == pytest.approx(delta_sum), (
@@ -652,7 +666,7 @@ def test_concurrent_calls_for_the_same_session_do_not_corrupt_the_ledger(running
     # here, and every recorded delta must have been an increment.
     assert score >= 0
     assert conn.execute(
-        "SELECT COUNT(*) FROM events_legacy_v1 WHERE budget_delta < 0").fetchone()[0] == 0
+        f"SELECT COUNT(*) FROM {table} WHERE budget_delta < 0").fetchone()[0] == 0
 
     # Dedupe survived the interleaving: UNIQUE(session_id, value_hash,
     # destination) is enforced by Ledger.record's SELECT-then-INSERT, which
@@ -660,7 +674,7 @@ def test_concurrent_calls_for_the_same_session_do_not_corrupt_the_ledger(running
     # here would mean two threads both passed the SELECT before either
     # INSERTed.
     dupes = conn.execute(
-        "SELECT COUNT(*) FROM (SELECT value_hash, destination FROM events_legacy_v1"
+        f"SELECT COUNT(*) FROM (SELECT value_hash, destination FROM {table}"
         " WHERE session_id=? GROUP BY value_hash, destination"
         " HAVING COUNT(*) > 1)", ("sockc",)).fetchone()[0]
     assert dupes == 0
@@ -867,7 +881,7 @@ def test_daemon_fails_closed_when_the_unlocked_scan_phase_raises(
     out = _raw_call(sock_path, {"hook_event_name": "PostToolUse",
                                 "session_id": "scanfail", "tool_name": "Read",
                                 "tool_response": "contact jordan@acme.com"})
-    assert out == {}
+    assert out == {"systemMessage": ACCOUNTING_FAILURE}
 
 
 def test_a_session_ending_mid_scan_does_not_reuse_the_discarded_salt(tmp_path):
@@ -878,8 +892,8 @@ def test_a_session_ending_mid_scan_does_not_reuse_the_discarded_salt(tmp_path):
     from privacy_hud.dispatch import dispatch
 
     st = writer_state(tmp_path)
-    dispatch(st, {"hook_event_name": "SessionStart", "session_id": "race",
-                  "cwd": "/r", "model": "gpt-5"})
+    # A legacy session (version 2's race is in test_accounting_dispatch).
+    st.ledger.start_session("race", cwd="/r", model="gpt-5")
 
     # Fire SessionEnd from inside the scan, i.e. exactly in the window the
     # split opens. Patching `Engine.scan` is how we make that window
@@ -912,7 +926,8 @@ def test_a_session_ending_mid_scan_does_not_reuse_the_discarded_salt(tmp_path):
     ) == seen["ended_session"]
 
     rows = st.ledger.conn.execute(
-        "SELECT value_hash, budget_delta FROM events_legacy_v1"
+        "SELECT value_hash, budget_delta FROM"
+        f" {st.ledger._legacy_events_table()}"
         " WHERE session_id='race'").fetchall()
     assert rows
     assert all(row["value_hash"] is None for row in rows)
@@ -1558,6 +1573,18 @@ def test_a_session_that_never_ends_does_not_pin_the_daemon(lifetime_daemon,
         session_stale_after=0.05, idle_timeout=3600.0)
     _session_start(sock_path, "leaked")
     assert daemon.live_sessions() == 1
+    # #54 Phase 4: a daemon that has stopped discards every session's
+    # in-memory identity before giving up ownership, so what the sweep left
+    # alone is read at that moment, not after it.
+    at_shutdown: list[tuple[set, set]] = []
+    discard = daemon._discard_session_identities
+
+    def record_then_discard():
+        at_shutdown.append((set(startup_state.salts),
+                            set(startup_state.engines)))
+        discard()
+
+    daemon._discard_session_identities = record_then_discard
 
     daemon.linger_grace = 0.01
     thread.join(timeout=10.0)
@@ -1572,8 +1599,11 @@ def test_a_session_that_never_ends_does_not_pin_the_daemon(lifetime_daemon,
         "SELECT ended_at FROM sessions WHERE session_id=?",
         ("leaked",)).fetchone()[0]
     assert ended is None, "the staleness sweep ended a session it only guessed"
-    assert "leaked" in startup_state.salts
-    assert "leaked" in startup_state.engines
+    assert len(at_shutdown) == 1
+    salts, engines = at_shutdown[0]
+    assert "leaked" in salts
+    assert "leaked" in engines
+    assert "leaked" not in startup_state.salts
 
 
 def test_the_absolute_cap_bounds_the_daemon_even_with_a_live_session(
@@ -2180,3 +2210,47 @@ def test_dispatch_reads_only_latch_fields_the_hook_client_writes():
     assert written, "the hook client must write a latch"
     assert read, "the daemon must read one"
     assert read <= written
+
+
+def test_daemon_shutdown_discards_registered_identity(tmp_path, monkeypatch):
+    """#54 Phase 4: once its workers have drained, a stopping daemon clears
+    every registered engine and drops every accounting key, salt and start
+    time before it gives up ledger ownership. It fabricates no SessionEnd
+    and ends nothing in the ledger."""
+    from runtime_helpers import activation as make_activation
+
+    sock_dir = tempfile.mkdtemp(prefix="phd")
+    state = writer_state(tmp_path / "data")
+    dispatch(state, {"hook_event_name": "SessionStart", "session_id": "k1",
+                     "cwd": "/r", "model": "gpt-5"})
+    dispatch(state, {"hook_event_name": "SessionStart", "session_id": "k2",
+                     "cwd": "/r", "model": "gpt-5"})
+    engines = dict(state.engines)
+    assert set(state.accounting_keys) == {"k1", "k2"}
+    daemon = Daemon(Path(sock_dir) / "d.sock", tmp_path / "data",
+                    idle_timeout=3600, poll_interval=0.05, state=state,
+                    activation=make_activation())
+    seen_at_release = []
+    real_release = Daemon._release_writer_lease
+
+    def release(self):
+        seen_at_release.append((dict(state.accounting_keys),
+                                dict(state.engines), dict(state.salts)))
+        return real_release(self)
+
+    monkeypatch.setattr(Daemon, "_release_writer_lease", release)
+    thread = threading.Thread(target=daemon.serve_forever, daemon=True)
+    thread.start()
+    daemon.stop()
+    thread.join(timeout=5.0)
+    try:
+        assert seen_at_release == [({}, {}, {})]
+        assert state.started_at == {}
+        for engine in engines.values():
+            assert engine.accounting_key is None
+        rows = state.ledger.conn.execute(
+            "SELECT session_id, ended_at FROM sessions"
+            " WHERE session_id IN ('k1','k2') ORDER BY session_id").fetchall()
+        assert [tuple(r) for r in rows] == [("k1", None), ("k2", None)]
+    finally:
+        state.ledger.conn.close()

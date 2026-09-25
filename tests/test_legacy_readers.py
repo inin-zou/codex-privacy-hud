@@ -314,10 +314,9 @@ def test_a_version_two_session_is_not_read_as_legacy(tmp_path):
 
 @pytest.fixture
 def ui(state):
-    from privacy_hud import dispatch as dispatch_mod
-    dispatch_mod.dispatch(state, {
-        "hook_event_name": "SessionStart", "session_id": "s1",
-        "cwd": "/w", "model": "gpt-5", "turn_id": "t1"})
+    # A legacy-accounted session, as 0.8.x recorded one. A genuine
+    # SessionStart is version-2 accounted since #54 Phase 4.
+    state.ledger.start_session("s1", cwd="/w", model="gpt-5")
     server = local_ui_server.serve("s1", print_url=False)
     host, port = server.socket.getsockname()[:2]
     try:

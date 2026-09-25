@@ -1,21 +1,19 @@
 """Versioned session accounting and legacy ledger access.
 
-Production sessions use legacy accounting. Phase 3 also implements an
-inactive version-2 core for isolated synthetic tests and the private-copy
-rehearsal.
+New sessions observed from a genuine SessionStart use version-2 accounting.
+Existing sessions and late attachments retain legacy accounting.
 
-Legacy records retain their stored scores, counts and classifications.
-Version-2 observations, events and disclosures are separate immutable
-records. Only a new chargeable disclosure increases a version-2 score.
+Observations, finding events and first disclosures are separate records.
+Only a new chargeable disclosure increases a version-2 score. Profiles
+and session caps are frozen; historical records are not rescored.
 
-Version-2 identity inputs are hashed before persistence. Labels and
-exemplars use explicit allowlists; the absence of a raw-content column
-alone does not establish that arbitrary metadata is safe.
+Identity inputs are hashed before persistence. Persisted metadata uses
+explicit allowlists and opaque labels. SessionEnd erases matching hashes
+while retaining opaque identities and accounting joins. Key destruction
+belongs to daemon lifecycle handling; this is logical erasure, not a
+secure-deletion guarantee.
 
-Readers select the session's accounting version inside a read transaction
-and never initialize, migrate or activate a ledger. SessionEnd erases
-matching hashes while retaining opaque identities and accounting joins;
-this is logical erasure, not a secure-deletion guarantee.
+Readers never initialize, migrate or activate a ledger.
 """
 from __future__ import annotations
 
@@ -93,21 +91,18 @@ def open_connection(path: Path, *, initialize: bool,
 def _refuse_unsupported(path: Path, check_same_thread: bool) -> None:
     """Validate an existing ledger's schema on a read-only connection.
 
-    Raises whatever `ledger_schema.validate_schema` raises, plus
-    `UnsupportedAccounting` for activated accounting. Nothing about the
-    file changes either way — that is the point of doing it here rather
-    than after the writable open.
+    Raises whatever `ledger_schema.validate_schema` raises: an unknown
+    version, an incomplete rebuild or an altered layout. A valid activated
+    (5402) ledger is this writer's own generation (#54 Phase 4). Nothing
+    about the file changes either way — that is the point of doing it here
+    rather than after the writable open.
     """
     probe = open_connection(path, initialize=False, read_only=True,
                             check_same_thread=check_same_thread)
     try:
-        version = ledger_schema.validate_schema(probe)
+        ledger_schema.validate_schema(probe)
     finally:
         probe.close()
-    if version == ledger_schema.ACTIVATED_VERSION:
-        raise UnsupportedAccounting(
-            "this ledger uses activated accounting; this version of "
-            "Privacy HUD cannot write it")
 
 
 #: `coverage.reason` values. Three, and the list is closed on purpose: each one
@@ -501,6 +496,8 @@ _INVALID_OBSERVATION = "invalid accounting observation"
 _INVALID_EVENT = "invalid accounting event"
 _INVALID_V2_SESSION = "invalid version-2 session"
 _INVALID_STORED_PROFILE = "invalid stored scoring profile"
+_OUTERMOST_REQUIRED = (
+    "accounted session start requires an outermost transaction")
 
 _OPAQUE_ID = re.compile(r"[0-9a-f]{32}")
 _MAX_INTEGER = 2 ** 63
@@ -579,6 +576,23 @@ def _check_observation(o: ObservationRecord) -> None:
                 and o.decision not in ("allow", "rewrite"))
             or (o.resolution_scope != "none"
                 and not evidence & _RESOLVING_EVIDENCE)):
+        raise ValueError(_INVALID_OBSERVATION)
+
+
+def _check_start_observation(o: object, session_id: str) -> None:
+    """The one observation an activation records: this session's genuine
+    `SessionStart`, as observed and nothing more -- lifecycle, B0, no
+    decision, no gap, no potential crossing, `HOOK_OBSERVED` alone, scope
+    none."""
+    if not isinstance(o, ObservationRecord):
+        raise ValueError(_INVALID_OBSERVATION)
+    _check_observation(o)
+    if (o.session_id != session_id or o.hook_event != "SessionStart"
+            or o.phase != "lifecycle" or o.action_kind != "lifecycle"
+            or o.boundary != "B0" or o.decision != "none"
+            or o.scan_gap is not None or o.potential_crossing
+            or o.evidence != Evidence.HOOK_OBSERVED
+            or o.resolution_scope != "none"):
         raise ValueError(_INVALID_OBSERVATION)
 
 
@@ -760,10 +774,8 @@ class Ledger:
             # between the read-only check above and `BEGIN IMMEDIATE`,
             # another writer could have prepared this ledger.
             version = ledger_schema.validate_schema(self.conn)
-            if version == ledger_schema.ACTIVATED_VERSION:
-                raise UnsupportedAccounting(
-                    "this ledger uses activated accounting; this version of "
-                    "Privacy HUD cannot write it")
+            # A prepared (5401) or activated (5402) ledger is opened as it
+            # is: no DDL, no generation change.
             if version == 0:
                 # A new file gets the legacy schema; an existing legacy
                 # ledger gains only a table it lacks. No column is added to
@@ -885,15 +897,26 @@ class Ledger:
                 self._migration_failpoint(statement)
         ledger_schema.validate_schema(self.conn)
 
-    # -- version-2 accounting (#54 Phase 3; no production caller) ----------
+    # -- version-2 accounting (#54 Phases 3 and 4) -------------------------
 
     def _require_prepared(self) -> None:
-        """Version-2 accounting is written only at generation 5401 in
-        Phase 3; a legacy or activated ledger is refused."""
+        """Generation 5401 only. Exclusive to the private synthetic
+        constructor `_start_v2_session`, whose Phase 3 contract it is."""
         if ledger_schema.validate_schema(self.conn) != \
                 ledger_schema.PREPARED_VERSION:
             raise UnsupportedAccounting(
                 "version-2 accounting requires a prepared ledger")
+
+    def _require_accounting_storage(self) -> None:
+        """Validated prepared (5401) or activated (5402) storage: what the
+        shared profile store and every production version-2 operation
+        require. A legacy (0) ledger has no version-2 tables."""
+        if ledger_schema.validate_schema(self.conn) not in (
+                ledger_schema.PREPARED_VERSION,
+                ledger_schema.ACTIVATED_VERSION):
+            raise UnsupportedAccounting(
+                "version-2 accounting requires prepared or activated "
+                "storage")
 
     def ensure_profile(self, profile: ScoringProfile) -> str:
         """Store `profile` under its content ID unless it is already stored,
@@ -902,7 +925,7 @@ class Ledger:
         if not isinstance(profile, ScoringProfile):
             raise ValueError(_INVALID_PROFILE)
         with self._write_transaction():
-            self._require_prepared()
+            self._require_accounting_storage()
             profile_id = profile.profile_id
             row = self.conn.execute(
                 "SELECT * FROM scoring_profiles WHERE profile_id=?",
@@ -939,7 +962,7 @@ class Ledger:
     def _v2_session(self, session_id: str) -> tuple[sqlite3.Row,
                                                      ScoringProfile]:
         """The version-2 session row and its validated frozen profile."""
-        self._require_prepared()
+        self._require_accounting_storage()
         row = self.conn.execute(
             "SELECT * FROM sessions WHERE session_id=?",
             (session_id,)).fetchone()
@@ -977,6 +1000,22 @@ class Ledger:
         if not self._write_depth:
             raise RuntimeError("a version-2 session needs a write transaction")
         self._require_prepared()
+        self._insert_v2_session(session_id, profile=profile)
+
+    def _insert_v2_session(
+        self,
+        session_id: str,
+        *,
+        profile: ScoringProfile,
+    ) -> None:
+        """Insert one version-2 session: its immutable profile (inserted or
+        reused), the session row with its frozen cap and a null cwd and
+        model, and its one start-coverage row. Requires a write
+        transaction this instance owns, validated prepared or activated
+        storage, and an absent nonempty session ID. Commits nothing."""
+        if not self._write_depth:
+            raise RuntimeError("a version-2 session needs a write transaction")
+        self._require_accounting_storage()
         if not isinstance(session_id, str) or not session_id \
                 or self.session_exists(session_id):
             raise ValueError(_INVALID_V2_SESSION)
@@ -991,6 +1030,60 @@ class Ledger:
             "INSERT INTO coverage(session_id,ts,observer,reason)"
             " VALUES(?,?,?,?)",
             (session_id, now, self.observer, COVERAGE_SESSION_START))
+
+    def start_accounted_session(
+        self,
+        session_id: str,
+        *,
+        cwd: str,
+        model: str,
+        profile: ScoringProfile,
+        start_observation: ObservationRecord,
+    ) -> bool:
+        """Activate version-2 accounting for the genuine start of an absent
+        session (#54 Phase 4). True means the activation COMMITTED; the
+        caller may install the session's accounting key only then.
+
+        Owns the outermost write transaction, and refuses to run inside any
+        other: a True returned from within a caller's transaction would
+        precede that caller's COMMIT. The writer lease is checked around
+        acquisition and before COMMIT (`_write_transaction`), so a runtime
+        selection that changes meanwhile rolls back the complete
+        activation, rebuild included.
+
+        Inside one transaction and one accounting savepoint: validate the
+        schema and re-read the session; an existing ID returns False
+        without changing anything. Otherwise validate the start
+        observation, run #54's rebuild only for generation 0, insert the
+        profile, session, start coverage and start observation, mark the
+        ledger 5402, validate it, and COMMIT. Generation 5401 runs no DDL.
+        No intermediate 5401 is ever committed. `cwd` and `model` are
+        accepted and deliberately not stored."""
+        del cwd, model
+        if self._write_depth or self.conn.in_transaction:
+            raise RuntimeError(_OUTERMOST_REQUIRED)
+        if not isinstance(profile, ScoringProfile):
+            raise ValueError(_INVALID_PROFILE)
+        with self._atomic_accounting_write():
+            version = ledger_schema.validate_schema(self.conn)
+            if not isinstance(session_id, str) or not session_id:
+                raise ValueError(_INVALID_V2_SESSION)
+            if self.session_exists(session_id):
+                return False
+            _check_start_observation(start_observation, session_id)
+            if version == 0:
+                self.prepare_session_boundary(session_id)
+            self._insert_v2_session(session_id, profile=profile)
+            self._record_observation(start_observation, ())
+            if version != ledger_schema.ACTIVATED_VERSION:
+                self.conn.execute(
+                    "PRAGMA user_version = "
+                    f"{int(ledger_schema.ACTIVATED_VERSION)}")
+            if ledger_schema.validate_schema(self.conn) != \
+                    ledger_schema.ACTIVATED_VERSION:
+                raise UnsupportedAccounting(
+                    "the activated ledger does not validate")
+        return True
 
     @contextmanager
     def _atomic_accounting_write(self) -> Iterator[None]:

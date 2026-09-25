@@ -31,6 +31,8 @@ changed behaviour. That is a bug, not a rebaseline.
 """
 from __future__ import annotations
 
+import time
+
 import json
 import sqlite3
 import urllib.error
@@ -799,9 +801,16 @@ def test_ui_copy_endpoint_carries_no_empty_messages(ui):
     for. The line is now chosen per session by `render.empty_message` and
     delivered by `/api/exposures`, and there is deliberately no second source
     left for a client to fall back to."""
-    assert _get(ui, "/api/copy") == {
+    from privacy_hud.render import accounting_copy
+    copy = _get(ui, "/api/copy")
+    # #54 Phase 4 adds the static version-2 catalog, which carries no
+    # empty-state line either: those stay per session.
+    assert copy == {
         "acronyms": {"ssn": "SSN", "ip": "IP", "url": "URL"},
+        "accounting": accounting_copy(),
     }
+    assert not any(key.startswith("empty_") and key != "empty_unresolved"
+                   for key in copy["accounting"])
 
 
 # --------------------------------------------------------------------- #
@@ -813,12 +822,16 @@ DISPATCH_RECEIPT = RECEIPT.replace("· 41 min", "· 0 min")
 
 def test_session_end_hook_output_receipt_is_byte_identical(tmp_path):
     state = writer_state(tmp_path)
-    dispatch(state, {"hook_event_name": "SessionStart", "session_id": SESSION,
-                     "cwd": "/repo", "model": "gpt-5"})
+    # A legacy-accounted session, as 0.8.x recorded one: this pins the
+    # legacy receipt. A genuine SessionStart is version-2 accounted since
+    # #54 Phase 4, and its receipt is pinned in test_accounting_surfaces.
+    state.ledger.start_session(SESSION, cwd="/repo", model="gpt-5")
+    state.started_at[SESSION] = time.time()
+    table = state.ledger._legacy_events_table()
     for i, spec in enumerate(_ROWS):
         state.ledger.record(SESSION, **spec)
         state.ledger.conn.execute(
-            "UPDATE events_legacy_v1 SET ts=? WHERE session_id=? AND turn_id=?",
+            f"UPDATE {table} SET ts=? WHERE session_id=? AND turn_id=?",
             (TS + i * 60, SESSION, spec["turn_id"]))
 
     out = dispatch(state, {"hook_event_name": "SessionEnd",

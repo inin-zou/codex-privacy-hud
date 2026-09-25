@@ -78,6 +78,7 @@ from pathlib import Path
 
 from . import codex
 from .dispatch import (
+    _discard_session_identity,
     State,
     _deny,
     active_sessions,
@@ -85,6 +86,7 @@ from .dispatch import (
     live_session_count,
     new_state,
 )
+from .hook_evidence import DELIVERY_KEY_ABSENT, normalize_delivery_key
 from .hud_snapshot import HEARTBEAT_INTERVAL
 from .runtime_client import (
     EVENT_FRAME_LIMIT,
@@ -109,7 +111,10 @@ from .runtime_contract import (
     load_activation,
     verify_import_origins,
 )
-from .runtime_messages import DAEMON_STARTUP_REFUSAL
+from .runtime_messages import (
+    ACCOUNTING_INGRESS_FAILURE,
+    DAEMON_STARTUP_REFUSAL,
+)
 from .runtime_owner import WriterLease, acquire_writer, running_activation
 
 _log = logging.getLogger(__name__)
@@ -407,12 +412,24 @@ class _Handler(socketserver.StreamRequestHandler):
         if op != OP_EVENT:
             return
 
+        # #54 Phase 4: exactly `{"payload"}` or `{"payload",
+        # "delivery_key"}`. Anything else is not a request this protocol
+        # defines, and gets the same silence as before.
         payload = body.get("payload")
-        if set(body) != {"payload"} or not isinstance(payload, dict):
+        if (not {"payload"} <= set(body) <= {"payload", "delivery_key"}
+                or not isinstance(payload, dict)):
             return
 
         try:
-            output = dispatch(self.server.state, payload)
+            # Inside the exception boundary: an invalid supplied key takes
+            # the same failure path as any other normalization failure --
+            # a denial on egress, the fixed unverified warning on ingress,
+            # and no accounting write. Only an absent field gets a
+            # request-local key; JSON null is a supplied, invalid value.
+            delivery_key = normalize_delivery_key(
+                body.get("delivery_key", DELIVERY_KEY_ABSENT))
+            output = dispatch(self.server.state, payload,
+                              delivery_key=delivery_key)
         except Exception:
             # A bug in one event must not take the daemon down for every
             # other session -- this per-request exception boundary stays.
@@ -427,14 +444,16 @@ class _Handler(socketserver.StreamRequestHandler):
             # are ingress/propagate/lifecycle by construction — see
             # dispatch.py's mapping table), so that cheap, exception-proof
             # check is the gate: fail closed there (I6), fail open
-            # everywhere else exactly as before. Which events those are is
+            # everywhere else, with a fixed warning. Which events those are is
             # Codex's fact, not this daemon's, so the set is
             # `codex.EGRESS_EVENTS` -- the same set `hooks/handler.py`
             # restates as a literal for its own client-side gate.
             if payload.get("hook_event_name") in codex.EGRESS_EVENTS:
                 output = _deny_for_internal_failure(payload)
             else:
-                output = {}
+                # Fail open, but not silently (#54 Phase 4): `{}` would
+                # read as an ordinary, recorded allow.
+                output = {"systemMessage": ACCOUNTING_INGRESS_FAILURE}
 
         self._write({"v": PROTOCOL_VERSION, "op": OP_EVENT, "ok": True,
                      "output": output})
@@ -1125,6 +1144,20 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
                     "another process owns the ledger") from exc
             raise
 
+    def _discard_session_identities(self) -> None:
+        """Clear every registered engine and drop every accounting key,
+        salt and start time this daemon holds (#54 Phase 4). Nothing is
+        written: shutdown fabricates no SessionEnd and ends no session, so
+        an open version-2 session is simply left without a key -- the next
+        daemon marks it unavailable."""
+        state = getattr(self, "state", None)
+        if state is None:
+            return
+        with state.lock:
+            for session_id in (set(state.engines) | set(state.accounting_keys)
+                               | set(state.salts) | set(state.started_at)):
+                _discard_session_identity(state, session_id)
+
     def _release_writer_lease(self) -> None:
         """Give the writer lease back. Idempotent, and a no-op for a daemon
         that never took one."""
@@ -1442,9 +1475,14 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
                 # after our socket file is gone: while that file exists a
                 # client can still reach us, and a daemon answering
                 # requests it may no longer write would be worse than one
-                # that is simply not there.
-                self._release_writer_lease()
-                self._release_startup_lock()
+                # that is simply not there. Session identity goes first
+                # (#54 Phase 4): the workers have drained, so no request
+                # can use a key after this, and none outlives ownership.
+                try:
+                    self._discard_session_identities()
+                finally:
+                    self._release_writer_lease()
+                    self._release_startup_lock()
 
 
 def _default_socket_path(data_dir: Path) -> Path:

@@ -87,14 +87,54 @@
   };
   const ASSOCIATION_NOTE = "This legacy source-to-destination association does not establish delivery or a multi-hop flow.";
 
+  // #54 Phase 4: version-2 accounting. Its words come from the server's
+  // static catalog (`/api/copy` -> `render.accounting_copy`); only the
+  // failure line is also here, because a page that could not read
+  // accounting may not have that catalog either.
+  const ACCOUNTING_ERROR = "Privacy HUD accounting could not be read. No percentage or counts are available.";
+  const V2_COUNT_KEYS = [
+    "observations", "event_rows", "finding_occurrences", "distinct_subjects",
+    "exposure_events", "intervention_events", "distinct_disclosures",
+    "concrete_recipients", "permission_actions", "denials_issued",
+    "denials_enforced", "reads_stopped", "rewrite_actions_issued",
+    "rewrite_actions_enforced", "unresolved_actions",
+    "unresolved_subject_events", "unresolved_recipient_events",
+  ];
+  const V2_KEYS = V2_COUNT_KEYS.concat([
+    "accounting_version", "accounting_status", "profile_id",
+    "confirmed_points", "budget_cap", "percent",
+    "percentage_unavailable_reasons", "score_label", "accounting_note",
+    "coverage",
+  ]);
+  const V2_REASONS = [
+    "accounting_unavailable", "unresolved_actions", "unresolved_subjects",
+    "unresolved_recipients", "coverage_incomplete",
+  ];
+  // Evidence names -> chip keys in the catalog, in the chips' fixed order.
+  const V2_CHIPS = [
+    ["deny_issued", "chip_denial_issued"],
+    ["deny_enforced", "chip_denial_enforced"],
+    ["rewrite_issued", "chip_rewrite_issued"],
+    ["rewrite_enforced", "chip_rewrite_applied"],
+    ["rejected_before_crossing", "chip_rejected_before_crossing"],
+    ["crossing_confirmed", "chip_exposed"],
+    ["permission_issued", "chip_permitted"],
+    ["execution_observed", "chip_local_access"],
+    ["local_detection", "chip_detected"],
+    ["persistence_observed", "chip_retention"],
+  ];
+
   const params = new URLSearchParams(location.search);
   let sessionId = params.get("session_id") || null;
   let activeTab = "Exposed";
   let tabData = {};      // tab name -> {rows, text, ...} or null when unavailable
   let summary = null;
-  // "legacy" | "unrecorded" | "unavailable". A failed request is
+  // "legacy" | "unrecorded" | "v2" | "unavailable". A failed request is
   // "unavailable", never "unrecorded": failing to ask is not an answer.
   let mode = "unavailable";
+  // Bumped whenever what is displayed changes (tab, session, reload): a
+  // detail reply that arrives after it no longer belongs to the page.
+  let viewGeneration = 0;
   let copy = { acronyms: {} };
   let selectedIndex = -1;
 
@@ -123,6 +163,92 @@
     if (pct <= 33) return "safe";
     if (pct <= 66) return "warn";
     return "danger";
+  }
+
+  // -- version-2 accounting --------------------------------------------
+
+  function isCount(v) {
+    return typeof v === "number" && Number.isInteger(v) && v >= 0;
+  }
+
+  function isFiniteNumber(v) {
+    return typeof v === "number" && Number.isFinite(v);
+  }
+
+  // The exact version-2 summary contract. No field is defaulted: a missing,
+  // mistyped, non-finite or inconsistent value is a failed reading, never a
+  // zero.
+  function validV2Summary(s) {
+    if (!s || typeof s !== "object" || Array.isArray(s)) return false;
+    const keys = Object.keys(s);
+    if (keys.length !== V2_KEYS.length || !V2_KEYS.every((k) => keys.includes(k))) return false;
+    if (s.accounting_version !== 2) return false;
+    if (s.accounting_status !== "available" && s.accounting_status !== "unavailable") return false;
+    if (typeof s.profile_id !== "string") return false;
+    if (!V2_COUNT_KEYS.every((k) => isCount(s[k]))) return false;
+    if (!isFiniteNumber(s.confirmed_points) || s.confirmed_points < 0) return false;
+    if (!isFiniteNumber(s.budget_cap) || s.budget_cap <= 0) return false;
+    const reasons = s.percentage_unavailable_reasons;
+    if (!Array.isArray(reasons) || !reasons.every((r) => V2_REASONS.includes(r))
+        || new Set(reasons).size !== reasons.length) return false;
+    if (s.percent === null) {
+      if (reasons.length === 0) return false;
+    } else if (!isCount(s.percent) || s.percent > 100 || reasons.length !== 0) {
+      return false;
+    }
+    if (typeof s.score_label !== "string" || typeof s.accounting_note !== "string") return false;
+    return !!s.coverage && typeof s.coverage === "object";
+  }
+
+  function validV2Tab(data) {
+    return !!data && Array.isArray(data.rows)
+      && data.rows.every((r) => r && r.accounting_version === 2 && isCount(r.id))
+      && validV2Summary(data.summary);
+  }
+
+  // The summary read with the active tab's rows: tiles, counts and rows are
+  // one reading, never an older /api/summary beside newer rows.
+  function v2Summary() {
+    const data = tabData[activeTab];
+    return mode === "v2" && data && validV2Tab(data) ? data.summary : null;
+  }
+
+  function accountingCopy() {
+    return (copy && copy.accounting) || null;
+  }
+
+  function points(value) {
+    return value.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+  }
+
+  function v2Lines(s, A) {
+    const lines = [s.percent === null ? A.percentage_unavailable
+      : A.percentage_available.replace("{P}", String(s.percent))];
+    for (const reason of s.percentage_unavailable_reasons) {
+      if (reason === "accounting_unavailable") lines.push(A.reason_accounting_unavailable);
+      else if (reason === "unresolved_actions") {
+        lines.push(s.unresolved_actions === 1 ? A.reason_unresolved_action
+          : A.reason_unresolved_actions.replace("{N}", String(s.unresolved_actions)));
+      } else if (reason === "unresolved_subjects") lines.push(A.reason_unresolved_subjects);
+      else if (reason === "unresolved_recipients") lines.push(A.reason_unresolved_recipients);
+    }
+    if (s.confirmed_points === 0 && s.unresolved_actions > 0) lines.push(A.zero_confirmed);
+    lines.push(A.accounting_note);
+    return lines;
+  }
+
+  function v2Chips(row, A) {
+    const names = Array.isArray(row.evidence) ? row.evidence : [];
+    return V2_CHIPS.filter(([name]) => {
+      if (!names.includes(name)) return false;
+      if (name === "crossing_confirmed") return row.boundary !== "B0";
+      if (name === "execution_observed") return row.boundary === "B0";
+      return true;
+    }).map(([, key]) => A[key]);
+  }
+
+  function v2Failed() {
+    return mode === "v2" && (!v2Summary() || !accountingCopy());
   }
 
   function sortRows(tab, rows) {
@@ -185,7 +311,9 @@
     summary = await fetchJSON(`/api/summary?session_id=${encodeURIComponent(sessionId)}`);
     mode = summary && summary.accounting_version === 1 ? "legacy"
       : summary && summary.accounting_version === 0 ? "unrecorded"
+      : summary && summary.accounting_version === 2 ? "v2"
       : "unavailable";
+    viewGeneration += 1;
 
     for (const tab of TABS) {
       try {
@@ -206,7 +334,22 @@
     const note = $("accountingNote");
     const status = $("accountingStatus");
     let tiles = [];
-    if (mode === "legacy") {
+    const s = v2Summary();
+    const A = accountingCopy();
+    if (mode === "v2" && s && A) {
+      // No percentage bar or band: the percentage is a line of its own,
+      // and "unavailable" when the evidence does not support one.
+      tiles = [
+        [points(s.confirmed_points), A.tile_points, null],
+        [String(s.distinct_disclosures), A.tile_disclosures, null],
+        [String(s.concrete_recipients), A.tile_recipients, null],
+        [String(s.denials_issued), A.tile_denials, null],
+      ];
+      note.textContent = v2Lines(s, A).join("\n");
+      note.hidden = false;
+      status.textContent = "";
+      status.hidden = true;
+    } else if (mode === "legacy") {
       // The stored numbers under legacy labels (#54). The score counts
       // permitted crossings and its rows may collapse different outcomes,
       // so none of these is a confirmed-disclosure figure.
@@ -242,25 +385,57 @@
   }
 
   function renderTabs() {
+    const s = v2Summary();
+    const A = accountingCopy();
+    const v2 = mode === "v2" && s && A;
+    const v2Counts = v2 ? {
+      "Exposed": s.exposure_events, "Prevented": s.intervention_events,
+      "All events": s.event_rows } : {};
+    const v2Labels = v2 ? {
+      "Exposed": A.tab_exposed, "Prevented": A.tab_prevented,
+      "All events": A.tab_all } : {};
     $("tabs").innerHTML = TABS.map((tab) => {
       const rows = mode === "legacy" ? tabRows(tab) : null;
-      const n = rows ? rows.length : UNAVAILABLE;
+      const n = v2 ? v2Counts[tab] : rows ? rows.length : UNAVAILABLE;
+      const label = v2 ? v2Labels[tab] : TAB_LABELS[tab];
       const active = tab === activeTab ? " active" : "";
-      return `<button class="tab${active}" role="tab" data-tab="${tab}">${TAB_LABELS[tab]} ${n}</button>`;
+      return `<button class="tab${active}" role="tab" data-tab="${tab}">${escapeHTML(label)} ${n}</button>`;
     }).join("");
     $("tabs").querySelectorAll(".tab").forEach((btn) => {
       btn.addEventListener("click", () => {
         activeTab = btn.dataset.tab;
         selectedIndex = -1;
+        viewGeneration += 1;
         render();
+        if (mode === "v2") clearDetail(v2Failed() ? ACCOUNTING_ERROR : "");
       });
     });
   }
 
+  function clearDetail(message) {
+    $("ruleConfirmation").textContent = "";
+    $("detailTitle").textContent = "";
+    $("detailFlow").textContent = "";
+    $("detailFields").innerHTML = "";
+    $("detailActions").innerHTML = "";
+    const emptyEl = $("detailEmpty");
+    emptyEl.textContent = message || "";
+    emptyEl.hidden = !message;
+  }
+
+  function currentRows() {
+    if (mode === "v2") {
+      if (!v2Summary()) return [];
+      return tabRows(activeTab).slice().sort((a, b) => a.id - b.id);
+    }
+    return mode === "legacy" && tabRows(activeTab)
+      ? sortRows(activeTab, tabRows(activeTab)) : [];
+  }
+
   function renderTable() {
     const data = tabData[activeTab] || null;
-    const rows = mode === "legacy" && tabRows(activeTab)
-      ? sortRows(activeTab, tabRows(activeTab)) : [];
+    const rows = currentRows();
+    const A = accountingCopy();
     const tbody = $("rows");
     const emptyEl = $("empty");
 
@@ -282,7 +457,9 @@
     if (rows.length === 0) {
       tbody.innerHTML = "";
       emptyEl.hidden = false;
-      emptyEl.textContent = mode === "unrecorded"
+      emptyEl.textContent = v2Failed()
+        ? ACCOUNTING_ERROR
+        : mode === "unrecorded"
         ? (data && data.empty_message) || UNRECORDED_EMPTY
         : mode === "unavailable"
           ? "Could not load session accounting."
@@ -291,7 +468,17 @@
             : (data && data.empty_message) || "No events to show.";
     } else {
       emptyEl.hidden = true;
-      tbody.innerHTML = rows.map((r, i) => {
+      tbody.innerHTML = mode === "v2" ? rows.map((r, i) => {
+        const chips = v2Chips(r, A).map((c) =>
+          `<span class="chip">${escapeHTML(c)}</span>`).join(" ");
+        return `
+          <tr class="row" tabindex="0" data-index="${i}" data-id="${r.id}">
+            <td>${escapeHTML(`${typeLabel(r.data_type)} ×${r.occurrences}`)}</td>
+            <td>${escapeHTML(truncateMiddle(r.source_label || "", 24))}</td>
+            <td>${escapeHTML(r.recipient_label || "")}</td>
+            <td>${chips}</td>
+          </tr>`;
+      }).join("") : rows.map((r, i) => {
         const chip = statusChip(r);
         return `
           <tr class="row" tabindex="0" data-index="${i}" data-id="${r.id}">
@@ -308,7 +495,7 @@
       });
     }
 
-    $("ascii").textContent = (data && data.text) || "";
+    $("ascii").textContent = v2Failed() ? "" : (data && data.text) || "";
   }
 
   function truncateMiddle(s, maxLen) {
@@ -330,7 +517,7 @@
   }
 
   function onRowKeydown(e) {
-    const rows = tabRows(activeTab) || [];
+    const rows = currentRows();
     if (e.key === "ArrowDown") {
       e.preventDefault();
       selectedIndex = Math.min(selectedIndex + 1, rows.length - 1);
@@ -356,19 +543,93 @@
     const el = document.querySelector(`.row[data-index="${index}"]`);
     if (el) el.classList.add("selected");
 
-    const rows = sortRows(activeTab, tabRows(activeTab) || []);
+    const rows = currentRows();
     const row = rows[index];
     if (!row) return;
 
-    const detailResp = await fetchJSON(
-      `/api/detail?session_id=${encodeURIComponent(sessionId)}&id=${row.id}`
-    );
+    const generation = viewGeneration;
+    const requestedSession = sessionId;
+    let detailResp;
+    try {
+      detailResp = await fetchJSON(
+        `/api/detail?session_id=${encodeURIComponent(sessionId)}&id=${row.id}`
+      );
+    } catch (e) {
+      if (generation === viewGeneration && mode === "v2") clearDetail(ACCOUNTING_ERROR);
+      return;
+    }
+    // A reply for a view that has since changed restores nothing.
+    if (generation !== viewGeneration || sessionId !== requestedSession) return;
     if (detailResp.error) return;
     renderDetail(detailResp.row);
   }
 
+  function renderDetailV2(row) {
+    const A = accountingCopy();
+    if (v2Failed() || !row || row.accounting_version !== 2) {
+      clearDetail(ACCOUNTING_ERROR);
+      return;
+    }
+    clearDetail("");
+    $("detailTitle").textContent = `${typeLabel(row.data_type)} ×${row.occurrences}`;
+    $("detailFlow").textContent = A.row_note;
+    const fields = [
+      [A.detail_subject, row.subject_label],
+      [A.detail_recipient, row.recipient_label],
+      [A.detail_source, row.source_label],
+      [A.detail_boundary, row.boundary],
+      [A.detail_observation, row.observation_id],
+      [A.detail_action, row.action_id],
+      [A.detail_evidence, v2Chips(row, A).join(" · ") || "none"],
+      [A.detail_occurrences_in_this_observation, String(row.occurrences)],
+      [A.detail_confirmed_contribution, points(row.budget_delta)],
+      [A.detail_masked_example, row.masked_example || A.not_stored],
+    ];
+    if (row.scan_gap) fields.push([A.detail_scan_gap, row.scan_gap]);
+    $("detailFields").innerHTML = fields.map(([label, value]) => `
+      <div class="field-row">
+        <span class="field-label">${escapeHTML(label)}</span>
+        <span>${escapeHTML(String(value))}</span>
+      </div>
+    `).join("") + `<p class="accounting-note">${escapeHTML(A.accounting_note)}</p>`
+      + `<p class="accounting-note">${escapeHTML(A.opaque_source)}</p>`;
+
+    // Only the conditional mask rule: an opaque subject or recipient label
+    // is never a source-rule selector.
+    const actions = [
+      { text: `Save mask rule for detected ${row.data_type}`,
+        rule_type: "mask", selector: row.data_type },
+    ];
+    const actionsEl = $("detailActions");
+    actionsEl.innerHTML = actions.map((a, i) =>
+      `<button class="action" data-i="${i}">${escapeHTML(a.text)}</button>`
+    ).join("");
+    actionsEl.querySelectorAll("button[data-i]").forEach((btn) => {
+      const a = actions[Number(btn.dataset.i)];
+      btn.addEventListener("click", async () => {
+        if (mode !== "v2" || v2Failed()) return;
+        const requestedSession = sessionId;
+        const generation = viewGeneration;
+        const { ok, data } = await postJSON("/api/policy", {
+          session_id: requestedSession,
+          rule_type: a.rule_type,
+          selector: a.selector,
+        });
+        if (mode !== "v2" || sessionId !== requestedSession
+            || generation !== viewGeneration) return;
+        $("ruleConfirmation").textContent = ok
+          ? data.message
+          : `Could not save rule: ${data.error || "unknown error"}`;
+      });
+    });
+  }
+
   function renderDetail(row) {
     $("detail").style.display = "block";
+    if (mode === "v2") {
+      renderDetailV2(row);
+      return;
+    }
     // Clear whatever an earlier row left: fields, actions and the last
     // rule confirmation never carry over.
     $("ruleConfirmation").textContent = "";
@@ -471,6 +732,12 @@
     renderTiles();
     renderTabs();
     renderTable();
+    if (v2Failed()) {
+      // A failed reading shows no stale detail and offers no action.
+      selectedIndex = -1;
+      clearDetail(ACCOUNTING_ERROR);
+      $("detail").style.display = "none";
+    }
     // An unrecorded session has no row to show: an open detail panel is
     // replaced by the empty-detail line, never left on a stale row.
     if (mode === "unrecorded") {
