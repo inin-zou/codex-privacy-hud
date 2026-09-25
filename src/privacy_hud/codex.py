@@ -230,6 +230,36 @@ def plugin_cache_root() -> Path:
     return codex_home() / "plugins" / "cache"
 
 
+def cached_plugin_parent(bundle: Path) -> Path | None:
+    """The canonical cache parent of an existing release bundle, or None.
+
+    This describes cache placement, not authentication of same-user code.
+    Require an ordinary numeric release and a canonical bundled bootstrap.
+    The configured cache root may itself resolve through a user alias.
+    """
+    try:
+        root = plugin_cache_root().resolve(strict=True)
+        path = Path(bundle)
+        if not path.is_absolute() or path.resolve(strict=True) != path:
+            return None
+        relative = path.relative_to(root)
+        if len(relative.parts) != 3:
+            return None
+        _marketplace, plugin, version = relative.parts
+        if plugin != PLUGIN_NAME:
+            return None
+        if re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\."
+                        r"(0|[1-9][0-9]*)", version) is None:
+            return None
+        bootstrap = path / "scripts" / "runtime.py"
+        if (not bootstrap.is_file()
+                or bootstrap.resolve(strict=True) != bootstrap):
+            return None
+        return path.parent
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
 def codex_data_candidates() -> list[Path]:
     """Directories under `$CODEX_HOME/plugins/data/` that look like ours.
 
