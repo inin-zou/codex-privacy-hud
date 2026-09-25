@@ -8,7 +8,6 @@ import json
 import os
 import shlex
 import signal
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
