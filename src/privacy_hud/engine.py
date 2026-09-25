@@ -132,6 +132,7 @@ from .detect.paths import PATTERNS, is_sensitive_path
 from .detect.secrets import CredentialMatch, SecretDetector
 from .detect.shell import network_file_rules
 from .hook_evidence import HookEvidence, classify_evidence
+from .guard_targets import GuardTargetIndex
 from .identity import file_identity, safe_masked_example
 from .mask import mask, value_hash
 from .matrix.loader import HARD_BLOCKED_DATA_TYPES, UnknownKey
@@ -625,6 +626,7 @@ class Engine:
         #: None. Separate from `salt`, the enforcement salt: a replacement
         #: enforcement engine never recreates accounting identity.
         self.accounting_key = accounting_key
+        self._guard_targets = GuardTargetIndex()
         #: Set by `clear_session_identity`; the engine then takes no further
         #: identity-bearing observation work.
         self._identity_cleared = False
@@ -675,6 +677,7 @@ class Engine:
         self.accounting_key = None
         self.salt = b""
         self._origins.clear()
+        self._guard_targets.clear()
         self.prompt_gate.clear()
         self._identity_cleared = True
 
@@ -1517,7 +1520,20 @@ class Engine:
         if not observed & _RESOLVING:
             scope = "none"
         gap = scan.degraded_reason if acc.phase != "lifecycle" else None
-        self.ledger.record_observation(ObservationRecord(
+        proposal = None
+        if (
+            guarded
+            and action == "deny"
+            and read_block is not None
+            and obs.tool_name == codex.SHELL_TOOL
+            and key is not None
+        ):
+            # read_block is the actual representation evaluated above.
+            # Never use evaluated_path, cwd, file_identity or subject IDs.
+            rule_id = _path_rule_id(read_block)
+            assert rule_id is not None
+            proposal = self._guard_targets.prepare(key, read_block, rule_id)
+        recorded = self.ledger.record_observation(ObservationRecord(
             session_id=obs.session_id, delivery_key=acc.delivery_key,
             action_id=acc.action_id, turn_id=acc.turn_id,
             ts=int(time.time()), hook_event=acc.hook_event, phase=acc.phase,
@@ -1525,8 +1541,25 @@ class Engine:
             decision=decision, evidence=observed,
             resolution_scope=scope,
             potential_crossing=acc.potential_crossing,
-            scan_gap=gap),  # type: ignore[arg-type]
+            scan_gap=gap,  # type: ignore[arg-type]
+            guard_target=proposal[1] if proposal is not None else None),
             events)
+
+        if (
+            proposal is not None
+            and not recorded.duplicate_delivery
+            and not self.ledger.conn.in_transaction
+        ):
+            # Dispatch holds State.lock here. Publish matching state only
+            # after the ledger's outer transaction has committed.
+            row = self.ledger.conn.execute(
+                "SELECT g.event_id FROM guard_targets g"
+                " JOIN events e ON e.id=g.event_id"
+                " WHERE g.session_id=? AND e.observation_id=?",
+                (obs.session_id, recorded.observation_id),
+            ).fetchone()
+            assert row is not None
+            self._guard_targets.remember(proposal[0], proposal[1], row[0])
 
         # Display only; a decision never reads it.
         summary = self.ledger.summary(obs.session_id)

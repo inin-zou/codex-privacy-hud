@@ -73,7 +73,8 @@ def assert_accounting(state, count, sid="s1"):
     assert summary.reads_stopped == 0
     assert summary.unresolved_actions == count
     assert summary.unresolved_subject_events == count
-    assert summary.distinct_subjects == count
+    # Counts resolved subjects only; guard targets must not resolve any.
+    assert summary.distinct_subjects == 0
     assert summary.distinct_disclosures == 0
     assert summary.confirmed_points == 0
     rows = public_rows(state, sid)
@@ -160,13 +161,9 @@ def test_hook_to_every_projection(guarded, tmp_path, monkeypatch):
         state.ledger.summary("s1"), rows, "Prevented",
         coverage=state.ledger.coverage("s1"), session_id="s1",
     )
-    receipt = render.receipt(
-        "s1", state.ledger.summary("s1"), rows, None,
-        coverage=state.ledger.coverage("s1"),
-    )
+    # The version-2 receipt is aggregate-only and lists no rows.
     for row in rows:
         assert row.guard_target.summary in audit
-        assert row.guard_target.summary in receipt
 
     # Use the SDK's real worker-thread call path.
     opened = []

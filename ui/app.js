@@ -476,7 +476,9 @@
             <td>${escapeHTML(`${typeLabel(r.data_type)} ×${r.occurrences}`)}</td>
             <td>${escapeHTML(truncateMiddle(r.source_label || "", 24))}</td>
             <td>${escapeHTML(r.recipient_label || "")}</td>
-            <td>${chips}</td>
+            <td>${chips}${r.guard_target
+              ? `<div>${escapeHTML(`Event #${r.id}: ${r.guard_target.summary}`)}</div>`
+              : ""}</td>
           </tr>`;
       }).join("") : rows.map((r, i) => {
         const chip = statusChip(r);
@@ -585,6 +587,9 @@
       [A.detail_confirmed_contribution, points(row.budget_delta)],
       [A.detail_masked_example, row.masked_example || A.not_stored],
     ];
+    if (row.guard_target) {
+      fields.push(["Guard target", row.guard_target.summary]);
+    }
     if (row.scan_gap) fields.push([A.detail_scan_gap, row.scan_gap]);
     $("detailFields").innerHTML = fields.map(([label, value]) => `
       <div class="field-row">

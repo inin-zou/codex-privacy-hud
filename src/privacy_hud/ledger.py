@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Literal, get_args
 
 from . import ledger_schema
+from .guard_targets import read_target, record_target
 from .accounting import (
     PATH_RULE_IDS, SOURCE_LABELS, AccountingEventRow, AccountingExposureRow,
     AccountingSummary, ActionKind, Boundary, DataType, Decision, EventKind,
@@ -1113,7 +1114,10 @@ class Ledger:
         scan gap — atomically. A delivery key already recorded in the
         session returns its original result and writes nothing."""
         with self._atomic_accounting_write():
-            return self._record_observation(observation, events)
+            result = self._record_observation(observation, events)
+            if observation.guard_target is not None and not result.duplicate_delivery:
+                record_target(self.conn, observation, result)
+            return result
 
     def _record_observation(self, observation: ObservationRecord,
                             events: Sequence[EventRecord]) -> RecordResult:
@@ -1464,6 +1468,8 @@ class Ledger:
             values["evidence"] = _stored_evidence(values["evidence"])
             values["budget_delta"] = float(values["budget_delta"])
             values["budget_cap"] = float(values["budget_cap"])
+            values["guard_target"] = read_target(
+                self.conn, session_id, values["id"])
             out.append(AccountingEventRow(**values))
         return out
 

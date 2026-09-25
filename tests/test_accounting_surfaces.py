@@ -455,7 +455,13 @@ rows, legacy prevented rows, and all legacy rows. Legacy outcomes may have
 collapsed.
 
 An unrecorded session returns an empty list. An empty list does not establish
-that no events occurred. Raw values and identity hashes are not returned.""",
+that no events occurred. Raw values and identity hashes are not returned.
+
+For supported newly recorded local shell read-guard denials, guard_target
+identifies the path representation evaluated by Privacy HUD. Its random ID
+and same_as_event_id correlate evaluated representations within one session
+and surviving in-memory correlation window. This is not filesystem identity
+or host-enforcement evidence. Null means no guard-target metadata was recorded.""",
     "privacy.get_exposure_detail": """Read one public finding-event row scoped to both session_id and event_id.
 
 accounting_version=2 returns the observation and action identifiers,
@@ -463,6 +469,12 @@ subject and recipient labels, outcome evidence, occurrences, scan-gap
 metadata, and the contribution charged at this event. A repeated confirmed
 crossing can have zero contribution because the disclosure was charged
 earlier. An intended recipient label is not proof of delivery.
+
+The optional guard_target describes the path representation evaluated by
+Privacy HUD. Same evaluated target does not mean same filesystem object.
+Its IDs and earlier-event links do not resolve accounting subjects, establish
+disclosure, or establish host enforcement. Null means no such metadata was
+recorded.
 
 accounting_version=1 retains legacy classifications, repetition counts,
 intervention labels, and contributions. These do not establish confirmed

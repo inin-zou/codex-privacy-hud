@@ -432,6 +432,57 @@ SOURCE_LABELS = frozenset({
 
 
 @dataclass(frozen=True, kw_only=True)
+class GuardTarget:
+    """Decision-input metadata, never an execution subject or disclosure."""
+
+    target_id: str
+    rule_id: str
+    same_as_event_id: int | None
+    basis: Literal["evaluated-path-v1"] = "evaluated-path-v1"
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.target_id, str)
+            or _TOKEN.fullmatch(self.target_id) is None
+            or not isinstance(self.rule_id, str)
+            or self.rule_id not in PATH_RULE_IDS
+            or self.basis != "evaluated-path-v1"
+            or (
+                self.same_as_event_id is not None
+                and (
+                    type(self.same_as_event_id) is not int
+                    or self.same_as_event_id <= 0
+                )
+            )
+        ):
+            raise ValueError("invalid guard target")
+
+    @property
+    def summary(self) -> str:
+        correlation = (
+            f"Same evaluated target as event #{self.same_as_event_id}."
+            if self.same_as_event_id is not None
+            else "First recorded occurrence in this correlation window."
+        )
+        return (
+            f"Guard target G{self.target_id} · {self.rule_id}. "
+            f"{correlation} Path representation evaluated by Privacy HUD "
+            f"({self.basis}); this metadata does not establish filesystem "
+            "identity or host enforcement."
+        )
+
+    def as_dict(self) -> dict:
+        return {
+            "target_id": self.target_id,
+            "rule_id": self.rule_id,
+            "same_as_event_id": self.same_as_event_id,
+            "basis": self.basis,
+            "meaning": "Path representation evaluated by Privacy HUD",
+            "summary": self.summary,
+        }
+
+
+@dataclass(frozen=True, kw_only=True)
 class ObservationRecord:
     session_id: str
     delivery_key: str
@@ -447,6 +498,7 @@ class ObservationRecord:
     resolution_scope: ResolutionScope
     potential_crossing: bool
     scan_gap: ScanGap | None
+    guard_target: GuardTarget | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -776,6 +828,7 @@ class AccountingExposureRow:
     budget_delta: float
     scan_gap: ScanGap | None
     budget_cap: float
+    guard_target: GuardTarget | None = None
 
     @property
     def accounting_version(self) -> Literal[2]:
@@ -786,6 +839,9 @@ class AccountingExposureRow:
         for f in fields(AccountingExposureRow):
             payload[f.name] = getattr(self, f.name)
         payload["evidence"] = list(evidence_names(self.evidence))
+        payload["guard_target"] = (
+            self.guard_target.as_dict() if self.guard_target is not None else None
+        )
         return payload
 
 
