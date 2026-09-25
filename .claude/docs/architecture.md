@@ -244,7 +244,7 @@ CREATE TABLE events (                     -- legacy UPDATEs: count increments; v
   UNIQUE(session_id, value_hash, destination)
 );
 
-CREATE TABLE flows (                      -- multi-hop chains for the L3 flow line
+CREATE TABLE flows (                      -- retained legacy placeholder; no production writer
   id         INTEGER PRIMARY KEY,
   session_id TEXT NOT NULL,
   value_hash BLOB NOT NULL,
@@ -269,6 +269,8 @@ CREATE TABLE policy_tokens (              -- one-shot consent, §8
   expires_at INTEGER NOT NULL
 );
 ```
+
+The legacy `flows` table is retained unchanged for compatibility. No production code writes it, and event-detail retrieval does not populate hops from it. It is not the storage contract for version-2 subject associations. Current requirements do not include reconstructed causal multi-hop chains. Any future same-subject observation history should be derived read-only from version-2 records without strengthening their evidence or changing accounting.
 
 **Persistence constraint:** raw content is not stored. The absence of a content column is insufficient by itself: source labels, exemplars, identities, and other metadata must also satisfy I1. Delegation text is scanned transiently; task names, targets, roles, fork arguments, and transcript references are not added to persisted metadata.
 

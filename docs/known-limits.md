@@ -12,6 +12,12 @@ The native Privacy status item does not verify runtime alignment. An old daemon 
 
 A denial or rewritten input returned by Privacy HUD is not confirmation that the host applied it. Current hooks do not establish that a denied call did not run or that rewritten input reached its intended recipient.
 
+**Multi-hop flows are not reconstructed.** The legacy `flows` table has no production writer, and event detail does not retrieve a chain of hops. The audit shows finding-event rows, not an aggregated route through files, model context, subagents and external recipients.
+
+Version-2 records can associate the same exact detected value with multiple observations through a session-scoped subject identity. This establishes repeated observation of that subject, not that a value travelled between the recorded locations. Source labels are generic, recipients may be intended or unresolved, and ledger recording order does not establish execution order. No cross-observation history view is shipped.
+
+SessionEnd erases subject and recipient identity hashes and discards the session key; existing opaque IDs and joins remain. This preserves recorded associations without retaining the key needed to match new values. A legacy repetition count and version-2 occurrences within one observation are neither distinct-value counts nor hop counts.
+
 The historical headings retain their link anchors. References to blocking below describe plugin decisions or legacy classifications, not confirmed host enforcement.
 
 ## 1. The start of a session is unmonitored.
