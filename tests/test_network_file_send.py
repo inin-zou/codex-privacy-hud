@@ -127,7 +127,7 @@ def file_rows(state):
     return state.ledger.conn.execute(
         "SELECT e.kind, e.rule_id, e.source_label, e.masked_example,"
         " e.evidence, e.occurrences, s.subject_id, s.subject_kind,"
-        " s.resolution, s.identity_hash, s.safe_suffix"
+        " s.resolution, s.identity_hash, s.label"
         " FROM events e JOIN subjects s USING (session_id, subject_id)"
         " WHERE e.session_id='s' AND s.subject_kind='file'"
         " ORDER BY e.id"
@@ -157,7 +157,7 @@ def test_sensitive_network_forms_deny_by_default(case, command):
         ) == ("prevented", "path.env", "tool input", None, 1)
         assert row["resolution"] == "unresolved"
         assert row["identity_hash"] is None
-        assert row["safe_suffix"] is None
+        assert row["label"] == f"file {row['subject_id']}"
         assert Evidence.DENY_ISSUED in Evidence(row["evidence"])
         assert not Evidence(row["evidence"]) & TERMINAL
         assert summary.denials_issued == 1

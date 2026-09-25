@@ -26,6 +26,8 @@ Codex Privacy HUD 是一个本地优先的 Codex 插件。它把收到的 hook �
 
 0.9.0 为收到真正 SessionStart 的新会话启用基于证据的记账，并继续使用 0.8.0 引入的运行时选择机制和隔离后的账本。已有会话和开始后才接入的会话仍采用旧版记账；历史记录不会被回填或重新计分。
 
+0.9.1 新增默认开启的网络命令词法防护。已识别的网络命令如果包含已知敏感路径引用，会收到拒绝决定，不受本地读取防护开关影响。插件不会打开或改写文件内容。从 shell 命令推断的文件身份以及宿主是否执行拒绝仍保持未确定状态；详见已知限制第 6 条。
+
 ```text
 Token HUD:    How much context has been consumed?
 Privacy HUD：哪些事实已确认，哪些结果仍未确定？
@@ -322,7 +324,7 @@ flowchart TD
 3. **托管工具绕过 hook。** WebSearch 等工具不触发本地函数工具的 hook 路径。（[详情](docs/known-limits.md#3-hosted-tools-bypass-hooks)）
 4. **Codex hook 不支持 `ask` 决策，插件也没有工具调用的交互式授权入口。** 内部已实现令牌逻辑，但浏览器按钮、`$privacy` 分支和已公开的 MCP 工具都不能签发授权令牌，也不提供基于令牌的重试。提示词重新提交确认是独立机制，见限制 22。（[详情](docs/known-limits.md#4-no-ask-decision-in-codex-hooks-and-no-interactive-consent-at-all)）
 5. **状态行项只存在于单独构建的 Codex 中，绝不出现在你的官方版本中。** **插件绝不修改你的官方 Codex 二进制。**（[详情](docs/known-limits.md#5-the-status-line-item-lives-in-a-separately-built-codex--never-in-your-official-one)）
-6. **如果命令自行读取文件，则引擎不检查所读内容。** 引擎扫描的是*工具调用的文本*，不扫描该调用在运行时将读取的内容。（[详情](docs/known-limits.md#6-a-command-that-reads-a-file-itself-is-not-inspected)）
+6. **不会检查网络发送所引用文件的内容。** 默认开启的词法防护会拒绝包含已知敏感路径引用的已识别网络命令。它可能因无关的路径引用而误拦截，也无法识别隐藏在展开结果或配置中的路径。普通非敏感文件的上传仍可进入现有策略检查。（[详情](docs/known-limits.md#6-a-command-that-reads-a-file-itself-is-not-inspected)）
 7. **检测采用启发式方法。** 有意规避检测的攻击者可以通过编码绕过正则表达式和命名实体识别（NER）。（[详情](docs/known-limits.md#7-detection-is-heuristic)）
 8. **展示哪个会话靠推断，不靠直接读取；无法确定时，技能会在终端审计中明确提示。** 浏览器以“Session <完整会话 ID>”标明所选会话。 伴随窗格没有这种标记；需要时用 `--session-id` 钉住会话。（[详情](docs/known-limits.md#8-which-session-is-being-shown-is-inferred-not-read--and-the-audit-says-so-when-it-cannot-be-sure)）
 9. **任何手段都无法收回已经披露的数据。** 永远无法收回。（[详情](docs/known-limits.md#9-nothing-recalls-disclosed-data)）
@@ -330,8 +332,8 @@ flowchart TD
 11. **来源提取会尽力识别，但不保证成功。** 能识别 `cat .env`，但不能识别 `python -c "open('.env')"`。没有来源的行不提供规则，以免提供无法生效的规则。（[详情](docs/known-limits.md#11-origin-extraction-is-best-effort)）
 12. **污点映射随守护进程终止而丢失。** 如果在会话中途替换守护进程，映射就会丢失，来源规则会停止匹配，且不会报错。（[详情](docs/known-limits.md#12-the-taint-map-dies-with-the-daemon)）
 13. **任何策略规则都无法在写入它的会话中移除。** 早在来源规则出现之前，脱敏规则就已如此。只有新建 Codex 对话才能从没有这些规则的状态开始。（[详情](docs/known-limits.md#13-no-policy-rule-can-be-removed-within-the-session-that-wrote-it)）
-14. **只有提取器能识别出读取操作的 shell 命令才会被拦截。** 防护只检查 shell 这一种工具，因为 Codex 通过它读取文件；其他工具一律不经检查直接放行。即使是 shell 命令，也只有 `cat .env` 这样的读取会被拦截；`wc -l .env`、`source .env`、`cp .env /tmp/x`、`strings id_rsa`、`head -5 .env` 和 `python -c "open('.env')"` 都不会被拦截：不拒绝、不提示、不写入记录。具体机制见第 11 条。（[详情](docs/known-limits.md#14-only-a-shell-command-whose-read-the-extractor-recognises-is-stopped)）
-15. **模板文件永远不会被拦截。** 即使其中确实包含密钥也一样，但检测仍会将其标记出来。（[详情](docs/known-limits.md#15-a-template-file-is-never-blocked)）
+14. **可选的本地读取防护只能识别部分 shell 读取。** 来源提取的限制仍然存在；独立且默认开启的网络防护见第 6 条。（[详情](docs/known-limits.md#14-only-a-shell-command-whose-read-the-extractor-recognises-is-stopped)）
+15. **模板后缀只豁免基于路径的拒绝。** 其他发现仍可能触发拒绝，包括命令参数中直接出现的凭据。插件不会检查所引用文件的内容。（[详情](docs/known-limits.md#15-a-template-file-is-never-blocked)）
 16. **可选的读取防护默认关闭。** 此设置只控制能够识别的 shell 读取，不控制提示词中的凭据暂缓。（[详情](docs/known-limits.md#16-nothing-is-blocked-until-you-turn-it-on)）
 17. 旧版记录仍可能合并不同结果。新版记账会追加独立的结果证据，并按操作统计发出的拒绝。历史记录不会重建，发出拒绝也不能证明宿主执行了拒绝。（[详情](docs/known-limits.md#17-a-blocked-read-can-leave-a-record-that-says-the-opposite-in-one-sequence)）
 18. 旧版记录仍可能合并匹配同一模式的文件。新版记账不再按模式合并，并按操作统计发出的拒绝，但所有从 shell 命令推断的文件身份均保持未解析，包括普通的 `cat .env` 读取。不同的不透明主体 ID 不能证明是不同文件，审计记录也不显示被拒绝读取的文件名。确认读取已停止需要执行证据。#44 仍保持开放，后续需要实现防护目标的身份识别和符合 I1 的审计展示；0.10.0 只是建议目标，不是发布承诺。（[详情](docs/known-limits.md#18-a-blocked-reads-row-does-not-name-the-file)）
