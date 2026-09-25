@@ -94,7 +94,8 @@ PROBED_DEPENDENCIES = ("transformers", "torch", "mcp")
 # -- fixed text: copies of privacy_hud.runtime_messages ----------------- #
 RUNTIME_SETUP_FAIL = (
     "[FAIL] Runtime setup\n"
-    "No usable Privacy HUD runtime is configured.\n"
+    "No usable Privacy HUD runtime is configured. "
+    "An update may require explicit repair; repair is not automatic.\n"
     "Run this command in another terminal:\n"
     "  {repair_command}\n"
     "Installation may download dependencies and model weights."
@@ -200,6 +201,7 @@ def _refuse(command: str, data_dir: Path) -> int:
         print(RUNTIME_SETUP_FAIL.format(repair_command=repair))
     elif command == "ambient":
         print(AMBIENT_RUNTIME_MISMATCH)
+        print(REPAIR_COMMAND_OUTPUT.format(repair_command=repair))
     else:
         body = RUNTIME_SETUP_FAIL.split("\n", 1)[1]
         print(body.format(repair_command=repair), file=sys.stderr)

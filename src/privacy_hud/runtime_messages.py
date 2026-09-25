@@ -15,7 +15,8 @@ from __future__ import annotations
 #: Doctor, and any bootstrap command that finds no usable selected runtime.
 RUNTIME_SETUP_FAIL = (
     "[FAIL] Runtime setup\n"
-    "No usable Privacy HUD runtime is configured.\n"
+    "No usable Privacy HUD runtime is configured. "
+    "An update may require explicit repair; repair is not automatic.\n"
     "Run this command in another terminal:\n"
     "  {repair_command}\n"
     "Installation may download dependencies and model weights."
@@ -65,6 +66,12 @@ EGRESS_REFUSAL = (
     "Privacy HUD issued a denial because no compatible daemon could verify "
     "this outbound call.\n"
     "Run $privacy repair to get the recovery command."
+)
+RUNTIME_REPAIR_REQUIRED = (
+    "An update may require explicit runtime repair; repair is not automatic.\n"
+    "Run this command in another terminal:\n"
+    "  {repair_command}\n"
+    "This command may download dependencies and model weights."
 )
 STARTING_INGRESS = "Privacy HUD is starting — this event is unverified."
 STARTING_EGRESS = (
