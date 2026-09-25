@@ -24,7 +24,7 @@ Codex Privacy HUD 是一个本地优先的 Codex 插件。它把收到的 hook �
 
 检测在本机执行；插件不会把提示词、文件或秘密信息发送到远程扫描服务。运行时通信仅使用 Unix 域套接字，以及绑定到 127.0.0.1 的本地浏览器界面。
 
-0.9.0 为收到真正 SessionStart 的新会话启用基于证据的记账，并继续使用 0.8.0 引入的运行时选择机制和隔离后的账本。已有会话和开始后才接入的会话仍采用旧版记账；历史记录不会被回填或重新计分。
+0.9.3 为收到真正 SessionStart 的新会话启用基于证据的记账，并继续使用 0.8.0 引入的运行时选择机制和隔离后的账本。已有会话和开始后才接入的会话仍采用旧版记账；历史记录不会被回填或重新计分。
 
 ```text
 Token HUD:    How much context has been consumed?
@@ -59,9 +59,9 @@ Privacy HUD：哪些事实已确认，哪些结果仍未确定？
 
 ## 安装
 
-Privacy HUD 0.9.0 继续使用 snapshot v2。收到真正 SessionStart 的新会话采用新版记账；已有会话和开始后才接入的会话仍采用旧版记账。支持 v2 的读取器会将 v1 明确标为旧版，并支持 v2 中可为空的记账字段。仅支持 snapshot v1 的旧读取器会拒绝 v2，不显示 Privacy 状态项。Codex 版本号相同并不代表快照兼容。
+Privacy HUD 0.9.3 继续使用 snapshot v2。收到真正 SessionStart 的新会话采用新版记账；已有会话和开始后才接入的会话仍采用旧版记账。支持 v2 的读取器会将 v1 明确标为旧版，并支持 v2 中可为空的记账字段。仅支持 snapshot v1 的旧读取器会拒绝 v2，不显示 Privacy 状态项。Codex 版本号相同并不代表快照兼容。
 
-支持 snapshot v2 的 Codex 0.154.0、0.155.0 和 0.155.1 补丁构建已于 2026-09-22 重新发布。此前安装的同版本二进制文件可能仍包含旧读取器。更新插件不会替换该二进制文件；仅发布 Privacy HUD 0.9.0 不需要再次发布 Codex 补丁构建。
+支持 snapshot v2 的 Codex 0.154.0、0.155.0 和 0.155.1 补丁构建已于 2026-09-22 重新发布。此前安装的同版本二进制文件可能仍包含旧读取器。更新插件不会替换该二进制文件；仅发布 Privacy HUD 0.9.3 不需要再次发布 Codex 补丁构建。
 
 原生 Privacy 状态项只显示记账快照，不验证运行时是否一致。修复之前，旧守护进程可能仍在刷新旧版读数。请使用插件内置启动器的 doctor 命令检查一致性。独立 ambient 启动器在运行时检查失败时显示错误，不显示百分比。
 
@@ -74,7 +74,7 @@ Privacy HUD 从所选插件包加载 Python 代码，已记录的 Python 环境�
 运行时不匹配时，入站事件继续执行并显示未经验证的提示；对于 hook 无法验证的出站调用，插件会返回拒绝决定。这些决定不能证明宿主实际执行了干预。监测空档和丢失的内存检测状态无法恢复。尚未结束的新版会话如果丢失记账密钥，其记账会在该会话余下时间保持不可用。
 
 ```bash
-PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.9.0/plugin'
+PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.9.3/plugin'
 PRIVACY_HUD_DATA='/absolute/path/to/plugin/data'
 
 python3 "$PRIVACY_HUD_BUNDLE/scripts/runtime.py" \
@@ -354,10 +354,10 @@ flowchart TD
 
 ## 卸载
 
-运行已安装的 0.9.0 插件包中的脚本。将下面的占位路径替换为该插件包的绝对目录；该目录必须同时包含 `install.sh` 和 `scripts/runtime.py`。
+运行已安装的 0.9.3 插件包中的脚本。将下面的占位路径替换为该插件包的绝对目录；该目录必须同时包含 `install.sh` 和 `scripts/runtime.py`。
 
 ```bash
-PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.9.0/plugin'
+PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.9.3/plugin'
 sh "$PRIVACY_HUD_BUNDLE/install.sh" --uninstall
 ```
 

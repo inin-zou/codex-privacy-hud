@@ -1,5 +1,5 @@
 {
-  "build_id": "7a7831b9d78d5f8246bc175ad2e0cd8ed65b82549e77cd9be728882ae0a30068",
+  "build_id": "a53261e19673b0eace0cd3b4d082040668a958dac090cd768de61fcb7842cab0",
   "format": 1,
   "protocol": 2,
   "readable_schemas": [
@@ -7,7 +7,7 @@
     5401,
     5402
   ],
-  "release": "0.9.0",
+  "release": "0.9.3",
   "snapshot_versions": [
     2
   ],
