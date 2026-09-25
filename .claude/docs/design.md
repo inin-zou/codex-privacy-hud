@@ -283,6 +283,8 @@ PRIVACY HUD issued a tool-call denial
 
 **Rules for block copy:** name the tool, name the data type and count, name the source and destination, and give exactly one next step. No severity adjectives ("dangerous", "critical") — the facts are alarming enough and adjectives erode trust when the tool is wrong.
 
+For the lexical network-file guard introduced in 0.9.2, the denial names the network-command decision and its lexical limitation rather than asserting a file identity, inspected contents or file count. Its only next step is `Run $privacy to review the ledger.` The audit does not identify the referenced file or confirm host enforcement.
+
 **Warnings that do not block do not interrupt.** They accrue into the ledger and surface at L1/L2. A tool that cries wolf on non-blocking events retrains the user to ignore the blocking ones.
 
 ---

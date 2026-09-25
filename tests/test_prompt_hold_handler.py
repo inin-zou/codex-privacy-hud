@@ -47,7 +47,7 @@ class Socket:
                 "v": self.handler.PROTOCOL_VERSION,
                 "op": "hello",
                 "ok": True,
-                "release": "0.9.1",
+                "release": "0.9.2",
                 "build_id": "a" * 64,
                 "activation_epoch": "b" * 32,
                 "storage_generation": self.handler.STORAGE_GENERATION,
