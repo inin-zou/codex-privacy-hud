@@ -494,6 +494,36 @@ def resolve_audit_session(ledger, data_dir, *, explicit: str | None = None,
                            daemon_answered=sessions is not None)
 
 
+@dataclass(frozen=True)
+class AuditReading:
+    """Audit projections read from one SQLite snapshot."""
+
+    summary: SessionSummary
+    rows: list[ExposureRow]
+    coverage: SessionCoverage
+    all_events_count: int
+
+
+def read_audit(
+    ledger: Ledger, session_id: str, tab: str,
+) -> AuditReading:
+    """Read one session's audit and tab count in one read transaction."""
+    with ledger._read_transaction():
+        summary = get_session_summary(ledger, session_id)
+        rows = list_exposures(ledger, session_id, tab)
+        coverage = get_session_coverage(ledger, session_id)
+        all_events_count = (
+            len(rows) if tab == "All events"
+            else len(list_exposures(ledger, session_id, "All events"))
+        )
+        return AuditReading(
+            summary=summary,
+            rows=rows,
+            coverage=coverage,
+            all_events_count=all_events_count,
+        )
+
+
 def get_session_summary(
     ledger: Ledger, session_id: str,
 ) -> SessionSummary:

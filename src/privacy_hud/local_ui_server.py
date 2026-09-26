@@ -204,17 +204,13 @@ class _Handler(BaseHTTPRequestHandler):
         if given:
             return given
         ledger: Ledger = self.server.ledger  # type: ignore[attr-defined]
-        ledger_path = _ledger_path()
-        if ledger_path is None:
-            # Unreachable in practice -- `serve()` already refused to start
-            # without a resolvable data directory -- but the environment
-            # this process reads is not immutable, so this stays a clean
-            # "no session" rather than an AttributeError on `.parent`.
+        data_dir: Path | None = self.server.data_dir  # type: ignore[attr-defined]
+        if data_dir is None:
             print("privacy-hud local-ui: PLUGIN_DATA is not set and no "
                   "Codex plugin-data directory was found", file=sys.stderr)
             return None
         return mcp_tools.resolve_audit_session(
-            ledger, ledger_path.parent).session_id
+            ledger, data_dir).session_id
 
     def _read_json_body(self) -> dict:
         length = int(self.headers.get("Content-Length", "0") or "0")
@@ -297,23 +293,16 @@ class _Handler(BaseHTTPRequestHandler):
             if not sid:
                 self._send_json(404, {"error": "no session"})
                 return
-            # Rows, counts, summary and coverage from one read transaction
-            # (#54 Phase 4), so a concurrent observation cannot put rows of
-            # one moment beside a summary of another.
-            with ledger._read_transaction():
-                try:
-                    rows = mcp_tools.list_exposures(ledger, sid, tab)
-                except ValueError as exc:
-                    self._send_json(400, {"error": str(exc)})
-                    return
-                summary = mcp_tools.get_session_summary(ledger, sid)
-                coverage = mcp_tools.get_session_coverage(ledger, sid)
-                # The exact "All events" count for the tab bar, from the
-                # list itself. An approximation from the summary omits
-                # kinds.
-                all_events = (len(rows) if tab == "All events" else
-                              len(mcp_tools.list_exposures(ledger, sid,
-                                                           "All events")))
+            # The shared audit read includes the tab count in its snapshot.
+            try:
+                reading = mcp_tools.read_audit(ledger, sid, tab)
+            except ValueError as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
+            summary = reading.summary
+            rows = reading.rows
+            coverage = reading.coverage
+            all_events = reading.all_events_count
             # `rows` goes to the browser as JSON and to `render_audit` as
             # typed rows -- the same values, serialized once, on purpose.
             #

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.2
+
+- Correct default browser audit session selection with fenced ledger storage by querying daemon activity from the plugin-data root.
+- Read CLI audit summaries, rows, and coverage in one SQLite read transaction through a shared operation also used by the browser audit.
+- Keep the browser's All events count in the same read transaction. Preserve explicit session selection, historical fallback, accounting semantics, and existing audit labels.
+
 ## 0.10.1
 
 - Add security reporting guidance and a latest-release-only support policy.

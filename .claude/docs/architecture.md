@@ -534,6 +534,8 @@ Writes go through the compatible daemon, which holds an exclusive lease on `runt
 
 Readers open existing ledgers read-only, without initialization, migration, or activation. Browser and MCP policy actions use the matching daemon's policy RPC. The daemon remains the sole production ledger writer.
 
+The CLI audit and browser `/api/exposures` use `mcp_tools.read_audit` to read a selected session's summary, rows, coverage, and All events count in one SQLite read transaction. Session resolution happens before that transaction; separate requests can observe different committed states. The browser's default session resolver uses `UIServer.data_dir`, the plugin-data root, to query daemon activity, including when the ledger is stored under `ledger/active.db`. Explicit session IDs and the existing historical fallback remain unchanged.
+
 `scripts/check-issue66-runtime.py` rehearses the whole transition on a private copy of a real ledger, including a crash at every durable stage and the actual historical initializer against the fence.
 
 

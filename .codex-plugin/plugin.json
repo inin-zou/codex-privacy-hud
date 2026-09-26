@@ -1,6 +1,6 @@
 {
   "name": "codex-privacy-hud",
-  "version": "0.10.1",
+  "version": "0.10.2",
   "description": "Local-first disclosure ledger and privacy enforcement for Codex sessions",
   "author": {
     "name": "Yongkang Zou"

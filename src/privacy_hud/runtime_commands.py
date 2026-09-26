@@ -208,11 +208,11 @@ def audit(data_dir: Path, *, activation: Activation,
             return AuditResult(resolved=resolved,
                                text=render.empty_message(tab, None),
                                banner=banner, runtime_mismatch=mismatch)
-        summary = mcp_tools.get_session_summary(ledger, chosen)
-        rows = mcp_tools.list_exposures(ledger, chosen, tab)
-        coverage = mcp_tools.get_session_coverage(ledger, chosen)
-        text = render.audit(summary, rows, tab, coverage=coverage,
-                            resolved=resolved)
+        reading = mcp_tools.read_audit(ledger, chosen, tab)
+        text = render.audit(
+            reading.summary, reading.rows, tab,
+            coverage=reading.coverage, resolved=resolved,
+        )
     finally:
         ledger.conn.close()
     return AuditResult(resolved=resolved, text=text, banner=banner,
