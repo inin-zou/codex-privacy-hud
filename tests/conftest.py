@@ -68,6 +68,28 @@ def state(tmp_path, monkeypatch):
     st.ledger.conn.close()
 
 
+@pytest.fixture
+def deterministic_state(tmp_path, monkeypatch):
+    """Real dispatch state with cheap detectors and an empty model double."""
+    from privacy_hud.detect.model import StubModelDetector
+    from privacy_hud.detect.paths import PathDetector
+    from privacy_hud.detect.secrets import SecretDetector
+
+    monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))
+    st = runtime_helpers.writer_state_with_detectors(
+        tmp_path,
+        detectors=[
+            PathDetector(),
+            SecretDetector(),
+            StubModelDetector([]),
+        ],
+    )
+    try:
+        yield st
+    finally:
+        runtime_helpers.close_writer(st.ledger)
+
+
 @pytest.fixture(autouse=True)
 def drain_the_egress_deep_scan_slot():
     """Wait out any egress deep scan a test abandoned, suite-wide.
