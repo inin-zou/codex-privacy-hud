@@ -12,11 +12,9 @@ MANIFEST="$SHARE/manifest.json"
 MARK="# codex-privacy-hud"
 YES=0; NO_MODEL=0; UNINSTALL=0; PURGE=0; REPAIR=0; PD_ARG=""
 
-# The bundle this script is part of. #66: first-party code is loaded from
-# the selected plugin bundle and from nowhere else, and the installer's own
-# location is the one thing it knows for certain about which bundle that is
-# -- not a cache listing, not a newest directory, not an installed
-# distribution's metadata.
+# The bundle containing this installer. Explicit runtime repair selects
+# this bundle. Normal installation resolves the installed plugin bundle
+# separately and passes that bundle to setup and wrapper generation.
 BUNDLE="$(cd "$(dirname "$0")" && pwd)"
 
 log() { printf '%s\n' "$*"; }
@@ -188,13 +186,13 @@ EXTRAS
 # what applies the runtime checks. A wrapper never imports the package
 # itself and never resolves a bundle of its own.
 install_wrappers() {
-  _cand="$1"; _pd="$2"
+  _cand="$1"; _pd="$2"; _bundle="$3"
   mkdir -p "$SHARE/bin"
   for name in doctor ambient ui mcp daemon; do
     cat > "$SHARE/bin/privacy-hud-$name" <<WRAP
 #!/bin/sh
 # codex-privacy-hud managed wrapper -- remove with: install.sh --uninstall
-exec "$_cand" "$BUNDLE/scripts/runtime.py" --plugin-data "$_pd" $name "\$@"
+exec "$_cand" "$_bundle/scripts/runtime.py" --plugin-data "$_pd" $name "\$@"
 WRAP
     chmod +x "$SHARE/bin/privacy-hud-$name"
   done
@@ -270,7 +268,7 @@ if [ "$REPAIR" -eq 1 ]; then
     CAND="$SHARE/runtime/bin/python"
     usable_python "$CAND" || die "the installer-owned environment cannot run the bundled code"
   fi
-  install_wrappers "$CAND" "$PD"
+  install_wrappers "$CAND" "$PD" "$BUNDLE"
   if [ "$NO_MODEL" -eq 0 ] && [ "${PRIVACY_HUD_FAKE:-0}" != "1" ]; then
     download_model "$CAND" || log "!! model weights were not downloaded; deep scan will be unavailable"
   fi
@@ -470,7 +468,7 @@ sys.stdout.write(str(runtime_repair.resolve_installed_bundle(runtime_contract.RE
   [ -n "$INSTALLED" ] && [ -f "$INSTALLED/scripts/runtime.py" ] \
     || die "could not resolve exactly one installed plugin bundle; run: codex plugin list"
   log "installed bundle: $INSTALLED"
-  install_wrappers "$SHARE/venv/bin/python" "$PD"
+  install_wrappers "$SHARE/venv/bin/python" "$PD" "$INSTALLED"
   "$SHARE/venv/bin/python" "$INSTALLED/scripts/runtime.py" --plugin-data "$PD" \
     setup --python "$SHARE/venv/bin/python" $( [ "$NO_MODEL" -eq 1 ] && echo --allow-degraded )
 fi

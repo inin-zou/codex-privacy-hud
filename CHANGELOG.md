@@ -9,6 +9,15 @@
 - Add synthetic growing-session measurements for full-history projection queries and returned rows. This removes duplicate projection work; per-dispatch projection cost still grows linearly with session history.
 - Preserve accounting, hook decisions and copy, snapshot format, and append-only history.
 
+## 0.10.3
+
+- Generate managed command wrappers for the installed plugin bundle selected during normal installation, including when the installer runs from a separate checkout.
+- Keep explicit runtime repair selecting the bundle containing the invoked installer, and generate its wrappers for that same bundle.
+- Add a hermetic installation contract that exercises plugin installation, runtime setup, and executed managed wrappers with distinct installer and installed directories.
+- Preserve bootstrap mismatch refusal, runtime ownership checks, ingress fail-open and unchecked-egress fail-closed behavior, ledger history, and existing runtime and storage formats.
+
+Refs #66.
+
 ## 0.10.1
 
 - Add security reporting guidance and a latest-release-only support policy.
