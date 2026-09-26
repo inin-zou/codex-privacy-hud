@@ -330,7 +330,17 @@ def test_new_session_never_links_to_previous_session(guarded):
     assert new["same_as_event_id"] is None
 
 
-def test_restart_key_loss_does_not_recreate_matching(guarded, tmp_path):
+def test_restart_key_loss_does_not_recreate_matching(
+        tmp_path, monkeypatch, request):
+    def forbidden_init(self, *args, **kwargs):
+        pytest.fail("guard-target test constructed the real ModelDetector")
+
+    monkeypatch.setattr(
+        dispatch_mod.ModelDetector, "__init__", forbidden_init
+    )
+    # Resolve setup only after installing the constructor trap.
+    guarded = request.getfixturevalue("guarded")
+
     deny(guarded, "/r/a.pem", "one")
     original = public_rows(guarded)[0].as_dict()
     # A replacement State owns no prior session keys.
