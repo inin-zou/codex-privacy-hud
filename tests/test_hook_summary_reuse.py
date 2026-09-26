@@ -183,7 +183,13 @@ def test_attachment_keeps_two_distinct_publications(
     assert before is readings[0][1]
     assert after is readings[1][1]
     if keyless:
-        assert (before.denials_issued, after.denials_issued) == (0, 1)
+        # A keyless version-2 session records no counted denial: its
+        # accounting is unavailable, so both readings carry zero (base
+        # behavior, unchanged). They are still two separate readings.
+        assert before is not after
+        assert (before.denials_issued, after.denials_issued) == (0, 0)
+        assert after.percentage_unavailable_reasons == (
+            "accounting_unavailable",)
     else:
         assert (
             before.legacy_prevented_rows,
