@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.1
+
+- Add security reporting guidance and a latest-release-only support policy.
+- Add plugin author, homepage, repository, license, and discovery keywords.
+- Add declarative .codexignore patterns for local state, secrets, and generated artifacts.
+- Pin third-party GitHub Actions to full commit SHAs and configure monthly GitHub Actions dependency updates.
+- Preserve the existing marketplace source format and Python dependency policy.
+
 ## 0.10.0
 
 - Add a bounded guard-decision audit for newly recorded, keyed version-2 local shell read-guard denials.

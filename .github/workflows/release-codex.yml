@@ -62,8 +62,8 @@ jobs:
           - { os: macos-15-intel, target: x86_64-apple-darwin }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with: { toolchain: 1.95.0, targets: "${{ matrix.target }}" }
       # Clone before the cache step, not after: rust-cache keys on the
       # Cargo.lock inside the workspace it is pointed at, and until this
@@ -73,11 +73,11 @@ jobs:
       # here costs nothing twice.
       - name: Clone Codex at the tag the build will use
         run: git clone --depth 1 --branch "rust-v${{ needs.version.outputs.ver }}" https://github.com/openai/codex "${{ runner.temp }}/codex-src"
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with: { workspaces: "${{ runner.temp }}/codex-src/codex-rs" }
       - name: Build
         run: scripts/build-patched-codex.sh "${{ needs.version.outputs.ver }}" --target "${{ matrix.target }}" --out dist --src "${{ runner.temp }}/codex-src"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: codex-privacy-${{ matrix.target }}
           path: dist/*
@@ -101,7 +101,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       VER: ${{ needs.version.outputs.ver }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
           merge-multiple: true
