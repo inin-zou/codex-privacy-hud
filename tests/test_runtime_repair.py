@@ -613,6 +613,16 @@ def test_repair_mode_does_not_replace_codex_binary(tmp_path, install):
     assert (home / ".codex" / "config.toml").read_bytes() == before_cfg
     assert (home / ".zshrc").read_bytes() == before_rc
     assert contract.classify_receipt(install.data) == "v2"
+    wrapper = (
+        home / ".local/share/codex-privacy-hud/bin/privacy-hud-doctor"
+    )
+    checked = subprocess.run(
+        [str(wrapper)],
+        capture_output=True, text=True, timeout=120, env=env,
+    )
+    assert "[ OK ] Runtime source" in checked.stdout, (
+        checked.stdout + checked.stderr
+    )
 
 
 @pytestmark_darwin
