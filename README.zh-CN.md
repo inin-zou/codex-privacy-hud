@@ -82,7 +82,7 @@ Privacy HUD 从所选插件包加载 Python 代码，已记录的 Python 环境�
 运行时不匹配时，入站事件继续执行并显示未经验证的提示；对于 hook 无法验证的出站调用，插件会返回拒绝决定。这些决定不能证明宿主实际执行了干预。监测空档和丢失的内存检测状态无法恢复。尚未结束的新版会话如果丢失记账密钥，其记账会在该会话余下时间保持不可用。
 
 ```bash
-PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.10.0/plugin'
+PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/plugin'
 PRIVACY_HUD_DATA='/absolute/path/to/plugin/data'
 
 python3 "$PRIVACY_HUD_BUNDLE/scripts/runtime.py" \
@@ -375,10 +375,10 @@ flowchart TD
 
 ## 卸载
 
-运行已安装的 0.10.0 插件包中的脚本。将下面的占位路径替换为该插件包的绝对目录；该目录必须同时包含 `install.sh` 和 `scripts/runtime.py`。
+运行当前已安装插件包中的脚本。将下面的占位路径替换为该插件包的绝对目录；该目录必须同时包含 `install.sh` 和 `scripts/runtime.py`。
 
 ```bash
-PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.10.0/plugin'
+PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/plugin'
 sh "$PRIVACY_HUD_BUNDLE/install.sh" --uninstall
 ```
 

@@ -6,6 +6,24 @@
 - Read CLI audit summaries, rows, and coverage in one SQLite read transaction through a shared operation also used by the browser audit.
 - Make the All events count opt-in for the browser and keep it in the same read transaction, avoiding an unused additional projection in CLI audits. Preserve explicit session selection, historical fallback, accounting semantics, and existing audit labels.
 
+## 0.10.4
+
+- Reuse one committed summary for a hook decision's display percentage and its corresponding HUD publication.
+- Preserve separate attachment and post-observation publications when they describe different ledger states.
+- Reuse the version-2 summary's coverage verdict for HUD publication while preserving legacy and SessionEnd coverage semantics.
+- Refuse HUD publication from an open transaction and preserve credential-hold failure handling.
+- Add synthetic growing-session measurements for full-history projection queries and returned rows. This removes duplicate projection work; per-dispatch projection cost still grows linearly with session history.
+- Preserve accounting, hook decisions and copy, snapshot format, and append-only history.
+
+## 0.10.3
+
+- Generate managed command wrappers for the installed plugin bundle selected during normal installation, including when the installer runs from a separate checkout.
+- Keep explicit runtime repair selecting the bundle containing the invoked installer, and generate its wrappers for that same bundle.
+- Add a hermetic installation contract that exercises plugin installation, runtime setup, and executed managed wrappers with distinct installer and installed directories.
+- Preserve bootstrap mismatch refusal, runtime ownership checks, ingress fail-open and unchecked-egress fail-closed behavior, ledger history, and existing runtime and storage formats.
+
+Refs #66.
+
 ## 0.10.1
 
 - Add security reporting guidance and a latest-release-only support policy.

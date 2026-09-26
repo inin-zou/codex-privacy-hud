@@ -490,8 +490,9 @@ class Decision:
     action: str
     reason: str | None = None
     system_message: str | None = None
-    # Display only: the session's legacy percentage, or None when the ledger
-    # has no record of the session. Never read by a decision.
+    # Display only: the applicable accounting percentage, possibly absent.
+    # Never read by a decision. Dispatch fills this after commit when it
+    # requests defer_summary=True.
     budget_percent: int | None = None
     # Populated only for action="rewrite" (see minimize_tool_input). An
     # unpopulated (None) updated_input on a rewrite decision must NEVER be
@@ -1002,7 +1003,8 @@ class Engine:
 
     def record_prompt_hold(self, obs: Observation,
                            matches: Sequence[CredentialMatch],
-                           reason: str) -> Decision:
+                           reason: str, *,
+                           defer_summary: bool = False) -> Decision:
         """Record a held prompt as a prevention and return the hold.
         Caller holds the lock.
 
@@ -1011,7 +1013,11 @@ class Engine:
         scan gap. Version 2 records an issued denial (`DENY_ISSUED`), never
         confirmed enforcement or crossing. Legacy writes one `prevented` row
         per distinct credential with no dedupe hash, so it cannot absorb a
-        later permitted crossing of the same value, and no masked example."""
+        later permitted crossing of the same value, and no masked example.
+
+        `defer_summary=True` has the same display-only meaning as in
+        `observe`. Dispatch reads the committed summary inside its hold
+        exception boundary before publishing."""
         if self._identity_cleared:
             raise RuntimeError("this engine's session identity was cleared")
         dest_kind = self._normalize_destination(obs.destination)
@@ -1022,7 +1028,8 @@ class Engine:
         if obs.accounting is not None:
             return self._observe_v2(
                 obs, scan, action="deny", blocked_origin=None,
-                read_block=None, notice=None, prompt_reason=reason)
+                read_block=None, notice=None, prompt_reason=reason,
+                defer_summary=defer_summary)
 
         kind = self.matrix.classify(obs.hook_event, "blocked")
         seen: set[str] = set()
@@ -1036,21 +1043,28 @@ class Engine:
                 destination=dest_kind, value_hash=None,
                 masked_example=None, tool_name=None, protection="blocked",
                 source_kind=None)
-        summary = self.ledger.summary(obs.session_id)
-        pct = getattr(summary, "legacy_percent", None)
+        pct = None
+        if not defer_summary:
+            summary = self.ledger.summary(obs.session_id)
+            pct = getattr(summary, "legacy_percent", None)
         return self._decision(obs, findings, action="deny",
                               blocked_origin=None, read_block=None,
                               notice=None, pct=pct, degraded=False,
                               dest_kind=dest_kind, prompt_reason=reason)
 
-    def observe(self, obs: Observation, *, scan: ScanResult | None = None) -> Decision:
+    def observe(self, obs: Observation, *, scan: ScanResult | None = None,
+                defer_summary: bool = False) -> Decision:
         """Phase 2: rule on `obs` and record it. Caller must hold the lock.
 
-        Every sqlite touch in this module happens in this method's body —
-        `_policy_selectors`, `consume_token`, `Ledger.record`,
-        `Ledger.summary` — so a concurrent caller must serialize the whole
-        of it (`dispatch.State.lock`). It is deliberately cheap: single-digit
-        milliseconds of sqlite, no inference.
+        The caller must serialize policy reads and ledger writes with
+        `dispatch.State.lock`. The default also computes a full-history
+        display summary; that projection grows with session history.
+
+        `defer_summary=True` omits only that display projection and leaves
+        `Decision.budget_percent` unset. Dispatch must fill it from a
+        committed summary before returning the decision or publishing HUD
+        output. This permits an outer transaction around observe to finish
+        before the display reading is taken.
 
         Pass `scan=` the `ScanResult` from a prior `self.scan(obs)` call to
         keep that inference outside the lock. Omit it and this scans inline,
@@ -1257,7 +1271,8 @@ class Engine:
         if obs.accounting is not None:
             return self._observe_v2(
                 obs, scan, action=action, blocked_origin=blocked_origin,
-                read_block=read_block, notice=notice)
+                read_block=read_block, notice=notice,
+                defer_summary=defer_summary)
 
         if dest_kind == "local":
             # Ruling 1: local always classifies as local_access, overriding
@@ -1304,8 +1319,10 @@ class Engine:
                 source_kind=obs.origin.kind.value if obs.origin else None)
 
         # Display only; a decision never reads it.
-        summary = self.ledger.summary(obs.session_id)
-        pct = getattr(summary, "legacy_percent", None)
+        pct = None
+        if not defer_summary:
+            summary = self.ledger.summary(obs.session_id)
+            pct = getattr(summary, "legacy_percent", None)
         return self._decision(
             obs, findings, action=action,
             blocked_origin=blocked_origin,
@@ -1388,7 +1405,8 @@ class Engine:
     def _observe_v2(self, obs: Observation, scan: ScanResult, *, action: str,
                     blocked_origin: Origin | None, read_block: str | None,
                     notice: str | None,
-                    prompt_reason: str | None = None) -> Decision:
+                    prompt_reason: str | None = None,
+                    defer_summary: bool = False) -> Decision:
         """Record one version-2 observation and return the unchanged hook
         decision.
 
@@ -1558,8 +1576,10 @@ class Engine:
             )
 
         # Display only; a decision never reads it.
-        summary = self.ledger.summary(obs.session_id)
-        pct = getattr(summary, "percent", None)
+        pct = None
+        if not defer_summary:
+            summary = self.ledger.summary(obs.session_id)
+            pct = getattr(summary, "percent", None)
         return self._decision(
             obs, findings, action=action,
             blocked_origin=blocked_origin,

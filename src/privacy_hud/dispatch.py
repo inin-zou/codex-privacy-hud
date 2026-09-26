@@ -112,12 +112,12 @@ from pathlib import Path
 from typing import Any
 
 from . import codex, ledger_schema, runtime_storage
-from .accounting import ObservationRecord, ScoringProfile
+from .accounting import AccountingSummary, ObservationRecord, ScoringProfile
 from .detect.model import ModelDetector
 from .detect.paths import PathDetector
 from .detect.secrets import SecretDetector
 from .detect.shell import extract_destinations
-from .engine import Engine, Observation, ScanResult
+from .engine import Decision, Engine, Observation, ScanResult
 from .hook_evidence import (
     DELIVERY_KEY_ABSENT,
     CurrentHookAdapter,
@@ -125,7 +125,7 @@ from .hook_evidence import (
     normalize_delivery_key,
 )
 from .hud_snapshot import HudPublisher
-from .ledger import Ledger, open_connection
+from .ledger import Ledger, SessionSummary, open_connection
 from .mask import new_salt
 from .matrix.loader import Matrix, load_matrix
 from .origin import OriginKind, extract_origin
@@ -755,20 +755,62 @@ def active_sessions(state: State, *, stale_after: float
     return fresh
 
 
-def _publish_hud(state: State, session_id: str) -> None:
-    """Contract A, after a ledger change. Reads summary and coverage under
-    the caller's lock and hands the numbers to the publisher. I6: any
-    failure here is swallowed; a hook must never fail because a display
-    file could not be written — but it is swallowed *loudly*, at DEBUG,
-    because a status item that silently stops updating with no way to find
-    out why is how a display bug becomes a "the tool is broken" report.
-    I3: the summary is the ledger's, verbatim; the publisher maps a legacy
-    summary to accounting 1 and an unrecorded one to accounting 0."""
+def _read_decision_summary(
+    state: State,
+    session_id: str,
+    decision: Decision,
+) -> SessionSummary:
+    """Fill display metadata from the ledger under State.lock.
+
+    The returned reading belongs only to this operation. The caller must
+    publish it under the same lock without intervening ledger writes.
+    Neither Engine nor Decision retains the summary.
+
+    Dispatch holds no ledger transaction here. A caller that wraps a whole
+    dispatch in its own transaction still gets the decision's display
+    percentage from the uncommitted state, as before; `_publish_hud`
+    refuses to publish that reading.
+    """
+    summary = state.ledger.summary(session_id)
+    decision.budget_percent = (
+        summary.percent
+        if isinstance(summary, AccountingSummary)
+        else getattr(summary, "legacy_percent", None)
+    )
+    return summary
+
+
+def _publish_hud(
+    state: State,
+    session_id: str,
+    *,
+    summary: SessionSummary | None = None,
+) -> None:
+    """Publish committed ledger state under the caller's State.lock.
+
+    A supplied summary must come from this operation, after its writes
+    commit and without intervening ledger changes. Attachment and
+    SessionStart publications obtain their own reading.
+
+    Version-2 summaries already contain the exact coverage verdict used
+    by their projection. Other summary variants require a coverage read.
+    Display failures remain best-effort and log only the exception class.
+    """
     try:
-        summary = state.ledger.summary(session_id)
-        coverage = state.ledger.coverage(session_id)
-        state.hud.publish(session_id, summary=summary,
-                          unverified=not coverage.verified)
+        if state.ledger.conn.in_transaction:
+            raise RuntimeError("hud publication requires a committed ledger")
+        if summary is None:
+            summary = state.ledger.summary(session_id)
+        if isinstance(summary, AccountingSummary):
+            unverified = (
+                "coverage_incomplete"
+                in summary.percentage_unavailable_reasons
+            )
+        else:
+            unverified = not state.ledger.coverage(session_id).verified
+        state.hud.publish(
+            session_id, summary=summary, unverified=unverified
+        )
     except Exception as exc:
         _log.debug("hud publish failed: %s", type(exc).__name__)
 
@@ -1218,8 +1260,10 @@ def dispatch(
                 dataclasses.replace(meta, accounting=accounting, cwd=cwd),
                 scan=ScanResult(dest_kind=dest,
                                 boundary=state.matrix.boundary_for(dest),
-                                findings=(), degraded=False))
-            _publish_hud(state, session_id)
+                                findings=(), degraded=False),
+                defer_summary=True)
+            summary = _read_decision_summary(state, session_id, decision)
+            _publish_hud(state, session_id, summary=summary)
         return _decision_to_output(decision, hook_event=event)
 
     with state.lock:
@@ -1248,7 +1292,10 @@ def dispatch(
                         held = dataclasses.replace(obs, accounting=accounting,
                                                    cwd=cwd)
                     decision = engine.record_prompt_hold(
-                        held, matches, held_reason(m.kind for m in matches))
+                        held, matches, held_reason(m.kind for m in matches),
+                        defer_summary=True)
+                    summary = _read_decision_summary(
+                        state, session_id, decision)
                 except Exception:
                     # The credential verdict already requires a hold. Keep
                     # its pending window and replay verdict so the stated
@@ -1267,7 +1314,7 @@ def dispatch(
                     # Process-level interruption is not a handled reply.
                     gate.restore(saved)
                     raise
-                _publish_hud(state, session_id)
+                _publish_hud(state, session_id, summary=summary)
                 return _decision_to_output(decision, hook_event=event)
 
     # Detection runs here, outside the lock. `Engine.scan()` touches no
@@ -1308,7 +1355,9 @@ def dispatch(
                     obs, accounting=accounting, cwd=cwd,
                     evaluated_path=(obs.origin.evaluated_path
                                     if obs.origin is not None else None))
-            decision = engine.observe(obs, scan=scan)
+            decision = engine.observe(
+                obs, scan=scan, defer_summary=True)
+            summary = _read_decision_summary(state, session_id, decision)
         except BaseException:
             if matches:
                 gate.finish_confirmation(delivery_key, verdict, recorded=False)
@@ -1318,7 +1367,7 @@ def dispatch(
             # SessionEnd may have cleared it during the unlocked scan.
             confirmed = gate.finish_confirmation(
                 delivery_key, verdict, recorded=engine.prompt_gate is gate)
-        _publish_hud(state, session_id)
+        _publish_hud(state, session_id, summary=summary)
 
     if confirmed:
         # Authorizes this plugin's allow decision only; it does not establish
