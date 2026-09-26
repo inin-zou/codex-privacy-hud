@@ -65,14 +65,14 @@ def _get(data, path):
         reader.conn.close()
 
 
-def _invoke(surface, data):
+def _invoke(surface, data, tab="Exposed"):
     if surface == "cli":
         return runtime_commands.audit(
             data, activation=activation(),
-            session_id="older", tab="Exposed",
+            session_id="older", tab=tab,
         )
     status, payload = _get(
-        data, "/api/exposures?session_id=older&tab=Exposed",
+        data, f"/api/exposures?session_id=older&tab={tab}",
     )
     assert status == 200
     return payload
@@ -122,7 +122,8 @@ def test_browser_session_selection_uses_data_root(
 
 @pytest.mark.parametrize("surface", ["cli", "browser"])
 @pytest.mark.parametrize(
-    "after_read", ["get_session_summary", "list_exposures"],
+    "after_read",
+    ["get_session_summary", "list_exposures", "get_session_coverage"],
 )
 def test_audit_keeps_one_snapshot_during_writer_commit(
         audit_store, monkeypatch, surface, after_read):
@@ -182,6 +183,8 @@ def test_audit_keeps_one_snapshot_during_writer_commit(
     assert coverage == before_coverage
     if surface == "browser":
         assert all_events_count == before_all
+    else:
+        assert all_events_count is None
 
     # The write really committed; a fresh reader sees the later state.
     fresh = runtime_commands.open_reader(data)
@@ -200,24 +203,45 @@ def test_audit_keeps_one_snapshot_during_writer_commit(
 
 
 @pytest.mark.parametrize("surface", ["cli", "browser"])
+@pytest.mark.parametrize("tab", ["Exposed", "All events"])
 def test_audit_surfaces_use_public_read_boundary(
-        audit_store, monkeypatch, surface):
+        audit_store, monkeypatch, surface, tab):
     data, _ = audit_store
     original = mcp_tools.read_audit
+    original_list = mcp_tools.list_exposures
     calls = []
+    list_calls = []
 
-    def tracked(ledger, session_id, tab):
-        result = original(ledger, session_id, tab)
-        calls.append((session_id, tab, result))
+    def tracked(
+            ledger, session_id, tab, *, include_all_events_count=False):
+        result = original(
+            ledger, session_id, tab,
+            include_all_events_count=include_all_events_count,
+        )
+        calls.append((session_id, tab, include_all_events_count, result))
         return result
 
+    def tracked_list(ledger, session_id, tab):
+        list_calls.append((session_id, tab))
+        return original_list(ledger, session_id, tab)
+
     monkeypatch.setattr(mcp_tools, "read_audit", tracked)
-    _invoke(surface, data)
+    monkeypatch.setattr(mcp_tools, "list_exposures", tracked_list)
+    _invoke(surface, data, tab)
 
     assert len(calls) == 1
-    session_id, tab, reading = calls[0]
-    assert (session_id, tab) == ("older", "Exposed")
+    session_id, selected_tab, count_requested, reading = calls[0]
+    assert (session_id, selected_tab) == ("older", tab)
+    assert count_requested is (surface == "browser")
     assert reading.summary.observations == 1
     assert len(reading.rows) == 1
     assert reading.coverage.shallow_scans == 0
-    assert reading.all_events_count == 1
+    if surface == "browser":
+        assert reading.all_events_count == 1
+    else:
+        assert reading.all_events_count is None
+
+    expected_list_calls = [("older", tab)]
+    if surface == "browser" and tab != "All events":
+        expected_list_calls.append(("older", "All events"))
+    assert list_calls == expected_list_calls

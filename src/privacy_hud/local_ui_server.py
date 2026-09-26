@@ -295,7 +295,9 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             # The shared audit read includes the tab count in its snapshot.
             try:
-                reading = mcp_tools.read_audit(ledger, sid, tab)
+                reading = mcp_tools.read_audit(
+                    ledger, sid, tab, include_all_events_count=True,
+                )
             except ValueError as exc:
                 self._send_json(400, {"error": str(exc)})
                 return

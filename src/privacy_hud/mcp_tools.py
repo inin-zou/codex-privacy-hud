@@ -501,21 +501,27 @@ class AuditReading:
     summary: SessionSummary
     rows: list[ExposureRow]
     coverage: SessionCoverage
-    all_events_count: int
+    all_events_count: int | None
 
 
 def read_audit(
-    ledger: Ledger, session_id: str, tab: str,
+    ledger: Ledger, session_id: str, tab: str, *,
+    include_all_events_count: bool = False,
 ) -> AuditReading:
-    """Read one session's audit and tab count in one read transaction."""
+    """Read one session's audit and optional count in one read transaction.
+
+    all_events_count is None unless explicitly requested.
+    """
     with ledger._read_transaction():
         summary = get_session_summary(ledger, session_id)
         rows = list_exposures(ledger, session_id, tab)
         coverage = get_session_coverage(ledger, session_id)
-        all_events_count = (
-            len(rows) if tab == "All events"
-            else len(list_exposures(ledger, session_id, "All events"))
-        )
+        all_events_count: int | None = None
+        if include_all_events_count:
+            all_events_count = (
+                len(rows) if tab == "All events"
+                else len(list_exposures(ledger, session_id, "All events"))
+            )
         return AuditReading(
             summary=summary,
             rows=rows,
