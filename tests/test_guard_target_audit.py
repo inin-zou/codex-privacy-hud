@@ -16,7 +16,7 @@ from privacy_hud import ledger as ledger_mod
 from privacy_hud import ledger_schema, local_ui_server, mcp_tools, render
 from privacy_hud.detect.paths import PathDetector
 from privacy_hud.hook_evidence import CurrentHookAdapter
-from runtime_helpers import close_writer, writer_state
+from runtime_helpers import close_writer, writer_state_with_detectors
 from test_accounting_dispatch import egress, end, send, start
 from test_browser_accounting_js import APP_JS, _HARNESS, _fetch
 from test_mcp_calls import _call, _payload
@@ -25,8 +25,9 @@ from test_mcp_calls import _call, _payload
 @pytest.fixture
 def guarded(tmp_path, monkeypatch):
     monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))
-    state = writer_state(tmp_path)
-    state.detectors = [PathDetector()]
+    state = writer_state_with_detectors(
+        tmp_path, detectors=[PathDetector()]
+    )
     state.hook_adapter = CurrentHookAdapter()
     state.settings = types.SimpleNamespace(deny_read=True)
     monkeypatch.setattr(
@@ -330,12 +331,23 @@ def test_new_session_never_links_to_previous_session(guarded):
     assert new["same_as_event_id"] is None
 
 
-def test_restart_key_loss_does_not_recreate_matching(guarded, tmp_path):
+def test_restart_key_loss_does_not_recreate_matching(
+        tmp_path, monkeypatch, request):
+    def forbidden_init(self, *args, **kwargs):
+        pytest.fail("guard-target test constructed the real ModelDetector")
+
+    monkeypatch.setattr(
+        dispatch_mod.ModelDetector, "__init__", forbidden_init
+    )
+    # Resolve setup only after installing the constructor trap.
+    guarded = request.getfixturevalue("guarded")
+
     deny(guarded, "/r/a.pem", "one")
     original = public_rows(guarded)[0].as_dict()
     # A replacement State owns no prior session keys.
-    replacement = writer_state(tmp_path)
-    replacement.detectors = [PathDetector()]
+    replacement = writer_state_with_detectors(
+        tmp_path, detectors=[PathDetector()]
+    )
     replacement.settings = types.SimpleNamespace(deny_read=True)
     try:
         deny(replacement, "/r/a.pem", "after-restart")

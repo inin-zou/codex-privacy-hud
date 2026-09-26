@@ -24,6 +24,12 @@ WITHHELD = ("privacy.allow_once", "privacy.hud_toggle",
             "privacy.read_guard_set")
 
 
+@pytest.fixture
+def state(deterministic_state):
+    """These contracts exercise dispatch and projections, not model inference."""
+    return deterministic_state
+
+
 def _registered(app) -> set[str]:
     """The names the MCP app holds, through whichever accessor this SDK
     version offers.

@@ -22,6 +22,12 @@ TOOLS = (
 REPO = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture
+def state(deterministic_state):
+    """These contracts exercise dispatch and projections, not model inference."""
+    return deterministic_state
+
+
 def payload(tool, tool_input):
     return {
         "hook_event_name": "PreToolUse",

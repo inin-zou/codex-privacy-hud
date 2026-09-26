@@ -42,6 +42,12 @@ KEY_LINE = ("Accounting is unavailable for the rest of this session because "
             "its identity key is unavailable.")
 
 
+@pytest.fixture
+def state(deterministic_state):
+    """These contracts exercise dispatch and projections, not model inference."""
+    return deterministic_state
+
+
 def unresolved_denial(sid, **changes):
     values = {"decision": "deny",
               "evidence": E.DENY_ISSUED | E.LOCAL_DETECTION | E.HOOK_OBSERVED,

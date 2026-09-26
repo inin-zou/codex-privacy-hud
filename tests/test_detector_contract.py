@@ -290,10 +290,27 @@ def test_a_detector_profile_is_immutable():
         PathDetector.profile.tier = 3
 
 
-def test_default_detectors_are_all_declared_and_ordered_by_tier():
+def test_default_detectors_are_all_declared_and_ordered_by_tier(monkeypatch):
     from privacy_hud.detect import default_detectors
 
+    constructed = []
+
+    def model_init_without_loading(self, *args, **kwargs):
+        constructed.append(self)
+
+    # Composition is under test; initialization and inference have their
+    # own model tests. Keep the actual ModelDetector class and profile.
+    monkeypatch.setattr(ModelDetector, "__init__", model_init_without_loading)
+
     detectors = default_detectors()
+    assert [type(detector) for detector in detectors] == [
+        PathDetector, SecretDetector, ModelDetector,
+    ]
+    assert len(constructed) == 1
+    assert constructed[0] is detectors[2]
+
     profiles = [profile_of(d) for d in detectors]
     assert [p.tier for p in profiles] == sorted(p.tier for p in profiles)
-    assert [p.cost for p in profiles] == [Cost.CHEAP, Cost.CHEAP, Cost.EXPENSIVE]
+    assert [p.cost for p in profiles] == [
+        Cost.CHEAP, Cost.CHEAP, Cost.EXPENSIVE,
+    ]

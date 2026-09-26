@@ -48,6 +48,12 @@ EXPOSURE_KEYS = [
 
 
 @pytest.fixture
+def state(deterministic_state):
+    """These contracts exercise dispatch and projections, not model inference."""
+    return deterministic_state
+
+
+@pytest.fixture
 def led(tmp_path):
     ledger = writer_ledger(tmp_path / "ledger.db", M)
     ledger.start_session("s1", cwd="/repo", model="gpt-5")

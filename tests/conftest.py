@@ -25,6 +25,28 @@ import runtime_helpers  # noqa: E402  (after the path setup above)
 
 
 @pytest.fixture(autouse=True)
+def forbid_real_model_construction_in_fast_tests(request, monkeypatch):
+    """Fast tests must supply detectors or intercept model initialization.
+
+    Slow tests retain their existing real-model and startup coverage.
+    This guard covers this pytest process, not child interpreters.
+    """
+    if request.node.get_closest_marker("slow") is not None:
+        return
+
+    from privacy_hud.detect.model import ModelDetector
+
+    def forbidden_init(self, *args, **kwargs):
+        pytest.fail(
+            "fast-tier test reached real ModelDetector construction: "
+            f"{request.node.nodeid}; supply an explicit test stack "
+            "or intercept initialization in a constructor contract"
+        )
+
+    monkeypatch.setattr(ModelDetector, "__init__", forbidden_init)
+
+
+@pytest.fixture(autouse=True)
 def release_writer_leases():
     """Give back every writer lease `runtime_helpers.writer_lease` handed
     out (#66 Pair 3).
@@ -44,6 +66,28 @@ def state(tmp_path, monkeypatch):
     st = runtime_helpers.writer_state(tmp_path)
     yield st
     st.ledger.conn.close()
+
+
+@pytest.fixture
+def deterministic_state(tmp_path, monkeypatch):
+    """Real dispatch state with cheap detectors and an empty model double."""
+    from privacy_hud.detect.model import StubModelDetector
+    from privacy_hud.detect.paths import PathDetector
+    from privacy_hud.detect.secrets import SecretDetector
+
+    monkeypatch.setenv("PLUGIN_DATA", str(tmp_path))
+    st = runtime_helpers.writer_state_with_detectors(
+        tmp_path,
+        detectors=[
+            PathDetector(),
+            SecretDetector(),
+            StubModelDetector([]),
+        ],
+    )
+    try:
+        yield st
+    finally:
+        runtime_helpers.close_writer(st.ledger)
 
 
 @pytest.fixture(autouse=True)

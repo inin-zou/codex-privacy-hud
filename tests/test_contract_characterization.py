@@ -49,7 +49,7 @@ from privacy_hud.matrix.loader import load_matrix
 
 from legacy_fakes import legacy_line
 from runtime_helpers import writer_ledger
-from runtime_helpers import writer_state
+from runtime_helpers import writer_state_with_detectors
 
 M = load_matrix()
 
@@ -821,7 +821,7 @@ DISPATCH_RECEIPT = RECEIPT.replace("· 41 min", "· 0 min")
 
 
 def test_session_end_hook_output_receipt_is_byte_identical(tmp_path):
-    state = writer_state(tmp_path)
+    state = writer_state_with_detectors(tmp_path, detectors=[])
     # A legacy-accounted session, as 0.8.x recorded one: this pins the
     # legacy receipt. A genuine SessionStart is version-2 accounted since
     # #54 Phase 4, and its receipt is pinned in test_accounting_surfaces.

@@ -33,6 +33,12 @@ KEYS = ["v", "accounting_version", "percent", "confirmed_points",
 
 
 @pytest.fixture
+def state(deterministic_state):
+    """These contracts exercise dispatch and projections, not model inference."""
+    return deterministic_state
+
+
+@pytest.fixture
 def data_dir(tmp_path):
     return tmp_path
 
