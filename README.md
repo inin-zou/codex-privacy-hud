@@ -81,7 +81,7 @@ Generation 5402 requires the activated-accounting implementation introduced in P
 Runtime mismatches produce an unverified warning on ingress and a denial for outbound calls the hook cannot verify. These are plugin decisions, not confirmation of host enforcement. Monitoring gaps and lost in-memory detection state cannot be reconstructed. Open version-2 sessions whose accounting keys were lost remain unavailable for the rest of those sessions.
 
 ```bash
-PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.10.0/plugin'
+PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/plugin'
 PRIVACY_HUD_DATA='/absolute/path/to/plugin/data'
 
 python3 "$PRIVACY_HUD_BUNDLE/scripts/runtime.py" \
@@ -438,12 +438,12 @@ Stated up front, because a privacy tool that overclaims is worse than none:
 
 ## Uninstall
 
-Run the script from the exact installed 0.10.0 plugin bundle. Replace the
+Run the script from the current installed plugin bundle. Replace the
 placeholder below with that bundle's absolute directory, containing both
 `install.sh` and `scripts/runtime.py`.
 
 ```bash
-PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/0.10.0/plugin'
+PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/plugin'
 sh "$PRIVACY_HUD_BUNDLE/install.sh" --uninstall
 ```
 
