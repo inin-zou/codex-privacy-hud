@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.4
+
+- Reuse one committed summary for a hook decision's display percentage and its corresponding HUD publication.
+- Preserve separate attachment and post-observation publications when they describe different ledger states.
+- Reuse the version-2 summary's coverage verdict for HUD publication while preserving legacy and SessionEnd coverage semantics.
+- Refuse HUD publication from an open transaction and preserve credential-hold failure handling.
+- Add synthetic growing-session measurements for full-history projection queries and returned rows. This removes duplicate projection work; per-dispatch projection cost still grows linearly with session history.
+- Preserve accounting, hook decisions and copy, snapshot format, and append-only history.
+
 ## 0.10.1
 
 - Add security reporting guidance and a latest-release-only support policy.

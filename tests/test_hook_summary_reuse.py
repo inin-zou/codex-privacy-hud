@@ -244,11 +244,12 @@ def test_dispatch_cannot_publish_an_outer_uncommitted_write(
         "SELECT COUNT(*) FROM observations WHERE session_id=?", (SID,)
     ).fetchone()[0]
 
-    with pytest.raises(
-        RuntimeError, match="hook summary requires a committed ledger"
-    ):
+    # The dispatch itself still answers as before; only the uncommitted
+    # reading is never published, and the outer rollback discards it.
+    with pytest.raises(RuntimeError, match="synthetic rollback"):
         with st.ledger._write_transaction():
-            result(st)
+            assert result(st) == {}
+            raise RuntimeError("synthetic rollback")
 
     assert snapshot.read_bytes() == before
     assert st.ledger.conn.execute(
