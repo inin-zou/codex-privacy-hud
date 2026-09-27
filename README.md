@@ -111,17 +111,19 @@ Verified end-to-end against a real Codex CLI install on 0.145.0 and 0.153.0.
 curl -fsSL https://raw.githubusercontent.com/inin-zou/codex-privacy-hud/main/install.sh | sh
 ```
 
-The script asks exactly one question — whether to download the detection
-model. Everything else is automatic. This is what it does, in the order it
-prints:
+When run through a pipe or without an adjacent plugin bundle, the installer downloads the complete bundle for the release pinned inside the script and verifies its SHA-256 against that release’s checksum file. Download, checksum, archive, or bundle-version failures stop before the installer creates its manifest, dependency environment, wrappers, or Codex configuration. The temporary bundle is removed when the installer exits. SHA-256 detects a corrupted download; the script and checksum still trust this repository’s publisher.
+
+If a terminal is available, the script asks whether to download the detection model. Without a terminal, it skips the model unless `--yes` is supplied. Later installation failures can leave a partial installation recorded by the uninstall manifest.
+
+This is what it does, in the order it prints:
 
 | step | what happens | where it lands |
 |---|---|---|
-| 1 | Finds your `codex`, reads its version, checks `python3 >= 3.11` | — |
-| 2 | Creates a private virtualenv and installs the plugin package into it (a few minutes; this pulls `torch` and `transformers`) | `~/.local/share/codex-privacy-hud/venv/` |
+| 1 | Establishes a complete installer bundle, downloading and checking the pinned release when needed; checks Codex and Python prerequisites | temporary directory when downloaded |
+| 2 | Creates a private virtualenv and installs dependencies declared by the bundle, including `torch`, `transformers`, and MCP dependencies; application code runs from the selected plugin bundle | `~/.local/share/codex-privacy-hud/venv/` |
 | 3 | **Asks** before downloading the `openai/privacy-filter` weights (~2.8 GB, from Hugging Face, once). Answer `y` for full detection. Answer `n` and you still get credential and path detection, but **names and addresses go undetected** — `privacy-hud-doctor` will say so. | `~/.cache/huggingface/hub/` |
 | 4 | Installs the plugin into Codex (`codex plugin marketplace add` + `codex plugin add`) | Codex's plugin directory |
-| 5 | Records which Python interpreter the daemon must run in | `~/.codex/plugins/data/codex-privacy-hud-…/runtime.json` |
+| 5 | Validates the installed release, generates wrappers for that installed bundle, and records its runtime selection and Python interpreter | `~/.codex/plugins/data/codex-privacy-hud-…/runtime.json` |
 | 6 | Downloads the patched Codex build for **your exact version**, verifies its SHA-256, unpacks it, and links your official `codex-code-mode-host` beside it (the tarball carries only `codex`; Code Mode needs that sibling, and the official one of the same version is the right one) | `~/.local/share/codex-privacy-hud/<version>/` |
 | 7 | Writes a small forwarder named `codex` and, if needed, adds `~/.local/bin` to your shell `PATH` | `~/.local/bin/codex` |
 | 8 | Adds `privacy` to `[tui].status_line` in your Codex config, creating the key with Codex's defaults if you never set one | `~/.codex/config.toml` |
@@ -131,9 +133,11 @@ The binary CI publishes is **unsigned and unnotarized**; the installer removes
 the quarantine attribute itself, and the SHA-256 it verifies protects against
 a corrupted download, not against a compromised release.
 
-Flags: `--yes` answers the model question with yes; `--no-model` skips the
-download without asking. Both are useful for scripted installs, and the
-script needs one of them when there is no terminal to ask on.
+`--yes` enables the model download without prompting. `--no-model` skips it. Pass installer arguments through `sh -s --`, for example:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/inin-zou/codex-privacy-hud/main/install.sh | sh -s -- --no-model
+```
 
 Installation downloads packages and the patched Codex build; model weights are downloaded only through the explicit model-download step. Runtime, setup probes and doctor checks enforce offline mode regardless of inherited environment values and never download missing weights. Missing or incomplete model weights leave tier 3 unavailable; the plugin does not fetch replacements. A process that already imported the ML stack in online mode also leaves tier 3 unavailable and must be restarted to load it offline.
 
@@ -238,7 +242,7 @@ and places it beside your official binary — it never modifies the official
 one — and `codex` then resolves to the patched build only while the versions
 match. Toggle the item with `/statusline` inside Codex, or hide it for now
 with `$privacy hud off`. Without a matching build, the fallback is a
-companion pane: `privacy-hud-ambient --watch` in a second terminal.
+companion pane: `~/.local/share/codex-privacy-hud/bin/privacy-hud-ambient --watch` in a second terminal.
 
 The companion pane uses the same accounting labels:
 
@@ -403,7 +407,7 @@ Stated up front, because a privacy tool that overclaims is worse than none:
 | `$privacy read on\|off\|status` | Turns the read guard on or off — see [The read guard](#the-read-guard). On, Privacy HUD issues denial requests for recognised matching reads; off (the default), this guard does not request a denial. Neither setting confirms host enforcement or complete observation. `status` prints `on` or `off`. Saved in `settings.json` under `~/.codex/plugins/data/codex-privacy-hud-…/`, and applies to a running session immediately. |
 | `$privacy setup` | Runs the installer that came with the plugin, for an install made with `codex plugin add` alone. Asks once to run outside the sandbox. |
 | `[tui].status_line` in `~/.codex/config.toml` | The list of status-line items Codex renders. The installer adds `"privacy"` to it. |
-| `install.sh --yes` / `--no-model` / `--release-base-url URL` / `--uninstall` / `--purge` | `--yes` answers the model question with yes, `--no-model` skips the download, `--release-base-url` fetches the patched build from somewhere other than this repository's GitHub releases, `--uninstall` removes what the installer created, `--purge` also removes the ledger and the weights. |
+| `install.sh --yes` / `--no-model` / `--release-base-url URL` / `--uninstall` / `--purge` | `--yes` answers the model question with yes, `--no-model` skips the download, `--release-base-url` changes the release-download base URL for both the plugin bundle and patched Codex assets (an alternate source supplies both the archive and its checksum and must be trusted), `--uninstall` removes what the installer created, `--purge` also removes the ledger and the weights. |
 | `PRIVACY_HUD_NO_SPAWN=1` | Turns daemon auto-start off entirely, for a sandbox where the spawn cannot succeed. |
 | `~/.local/share/codex-privacy-hud/bin/privacy-hud-ambient --watch [N]` / `--once` / `--session-id <id>` | Runs the fallback pane: redraw every N seconds, print one line and exit, or pin the pane to one session. |
 
@@ -436,6 +440,16 @@ Stated up front, because a privacy tool that overclaims is worse than none:
   --plugin-data "$PRIVACY_HUD_DATA" doctor`.
 - To start over: run the [uninstaller](#uninstall), then install again.
 
+Piped `--repair-runtime` and `--uninstall` are refused without downloading a bundle or changing the installation. Run the installer from the current installed plugin bundle. Replace both placeholder paths below with the actual absolute directories before running these commands.
+
+```bash
+PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/plugin'
+PRIVACY_HUD_DATA='/absolute/path/to/plugin/data'
+
+sh "$PRIVACY_HUD_BUNDLE/install.sh" \
+  --repair-runtime --plugin-data "$PRIVACY_HUD_DATA" --yes
+```
+
 ## Uninstall
 
 Run the script from the current installed plugin bundle. Replace the
@@ -447,8 +461,9 @@ PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/plugin'
 sh "$PRIVACY_HUD_BUNDLE/install.sh" --uninstall
 ```
 
-The stop operation needs the rest of the bundle; a standalone script
-download piped into `sh` does not supply it.
+A piped uninstall is refused before any download or change to the
+installation. The stop operation needs the rest of the current installed
+plugin bundle.
 
 Successful uninstall removes installer-managed files recorded in
 `~/.local/share/codex-privacy-hud/manifest.json` and restores `codex` to

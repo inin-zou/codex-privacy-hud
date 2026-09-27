@@ -110,15 +110,19 @@ python3 "$PRIVACY_HUD_BUNDLE/scripts/runtime.py" \
 curl -fsSL https://raw.githubusercontent.com/inin-zou/codex-privacy-hud/main/install.sh | sh
 ```
 
-脚本只询问一个问题：是否下载检测模型。其余步骤全部自动完成。脚本按以下顺序执行并输出进度：
+通过管道运行，或脚本旁没有插件包时，安装脚本会下载脚本内固定版本对应的完整插件包，并使用同一发布版本提供的校验文件验证 SHA-256。下载失败、校验失败、压缩包无效或插件包版本不符时，脚本会在创建安装清单、依赖环境、命令包装脚本或修改 Codex 配置之前退出。临时插件包会在脚本退出时删除。SHA-256 可以检测下载损坏；脚本和校验文件仍依赖对本仓库发布者的信任。
+
+如果有可用终端，脚本会询问是否下载检测模型。如果没有可用终端，除非指定 `--yes`，否则会跳过模型下载。后续安装步骤失败时，可能留下由卸载清单记录的部分安装内容。
+
+脚本按以下顺序执行并输出进度：
 
 | 步骤 | 执行内容 | 存放位置 |
 |---|---|---|
-| 1 | 查找 `codex`，读取版本，检查 `python3 >= 3.11` | — |
-| 2 | 创建专用虚拟环境，并在其中安装插件包。此过程需要几分钟，会下载 `torch` 和 `transformers`。 | `~/.local/share/codex-privacy-hud/venv/` |
+| 1 | 确认完整安装插件包；必要时下载并校验脚本固定的发布版本，然后检查 Codex 和 Python 前置条件 | 需要下载时使用临时目录 |
+| 2 | 创建专用虚拟环境，安装插件包声明的依赖，包括 `torch`、`transformers` 和 MCP 依赖；应用代码从选定的插件包运行 | `~/.local/share/codex-privacy-hud/venv/` |
 | 3 | 下载 `openai/privacy-filter` 权重前**先询问**。权重约 2.8 GB，来自 Hugging Face，只需下载一次。选择 `y` 启用完整检测。选择 `n` 仍可检测凭据和路径，但**无法检测姓名和地址**。`privacy-hud-doctor` 会说明这一点。 | `~/.cache/huggingface/hub/` |
 | 4 | 将插件安装到 Codex（`codex plugin marketplace add` + `codex plugin add`） | Codex 插件目录 |
-| 5 | 记录守护进程必须使用的 Python 解释器 | `~/.codex/plugins/data/codex-privacy-hud-…/runtime.json` |
+| 5 | 校验已安装版本，为该已安装插件包生成命令包装脚本，并记录运行时选择及 Python 解释器 | `~/.codex/plugins/data/codex-privacy-hud-…/runtime.json` |
 | 6 | 下载与**你的版本完全一致**的补丁版 Codex 构建，校验 SHA-256 并解压，再将官方 `codex-code-mode-host` 链接到同一目录。压缩包只包含 `codex`；Code Mode 需要同目录下的这个程序，应使用相同版本的官方程序。 | `~/.local/share/codex-privacy-hud/<version>/` |
 | 7 | 写入名为 `codex` 的小型转发脚本（forwarder）。如果需要，则将 `~/.local/bin` 加入 shell 的 `PATH`。 | `~/.local/bin/codex` |
 | 8 | 在 Codex 配置的 `[tui].status_line` 中加入 `privacy`。如果你从未设置过这个键，则以 Codex 默认值创建。 | `~/.codex/config.toml` |
@@ -126,7 +130,11 @@ curl -fsSL https://raw.githubusercontent.com/inin-zou/codex-privacy-hud/main/ins
 
 CI 发布的二进制**未经签名，也未经公证**。安装脚本会自行移除隔离属性。SHA-256 校验只能防止下载损坏，无法防范发布内容遭篡改。
 
-参数说明：`--yes` 自动同意下载模型；`--no-model` 不询问，直接跳过下载。这两个参数都适用于脚本化安装。如果没有终端可供交互询问，则必须提供其中一个。
+`--yes` 无需询问即可下载模型。`--no-model` 跳过模型下载。通过 `sh -s --` 向安装脚本传递参数，例如：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/inin-zou/codex-privacy-hud/main/install.sh | sh -s -- --no-model
+```
 
 安装过程会下载软件包和补丁版 Codex；模型权重仅通过明确执行的模型下载步骤获取。无论继承的环境变量如何设置，运行时、安装配置探测和诊断检查都会强制离线，绝不下载缺失的权重。模型权重缺失或不完整时，第三级检测不可用，插件不会自动下载替代文件。如果当前进程已在在线模式下导入模型依赖，第三级检测同样不可用；必须重启该进程，才能以离线模式加载模型。
 
@@ -203,7 +211,7 @@ gpt-5.4 · ~/proj · Privacy legacy 28% · 2 prevented rows
 
 原版 Codex 不支持插件自有的状态行项，因此需要带有小补丁的 Codex 构建。补丁为 `patches/privacy-status-line.patch`，只新增一个状态行项，没有其他改动。`install.sh` 下载与你的 Codex 版本完全一致的构建，将其放在官方二进制旁边，绝不修改官方二进制。只有版本匹配时，`codex` 才指向补丁版构建。
 
-运行 Codex 内的 `/statusline`，可切换状态行项的显示。运行 `$privacy hud off`，可临时隐藏。如果没有匹配的构建，则使用伴随窗格：在第二个终端运行 `privacy-hud-ambient --watch`。
+运行 Codex 内的 `/statusline`，可切换状态行项的显示。运行 `$privacy hud off`，可临时隐藏。如果没有匹配的构建，则使用伴随窗格：在第二个终端运行 `~/.local/share/codex-privacy-hud/bin/privacy-hud-ambient --watch`。
 
 伴随窗格使用相同的记账标签：
 
@@ -361,17 +369,32 @@ flowchart TD
 | `$privacy read on\|off\|status` | 开启或关闭读取防护，见[读取防护](#读取防护)。开启时，Privacy HUD 对可识别的匹配读取发出拒绝请求；关闭时（默认），此防护不请求拒绝。两种设置都不能证明宿主执行了拒绝，也不能证明所有操作均被观察到。`status` 输出 `on` 或 `off`。设置保存在 `~/.codex/plugins/data/codex-privacy-hud-…/` 下的 `settings.json` 中，对正在运行的会话立即生效。 |
 | `$privacy setup` | 运行插件自带的安装脚本，适用于仅通过 `codex plugin add` 安装插件的情况。会请求一次在沙箱外运行的权限。 |
 | `~/.codex/config.toml` 中的 `[tui].status_line` | 指定 Codex 显示的状态行项列表。安装脚本会在其中加入 `"privacy"`。 |
-| `install.sh --yes` / `--no-model` / `--release-base-url URL` / `--uninstall` / `--purge` | `--yes` 自动同意下载模型。`--no-model` 跳过下载。`--release-base-url` 从本仓库 GitHub releases 之外的位置获取补丁版构建。`--uninstall` 移除安装脚本创建的内容。`--purge` 还会移除账本和模型权重。 |
+| `install.sh --yes` / `--no-model` / `--release-base-url URL` / `--uninstall` / `--purge` | `--yes` 自动同意下载模型。`--no-model` 跳过下载。`--release-base-url` 同时更改插件包和补丁版 Codex 发布文件的下载根地址。替代来源会同时提供压缩包和校验文件，必须是你信任的来源。`--uninstall` 移除安装脚本创建的内容。`--purge` 还会移除账本和模型权重。 |
 | `PRIVACY_HUD_NO_SPAWN=1` | 完全关闭守护进程自动启动，适用于无法成功启动进程的沙箱。 |
-| `privacy-hud-ambient --watch [N]` / `--once` / `--session-id <id>` | 运行伴随窗格：每 N 秒重绘、输出一行后退出，或将窗格钉住到一个会话。 |
+| `~/.local/share/codex-privacy-hud/bin/privacy-hud-ambient --watch [N]` / `--once` / `--session-id <id>` | 运行伴随窗格：每 N 秒重绘、输出一行后退出，或将窗格钉住到一个会话。 |
 
 ## 排障
 
-- **`no patched build published for codex <ver> yet`**：你的 Codex 版本尚无对应发布。其余内容均已安装。如果该版本的构建发布了，则重新运行安装脚本，状态行项就会出现。在此之前，可在第二个终端运行 `~/.local/share/codex-privacy-hud/venv/bin/privacy-hud-ambient --watch`，使用伴随窗格。
+- **`no patched build published for codex <ver> yet`**：你的 Codex 版本尚无对应发布。其余内容均已安装。如果该版本的构建发布了，则重新运行安装脚本，状态行项就会出现。在此之前，可在第二个终端运行 `~/.local/share/codex-privacy-hud/bin/privacy-hud-ambient --watch`，使用伴随窗格。
 - **升级 Codex 后，状态行中没有 `privacy` 状态行项**：转发脚本未找到新版本对应的补丁版构建，因此原样运行了官方二进制。功能没有损坏，只是状态行项暂时消失。自动化工作流每六小时检查一次 Codex 新版本。只要补丁仍然适用，就会发布对应的补丁版 Codex。因此，发布已有一天的版本通常已有对应构建。重新运行安装脚本（或 `$privacy setup`）即可获取。如果仍无对应构建，可以查看说明原因的 issue：补丁无法继续应用时，标题为 `patch needs rebasing for Codex <version>`；补丁已成功应用但构建未完成时，标题为 `release build failed for Codex <version>`。
 - **`!! config.toml: …`**：你的 `config.toml` 中，`[tui]` 表或 `status_line` 键的结构不适合安装脚本直接修改。脚本没有改动配置。按照脚本输出的那一行，自行将 `"privacy"` 加入 `[tui].status_line`。
-- **Doctor 显示 `FAIL`**：阅读对应的修复提示，其中给出了确切命令。运行 `privacy-hud-doctor --check-model`，可进一步实际加载检测器进行检查。
+- **Doctor 显示 `FAIL`**：阅读对应的修复提示，其中给出了确切命令。使用已设置的插件包和数据目录运行以下命令，可实际加载检测器并检查其可用性：
+
+  ```bash
+  python3 "$PRIVACY_HUD_BUNDLE/scripts/runtime.py" \
+    --plugin-data "$PRIVACY_HUD_DATA" doctor --load-model
+  ```
 - 重新开始：运行[卸载脚本](#卸载)，然后重新安装。
+
+通过管道运行的 `--repair-runtime` 和 `--uninstall` 会被拒绝，不会下载插件包，也不会更改安装内容。请运行当前已安装插件包中的安装脚本。执行下面的命令前，请将两个占位路径替换为实际的绝对目录。
+
+```bash
+PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/plugin'
+PRIVACY_HUD_DATA='/absolute/path/to/plugin/data'
+
+sh "$PRIVACY_HUD_BUNDLE/install.sh" \
+  --repair-runtime --plugin-data "$PRIVACY_HUD_DATA" --yes
+```
 
 ## 卸载
 
@@ -382,7 +405,7 @@ PRIVACY_HUD_BUNDLE='/absolute/path/to/installed/plugin'
 sh "$PRIVACY_HUD_BUNDLE/install.sh" --uninstall
 ```
 
-停止运行时需要插件包中的其余文件；仅下载独立脚本并通过管道交给 `sh` 不会提供这些文件。
+通过管道运行的卸载命令会在任何下载或安装内容修改之前被拒绝。停止运行时需要当前已安装插件包中的其余文件。
 
 卸载成功后，会移除 `~/.local/share/codex-privacy-hud/manifest.json` 中记录的安装脚本所管理的文件，并让 `codex` 恢复指向官方二进制。如果不添加 `--purge`，则保留披露账本和模型权重。
 

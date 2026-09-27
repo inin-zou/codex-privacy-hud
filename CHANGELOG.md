@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.6
+
+- Support piped installation from outside a checkout by downloading the complete plugin bundle for the installer's pinned release and checking its SHA-256 before persistent installation writes.
+- Refuse unavailable, malformed, incomplete, or mismatched release bundles without creating an installation manifest, dependency environment, wrappers, or runtime receipt.
+- Validate installed runtime code before generating wrappers or recording its selection. Piped runtime repair and uninstall require an existing plugin bundle.
+- Publish complete versioned plugin archives and checksum files, and clarify installation, repair, and uninstall commands in both READMEs.
+
+Refs #94.
+
 ## 0.10.5
 
 - Correct default browser audit session selection with fenced ledger storage by querying daemon activity from the plugin-data root.
