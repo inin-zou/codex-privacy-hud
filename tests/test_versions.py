@@ -68,3 +68,13 @@ def test_declarations_agree_on_the_current_release():
         (REPO / runtime_contract.MANIFEST_NAME).read_text(encoding="utf-8")
     )
     assert manifest["release"] == release
+
+
+def test_installer_pins_the_current_release():
+    from privacy_hud import runtime_contract
+
+    source = (REPO / "install.sh").read_text(encoding="utf-8")
+    versions = re.findall(
+        r'^RELEASE="([0-9]+\.[0-9]+\.[0-9]+)"$', source, re.M
+    )
+    assert versions == [runtime_contract.RELEASE]
