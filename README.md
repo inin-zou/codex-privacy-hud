@@ -113,6 +113,8 @@ curl -fsSL https://raw.githubusercontent.com/inin-zou/codex-privacy-hud/main/ins
 
 When run through a pipe or without an adjacent plugin bundle, the installer downloads the complete bundle for the release pinned inside the script and verifies its SHA-256 against that release’s checksum file. Download, checksum, archive, or bundle-version failures stop before the installer creates its manifest, dependency environment, wrappers, or Codex configuration. The temporary bundle is removed when the installer exits. SHA-256 detects a corrupted download; the script and checksum still trust this repository’s publisher.
 
+Version bumps merged to `main` automatically start tagging and publishing the matching plugin release. Until that release is published and its downloads are available, the one-command installer can fail before persistent installation writes. Retry after publication completes; a failed release workflow can extend this window.
+
 If a terminal is available, the script asks whether to download the detection model. Without a terminal, it skips the model unless `--yes` is supplied. Later installation failures can leave a partial installation recorded by the uninstall manifest.
 
 This is what it does, in the order it prints:

@@ -2,6 +2,8 @@
 
 The [one-command installer](../README.md#install) runs the steps below itself. Read this page to see or control each one — installing the plugin, recording the interpreter, or running only the fallback pane without a patched Codex build.
 
+Version bumps merged to `main` automatically start tagging and publishing the matching plugin release. Until that release is published and its downloads are available, the one-command installer can fail before persistent installation writes. Retry after publication completes; a failed release workflow can extend this window.
+
 Privacy HUD 0.10.0 retains snapshot version 2. New sessions observed from a genuine SessionStart use version-2 accounting; existing sessions and late attachments retain legacy accounting. Snapshot-v2 readers accept version 1 as explicitly legacy and version 2 with nullable accounting fields. Older snapshot-v1-only readers reject version 2 and show no Privacy item. Matching Codex version numbers do not establish snapshot compatibility.
 
 The snapshot-v2 patched Codex builds for 0.154.0, 0.155.0, and 0.155.1 were re-released on 2026-09-22. An earlier installation of one of those versions may still contain the older reader. Updating the plugin does not replace that binary. No additional patched-Codex release is required solely for Privacy HUD 0.10.0.
