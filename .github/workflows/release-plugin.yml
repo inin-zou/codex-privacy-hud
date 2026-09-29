@@ -1,26 +1,57 @@
 name: Release plugin bundle
 
-on:
+"on":
   push:
+    branches: ["main"]
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: release-plugin-${{ github.ref }}
+  group: release-plugin-publish
   cancel-in-progress: false
+  queue: max
 
 jobs:
   publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
+
+      - name: Select immutable release source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --tags origin
+          pushed="$(git rev-parse "$GITHUB_SHA^{commit}")"
+          if ! python scripts/release-tag-decision.py --sha "$pushed" > decision.json; then
+            cat decision.json
+            exit 1
+          fi
+          cat decision.json
+          tag="$(python -c 'import json; print(json.load(open("decision.json"))["tag"])')"
+          commit="$(python -c 'import json; print(json.load(open("decision.json"))["commit"])')"
+          action="$(python -c 'import json; print(json.load(open("decision.json"))["action"])')"
+          case "$GITHUB_REF" in
+            refs/heads/main) ;;
+            refs/tags/*) test "$GITHUB_REF_NAME" = "$tag" ;;
+            *) echo "Unsupported release ref" >&2; exit 1 ;;
+          esac
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+          echo "RELEASE_COMMIT=$commit" >> "$GITHUB_ENV"
+          echo "TAG_ACTION=$action" >> "$GITHUB_ENV"
+          git checkout --detach "$commit"
 
       - name: Build complete bundle
         shell: bash
@@ -56,7 +87,8 @@ jobs:
           print(release)
           PY
           )"
-          test "$GITHUB_REF_NAME" = "v$RELEASE"
+          test "$RELEASE_TAG" = "v$RELEASE"
+          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
           python scripts/build-runtime-manifest.py --check
           sh -n install.sh
           prefix="codex-privacy-hud-$RELEASE"
@@ -71,25 +103,68 @@ jobs:
           echo "RELEASE=$RELEASE" >> "$GITHUB_ENV"
           echo "ART=$ART" >> "$GITHUB_ENV"
 
+      - name: Ensure immutable release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$TAG_ACTION" = create ]; then
+            test "$RELEASE_COMMIT" = "$(git rev-parse "$GITHUB_SHA^{commit}")"
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f "ref=refs/tags/$RELEASE_TAG" \
+              -f "sha=$RELEASE_COMMIT"
+          else
+            test "$TAG_ACTION" = already-released
+          fi
+          git fetch --no-tags origin "refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse FETCH_HEAD^{commit})" = "$RELEASE_COMMIT"
+
       - name: Publish complete pair
         shell: bash
         run: |
           set -euo pipefail
           tag="v$RELEASE"
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
-              --json isDraft > release-state.json; then
-            python - <<'PY'
+              --json isDraft,assets > release-state.json; then
+            draft="$(python - <<'PY'
           import json
-          assert json.load(open("release-state.json"))["isDraft"], \
-              "Refusing to replace a published release"
+          state = json.load(open("release-state.json"))
+          if type(state["isDraft"]) is not bool:
+              raise SystemExit("Invalid release state")
+          print("true" if state["isDraft"] else "false")
           PY
+          )"
+            if [ "$draft" = false ]; then
+              echo "Published release preserved; checking anonymous downloads next."
+              exit 0
+            fi
           else
             gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
               --verify-tag --draft --title "$tag" \
               --notes "Complete Privacy HUD plugin bundle and SHA-256 checksum."
+            printf '%s\n' '{"isDraft":true,"assets":[]}' > release-state.json
           fi
-          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" \
-            "dist/$ART" "dist/$ART.sha256"
+
+          mkdir existing
+          for artifact in "dist/$ART" "dist/$ART.sha256"; do
+            name="${artifact#dist/}"
+            present="$(python - "$name" <<'PY'
+          import json
+          import sys
+          state = json.load(open("release-state.json"))
+          print("true" if any(
+              asset["name"] == sys.argv[1] for asset in state["assets"]
+          ) else "false")
+          PY
+          )"
+            if [ "$present" = true ]; then
+              gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
+                --dir existing --pattern "$name"
+              cmp "$artifact" "existing/$name"
+            else
+              gh release upload "$tag" --repo "$GITHUB_REPOSITORY" "$artifact"
+            fi
+          done
+
           mkdir downloaded
           gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
             --dir downloaded --pattern "$ART" --pattern "$ART.sha256"
