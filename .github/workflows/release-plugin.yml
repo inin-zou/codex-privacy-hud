@@ -1,0 +1,113 @@
+name: Release plugin bundle
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-plugin-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Build complete bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          RELEASE="$(python - <<'PY'
+          import json
+          import re
+          import tomllib
+          from pathlib import Path
+
+          root = Path(".")
+          release = tomllib.loads(
+              (root / "pyproject.toml").read_text()
+          )["project"]["version"]
+          assert re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", release)
+          plugin = json.loads((root / ".codex-plugin/plugin.json").read_text())
+          market = json.loads(
+              (root / ".agents/plugins/marketplace.json").read_text()
+          )
+          assert plugin["version"] == release
+          assert [
+              item["version"] for item in market["plugins"]
+              if item["name"] == plugin["name"]
+          ] == [release]
+          assert re.findall(
+              r'^RELEASE="([^"]+)"$',
+              (root / "install.sh").read_text(), re.M
+          ) == [release]
+          assert json.loads(
+              (root / "runtime-build.json").read_text()
+          )["release"] == release
+          print(release)
+          PY
+          )"
+          test "$GITHUB_REF_NAME" = "v$RELEASE"
+          python scripts/build-runtime-manifest.py --check
+          sh -n install.sh
+          prefix="codex-privacy-hud-$RELEASE"
+          ART="codex-privacy-hud-$RELEASE.tar.gz"
+          mkdir dist
+          git archive --format=tar --prefix="$prefix/" HEAD |
+            gzip -n > "dist/$ART"
+          (
+            cd dist
+            sha256sum "$ART" > "$ART.sha256"
+          )
+          echo "RELEASE=$RELEASE" >> "$GITHUB_ENV"
+          echo "ART=$ART" >> "$GITHUB_ENV"
+
+      - name: Publish complete pair
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="v$RELEASE"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+              --json isDraft > release-state.json; then
+            python - <<'PY'
+          import json
+          assert json.load(open("release-state.json"))["isDraft"], \
+              "Refusing to replace a published release"
+          PY
+          else
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+              --verify-tag --draft --title "$tag" \
+              --notes "Complete Privacy HUD plugin bundle and SHA-256 checksum."
+          fi
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" \
+            "dist/$ART" "dist/$ART.sha256"
+          mkdir downloaded
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
+            --dir downloaded --pattern "$ART" --pattern "$ART.sha256"
+          cmp "dist/$ART" "downloaded/$ART"
+          cmp "dist/$ART.sha256" "downloaded/$ART.sha256"
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false
+
+      - name: Verify anonymous downloads
+        env:
+          GH_TOKEN: ""
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir anonymous
+          cd anonymous
+          base="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/v$RELEASE"
+          for name in "$ART" "$ART.sha256"; do
+            curl --retry 5 --retry-all-errors --retry-delay 5 \
+              -fsSL "$base/$name" -o "$name"
+          done
+          sha256sum -c "$ART.sha256"

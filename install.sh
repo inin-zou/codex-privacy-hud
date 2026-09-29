@@ -4,6 +4,7 @@
 set -eu
 
 REPO="inin-zou/codex-privacy-hud"
+RELEASE="0.10.6"
 BASE_URL="${PRIVACY_HUD_RELEASE_BASE_URL:-https://github.com/$REPO/releases/download}"
 SHARE="$HOME/.local/share/codex-privacy-hud"
 BIN="$HOME/.local/bin"
@@ -15,7 +16,31 @@ YES=0; NO_MODEL=0; UNINSTALL=0; PURGE=0; REPAIR=0; PD_ARG=""
 # The bundle containing this installer. Explicit runtime repair selects
 # this bundle. Normal installation resolves the installed plugin bundle
 # separately and passes that bundle to setup and wrapper generation.
-BUNDLE="$(cd "$(dirname "$0")" && pwd)"
+# A piped shell must not treat the caller's working directory as a bundle.
+BUNDLE=""
+case "$0" in
+  sh|*/sh|-sh|dash|*/dash|bash|*/bash) ;;
+  *)
+    if [ -f "$0" ]; then
+      BUNDLE="$(cd "$(dirname "$0")" && pwd)"
+    fi
+    ;;
+esac
+
+BUNDLE_TMP=""
+TMP=""
+BOOTSTRAPPED=0
+BUNDLE_BUILD_ID=""
+
+cleanup_install_tmp() {
+  [ -z "$BUNDLE_TMP" ] || rm -rf "$BUNDLE_TMP"
+  [ -z "$TMP" ] || rm -rf "$TMP"
+  :
+}
+trap cleanup_install_tmp 0
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 log() { printf '%s\n' "$*"; }
 die() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
@@ -150,6 +175,168 @@ host_python() {
   return 1
 }
 
+has_bundle() {
+  [ -n "$BUNDLE" ] &&
+    [ -f "$BUNDLE/pyproject.toml" ] &&
+    [ -d "$BUNDLE/src/privacy_hud" ] &&
+    [ -f "$BUNDLE/scripts/runtime.py" ]
+}
+
+require_maintenance_bundle() {
+  has_bundle && return 0
+  if [ "$REPAIR" -eq 1 ]; then
+    die '--repair-runtime requires the installer from an existing plugin bundle. Set PRIVACY_HUD_BUNDLE and PRIVACY_HUD_DATA to the absolute installed bundle and data directories described in README.md, then run: sh "$PRIVACY_HUD_BUNDLE/install.sh" --repair-runtime --plugin-data "$PRIVACY_HUD_DATA" --yes'
+  fi
+  die '--uninstall requires the installer from an existing plugin bundle. Set PRIVACY_HUD_BUNDLE to the absolute installed bundle directory described in README.md, then run: sh "$PRIVACY_HUD_BUNDLE/install.sh" --uninstall'
+}
+
+bootstrap_bundle() {
+  BASE="$(host_python)" ||
+    die "python3 >= 3.11 required: brew install python@3.12"
+  BUNDLE_TMP="$(mktemp -d "${TMPDIR:-/tmp}/privacy-hud-bundle.XXXXXX")"
+  BUNDLE_ART="codex-privacy-hud-$RELEASE.tar.gz"
+
+  curl -fsSL "$BASE_URL/v$RELEASE/$BUNDLE_ART" \
+    -o "$BUNDLE_TMP/$BUNDLE_ART" ||
+    die "release bundle unavailable for $RELEASE; not installing"
+  curl -fsSL "$BASE_URL/v$RELEASE/$BUNDLE_ART.sha256" \
+    -o "$BUNDLE_TMP/$BUNDLE_ART.sha256" ||
+    die "release bundle checksum unavailable for $RELEASE; not installing"
+
+  "$BASE" -I -B - "$BUNDLE_TMP" "$BUNDLE_ART" "$RELEASE" <<'BUNDLE_EXTRACT'
+import hashlib
+import re
+import shutil
+import sys
+import tarfile
+from pathlib import Path
+
+root = Path(sys.argv[1])
+name = sys.argv[2]
+release = sys.argv[3]
+archive = root / name
+
+def refuse(message):
+    raise SystemExit("install.sh: " + message + "; not installing")
+
+try:
+    checksum = (root / (name + ".sha256")).read_text(encoding="ascii")
+    match = re.fullmatch(
+        r"([0-9a-f]{64})  " + re.escape(name) + r"\n?", checksum
+    )
+    if match is None:
+        refuse("release bundle checksum malformed")
+    digest = hashlib.sha256()
+    with archive.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    if digest.hexdigest() != match.group(1):
+        refuse("release bundle checksum mismatch")
+
+    prefix = "codex-privacy-hud-" + release
+    seen = set()
+    with tarfile.open(archive, "r:gz") as handle:
+        members = handle.getmembers()
+        for member in members:
+            parts = member.name.rstrip("/").split("/")
+            key = "/".join(parts)
+            if (
+                not parts or parts[0] != prefix
+                or any(part in ("", ".", "..") for part in parts)
+                or key in seen
+                or not (member.isfile() or member.isdir())
+            ):
+                refuse("unsafe release archive")
+            seen.add(key)
+
+        # Never use extractall: no links, devices, ownership restoration,
+        # absolute paths, parent traversal, or duplicate member overwrite.
+        for member in members:
+            destination = root.joinpath(*member.name.rstrip("/").split("/"))
+            if member.isdir():
+                destination.mkdir(parents=True, exist_ok=True)
+            else:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                source = handle.extractfile(member)
+                if source is None:
+                    refuse("unsafe release archive")
+                with source, destination.open("xb") as output:
+                    shutil.copyfileobj(source, output)
+                destination.chmod(0o755 if member.mode & 0o111 else 0o644)
+
+    bundle = root / prefix
+    required = (
+        "install.sh", "pyproject.toml", "runtime-build.json",
+        ".codex-plugin/plugin.json", ".agents/plugins/marketplace.json",
+        "scripts/runtime.py", "src/privacy_hud/runtime_contract.py",
+        "hooks/hooks.json", "hooks/handler.py",
+        "mcp/server.py", "skills/privacy/SKILL.md",
+    )
+    if any(not (bundle / item).is_file() for item in required):
+        refuse("release bundle incomplete")
+except (OSError, UnicodeError, tarfile.TarError, ValueError):
+    refuse("unsafe release archive")
+BUNDLE_EXTRACT
+
+  BUNDLE="$BUNDLE_TMP/codex-privacy-hud-$RELEASE"
+  BUNDLE_BUILD_ID="$(validate_bundle "$BASE" "$BUNDLE")" ||
+    die "release bundle validation failed; not installing"
+  BOOTSTRAPPED=1
+}
+
+validate_bundle() {
+  "$1" -I -B - "$2" "$RELEASE" <<'BUNDLE_VALIDATE'
+import json
+import sys
+import tomllib
+from pathlib import Path
+
+bundle = Path(sys.argv[1])
+release = sys.argv[2]
+
+try:
+    project = tomllib.loads(
+        (bundle / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    plugin = json.loads(
+        (bundle / ".codex-plugin/plugin.json").read_text(encoding="utf-8")
+    )
+    manifest = json.loads(
+        (bundle / "runtime-build.json").read_text(encoding="utf-8")
+    )
+    versions = [
+        project["project"]["version"], plugin["version"], manifest["release"]
+    ]
+    marketplace_path = bundle / ".agents/plugins/marketplace.json"
+    if marketplace_path.exists():
+        marketplace = json.loads(marketplace_path.read_text(encoding="utf-8"))
+        entries = [
+            item for item in marketplace["plugins"]
+            if item["name"] == plugin["name"]
+        ]
+        if len(entries) != 1:
+            raise ValueError("marketplace entry")
+        versions.append(entries[0]["version"])
+    if any(version != release for version in versions):
+        raise SystemExit(
+            "install.sh: release bundle version mismatch; not installing"
+        )
+
+    sys.path.insert(0, str(bundle / "src"))
+    from privacy_hud import runtime_contract
+    if runtime_contract.RELEASE != release:
+        raise SystemExit(
+            "install.sh: release bundle version mismatch; not installing"
+        )
+    identity = runtime_contract.load_identity(bundle)
+    print(identity.build_id)
+except Exception:
+    raise SystemExit(
+        "install.sh: release bundle invalid or incomplete; not installing"
+    ) from None
+BUNDLE_VALIDATE
+}
+
 # The interpreter the receipt in $1 records, if any. Read with sed rather
 # than with python, because this runs in exactly the states where no python
 # is yet known to work.
@@ -228,6 +415,10 @@ snapshot_download('openai/privacy-filter', allow_patterns=[
     'tokenizer_config.json', 'viterbi_calibration.json'])
 WEIGHTS
 }
+
+if [ "$REPAIR" -eq 1 ] || [ "$UNINSTALL" -eq 1 ]; then
+  require_maintenance_bundle
+fi
 
 # ----------------------------------------------------------- repair runtime
 # Repairs the runtime and nothing else. It does not install, replace or
@@ -365,6 +556,10 @@ if [ "$UNINSTALL" -eq 1 ]; then
 fi
 
 # ------------------------------------------------------------------ install
+log "step 1/9: establishing the installer bundle and checking prerequisites"
+if ! has_bundle; then
+  bootstrap_bundle
+fi
 OFFICIAL="$(official_codex)" || die "codex not found on PATH; install Codex CLI first"
 VER="$("$OFFICIAL" --version | awk '{print $2}')"
 echo "$VER" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || die "cannot parse codex version from: $("$OFFICIAL" --version)"
@@ -414,10 +609,6 @@ mkdir -p "$SHARE"
 # unconditionally (it is ours by name), and listing it would make the
 # manifest describe its own directory.
 write_manifest
-# $SHARE itself is deliberately not in `created`: --uninstall removes it
-# unconditionally (it is ours by name), and listing it would make the
-# manifest describe its own directory.
-write_manifest
 if [ "${PRIVACY_HUD_FAKE:-0}" != "1" ]; then
   command -v python3 >/dev/null || die "python3 >= 3.11 required: brew install python@3.12"
   python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' || die "python3 >= 3.11 required: brew install python@3.12"
@@ -455,18 +646,30 @@ if [ "${PRIVACY_HUD_FAKE:-0}" != "1" ]; then
   fi
   log "step 4/9: installing the Codex plugin"
   codex plugin marketplace add "$REPO" >/dev/null 2>&1 || true
-  codex plugin add "codex-privacy-hud@codex-privacy-hud" >/dev/null 2>&1 || true
+  codex plugin add "codex-privacy-hud@codex-privacy-hud" ||
+    die "Codex plugin installation failed; the installer manifest and dependency environment were preserved"
   log "step 5/9: selecting the installed plugin bundle and recording the interpreter"
   # The bundle Codex actually runs is the copy in its own plugin cache, and
   # which copy that is has to be RESOLVED, not guessed: two cached copies
   # are an error here, never a newest-directory choice (#66).
-  INSTALLED="$(PRIVACY_HUD_BUNDLE_SRC="$BUNDLE/src" "$SHARE/venv/bin/python" -I -B -c 'import os, sys
+  INSTALLED="$(PRIVACY_HUD_BUNDLE_SRC="$BUNDLE/src" \
+    "$SHARE/venv/bin/python" -I -B -c 'import os, sys
 sys.path.insert(0, os.environ["PRIVACY_HUD_BUNDLE_SRC"])
-from privacy_hud import runtime_contract, runtime_repair
-sys.stdout.write(str(runtime_repair.resolve_installed_bundle(runtime_contract.RELEASE)))' 2>/dev/null)" \
-    || die "could not resolve exactly one installed plugin bundle; run: codex plugin list"
-  [ -n "$INSTALLED" ] && [ -f "$INSTALLED/scripts/runtime.py" ] \
-    || die "could not resolve exactly one installed plugin bundle; run: codex plugin list"
+from privacy_hud import runtime_repair
+sys.stdout.write(str(runtime_repair.resolve_installed_bundle(sys.argv[1])))' \
+    "$RELEASE" 2>/dev/null)" ||
+    die "could not find exactly one installed plugin bundle for release $RELEASE; run: codex plugin list"
+
+  [ -n "$INSTALLED" ] && [ -f "$INSTALLED/scripts/runtime.py" ] ||
+    die "could not find exactly one installed plugin bundle for release $RELEASE; run: codex plugin list"
+
+  INSTALLED_BUILD_ID="$(validate_bundle "$SHARE/venv/bin/python" "$INSTALLED")" ||
+    die "installed plugin bundle does not match release $RELEASE; no runtime was selected"
+
+  if [ "$BOOTSTRAPPED" -eq 1 ] &&
+     [ "$INSTALLED_BUILD_ID" != "$BUNDLE_BUILD_ID" ]; then
+    die "installed plugin bundle does not match release $RELEASE; no runtime was selected"
+  fi
   log "installed bundle: $INSTALLED"
   install_wrappers "$SHARE/venv/bin/python" "$PD" "$INSTALLED"
   "$SHARE/venv/bin/python" "$INSTALLED/scripts/runtime.py" --plugin-data "$PD" \
@@ -475,8 +678,7 @@ fi
 
 log "step 6/9: fetching patched Codex $VER"
 ART="codex-privacy-$VER-$TRIPLE.tar.gz"
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/privacy-hud-codex.XXXXXX")"
 # Two URLs, and the second one is the one that usually answers. The
 # versioned URL resolves only if a release was tagged exactly
 # `codex-<ver>-hud` for the version this machine's official binary reports
