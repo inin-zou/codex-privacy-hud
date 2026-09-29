@@ -1,11 +1,5 @@
 # Changelog
 
-## Unreleased
-
-- Automatically tag consistent new plugin versions at the triggering `main` commit and publish their complete bundles and SHA-256 checksum files in the same workflow.
-- Preserve existing tags and published releases; resume incomplete drafts by comparing existing assets and uploading only missing files.
-- Document that the one-command installer can refuse installation between a version bump reaching `main` and the matching release becoming downloadable.
-
 ## 0.10.6
 
 - Support piped installation from outside a checkout by downloading the complete plugin bundle for the installer's pinned release and checking its SHA-256 before persistent installation writes.
