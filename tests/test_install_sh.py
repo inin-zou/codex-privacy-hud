@@ -288,6 +288,67 @@ def test_the_created_status_line_carries_codex_own_defaults(home):
 
 # -- partial installs, PATH, and flag validation -------------------------
 
+@pytest.mark.parametrize(
+    ("command", "event", "expected"),
+    [
+        ("chmod", "fail", 1),
+        ("chmod", "HUP", 129),
+        ("chmod", "INT", 130),
+        ("chmod", "TERM", 143),
+        ("mv", "HUP", 129),
+        ("mv", "INT", 130),
+        ("mv", "TERM", 143),
+    ],
+)
+def test_forwarder_temp_cleanup_on_failure_or_signal(
+    home, command, event, expected
+):
+    home, env, rel = home
+    before = _tree(home)
+    shim_bin = home.parent / "interrupt-bin"
+    action = (
+        "exit 1"
+        if event == "fail"
+        else f'kill -s {event} "$PPID"\n    exit 0'
+    )
+    move = '/bin/mv "$@" || exit $?' if command == "mv" else ":"
+    executable(
+        shim_bin / command,
+        f"""#!/bin/sh
+case "${{2-}}" in
+  "$HOME/.local/bin/.codex-forwarder."*)
+    [ -f "$2" ] || exit 98
+    printf '%s\\n' 'TEST forwarder temp reached' >&2
+    {move}
+    {action}
+    ;;
+esac
+exec /bin/{command} "$@"
+""",
+    )
+    r = run(
+        {**env, "PATH": f"{shim_bin}:{env['PATH']}"},
+        "--yes", "--release-base-url", rel.as_uri(),
+    )
+    assert "TEST forwarder temp reached" in r.stderr, r.stderr
+    assert r.returncode == expected, (r.stdout, r.stderr)
+    bin_ = home / ".local/bin"
+    assert bin_.is_dir()
+    assert not list(bin_.glob(".codex-forwarder.*"))
+    fwd = bin_ / "codex"
+    if command == "mv":
+        # The signal lands after the real mv, before the installer clears
+        # FORWARDER_TMP. Cleanup must preserve the installed forwarder.
+        assert fwd.read_text() == forwarder_source()
+    else:
+        assert not fwd.exists()
+
+    r = run(env, "--uninstall")
+    assert r.returncode == 0, r.stderr
+    assert not bin_.exists()
+    assert _tree(home) == before
+
+
 def test_an_aborted_install_still_leaves_an_actionable_manifest(home):
     """The manifest is contract C, and `--uninstall` refuses to infer. If it
     were written only at the end, an install that died after creating the

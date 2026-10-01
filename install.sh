@@ -29,10 +29,12 @@ esac
 
 BUNDLE_TMP=""
 TMP=""
+FORWARDER_TMP=""
 BOOTSTRAPPED=0
 BUNDLE_BUILD_ID=""
 
 cleanup_install_tmp() {
+  [ -z "$FORWARDER_TMP" ] || rm -f "$FORWARDER_TMP"
   [ -z "$BUNDLE_TMP" ] || rm -rf "$BUNDLE_TMP"
   [ -z "$TMP" ] || rm -rf "$TMP"
   :
@@ -189,7 +191,7 @@ install_forwarder() {
     die "$FWD is not ours; not replacing it"
   fi
 
-  forwarder_tmp=$(mktemp "$BIN/.codex-forwarder.XXXXXX") ||
+  FORWARDER_TMP=$(mktemp "$BIN/.codex-forwarder.XXXXXX") ||
     die "could not prepare the codex forwarder"
   if ! {
     cat <<'FWD_HEADER'
@@ -238,15 +240,14 @@ if [ -f "$patched" ] && [ -r "$patched" ] && [ -x "$patched" ]; then
 fi
 exec "$official" "$@"
 FWD_BODY
-  } > "$forwarder_tmp"; then
-    rm -f "$forwarder_tmp"
+  } > "$FORWARDER_TMP"; then
     die "could not write the codex forwarder"
   fi
-  if ! chmod 755 "$forwarder_tmp" ||
-     ! mv -f "$forwarder_tmp" "$FWD"; then
-    rm -f "$forwarder_tmp"
+  if ! chmod 755 "$FORWARDER_TMP" ||
+     ! mv -f "$FORWARDER_TMP" "$FWD"; then
     die "could not replace the codex forwarder"
   fi
+  FORWARDER_TMP=""
   add_created "$FWD"
 }
 
