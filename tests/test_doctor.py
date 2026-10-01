@@ -178,6 +178,12 @@ def isolated_env(tmp_path, monkeypatch):
     monkeypatch.setenv("CODEX_HOME", str(codex))
     monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
     monkeypatch.delenv("HF_HUB_CACHE", raising=False)
+    home = tmp_path / "home"
+    home.mkdir()
+    commands = tmp_path / "commands"
+    commands.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", str(commands))
     return data
 
 
@@ -1369,7 +1375,7 @@ def test_a_check_that_raises_becomes_a_failure_not_a_traceback(monkeypatch,
     assert "RuntimeError" in ledger.summary
     text = doctor.format_report(checks)
     assert "something private" not in text
-    assert len(checks) == 13
+    assert len(checks) == 14
 
 
 def test_report_is_plain_text_with_no_escape_sequences(isolated_env):
