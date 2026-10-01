@@ -15,7 +15,7 @@ case "${PH_TEST_DEPTH:-0}" in
   0|1|2) PH_TEST_DEPTH=$((PH_TEST_DEPTH + 1)) ;;
   *)
     printf '%s\\n' 'TEST forwarder entry limit reached' >&2
-    kill -KILL -- "-$PH_TEST_PGID"
+    kill -s KILL -- "-$PH_TEST_PGID"
     exit 99
     ;;
 esac

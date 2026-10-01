@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import os
 import signal
+import subprocess
 from types import SimpleNamespace
 
 import pytest
 
 from forwarder_helpers import (
+    FUSE,
     INSTALL,
     bounded_run,
     executable,
@@ -16,6 +18,25 @@ from forwarder_helpers import (
 GUARD = "PRIVACY_HUD_FORWARDER_PROBE"
 REFUSAL = "codex-privacy-hud: recursive forwarder entry refused\n"
 MISSING = "codex-privacy-hud: official codex not found\n"
+
+
+@pytest.mark.parametrize("shell", ["/bin/sh", "/bin/dash"])
+def test_fuse_kills_its_process_group_under_available_shells(shell):
+    if not os.path.isfile(shell):
+        pytest.skip(f"{shell} is unavailable")
+    result = subprocess.run(
+        [
+            shell, "-c",
+            "PH_TEST_PGID=$$; export PH_TEST_PGID;\n" + FUSE,
+        ],
+        env={"PATH": "/usr/bin:/bin", "PH_TEST_DEPTH": "3"},
+        capture_output=True,
+        text=True,
+        start_new_session=True,
+        timeout=3,
+    )
+    assert result.returncode == -signal.SIGKILL, result.stderr
+    assert result.stderr == "TEST forwarder entry limit reached\n"
 
 
 @pytest.fixture
