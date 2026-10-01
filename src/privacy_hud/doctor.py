@@ -2530,6 +2530,96 @@ def check_native_reader() -> Check:
 # report
 # --------------------------------------------------------------------- #
 
+_FORWARDER_MARKER = b"# codex-privacy-hud forwarder"
+_FORWARDER_SAFETY = b"# codex-privacy-hud forwarder safety: 1"
+_FORWARDER_REMEDY = (
+    "Re-run the normal installer from Privacy HUD 0.10.7 or newer "
+    "with HOME set to the home that owns each reported forwarder. "
+    "See README.md#install. --repair-runtime does not replace forwarders."
+)
+
+
+def _forwarder_header(path: Path) -> tuple[Path, bytes]:
+    resolved = path.resolve(strict=True)
+    fd = os.open(
+        resolved,
+        os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+    )
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("not a regular file")
+        return resolved, os.read(fd, 512)
+    finally:
+        os.close(fd)
+
+
+def check_codex_forwarder() -> Check:
+    candidates = [Path.home() / ".local" / "bin" / "codex"]
+    candidates.extend(
+        Path(entry or ".") / "codex"
+        for entry in os.environ.get("PATH", "").split(os.pathsep)
+    )
+    seen: set[Path] = set()
+    old: list[Path] = []
+    unreadable: list[Path] = []
+    found = False
+
+    for candidate in candidates:
+        try:
+            candidate.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            unreadable.append(candidate)
+            continue
+        try:
+            resolved, header = _forwarder_header(candidate)
+        except (OSError, RuntimeError):
+            unreadable.append(candidate)
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        lines = header.splitlines()
+        if not any(
+            line.startswith(_FORWARDER_MARKER)
+            for line in lines[:2]
+        ):
+            continue
+        found = True
+        if len(lines) < 3 or lines[2] != _FORWARDER_SAFETY:
+            old.append(resolved)
+
+    if old:
+        return Check(
+            "Codex forwarder",
+            WARN,
+            "a Privacy HUD forwarder lacks the recursion-protection marker",
+            details=[_display_path(path) for path in old],
+            fixes=[_FORWARDER_REMEDY],
+        )
+    if unreadable:
+        return Check(
+            "Codex forwarder",
+            WARN,
+            "a Codex candidate could not be inspected safely",
+            details=[_display_path(path) for path in unreadable],
+            fixes=[
+                "Check the type and read permissions of the reported "
+                "Codex candidates, then run doctor again."
+            ],
+        )
+    if found:
+        return Check(
+            "Codex forwarder",
+            OK,
+            "all detected Privacy HUD forwarders declare safety revision 1",
+        )
+    return Check(
+        "Codex forwarder", SKIP, "no Privacy HUD forwarder found"
+    )
+
+
 def run_checks(*, load_model: bool = False,
                timeout: float = DAEMON_TIMEOUT,
                probe_timeout: float = runtime.PROBE_TIMEOUT) -> list[Check]:
@@ -2547,6 +2637,7 @@ def run_checks(*, load_model: bool = False,
     """
     checks = [
         ("Python", check_python),
+        ("Codex forwarder", check_codex_forwarder),
         ("PLUGIN_DATA", check_plugin_data),
         ("Runtime source", check_runtime_source),
         ("Read guard", check_read_guard),
