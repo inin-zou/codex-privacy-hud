@@ -369,17 +369,26 @@ There is **no second LLM call to audit the first one.** That would re-transmit t
 ### What the forwarder is, and what it is not
 
 Your official `codex` binary is **never modified, moved, or replaced.**
-`~/.local/bin/codex` is a ten-line shell script: it finds the official
-binary on your `PATH`, asks it for its version, and runs the patched build
-of that same version if one is installed — otherwise it runs the official
-binary unchanged. Upgrade Codex with `brew` or `npm` and the forwarder simply
-falls through to the new official version until a matching patched build
-exists; nothing breaks, you just lose the status-line item in the meantime.
+`~/.local/bin/codex` is a shell script. It resolves its own location from
+`$0`, skips marked Privacy HUD forwarders when searching `PATH` for the
+official binary, and guards the version probe against recursive forwarder
+entry. It looks for a matching patched build relative to its resolved
+installation, independently of the caller's `HOME`. If no usable matching
+build is installed, it runs the official binary unchanged. Failure to
+resolve itself, find the official binary, or query its version produces
+a diagnostic and exits.
 
-If the installer prints a block starting with `!! PATH:`, another `codex`
-comes earlier on your `PATH` than `~/.local/bin`. Put the line it shows
-first in your shell rc file and open a new shell, or the status item will
-never appear.
+After an upgrade through `brew` or `npm`, the forwarder uses the new
+official binary if no usable matching patched build is installed.
+The official binary does not provide the `privacy` status-line item.
+
+If the installer prints a block starting with `!! PATH:`, PATH selects
+another `codex` instead of this installation's forwarder. Copy the
+`export PATH=...` line it prints into the named shell rc file after other
+PATH assignments, then open a new shell. The line uses this installation's
+bin path, even if the new shell has a different `HOME`. This changes PATH
+selection; the `privacy` status-line item still requires a matching
+patched Codex build.
 
 ## Known limits
 

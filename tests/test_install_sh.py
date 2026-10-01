@@ -318,8 +318,27 @@ def test_it_says_so_when_the_official_binary_still_wins_on_path(home):
     env = {**env, "PATH": f"{env['PATH']}:{local_bin}"}
     r = run(env, "--yes", "--release-base-url", rel.as_uri())
     assert r.returncode == 0, r.stderr
-    assert "PATH" in r.stdout
-    assert "This installation's forwarder is not the command selected by PATH." in r.stdout
+    winner = (Path(env["PATH"].split(":")[0]) / "codex").resolve()
+    assert (
+        f"!! PATH: '{winner}' is selected before '{local_bin / 'codex'}'."
+        in r.stdout.splitlines()
+    )
+    assert (
+        "!! This installation's forwarder is not the command selected by PATH."
+        in r.stdout.splitlines()
+    )
+    assert (
+        f"!! Add this line to {home / '.zshrc'} after other PATH assignments, "
+        "then open a new shell:"
+    ) in r.stdout.splitlines()
+    quoted_bin = "".join(
+        "\\" + char if char in '"\\$`' else char
+        for char in str(local_bin)
+    )
+    assert r.stdout.splitlines().count(
+        f'export PATH="{quoted_bin}:$PATH"'
+    ) == 1
+    assert 'export PATH="$HOME/.local/bin:$PATH"' not in r.stdout
     assert "# codex-privacy-hud" not in (home / ".zshrc").read_text()
 
 

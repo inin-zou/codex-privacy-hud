@@ -868,8 +868,10 @@ if curl -fsSL "$BASE_URL/codex-$VER-hud/$ART" -o "$TMP/$ART" 2>/dev/null || curl
     log ""
     log "!! PATH: '$WINNER' is selected before '$FWD'."
     log "!! This installation's forwarder is not the command selected by PATH."
-    log "!! Put this installation's bin directory before other Codex directories"
-    log "!! in $(rc_file), then open a new shell."
+    log "!! Add this line to $(rc_file) after other PATH assignments, then open a new shell:"
+    # Quote the installation path; expand PATH only when the user runs the line.
+    PATH_BIN=$(printf '%s\n' "$BIN" | sed 's/["\\$`]/\\&/g')
+    log "export PATH=\"$PATH_BIN:\$PATH\""
     log ""
   fi
   case ":$PATH:" in *":$BIN:"*) ;; *)

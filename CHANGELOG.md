@@ -8,6 +8,8 @@
 - Refresh existing marked forwarders during normal installation even when no matching patched download is available. Runtime repair continues to leave forwarders unchanged.
 - Add a read-only doctor warning for forwarders without the recursion-protection marker and document the normal-installation remedy.
 - Add hermetic regression coverage with deterministic recursion containment and process-group timeout cleanup.
+- Restore a copyable PATH warning hint using the shell-escaped installation bin path, independent of the next shell's HOME.
+- Update English and Chinese forwarder descriptions and PATH instructions to describe identity resolution, marked-forwarder skipping, and version-probe recursion protection.
 
 Refs #98.
 
