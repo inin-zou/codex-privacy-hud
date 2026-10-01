@@ -4,7 +4,7 @@
 set -eu
 
 REPO="inin-zou/codex-privacy-hud"
-RELEASE="0.10.6"
+RELEASE="0.10.7"
 BASE_URL="${PRIVACY_HUD_RELEASE_BASE_URL:-https://github.com/$REPO/releases/download}"
 SHARE="$HOME/.local/share/codex-privacy-hud"
 BIN="$HOME/.local/bin"

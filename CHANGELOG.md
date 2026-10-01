@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.7
+
+- Resolve the Codex forwarder's identity and patched-build location independently of the caller's HOME, including relative paths and symlinked invocations.
+- Skip Privacy HUD forwarders during official Codex discovery in both the installer and forwarder, and refuse recursive version-probe entry with a fixed diagnostic.
+- Keep the version-probe guard out of normal Codex execution so legitimate nested invocations remain available.
+- Refresh existing marked forwarders during normal installation even when no matching patched download is available. Runtime repair continues to leave forwarders unchanged.
+- Add a read-only doctor warning for forwarders without the recursion-protection marker and document the normal-installation remedy.
+- Add hermetic regression coverage with deterministic recursion containment and process-group timeout cleanup.
+
+Refs #98.
+
 ## 0.10.6
 
 - Support piped installation from outside a checkout by downloading the complete plugin bundle for the installer's pinned release and checking its SHA-256 before persistent installation writes.
