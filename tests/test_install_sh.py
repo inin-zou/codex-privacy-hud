@@ -319,7 +319,7 @@ def test_it_says_so_when_the_official_binary_still_wins_on_path(home):
     r = run(env, "--yes", "--release-base-url", rel.as_uri())
     assert r.returncode == 0, r.stderr
     assert "PATH" in r.stdout
-    assert 'export PATH="$HOME/.local/bin:$PATH"' in r.stdout
+    assert "This installation's forwarder is not the command selected by PATH." in r.stdout
     assert "# codex-privacy-hud" not in (home / ".zshrc").read_text()
 
 

@@ -84,30 +84,170 @@ target() {
 }
 
 first_codex_on_path() {
-  # `command -v -a` is not POSIX (and /bin/sh on macOS rejects it); walk PATH.
-  # $1 is a path to skip, or empty to skip nothing: the same walk answers two
-  # questions -- "where is the official binary" (skip our forwarder) and
-  # "which codex would the user's shell actually run" (skip nothing).
-  skip="${1:-}"
-  saved_ifs="$IFS"; IFS=:
-  for d in $PATH; do
-    [ -n "$d" ] && [ -x "$d/codex" ] && [ "$d/codex" != "$skip" ] && { IFS="$saved_ifs"; echo "$d/codex"; return 0; }
-  done
-  IFS="$saved_ifs"; return 1
+  find_codex any
 }
 
-official_codex() { first_codex_on_path "$FWD"; }
+official_codex() {
+  find_codex official "$FWD"
+}
 
-# Follow symlinks to the real file, in POSIX sh (macOS ships `readlink -f`
-# only since 12.3, and python3 is not something the FAKE test path can rely on).
-real_path() {
-  p="$1"; n=0
-  while [ -L "$p" ] && [ "$n" -lt 20 ]; do
-    t="$(readlink "$p")"
-    case "$t" in /*) p="$t" ;; *) p="$(dirname "$p")/$t" ;; esac
+# Literal source shared with the generated standalone forwarder.
+# The eval below evaluates only this quoted, repository-owned heredoc.
+codex_path_helpers() {
+  cat <<'CODEX_PATH_HELPERS'
+real_path() (
+  p=$1
+  case "$p" in
+    */*) ;;
+    *) p=$(command -v "$p" 2>/dev/null) || return 1 ;;
+  esac
+  case "$p" in
+    /*) ;;
+    *) p="$(pwd -P)/$p" ;;
+  esac
+  n=0
+  while :; do
+    parent=${p%/*}
+    name=${p##*/}
+    [ -n "$parent" ] || parent=/
+    parent=$(CDPATH= cd -P "$parent" 2>/dev/null && pwd -P) ||
+      return 1
+    p="$parent/$name"
+    if [ ! -L "$p" ]; then
+      [ -f "$p" ] || return 1
+      printf '%s\n' "$p"
+      return 0
+    fi
+    [ "$n" -lt 40 ] || return 1
+    target=$(readlink "$p") || return 1
+    case "$target" in
+      /*) p=$target ;;
+      *) p="$parent/$target" ;;
+    esac
     n=$((n + 1))
   done
-  printf '%s\n' "$p"
+)
+
+is_forwarder() (
+  [ -f "$1" ] && [ -r "$1" ] || return 1
+  LC_ALL=C dd if="$1" bs=512 count=1 2>/dev/null |
+    LC_ALL=C head -n 2 |
+    LC_ALL=C grep -q '^# codex-privacy-hud forwarder'
+)
+
+find_codex() (
+  mode=$1
+  skip=${2:-}
+  if [ -n "$skip" ]; then
+    skip=$(real_path "$skip" 2>/dev/null) || skip=
+  fi
+  remaining=${PATH-}
+  while :; do
+    case "$remaining" in
+      *:*)
+        directory=${remaining%%:*}
+        remaining=${remaining#*:}
+        last=0
+        ;;
+      *)
+        directory=$remaining
+        last=1
+        ;;
+    esac
+    [ -n "$directory" ] || directory=.
+    candidate="$directory/codex"
+    if [ -f "$candidate" ] && [ -x "$candidate" ]; then
+      resolved=$(real_path "$candidate" 2>/dev/null) || resolved=
+      if [ -n "$resolved" ]; then
+        if [ "$mode" = any ]; then
+          printf '%s\n' "$resolved"
+          return 0
+        fi
+        if [ "$resolved" != "$skip" ] &&
+           [ -r "$resolved" ] &&
+           ! is_forwarder "$resolved"; then
+          printf '%s\n' "$resolved"
+          return 0
+        fi
+      fi
+    fi
+    [ "$last" -eq 0 ] || break
+  done
+  return 1
+)
+CODEX_PATH_HELPERS
+}
+
+eval "$(codex_path_helpers)"
+
+install_forwarder() {
+  mkdir -p "$BIN"
+  if [ -L "$FWD" ]; then
+    die "$FWD is a symlink; not replacing it"
+  fi
+  if [ -e "$FWD" ] && ! is_forwarder "$FWD"; then
+    die "$FWD is not ours; not replacing it"
+  fi
+
+  forwarder_tmp=$(mktemp "$BIN/.codex-forwarder.XXXXXX") ||
+    die "could not prepare the codex forwarder"
+  if ! {
+    cat <<'FWD_HEADER'
+#!/bin/sh
+# codex-privacy-hud forwarder — remove with: install.sh --uninstall
+# codex-privacy-hud forwarder safety: 1
+if [ "${PRIVACY_HUD_FORWARDER_PROBE+x}" = x ]; then
+  printf '%s\n' 'codex-privacy-hud: recursive forwarder entry refused' >&2
+  exit 126
+fi
+FWD_HEADER
+    codex_path_helpers
+    cat <<'FWD_BODY'
+self=$(real_path "$0") || {
+  printf '%s\n' 'codex-privacy-hud: cannot resolve forwarder path' >&2
+  exit 126
+}
+official=$(find_codex official "$self") || {
+  printf '%s\n' 'codex-privacy-hud: official codex not found' >&2
+  exit 127
+}
+
+version_output=$(
+  PRIVACY_HUD_FORWARDER_PROBE=1
+  export PRIVACY_HUD_FORWARDER_PROBE
+  "$official" --version
+) || {
+  printf '%s\n' 'codex-privacy-hud: official codex version probe failed' >&2
+  exit 126
+}
+ver=$(printf '%s\n' "$version_output" | awk '{print $2}')
+printf '%s\n' "$ver" |
+  grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' ||
+  exec "$official" "$@"
+
+self_directory=${self%/*}
+installation_prefix=${self_directory%/*}
+patched="$installation_prefix/share/codex-privacy-hud/$ver/codex"
+if [ -f "$patched" ] && [ -r "$patched" ] && [ -x "$patched" ]; then
+  patched_real=$(real_path "$patched" 2>/dev/null) || patched_real=
+  if [ -n "$patched_real" ] &&
+     [ "$patched_real" != "$self" ] &&
+     ! is_forwarder "$patched_real"; then
+    exec "$patched_real" "$@"
+  fi
+fi
+exec "$official" "$@"
+FWD_BODY
+  } > "$forwarder_tmp"; then
+    rm -f "$forwarder_tmp"
+    die "could not write the codex forwarder"
+  fi
+  if ! chmod 755 "$forwarder_tmp" ||
+     ! mv -f "$forwarder_tmp" "$FWD"; then
+    rm -f "$forwarder_tmp"
+    die "could not replace the codex forwarder"
+  fi
+  add_created "$FWD"
 }
 
 # The patched tarball carries only `codex`. Codex 0.154 also expects a sibling
@@ -473,7 +613,7 @@ fi
 if [ "$UNINSTALL" -eq 1 ]; then
   [ -f "$MANIFEST" ] || die "nothing to uninstall: $MANIFEST not found"
   if [ -f "$FWD" ]; then
-    head -2 "$FWD" | grep -q "codex-privacy-hud forwarder" || die "$FWD is not ours; not removing it"
+    is_forwarder "$FWD" || die "$FWD is not ours; not removing it"
     rm -f "$FWD"; log "removed $FWD"
   fi
   # config.toml: only touch it when the manifest itself recorded an edit --
@@ -550,7 +690,7 @@ if [ "$UNINSTALL" -eq 1 ]; then
   rmdir "$BIN" 2>/dev/null || true
   rmdir "$HOME/.local/share" 2>/dev/null || true
   rmdir "$HOME/.local" 2>/dev/null || true
-  log "codex now resolves to: $(official_codex || echo '(none found)')"
+  log "codex now resolves to: $(first_codex_on_path || echo '(none found)')"
   log "the plugin itself is separate: codex plugin remove codex-privacy-hud"
   exit 0
 fi
@@ -561,8 +701,15 @@ if ! has_bundle; then
   bootstrap_bundle
 fi
 OFFICIAL="$(official_codex)" || die "codex not found on PATH; install Codex CLI first"
-VER="$("$OFFICIAL" --version | awk '{print $2}')"
-echo "$VER" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || die "cannot parse codex version from: $("$OFFICIAL" --version)"
+VERSION_OUTPUT="$(
+  PRIVACY_HUD_FORWARDER_PROBE=1
+  export PRIVACY_HUD_FORWARDER_PROBE
+  "$OFFICIAL" --version
+)" || die "official codex version probe failed"
+VER="$(printf '%s\n' "$VERSION_OUTPUT" | awk '{print $2}')"
+printf '%s\n' "$VER" |
+  grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' ||
+  die "cannot parse official codex version"
 TRIPLE="$(target)"
 log "codex $VER at $OFFICIAL ($TRIPLE)"
 
@@ -701,28 +848,7 @@ if curl -fsSL "$BASE_URL/codex-$VER-hud/$ART" -o "$TMP/$ART" 2>/dev/null || curl
   xattr -d com.apple.quarantine "$SHARE/$VER/codex" 2>/dev/null || true
   add_created "$SHARE/$VER/"
   link_official_host "$SHARE/$VER"
-  mkdir -p "$BIN"
-  cat > "$FWD" <<'FWD'
-#!/bin/sh
-# codex-privacy-hud forwarder — remove with: install.sh --uninstall
-self="$HOME/.local/bin/codex"
-official=""
-saved_ifs="$IFS"; IFS=:
-for d in $PATH; do
-  [ -n "$d" ] && [ -x "$d/codex" ] && [ "$d/codex" != "$self" ] && { official="$d/codex"; break; }
-done
-IFS="$saved_ifs"
-[ -x "$official" ] || { echo "codex-privacy-hud: official codex not found" >&2; exit 127; }
-ver="$("$official" --version | awk '{print $2}')"
-# $ver comes from another program's stdout and is about to become a path
-# segment. Exactly x.y.z, the same regex install.sh checks, or we do not
-# build a path out of it at all -- just run the official binary.
-printf '%s\n' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || exec "$official" "$@"
-patched="$HOME/.local/share/codex-privacy-hud/$ver/codex"
-[ -x "$patched" ] && exec "$patched" "$@"
-exec "$official" "$@"
-FWD
-  chmod +x "$FWD"; add_created "$FWD"
+  install_forwarder
   log "step 7/9: forwarder at $FWD"
   # Test hook (tests/test_install_sh.py): abort here, with the forwarder and
   # the patched build on disk, to prove the incrementally written manifest
@@ -736,14 +862,14 @@ FWD
   # file is not touched -- the `case` right after this only appends when the
   # directory is absent entirely -- and `codex` keeps running the official
   # build with no status item and no explanation. Say so, loudly.
-  WINNER="$(first_codex_on_path '' || true)"
-  if [ "$WINNER" != "$FWD" ]; then
+  WINNER="$(first_codex_on_path || true)"
+  FWD_REAL="$(real_path "$FWD")"
+  if [ "$WINNER" != "$FWD_REAL" ]; then
     log ""
-    log "!! PATH: '$WINNER' still comes before '$FWD', so typing 'codex' will"
-    log "!! keep running the official binary and the privacy status item will"
-    log "!! not appear. Put this line FIRST in $(rc_file), then open a new shell:"
-    log "!!"
-    log '!!     export PATH="$HOME/.local/bin:$PATH"'
+    log "!! PATH: '$WINNER' is selected before '$FWD'."
+    log "!! This installation's forwarder is not the command selected by PATH."
+    log "!! Put this installation's bin directory before other Codex directories"
+    log "!! in $(rc_file), then open a new shell."
     log ""
   fi
   case ":$PATH:" in *":$BIN:"*) ;; *)
@@ -816,6 +942,10 @@ $DEFAULT_LINE
 else
   log "no patched build published for codex $VER yet; skipping the status line."
   log "the fallback pane still works: $SHARE/bin/privacy-hud-ambient --watch"
+  if is_forwarder "$FWD"; then
+    install_forwarder
+    log "step 7/9: refreshed existing forwarder at $FWD"
+  fi
 fi
 
 if [ "${PRIVACY_HUD_FAKE:-0}" != "1" ]; then
