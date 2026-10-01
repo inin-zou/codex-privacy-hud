@@ -140,6 +140,14 @@ curl -fsSL https://raw.githubusercontent.com/inin-zou/codex-privacy-hud/main/ins
 
 安装过程会下载软件包和补丁版 Codex；模型权重仅通过明确执行的模型下载步骤获取。无论继承的环境变量如何设置，运行时、安装配置探测和诊断检查都会强制离线，绝不下载缺失的权重。模型权重缺失或不完整时，第三级检测不可用，插件不会自动下载替代文件。如果当前进程已在在线模式下导入模型依赖，第三级检测同样不可用；必须重启该进程，才能以离线模式加载模型。
 
+Privacy HUD 0.10.7 更新了 Codex 转发脚本，使其不依赖 `HOME` 识别自身，并跳过其他 Privacy HUD 转发脚本。更新插件或运行 `--repair-runtime` 不会替换已有的转发脚本。请将 `HOME` 设为该安装所属的主目录，再运行 0.10.7 或更新版本的常规安装程序。即使没有匹配的 Codex 补丁构建，常规安装也会更新已有且带有本项目标记的转发脚本。如果 doctor 报告了多个主目录中的转发脚本，请分别更新对应的安装。请通过 `sh` 运行安装程序，不要通过旧版转发脚本执行更新。
+
+```sh
+# 指向已下载或检出的 0.10.7 或更新版本的插件包。
+PRIVACY_HUD_BUNDLE='/absolute/path/to/codex-privacy-hud'
+sh "$PRIVACY_HUD_BUNDLE/install.sh" --yes --no-model
+```
+
 ### 只安装插件：直接用 Codex 命令
 
 插件本身的安装方式与其他 Codex 插件相同，无需手动克隆仓库：

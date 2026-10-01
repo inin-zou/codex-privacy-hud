@@ -143,6 +143,14 @@ curl -fsSL https://raw.githubusercontent.com/inin-zou/codex-privacy-hud/main/ins
 
 Installation downloads packages and the patched Codex build; model weights are downloaded only through the explicit model-download step. Runtime, setup probes and doctor checks enforce offline mode regardless of inherited environment values and never download missing weights. Missing or incomplete model weights leave tier 3 unavailable; the plugin does not fetch replacements. A process that already imported the ML stack in online mode also leaves tier 3 unavailable and must be restarted to load it offline.
 
+Privacy HUD 0.10.7 updates the Codex forwarder to identify itself independently of `HOME` and skip other Privacy HUD forwarders. Updating the plugin or running `--repair-runtime` does not replace an existing forwarder. Re-run the normal installer from version 0.10.7 or newer with `HOME` set to the home that owns the installation. Normal installation refreshes an existing marked forwarder even when no matching patched build is available. If doctor reports forwarders from several homes, update each installation separately. Run the installer through `sh`; do not use an old forwarder to perform the update.
+
+```sh
+# Point this at the downloaded or checked-out 0.10.7-or-newer bundle.
+PRIVACY_HUD_BUNDLE='/absolute/path/to/codex-privacy-hud'
+sh "$PRIVACY_HUD_BUNDLE/install.sh" --yes --no-model
+```
+
 ### Plugin only, from the Codex CLI
 
 The plugin itself installs like any other Codex plugin, with nothing to

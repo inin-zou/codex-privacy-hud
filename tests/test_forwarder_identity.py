@@ -263,3 +263,17 @@ def test_bare_name_resolution_uses_path(case):
     result = invoke(case, argv=[str(probe)])
     assert result.returncode == 0
     assert result.stdout.strip() == str(case.a.resolve())
+
+
+def test_spec_forwarder_listing_matches_installer():
+    from forwarder_helpers import REPO, forwarder_source
+
+    spec = (
+        REPO
+        / "docs/superpowers/specs/"
+        "2026-09-15-patched-codex-status-line-design.md"
+    ).read_text(encoding="utf-8")
+    listing = spec.split("**Forwarding script**", 1)[1].split(
+        "```sh\n", 1
+    )[1].split("\n```", 1)[0] + "\n"
+    assert listing == forwarder_source()

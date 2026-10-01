@@ -626,6 +626,34 @@ def test_repair_mode_does_not_replace_codex_binary(tmp_path, install):
 
 
 @pytestmark_darwin
+def test_repair_mode_preserves_existing_forwarder(tmp_path, install):
+    home, env, _ = _fake_home(tmp_path)
+    seed_ledger(install.data)
+    write_receipt_v1(install.data, python=install.python)
+    fwd = home / ".local/bin/codex"
+    fwd.parent.mkdir(parents=True, exist_ok=True)
+    old = (
+        "#!/bin/sh\n"
+        "# codex-privacy-hud forwarder synthetic old installation\n"
+        "exit 91\n"
+    ).encode()
+    fwd.write_bytes(old)
+    fwd.chmod(0o755)
+
+    proc = subprocess.run(
+        [
+            "/bin/sh", str(install.bundle / "install.sh"),
+            "--repair-runtime", "--plugin-data", str(install.data),
+            "--yes", "--no-model",
+        ],
+        capture_output=True, text=True, timeout=600, env=env,
+    )
+
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert fwd.read_bytes() == old
+
+
+@pytestmark_darwin
 def test_unusable_manual_environment_is_not_modified(tmp_path, install):
     """An interpreter the user manages is never written to.
 

@@ -1480,6 +1480,10 @@ def test_healthy_setup_reports_healthy_and_exits_zero(isolated_env, monkeypatch,
     manifest["mcpServers"] = {"privacy-hud": {
         "command": "python3", "args": ["./mcp/server.py"], "cwd": "."}}
     manifest_path.write_text(json.dumps(manifest))
+    # `isolated_env` narrows PATH to a synthetic directory; the declared
+    # `python3` command must still resolve there for the server to start.
+    (tmp_path / "commands" / "python3").symlink_to(
+        Path(sys.executable).resolve())
     (repo / "mcp").mkdir(parents=True, exist_ok=True)
     (repo / "mcp" / "server.py").write_text(
         _fake_mcp_server_body(list(doctor.MCP_TOOLS)), encoding="utf-8")
