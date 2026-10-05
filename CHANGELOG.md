@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.9
+
+- Extract shared policy and session services below the daemon and user-facing adapters, and move session-query and policy-update clients into the runtime client layer.
+- Import plugin-data resolution directly from runtime support and enforce runtime dependency boundaries with AST-based tests, including function-local imports.
+- Mark historical exposure over-reporting and accounting-0/1-only publication designs as superseded. Preserve public behavior, user-facing copy, MCP contracts, policy RPC results, accounting, and ledger history.
+
 ## 0.10.8
 
 - Refresh the configured codex-privacy-hud Git marketplace before installing the plugin, so rerunning the README installer can upgrade an existing installation.
