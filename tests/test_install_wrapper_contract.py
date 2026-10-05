@@ -7,13 +7,13 @@ from __future__ import annotations
 
 import json
 import shlex
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 import pytest
 
+from forwarder_helpers import bounded_run
 from privacy_hud import codex, runtime_contract
 from runtime_helpers import make_bundle
 
@@ -29,12 +29,11 @@ def _executable(path: Path, body: str) -> None:
 
 
 def _run(env: dict[str, str], cwd: Path, *argv: str):
-    return subprocess.run(
-        argv,
+    return bounded_run(
+        cwd,
+        list(argv),
+        env,
         cwd=cwd,
-        env=env,
-        capture_output=True,
-        text=True,
         timeout=120,
     )
 
@@ -127,6 +126,8 @@ def test_complete_install_dispatches_to_selected_bundle():
             '  --version) echo "codex-cli 0.154.0" ;;\n'
             '  "plugin marketplace add inin-zou/codex-privacy-hud") '
             "exit 0 ;;\n"
+            '  "plugin marketplace upgrade codex-privacy-hud") '
+            "exit 0 ;;\n"
             '  "plugin add codex-privacy-hud@codex-privacy-hud")\n'
             '    mkdir -p "$(dirname "$TEST_INSTALLED")"\n'
             '    cp -R "$TEST_SOURCE" "$TEST_INSTALLED"\n'
@@ -150,8 +151,11 @@ def test_complete_install_dispatches_to_selected_bundle():
             assert source.resolve() != installed.resolve()
 
             calls = Path(env["TEST_CODEX_LOG"]).read_text().splitlines()
-            assert "plugin marketplace add inin-zou/codex-privacy-hud" in calls
-            assert "plugin add codex-privacy-hud@codex-privacy-hud" in calls
+            assert [call for call in calls if call.startswith("plugin ")] == [
+                "plugin marketplace add inin-zou/codex-privacy-hud",
+                "plugin marketplace upgrade codex-privacy-hud",
+                "plugin add codex-privacy-hud@codex-privacy-hud",
+            ]
             assert Path(env["TEST_PIP_LOG"]).read_text()
 
             receipt = json.loads(

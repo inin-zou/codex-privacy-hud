@@ -16,7 +16,6 @@ second URL.
 """
 import hashlib
 import json
-import subprocess
 import sys
 import tarfile
 from pathlib import Path
@@ -521,9 +520,7 @@ def test_uninstall_without_usable_python_preserves_targets_then_retries(
     if purge:
         command.append("--purge")
 
-    result = subprocess.run(
-        command, cwd=tmp_path, env=blocked_env,
-        capture_output=True, text=True, timeout=30)
+    result = run(blocked_env, *command[2:])
     assert result.returncode == 1
     assert "Uninstall is incomplete:" in result.stdout
     assert manifest.read_bytes() == before
@@ -531,9 +528,7 @@ def test_uninstall_without_usable_python_preserves_targets_then_retries(
     assert data_file.read_bytes() == b"data"
     assert model_file.read_bytes() == b"model"
 
-    result = subprocess.run(
-        command, cwd=tmp_path, env=env,
-        capture_output=True, text=True, timeout=30)
+    result = run(env, *command[2:])
     assert result.returncode == 0, result.stdout + result.stderr
     assert not share.exists()
     if purge:
