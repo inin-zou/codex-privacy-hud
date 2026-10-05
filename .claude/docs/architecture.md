@@ -41,7 +41,29 @@ flowchart TD
     H --> T
 ```
 
-Everything inside `plugin` is local. The only sockets that exist are a unix domain socket and a loopback HTTP listener.
+All runtime processing remains local. Hook and policy/session RPCs use the Unix-domain socket; the browser UI listens on `127.0.0.1`. A client sends RPCs to the daemon process without importing the daemon module.
+
+The diagram above shows runtime data flow; the table below shows module dependencies.
+
+The current module boundaries below describe 0.10.9. “Depends on” means a Python runtime import or call; socket requests and snapshot reads are identified separately.
+
+| Layer | Modules and dependencies |
+|---|---|
+| Composition and launch | `scripts/runtime.py` selects and verifies the runtime, then launches daemon or surface adapters. Its imports of those adapters are intentional. Other scripts are maintenance/composition entry points. |
+| Hook ingress | `hooks/handler.py` is the standalone stdlib client. It sends hook requests over the Unix socket; it does not import the package. |
+| Client transport | `runtime_client.py` owns verified connections, active-session queries and policy-update requests. It depends on runtime contracts, Codex path facts and shared policy validation, never on the daemon implementation or a surface. |
+| Daemon coordinator | `daemon.py` owns socket service and lifecycle, calls `dispatch.py`, and saves policy through `policy_services.py` under the state lock. It imports no surface. |
+| Shared policy services | `policy_services.py` owns rule validation, policy writes through `Ledger.add_policy`, and conditional-enforcement notes. Client and daemon both validate. Engine precedence remains the enforcement boundary. |
+| Shared session services | `session_services.py` owns session selection, audit reads and result types, plus the existing HUD/settings controls. It reads ledger projections and uses `runtime_client.py` for live-session queries. It imports no surface or daemon implementation. |
+| Surfaces | `mcp/server.py`, `local_ui_server.py`, `runtime_commands.py`, `ambient.py` and the compatibility API `mcp_tools.py` depend on shared services and lower-level support. They do not import one another. `mcp_tools.py` re-exports its public service API and retains the internal `allow_once` primitive; this does not expose an MCP allowance tool. |
+| Detection and decisions | `dispatch.py` coordinates `engine.py`, detector profiles, origin and guard logic, prompt holds and hook evidence. This extraction does not change hook decisions or policy precedence. |
+| Accounting and persistence | `accounting.py`, `identity.py`, `ledger.py`, `ledger_schema.py` and `budget.py` retain their existing responsibilities. The daemon remains the ledger writer; surface ledger connections remain read-only. |
+| Presentation and HUD | `render.py` renders typed readings. `dispatch.py` publishes committed readings through `hud_snapshot.py`; ambient and patched Codex read snapshots. Display-summary reuse from 0.10.4 remains unchanged. |
+| Runtime support | `runtime.plugin_data_dir()` returns `Path | None`; `runtime.resolve_data_dir()` returns the separate `(directory, notes, candidates)` result. Ambient and MCP import the former directly. `codex.socket_path()` supplies the socket pathname to daemon, doctor and clients. |
+
+`tests/test_runtime_layers.py` parses `src/`, `mcp/` and `scripts/`, including function-local imports. It rejects daemon/core-to-surface, core-to-daemon, surface-to-daemon and surface-to-surface runtime imports. All package modules outside the five listed surfaces and daemon are lower-level support for this contract. Scripts are composition/maintenance entry points. Imports in recognized `TYPE_CHECKING`-only branches are allowed; runtime branches remain checked.
+
+The browser retains `local_ui_server.resolve_data_dir` as a compatibility alias of `runtime.plugin_data_dir`; it is not a shared import location. Shared audit reads retain the existing ledger read-transaction and accounting-version helpers. This change does not redesign ledger internals.
 
 ---
 
@@ -170,7 +192,9 @@ The legacy `detected` and `retention` classifications remain representable and r
 
 At `SessionEnd`, dispatch ends the ledger session, discards its in-memory identity state, retires its HUD snapshot and returns a text receipt in hook `systemMessage`. The plugin does not save a Markdown receipt file. Returning the receipt does not confirm that the host displayed it, and transcript retention remains outside this ledger's account.
 
-### 3.6 Known imprecision
+### 3.6 Known imprecision — SUPERSEDED exposure-accounting design
+
+The following table records the original rationale, not the current version-2 accounting contract. Its proposals to infer exposure from observed content and deliberately over-report discarded or truncated tool results are superseded. They are retained to explain why the accounting model changed.
 
 | Case | Effect | Mitigation |
 |---|---|---|
@@ -179,7 +203,13 @@ At `SessionEnd`, dispatch ends the ledger session, discards its in-memory identi
 | Tool result discarded by Codex without entering context | Over-counting | Accept — conservative direction is the correct one |
 | Hosted tools (WebSearch) | Not covered | Documented in §11 and in the UI |
 
-Where we are imprecise, we are deliberately imprecise **toward over-reporting exposure**. An audit that under-reports is worse than useless.
+> Historical rationale — SUPERSEDED: Where we are imprecise, we are deliberately imprecise **toward over-reporting exposure**. An audit that under-reports is worse than useless.
+
+Current version-2 accounting does not turn a detector hit, an observed tool result or permission to proceed into confirmed disclosure. `hook_evidence.CurrentHookAdapter.normalize` records hook observation without crossing or host-enforcement receipts. `hook_evidence.classify_evidence` requires `CROSSING_CONFIRMED` at a non-B0 boundary for an `exposed` event. An issued denial can produce a `prevented` event, but that classification does not establish that the host enforced it; issued rewrites and confirmed application also remain distinct.
+
+`accounting.resolve_outcomes` retains unresolved action outcomes. `Ledger._summary_v2` withholds the percentage when accounting is unavailable, actions or identities are unresolved, or recorded coverage is incomplete. Zero confirmed points with unresolved evidence does not establish zero disclosure. Current hooks do not confirm model-context admission, transmission or host application of interventions, so neither truncation nor a discarded result justifies inventing a crossing or a non-crossing receipt.
+
+Existing and late-attached sessions retain legacy accounting, with explicitly labelled historical permitted-crossing scores and unchanged stored history. Hosted-tool and detection limits remain; this correction does not expand observation coverage.
 
 ---
 
@@ -534,7 +564,7 @@ Writes go through the compatible daemon, which holds an exclusive lease on `runt
 
 Readers open existing ledgers read-only, without initialization, migration, or activation. Browser and MCP policy actions use the matching daemon's policy RPC. The daemon remains the sole production ledger writer.
 
-The CLI audit and browser `/api/exposures` use `mcp_tools.read_audit` to read a selected session's summary, rows, and coverage in one SQLite read transaction. The browser also requests the All events count with `include_all_events_count=True`, keeping that count in the same snapshot. The CLI leaves the count unrequested, so `all_events_count` is `None` and no additional All events projection is read. When requested on the All events tab, the count reuses the selected rows. Session resolution happens before that transaction; separate requests can observe different committed states. The browser's default session resolver uses `UIServer.data_dir`, the plugin-data root, to query daemon activity, including when the ledger is stored under `ledger/active.db`. Explicit session IDs and the existing historical fallback remain unchanged.
+The CLI audit and browser `/api/exposures` use `session_services.read_audit` (also re-exported as `mcp_tools.read_audit`) to read a selected session's summary, rows, and coverage in one SQLite read transaction. The browser also requests the All events count with `include_all_events_count=True`, keeping that count in the same snapshot. The CLI leaves the count unrequested, so `all_events_count` is `None` and no additional All events projection is read. When requested on the All events tab, the count reuses the selected rows. Session resolution happens before that transaction; separate requests can observe different committed states. The browser's default session resolver uses `UIServer.data_dir`, the plugin-data root, to query daemon activity, including when the ledger is stored under `ledger/active.db`. Explicit session IDs and the existing historical fallback remain unchanged.
 
 `scripts/check-issue66-runtime.py` rehearses the whole transition on a private copy of a real ledger, including a crash at every durable stage and the actual historical initializer against the fence.
 
@@ -665,7 +695,7 @@ merely co-occurs with a credential — a path on the same command line, which
 is what one click of the audit UI's "Save mask rule for detected <type>" on a path
 exposure writes — skipped the block for the whole call. Those selectors are
 innocuous, so no refusal keyed on a selector reaches that case.
-`mcp_tools.apply_policy` still refuses a `mask` rule whose selector *is* a
+`policy_services.apply_policy` (also re-exported as `mcp_tools.apply_policy`) still refuses a `mask` rule whose selector *is* a
 hard-blocked type, keyed off the same `HARD_BLOCKED_DATA_TYPES` so the two
 cannot drift — now because such a rule would decide nothing while reporting
 success, with no path to remove it (known limit 13), and as defence in depth
@@ -678,14 +708,20 @@ checks the property as behaviour, with a co-occurring finding in its payload.
 **UI delivery.** Codex Desktop does not currently render MCP Apps inline iframe resources ([openai/codex#21019](https://github.com/openai/codex/issues/21019)), and `tui.status_line` accepts only built-in item identifiers. So:
 
 - **L2/L3** — the `$privacy` skill uses the bundled runtime launcher to start a separate `local_ui_server` process serving static HTML + vanilla JS on `127.0.0.1:<ephemeral>`. The hook daemon serves the Unix-domain socket, not HTTP. The skill prints the browser URL and an ASCII audit fallback.
-  - **Which session either surface shows** is resolved by `mcp_tools.resolve_audit_session`: an explicit `$privacy <id>` wins, otherwise the daemon's `active_sessions` op (§2) names the session that fired a hook most recently, and only if the daemon cannot be asked does it fall back to the ledger's most-recently-*started* session — labelled as that, never as the caller's own. The skill reports concurrent active sessions; the browser labels the selected session by its full ID. `local_ui_server`'s default (`/api/session` with no `session_id`) goes through the same function but separately timed resolutions can select different sessions; the skill therefore pins its selected ID in the browser URL, and so does `ambient` — on its own much slower clock (`ambient.RESOLVE_INTERVAL`, ~30 s, against a 2 s redraw), because the identity question is the one thing the ledger cannot answer while the ambient *reading* stays a snapshot-file poll. All three surfaces therefore name one session at a time. See README known limit 8, including why the ambient line carries no marker for session ambiguity: `⚠unverified` means the record has a hole, not "I am unsure whose record this is", and one glyph cannot carry both.
+  - **Which session either surface shows** is resolved by `session_services.resolve_audit_session` (also re-exported as `mcp_tools.resolve_audit_session`): an explicit `$privacy <id>` wins, otherwise the daemon's `active_sessions` op (§2) names the session that fired a hook most recently, and if the daemon cannot be asked or reports no live sessions it falls back to the ledger's most-recently-*started* session — labelled as that, never as the caller's own. The skill reports concurrent active sessions; the browser labels the selected session by its full ID. `local_ui_server`'s default (`/api/session` with no `session_id`) goes through the same function but separately timed resolutions can select different sessions; the skill therefore pins its selected ID in the browser URL, and so does `ambient` — on its own much slower clock (`ambient.RESOLVE_INTERVAL`, ~30 s, against a 2 s redraw), because the identity question is the one thing the ledger cannot answer while the ambient *reading* stays a snapshot-file poll. All three surfaces therefore name one session at a time. See README known limit 8, including why the ambient line carries no marker for session ambiguity: `⚠unverified` means the record has a hole, not "I am unsure whose record this is", and one glyph cannot carry both.
   - **What the skill's terminal audit header claims** follows from its resolution: `render.audit(..., resolved=)` writes the subtitle from `ResolvedSession.basis` (`Current session` only for a single daemon-named live session; `Session <id>`, `Most recently active session`, `Most recently started session`, `No session on record` otherwise). The browser and its ASCII view pass `session_id` and show `Session <full ID>`. Without either an ID or a resolution, the renderer shows `Session ID unknown`.
 - **L1** — `privacy_hud.ambient` (entry point `privacy_hud.ambient:main`, console script `privacy-hud-ambient`): a standalone process the user runs in a second terminal pane, which reads the contract A snapshot `$PLUGIN_DATA/hud/<session_id>.json` (written by the daemon) and redraws `render.hud_line()` in place. The fallback when no patched build matches the installed Codex version; not a Codex status item itself.
 - **Alerts** — hook `systemMessage`, which is native and always available.
 
 The MCP tools return structured JSON regardless, so when Codex renders MCP UI the same data powers it with no rework.
 
-**Native status-line item.** The patched Codex TUI and ambient pane read contract A from `$PLUGIN_DATA/hud/<session_id>.json`. In 0.7.8 `HudPublisher.publish(session_id, summary=..., unverified=...)` writes snapshot v2 with an accounting discriminator and nullable quantities. Production publishes only unrecorded accounting 0 or legacy accounting 1. Both updated readers accept v1 as legacy; old patched readers reject v2. `_daemon.json` remains independently versioned at 1. Snapshot writes are atomic, age greater than 30 seconds is stale, and `SessionEnd` retires the snapshot. `hud_line(reading, width)` uses complete bar-free candidates such as `Privacy legacy 28% · 2 prevented rows`; the Rust item returns the full line. Contract B changes hidden/timestamp on valid readings and does nothing for missing or malformed snapshots. `$privacy hud` invokes Python helpers through the skill; it is not an exposed MCP tool. Contract C is the install manifest reversed by uninstall. The user's official binary remains unchanged; version matching by the forwarder does not establish snapshot compatibility. See the patched-status-line spec and `patches/README.md` for rollout and test limits.
+**Native status-line item.** The patched Codex TUI and ambient pane read contract A from `$PLUGIN_DATA/hud/<session_id>.json`.
+
+**SUPERSEDED — 0.7.8 production restriction.** The original rollout introduced snapshot v2 with an accounting discriminator and nullable quantities while production published only unrecorded accounting 0 or legacy accounting 1. That restriction described the staged accounting rollout; it is not the current production contract.
+
+**Current publication.** `hud_snapshot.HudPublisher.publish` writes snapshot version 2 for accounting 0, 1 and 2. Accounting 0 has null quantities and `unverified=true`. Accounting 1 carries the legacy percentage and legacy prevented-row count. Accounting 2 carries the summary's nullable percentage, confirmed points, denials issued and unresolved actions; its legacy prevented-row field is null. `dispatch._publish_hud` supplies the committed summary and coverage verdict. For version-2 summaries, incomplete coverage determines `unverified`; accounting-key loss withholds the percentage without relabelling coverage. `Ledger._summary_v2` also withholds the percentage for unresolved actions or identities. A genuine new SessionStart can activate version-2 accounting; existing sessions and late attachments retain legacy accounting.
+
+Both updated readers accept v1 as legacy; old patched readers reject v2. `_daemon.json` remains independently versioned at 1. Snapshot writes are atomic, age greater than 30 seconds is stale, and `SessionEnd` retires the snapshot. `hud_line(reading, width)` uses complete bar-free candidates such as `Privacy legacy 28% · 2 prevented rows`; the Rust item returns the full line. Contract B changes hidden/timestamp on valid readings and does nothing for missing or malformed snapshots. `$privacy hud` invokes Python helpers through the skill; it is not an exposed MCP tool. Contract C is the install manifest reversed by uninstall. The user's official binary remains unchanged; version matching by the forwarder does not establish snapshot compatibility. See the patched-status-line spec and `patches/README.md` for rollout and test limits.
 
 ---
 
