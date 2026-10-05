@@ -34,6 +34,14 @@ python3 "$PRIVACY_HUD_BUNDLE/scripts/runtime.py" \
 
 Privacy HUD 0.7.1 does not alter the schema of a valid prepared generation-5401 ledger during initialization: `events` already contains `source_kind`. It can nevertheless open the historical ledger pathname without participating in the selected runtime's handshake or writer lease. On a prepared ledger, historical session and coverage writes can succeed even though legacy event recording fails against the new `events` layout. On a generation-0 ledger, historical event writes remain possible, and initialization adds `source_kind` only when that column is absent. Explicit repair therefore quiesces legacy users, preserves the ledger at `$PLUGIN_DATA/ledger/active.db`, and replaces `$PLUGIN_DATA/ledger.db` with a directory fence that prevents subsequent historical-path opens. The fence does not revoke already-open connections or protect against same-user code deliberately opening the active pathname.
 
+Privacy HUD 0.10.7 updates the Codex forwarder to identify itself independently of `HOME` and skip other Privacy HUD forwarders. Updating the plugin or running `--repair-runtime` does not replace an existing forwarder. Re-run the normal installer from version 0.10.7 or newer with `HOME` set to the home that owns the installation. Normal installation refreshes an existing marked forwarder even when no matching patched build is available. If doctor reports forwarders from several homes, update each installation separately. Run the installer through `sh`; do not use an old forwarder to perform the update.
+
+```sh
+# Point this at the downloaded or checked-out 0.10.7-or-newer bundle.
+PRIVACY_HUD_BUNDLE='/absolute/path/to/codex-privacy-hud'
+sh "$PRIVACY_HUD_BUNDLE/install.sh" --yes --no-model
+```
+
 ## Prerequisites
 
 Tier 3 detection (person, address, date, account number — the categories no regex can shape-match) runs the `openai/privacy-filter` model locally. It is not optional equipment: without it the engine still runs, but only tiers 0–2, which means credentials and paths are still caught and **names and addresses are not**.

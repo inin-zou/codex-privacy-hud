@@ -283,28 +283,135 @@ curl -fsSL https://raw.githubusercontent.com/inin-zou/codex-privacy-hud/main/ins
 
 Installation downloads packages and the patched Codex build; model weights are downloaded only through the explicit model-download step. Runtime, setup probes and doctor checks enforce offline mode regardless of inherited environment values and never download missing weights.
 
-No matching release for the user's Codex version: step 6 prints which
-versions exist and continues; the forwarding script then falls through to
-the official binary and the user has the fallback pane.
+If no matching patched release is available, installation skips the native status-line configuration. A fresh installation does not create a Codex forwarder in this branch. An existing marked forwarder is refreshed and uses an installed matching patched build if present; otherwise it falls through to the official binary. The separate ambient pane remains available.
 
 **Forwarding script** `~/.local/bin/codex`:
 
 ```sh
 #!/bin/sh
 # codex-privacy-hud forwarder — remove with: install.sh --uninstall
-self="$HOME/.local/bin/codex"
-official=""
-saved_ifs="$IFS"; IFS=:
-for d in $PATH; do                            # every codex on PATH, in order
-  [ -n "$d" ] && [ -x "$d/codex" ] && [ "$d/codex" != "$self" ] && { official="$d/codex"; break; }
-done
-IFS="$saved_ifs"
-[ -x "$official" ] || { echo "codex-privacy-hud: official codex not found" >&2; exit 127; }
-ver="$("$official" --version | awk '{print $2}')"
-patched="$HOME/.local/share/codex-privacy-hud/$ver/codex"
-[ -x "$patched" ] && exec "$patched" "$@"
+# codex-privacy-hud forwarder safety: 1
+if [ "${PRIVACY_HUD_FORWARDER_PROBE+x}" = x ]; then
+  printf '%s\n' 'codex-privacy-hud: recursive forwarder entry refused' >&2
+  exit 126
+fi
+real_path() (
+  p=$1
+  case "$p" in
+    */*) ;;
+    *) p=$(command -v "$p" 2>/dev/null) || return 1 ;;
+  esac
+  case "$p" in
+    /*) ;;
+    *) p="$(pwd -P)/$p" ;;
+  esac
+  n=0
+  while :; do
+    parent=${p%/*}
+    name=${p##*/}
+    [ -n "$parent" ] || parent=/
+    parent=$(CDPATH= cd -P "$parent" 2>/dev/null && pwd -P) ||
+      return 1
+    p="$parent/$name"
+    if [ ! -L "$p" ]; then
+      [ -f "$p" ] || return 1
+      printf '%s\n' "$p"
+      return 0
+    fi
+    [ "$n" -lt 40 ] || return 1
+    target=$(readlink "$p") || return 1
+    case "$target" in
+      /*) p=$target ;;
+      *) p="$parent/$target" ;;
+    esac
+    n=$((n + 1))
+  done
+)
+
+is_forwarder() (
+  [ -f "$1" ] && [ -r "$1" ] || return 1
+  LC_ALL=C dd if="$1" bs=512 count=1 2>/dev/null |
+    LC_ALL=C head -n 2 |
+    LC_ALL=C grep -q '^# codex-privacy-hud forwarder'
+)
+
+find_codex() (
+  mode=$1
+  skip=${2:-}
+  if [ -n "$skip" ]; then
+    skip=$(real_path "$skip" 2>/dev/null) || skip=
+  fi
+  remaining=${PATH-}
+  while :; do
+    case "$remaining" in
+      *:*)
+        directory=${remaining%%:*}
+        remaining=${remaining#*:}
+        last=0
+        ;;
+      *)
+        directory=$remaining
+        last=1
+        ;;
+    esac
+    [ -n "$directory" ] || directory=.
+    candidate="$directory/codex"
+    if [ -f "$candidate" ] && [ -x "$candidate" ]; then
+      resolved=$(real_path "$candidate" 2>/dev/null) || resolved=
+      if [ -n "$resolved" ]; then
+        if [ "$mode" = any ]; then
+          printf '%s\n' "$resolved"
+          return 0
+        fi
+        if [ "$resolved" != "$skip" ] &&
+           [ -r "$resolved" ] &&
+           ! is_forwarder "$resolved"; then
+          printf '%s\n' "$resolved"
+          return 0
+        fi
+      fi
+    fi
+    [ "$last" -eq 0 ] || break
+  done
+  return 1
+)
+self=$(real_path "$0") || {
+  printf '%s\n' 'codex-privacy-hud: cannot resolve forwarder path' >&2
+  exit 126
+}
+official=$(find_codex official "$self") || {
+  printf '%s\n' 'codex-privacy-hud: official codex not found' >&2
+  exit 127
+}
+
+version_output=$(
+  PRIVACY_HUD_FORWARDER_PROBE=1
+  export PRIVACY_HUD_FORWARDER_PROBE
+  "$official" --version
+) || {
+  printf '%s\n' 'codex-privacy-hud: official codex version probe failed' >&2
+  exit 126
+}
+ver=$(printf '%s\n' "$version_output" | awk '{print $2}')
+printf '%s\n' "$ver" |
+  grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' ||
+  exec "$official" "$@"
+
+self_directory=${self%/*}
+installation_prefix=${self_directory%/*}
+patched="$installation_prefix/share/codex-privacy-hud/$ver/codex"
+if [ -f "$patched" ] && [ -r "$patched" ] && [ -x "$patched" ]; then
+  patched_real=$(real_path "$patched" 2>/dev/null) || patched_real=
+  if [ -n "$patched_real" ] &&
+     [ "$patched_real" != "$self" ] &&
+     ! is_forwarder "$patched_real"; then
+    exec "$patched_real" "$@"
+  fi
+fi
 exec "$official" "$@"
 ```
+
+The forwarder resolves its own location from `$0`, skips marked Privacy HUD forwarders, and guards the official version probe with `PRIVACY_HUD_FORWARDER_PROBE`. The guard is not inherited by the final Codex process, so normal nested Codex invocations remain possible. Patched-build lookup is relative to the resolved forwarder installation, not the caller’s `HOME`.
 
 Version mismatch after `brew upgrade codex` → official binary runs
 unchanged, the status item disappears, nothing breaks.

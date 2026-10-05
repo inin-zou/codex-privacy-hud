@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pytest
 
+from forwarder_helpers import bounded_run, executable, forwarder_source
+
 # `install.sh` is macOS-only by construction, and so is this file: it calls
 # `sed -i ''` (the BSD spelling, which GNU sed reads as an empty script) and
 # `xattr`, and its `target()` refuses any uname but Darwin. On Linux these
@@ -64,15 +66,35 @@ def home(tmp_path):
     # 3.9). Uninstall has to run the bundle's stop surface to confirm the
     # runtime stopped, and refuses to continue when it cannot (#70), so a
     # host with no usable interpreter is a different test.
+    hostbin = tmp_path / "hostbin"
+    hostbin.mkdir()
+    (hostbin / "python3.12").symlink_to(Path(sys.executable).resolve())
     env = {"HOME": str(home),
-           "PATH": f"{bin_}:{Path(sys.executable).parent}:/usr/bin:/bin",
+           "PATH": f"{bin_}:{hostbin}:/usr/bin:/bin",
+           "TMPDIR": str(tmp_path),
            "SHELL": "/bin/zsh",
            "PRIVACY_HUD_FAKE": "1", "PRIVACY_HUD_TARGET": TRIPLE}
     return home, env, rel
 
 
-def run(env, *args):
-    return subprocess.run(["sh", str(INSTALL), *args], capture_output=True, text=True, env=env)
+def run(env, *args, forwarders=()):
+    root = Path(env["HOME"]).parent
+    own = Path(env["HOME"]) / ".local/bin/codex"
+    managed = list(forwarders)
+    if own.is_file():
+        header = own.read_bytes()[:512].splitlines()[:2]
+        if any(
+            line.startswith(b"# codex-privacy-hud forwarder")
+            for line in header
+        ):
+            managed.append(own)
+    return bounded_run(
+        root,
+        ["/bin/sh", str(INSTALL), *args],
+        env,
+        forwarders=tuple(managed),
+        timeout=30,
+    )
 
 
 def test_install_then_uninstall_restores_the_tree(home):
@@ -108,7 +130,12 @@ def test_existing_tui_table_gets_only_the_key(home):
 def test_forwarder_runs_patched_when_versions_match(home):
     home, env, rel = home
     run(env, "--yes", "--release-base-url", rel.as_uri())
-    out = subprocess.run([str(home / ".local/bin/codex"), "hello"], capture_output=True, text=True, env=env)
+    fwd = home / ".local/bin/codex"
+    out = bounded_run(
+        home.parent, [str(fwd), "hello"], env,
+        forwarders=(fwd,),
+    )
+    assert out.returncode == 0, out.stderr
     assert out.stdout.strip() == "patched hello"
 
 
@@ -118,7 +145,12 @@ def test_forwarder_falls_through_when_no_build_matches(home):
     # simulate `brew upgrade codex`: the official binary now reports a newer version
     official = Path(env["PATH"].split(":")[0]) / "codex"
     official.write_text('#!/bin/sh\n[ "$1" = --version ] && echo "codex-cli 0.155.0" && exit 0\necho official "$@"\n')
-    out = subprocess.run([str(home / ".local/bin/codex"), "hello"], capture_output=True, text=True, env=env)
+    fwd = home / ".local/bin/codex"
+    out = bounded_run(
+        home.parent, [str(fwd), "hello"], env,
+        forwarders=(fwd,),
+    )
+    assert out.returncode == 0, out.stderr
     assert out.stdout.strip() == "official hello"
 
 
@@ -256,6 +288,67 @@ def test_the_created_status_line_carries_codex_own_defaults(home):
 
 # -- partial installs, PATH, and flag validation -------------------------
 
+@pytest.mark.parametrize(
+    ("command", "event", "expected"),
+    [
+        ("chmod", "fail", 1),
+        ("chmod", "HUP", 129),
+        ("chmod", "INT", 130),
+        ("chmod", "TERM", 143),
+        ("mv", "HUP", 129),
+        ("mv", "INT", 130),
+        ("mv", "TERM", 143),
+    ],
+)
+def test_forwarder_temp_cleanup_on_failure_or_signal(
+    home, command, event, expected
+):
+    home, env, rel = home
+    before = _tree(home)
+    shim_bin = home.parent / "interrupt-bin"
+    action = (
+        "exit 1"
+        if event == "fail"
+        else f'kill -s {event} "$PPID"\n    exit 0'
+    )
+    move = '/bin/mv "$@" || exit $?' if command == "mv" else ":"
+    executable(
+        shim_bin / command,
+        f"""#!/bin/sh
+case "${{2-}}" in
+  "$HOME/.local/bin/.codex-forwarder."*)
+    [ -f "$2" ] || exit 98
+    printf '%s\\n' 'TEST forwarder temp reached' >&2
+    {move}
+    {action}
+    ;;
+esac
+exec /bin/{command} "$@"
+""",
+    )
+    r = run(
+        {**env, "PATH": f"{shim_bin}:{env['PATH']}"},
+        "--yes", "--release-base-url", rel.as_uri(),
+    )
+    assert "TEST forwarder temp reached" in r.stderr, r.stderr
+    assert r.returncode == expected, (r.stdout, r.stderr)
+    bin_ = home / ".local/bin"
+    assert bin_.is_dir()
+    assert not list(bin_.glob(".codex-forwarder.*"))
+    fwd = bin_ / "codex"
+    if command == "mv":
+        # The signal lands after the real mv, before the installer clears
+        # FORWARDER_TMP. Cleanup must preserve the installed forwarder.
+        assert fwd.read_text() == forwarder_source()
+    else:
+        assert not fwd.exists()
+
+    r = run(env, "--uninstall")
+    assert r.returncode == 0, r.stderr
+    assert not bin_.exists()
+    assert _tree(home) == before
+
+
 def test_an_aborted_install_still_leaves_an_actionable_manifest(home):
     """The manifest is contract C, and `--uninstall` refuses to infer. If it
     were written only at the end, an install that died after creating the
@@ -286,8 +379,27 @@ def test_it_says_so_when_the_official_binary_still_wins_on_path(home):
     env = {**env, "PATH": f"{env['PATH']}:{local_bin}"}
     r = run(env, "--yes", "--release-base-url", rel.as_uri())
     assert r.returncode == 0, r.stderr
-    assert "PATH" in r.stdout
-    assert 'export PATH="$HOME/.local/bin:$PATH"' in r.stdout
+    winner = (Path(env["PATH"].split(":")[0]) / "codex").resolve()
+    assert (
+        f"!! PATH: '{winner}' is selected before '{local_bin / 'codex'}'."
+        in r.stdout.splitlines()
+    )
+    assert (
+        "!! This installation's forwarder is not the command selected by PATH."
+        in r.stdout.splitlines()
+    )
+    assert (
+        f"!! Add this line to {home / '.zshrc'} after other PATH assignments, "
+        "then open a new shell:"
+    ) in r.stdout.splitlines()
+    quoted_bin = "".join(
+        "\\" + char if char in '"\\$`' else char
+        for char in str(local_bin)
+    )
+    assert r.stdout.splitlines().count(
+        f'export PATH="{quoted_bin}:$PATH"'
+    ) == 1
+    assert 'export PATH="$HOME/.local/bin:$PATH"' not in r.stdout
     assert "# codex-privacy-hud" not in (home / ".zshrc").read_text()
 
 
@@ -430,3 +542,61 @@ def test_uninstall_without_usable_python_preserves_targets_then_retries(
     else:
         assert data_file.read_bytes() == b"data"
         assert model_file.read_bytes() == b"model"
+
+
+def test_reinstall_refreshes_old_forwarder_without_download(home):
+    home_path, env, rel = home
+    first = run(env, "--yes", "--release-base-url", rel.as_uri())
+    assert first.returncode == 0, first.stderr
+
+    fwd = home_path / ".local/bin/codex"
+    old = (
+        "#!/bin/sh\n"
+        "# codex-privacy-hud forwarder — remove with: install.sh --uninstall\n"
+        "exit 91\n"
+    )
+    fwd.write_text(old, encoding="utf-8")
+    for path in (rel / "latest").iterdir():
+        path.unlink()
+
+    second = run(env, "--yes", "--release-base-url", rel.as_uri())
+    assert second.returncode == 0, second.stderr
+    assert fwd.read_text(encoding="utf-8") == forwarder_source()
+    manifest = json.loads(
+        (home_path / ".local/share/codex-privacy-hud/manifest.json")
+        .read_text()
+    )
+    assert str(fwd) in manifest["created"]
+
+
+def test_install_skips_foreign_forwarder_before_version_probe(home):
+    home_path, env, rel = home
+    foreign = executable(
+        home_path.parent / "other/.local/bin/codex",
+        "#!/bin/sh\n"
+        "# codex-privacy-hud forwarder synthetic old installation\n"
+        "exit 91\n",
+    )
+    changed = dict(env, PATH=f"{foreign.parent}:{env['PATH']}")
+    result = run(
+        changed, "--yes", "--release-base-url", rel.as_uri(),
+        forwarders=(foreign,),
+    )
+    assert result.returncode == 0, result.stderr
+    assert (home_path / ".local/bin/codex").exists()
+
+
+def test_uninstall_accepts_old_forwarder_marker(home):
+    home_path, env, rel = home
+    result = run(env, "--yes", "--release-base-url", rel.as_uri())
+    assert result.returncode == 0, result.stderr
+    fwd = home_path / ".local/bin/codex"
+    fwd.write_text(
+        "#!/bin/sh\n"
+        "# codex-privacy-hud forwarder — remove with: install.sh --uninstall\n"
+        "exit 91\n",
+        encoding="utf-8",
+    )
+    result = run(env, "--uninstall")
+    assert result.returncode == 0, result.stderr
+    assert not fwd.exists()
