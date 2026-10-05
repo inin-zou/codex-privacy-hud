@@ -13,7 +13,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/release-tag-decision.py"
-VERSION = "0.10.7"
+VERSION = "0.10.8"
 
 
 def git(root, *args):
@@ -96,7 +96,7 @@ def test_create_uses_pushed_commit_and_numeric_version_order(repo, decision):
     ]
     result = decision.decide(root, tags, pushed)
     assert result["action"] == "create"
-    assert result["tag"] == "v0.10.7"
+    assert result["tag"] == "v0.10.8"
     assert result["commit"] == pushed
     assert result["reason"]
 
@@ -106,7 +106,7 @@ def test_existing_tag_is_preserved(repo, decision, use_ancestor):
     root, first, pushed = repo
     tagged = first if use_ancestor else pushed
     result = decision.decide(
-        root, [{"name": "v0.10.7", "commit": tagged}], pushed
+        root, [{"name": "v0.10.8", "commit": tagged}], pushed
     )
     assert result["action"] == "already-released"
     assert result["commit"] == tagged
@@ -116,8 +116,8 @@ def test_existing_tag_is_preserved(repo, decision, use_ancestor):
 def test_existing_version_can_be_revisited_after_a_newer_release(repo, decision):
     root, first, pushed = repo
     result = decision.decide(root, [
-        {"name": "v0.10.7", "commit": first},
-        {"name": "v0.10.8", "commit": pushed},
+        {"name": "v0.10.8", "commit": first},
+        {"name": "v0.10.9", "commit": pushed},
     ], pushed)
     assert result["action"] == "already-released"
     assert result["commit"] == first
@@ -126,13 +126,13 @@ def test_existing_version_can_be_revisited_after_a_newer_release(repo, decision)
 def test_missing_older_version_is_refused(repo, decision):
     root, first, pushed = repo
     result = decision.decide(
-        root, [{"name": "v0.10.8", "commit": first}], pushed
+        root, [{"name": "v0.10.9", "commit": first}], pushed
     )
     assert result["action"] == "refuse"
     assert "newer" in result["reason"]
 
 
-@pytest.mark.parametrize("name", ["v0.010.7", "v0.10.7-rc1", "vbroken"])
+@pytest.mark.parametrize("name", ["v0.010.8", "v0.10.8-rc1", "vbroken"])
 def test_noncanonical_plugin_tag_is_refused(repo, decision, name):
     root, first, pushed = repo
     result = decision.decide(root, [{"name": name, "commit": first}], pushed)
@@ -141,7 +141,7 @@ def test_noncanonical_plugin_tag_is_refused(repo, decision, name):
 
 
 @pytest.mark.parametrize("version", [
-    "0.010.7", "v0.10.7", "0.10.7-rc1", "0.10", "０.10.7",
+    "0.010.8", "v0.10.8", "0.10.8-rc1", "0.10", "０.10.8",
 ])
 def test_noncanonical_declared_version_is_refused(repo, decision, version):
     root, _, pushed = repo
@@ -160,12 +160,12 @@ def test_each_disagreeing_declaration_is_refused(repo, decision, relative):
     root, _, pushed = repo
     path = root / relative
     path.write_text(
-        path.read_text(encoding="utf-8").replace(VERSION, "0.10.8"),
+        path.read_text(encoding="utf-8").replace(VERSION, "0.10.9"),
         encoding="utf-8",
     )
     # Disagreement must fail even when the matching tag already exists.
     result = decision.decide(
-        root, [{"name": "v0.10.7", "commit": pushed}], pushed
+        root, [{"name": "v0.10.8", "commit": pushed}], pushed
     )
     assert result["action"] == "refuse"
 
@@ -188,7 +188,7 @@ def test_descendant_tag_is_refused(repo, decision):
     root, first, second = repo
     git(root, "checkout", "--detach", first)
     result = decision.decide(
-        root, [{"name": "v0.10.7", "commit": second}], first
+        root, [{"name": "v0.10.8", "commit": second}], first
     )
     assert result["action"] == "refuse"
     assert "ancestor" in result["reason"]
@@ -201,7 +201,7 @@ def test_unrelated_tag_is_refused(repo, decision):
     unrelated = git(root, "rev-parse", "HEAD")
     git(root, "checkout", "--detach", pushed)
     result = decision.decide(
-        root, [{"name": "v0.10.7", "commit": unrelated}], pushed
+        root, [{"name": "v0.10.8", "commit": unrelated}], pushed
     )
     assert result["action"] == "refuse"
     assert "ancestor" in result["reason"]
@@ -225,8 +225,8 @@ def test_local_annotated_tags_are_peeled(repo, decision):
 def test_duplicate_tag_input_is_refused(repo, decision):
     root, first, pushed = repo
     tags = [
-        {"name": "v0.10.7", "commit": first},
-        {"name": "v0.10.7", "commit": pushed},
+        {"name": "v0.10.8", "commit": first},
+        {"name": "v0.10.8", "commit": pushed},
     ]
     assert decision.decide(root, tags, pushed)["action"] == "refuse"
 
@@ -236,7 +236,7 @@ def test_cli_json_and_exit_status(repo, tmp_path, refuse):
     root, first, pushed = repo
     tags_path = tmp_path / "tags.json"
     tags_path.write_text(json.dumps(
-        [{"name": "v0.10.8", "commit": first}] if refuse else []
+        [{"name": "v0.10.9", "commit": first}] if refuse else []
     ), encoding="utf-8")
     result = subprocess.run(
         [

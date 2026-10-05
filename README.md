@@ -115,6 +115,10 @@ When run through a pipe or without an adjacent plugin bundle, the installer down
 
 Version bumps merged to `main` automatically start tagging and publishing the matching plugin release. Until that release is published and its downloads are available, the one-command installer can fail before persistent installation writes. Retry after publication completes; a failed release workflow can extend this window.
 
+**Upgrading an existing installation:** rerun the one-command installer above. Starting with Privacy HUD 0.10.8, normal installation adds the marketplace if needed, refreshes only the configured `codex-privacy-hud` Git marketplace, and then installs the plugin. It uses the official Codex binary found during prerequisite checks, bypassing Privacy HUD forwarders for these commands. If marketplace setup or refresh fails, installation stops before plugin installation and prints the Codex error; earlier dependency-installation steps may already have changed the installation.
+
+If the installed bundle still does not match the installer's pinned release, run `codex plugin marketplace upgrade codex-privacy-hud`, then rerun the one-command installer. If `codex` selects an old Privacy HUD forwarder, use your official Codex binary's absolute path for the refresh command. If the mismatch persists, report the error without deleting plugin data. A marketplace configured from a local path must use the [local-checkout instructions](docs/installing-by-hand.md), not this Git-marketplace upgrade path. `--repair-runtime` repairs the explicitly selected bundle; it does not refresh the marketplace or install a newer plugin.
+
 If a terminal is available, the script asks whether to download the detection model. Without a terminal, it skips the model unless `--yes` is supplied. Later installation failures can leave a partial installation recorded by the uninstall manifest.
 
 This is what it does, in the order it prints:
@@ -124,7 +128,7 @@ This is what it does, in the order it prints:
 | 1 | Establishes a complete installer bundle, downloading and checking the pinned release when needed; checks Codex and Python prerequisites | temporary directory when downloaded |
 | 2 | Creates a private virtualenv and installs dependencies declared by the bundle, including `torch`, `transformers`, and MCP dependencies; application code runs from the selected plugin bundle | `~/.local/share/codex-privacy-hud/venv/` |
 | 3 | **Asks** before downloading the `openai/privacy-filter` weights (~2.8 GB, from Hugging Face, once). Answer `y` for full detection. Answer `n` and you still get credential and path detection, but **names and addresses go undetected** — `privacy-hud-doctor` will say so. | `~/.cache/huggingface/hub/` |
-| 4 | Installs the plugin into Codex (`codex plugin marketplace add` + `codex plugin add`) | Codex's plugin directory |
+| 4 | Adds the marketplace if needed, refreshes only `codex-privacy-hud` (`codex plugin marketplace upgrade codex-privacy-hud`), then installs the plugin using the official Codex binary | Codex's marketplace and plugin directories |
 | 5 | Validates the installed release, generates wrappers for that installed bundle, and records its runtime selection and Python interpreter | `~/.codex/plugins/data/codex-privacy-hud-…/runtime.json` |
 | 6 | Downloads the patched Codex build for **your exact version**, verifies its SHA-256, unpacks it, and links your official `codex-code-mode-host` beside it (the tarball carries only `codex`; Code Mode needs that sibling, and the official one of the same version is the right one) | `~/.local/share/codex-privacy-hud/<version>/` |
 | 7 | Writes a small forwarder named `codex` and, if needed, adds `~/.local/bin` to your shell `PATH` | `~/.local/bin/codex` |
@@ -158,11 +162,11 @@ clone:
 
 ```bash
 codex plugin marketplace add inin-zou/codex-privacy-hud
+codex plugin marketplace upgrade codex-privacy-hud
 codex plugin add codex-privacy-hud@codex-privacy-hud
 ```
 
-The first command clones this repository into Codex's marketplace store;
-the second copies it into the plugin cache,
+The first command configures this repository as a Git marketplace; if it is already configured, that alone does not refresh its snapshot. The second refreshes this marketplace's configured Git revision. The third copies the plugin into the cache,
 `~/.codex/plugins/cache/codex-privacy-hud/codex-privacy-hud/<version>/`.
 That gives Codex the `$privacy` skill, the hooks, and the MCP server, and
 it puts `install.sh` on your machine, but it does not run it: the daemon's
@@ -182,8 +186,9 @@ From here:
    and asks once for permission to run it outside the sandbox, since it
    writes to your home directory and downloads. Approve, and wait; the
    model download takes a few minutes. The reminder prints the same path,
-   so you can also run it in another terminal. It is the same script as
-   the one-liner above and is safe to run over an existing plugin install;
+   so you can also run it in another terminal. The cached script is pinned
+   to that plugin release. To upgrade an existing installation, use the
+   current one-liner above;
    `--yes` downloads the model without asking, `--no-model` skips it.
 3. Restart Codex so the patched build and the status item are picked up.
 

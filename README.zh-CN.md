@@ -114,6 +114,10 @@ curl -fsSL https://raw.githubusercontent.com/inin-zou/codex-privacy-hud/main/ins
 
 版本更新合并到 `main` 后，工作流会自动开始创建对应标签并发布插件。在该版本发布完成且下载文件可用之前，一键安装命令可能会在写入持久化安装文件之前失败。请在发布完成后重试；如果发布工作流失败，这段等待时间可能会延长。
 
+**升级已有安装：**重新运行上方的一键安装命令。从 Privacy HUD 0.10.8 开始，常规安装会在需要时添加插件市场，仅刷新已配置的 `codex-privacy-hud` Git 插件市场，然后安装插件。这些命令使用前置检查找到的官方 Codex 程序，绕过 Privacy HUD 转发脚本。如果插件市场配置或刷新失败，安装会在安装插件之前停止，并显示 Codex 的错误；此前的依赖安装步骤可能已经更改了安装内容。
+
+如果已安装的插件包仍与安装脚本固定的发布版本不符，请先运行 `codex plugin marketplace upgrade codex-privacy-hud`，再重新运行一键安装命令。如果 `codex` 指向旧版 Privacy HUD 转发脚本，请使用官方 Codex 程序的绝对路径执行刷新命令。如果版本仍不匹配，请报告错误，不要删除插件数据。从本地路径配置的插件市场应使用[本地检出目录的安装说明](docs/installing-by-hand.md)，而不是这里的 Git 插件市场升级流程。`--repair-runtime` 只修复明确选定的插件包所用的运行时，不会刷新插件市场，也不会安装更新版本的插件。
+
 如果有可用终端，脚本会询问是否下载检测模型。如果没有可用终端，除非指定 `--yes`，否则会跳过模型下载。后续安装步骤失败时，可能留下由卸载清单记录的部分安装内容。
 
 脚本按以下顺序执行并输出进度：
@@ -123,7 +127,7 @@ curl -fsSL https://raw.githubusercontent.com/inin-zou/codex-privacy-hud/main/ins
 | 1 | 确认完整安装插件包；必要时下载并校验脚本固定的发布版本，然后检查 Codex 和 Python 前置条件 | 需要下载时使用临时目录 |
 | 2 | 创建专用虚拟环境，安装插件包声明的依赖，包括 `torch`、`transformers` 和 MCP 依赖；应用代码从选定的插件包运行 | `~/.local/share/codex-privacy-hud/venv/` |
 | 3 | 下载 `openai/privacy-filter` 权重前**先询问**。权重约 2.8 GB，来自 Hugging Face，只需下载一次。选择 `y` 启用完整检测。选择 `n` 仍可检测凭据和路径，但**无法检测姓名和地址**。`privacy-hud-doctor` 会说明这一点。 | `~/.cache/huggingface/hub/` |
-| 4 | 将插件安装到 Codex（`codex plugin marketplace add` + `codex plugin add`） | Codex 插件目录 |
+| 4 | 在需要时添加插件市场，仅刷新 `codex-privacy-hud`（`codex plugin marketplace upgrade codex-privacy-hud`），然后使用官方 Codex 程序安装插件 | Codex 的插件市场目录和插件目录 |
 | 5 | 校验已安装版本，为该已安装插件包生成命令包装脚本，并记录运行时选择及 Python 解释器 | `~/.codex/plugins/data/codex-privacy-hud-…/runtime.json` |
 | 6 | 下载与**你的版本完全一致**的补丁版 Codex 构建，校验 SHA-256 并解压，再将官方 `codex-code-mode-host` 链接到同一目录。压缩包只包含 `codex`；Code Mode 需要同目录下的这个程序，应使用相同版本的官方程序。 | `~/.local/share/codex-privacy-hud/<version>/` |
 | 7 | 写入名为 `codex` 的小型转发脚本（forwarder）。如果需要，则将 `~/.local/bin` 加入 shell 的 `PATH`。 | `~/.local/bin/codex` |
@@ -154,11 +158,13 @@ sh "$PRIVACY_HUD_BUNDLE/install.sh" --yes --no-model
 
 ```bash
 codex plugin marketplace add inin-zou/codex-privacy-hud
+codex plugin marketplace upgrade codex-privacy-hud
 codex plugin add codex-privacy-hud@codex-privacy-hud
 ```
 
-第一条命令会将本仓库克隆到 Codex 的插件市场存储目录。
-第二条命令会将其复制到插件缓存目录 `~/.codex/plugins/cache/codex-privacy-hud/codex-privacy-hud/<version>/`。
+第一条命令将本仓库配置为 Git 插件市场；如果已经配置，仅运行这条命令不会刷新现有快照。
+第二条命令刷新该插件市场所配置的 Git 修订版本。
+第三条命令将插件复制到缓存目录 `~/.codex/plugins/cache/codex-privacy-hud/codex-privacy-hud/<version>/`。
 这样会为 Codex 安装 `$privacy` 技能、hook 和 MCP 服务器。
 `install.sh` 也会随之保存到本机，但不会自动运行。
 此时仍缺少守护进程的 Python 环境、检测模型和补丁版 Codex。
@@ -168,7 +174,7 @@ codex plugin add codex-privacy-hud@codex-privacy-hud
 接下来，请按以下步骤操作：
 
 1. 运行 `codex`。Codex 0.154 启动时会显示 **Hooks need review**（需要审核 hook），提示你审核插件的八个 hook。选择 **Trust all and continue**（信任全部并继续）。在此之前，插件中的任何内容都不会运行。
-2. 发送任意消息。第一轮交互会显示一行提醒。输入 `$privacy setup`，让 Codex 运行插件缓存中的安装脚本（`sh ~/.codex/plugins/cache/codex-privacy-hud/codex-privacy-hud/<version>/install.sh --yes`）。脚本需要向你的主目录写入文件并下载内容，因此 Codex 会请求一次在沙箱外运行的权限。批准请求后，等待安装完成。模型下载需要几分钟。提醒中也会显示同一路径，你可以在另一个终端中运行该命令。这与上方一行安装命令使用的是同一个脚本。已有插件安装也可以安全地再次运行该脚本。`--yes` 会直接下载模型，不再询问。`--no-model` 会跳过模型下载。
+2. 发送任意消息。第一轮交互会显示一行提醒。输入 `$privacy setup`，让 Codex 运行插件缓存中的安装脚本（`sh ~/.codex/plugins/cache/codex-privacy-hud/codex-privacy-hud/<version>/install.sh --yes`）。脚本需要向你的主目录写入文件并下载内容，因此 Codex 会请求一次在沙箱外运行的权限。批准请求后，等待安装完成。模型下载需要几分钟。提醒中也会显示同一路径，你可以在另一个终端中运行该命令。缓存中的安装脚本固定使用该插件的发布版本。要升级已有安装，请使用上方获取当前安装脚本的一键安装命令。`--yes` 会直接下载模型，不再询问。`--no-model` 会跳过模型下载。
 3. 重启 Codex，让补丁版 Codex 和状态行项生效。
 
 如果你希望手动操作，[docs/installing-by-hand.md](docs/installing-by-hand.md) 列出了脚本执行的每一个步骤。
