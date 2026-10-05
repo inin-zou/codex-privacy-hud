@@ -43,8 +43,8 @@ nothing to resolve and `_resolve_session_id` returns `None` without touching
 sqlite at all.
 
 **Session resolution is imported, never re-derived.** The plugin-data
-directory comes from `local_ui_server.resolve_data_dir()`; *which session to
-show* comes from `mcp_tools.resolve_audit_session`, the same function
+directory comes from `runtime.plugin_data_dir()`; *which session to
+show* comes from `session_services.resolve_audit_session`, the same function
 `$privacy` and the local UI use. This module used to call
 `local_ui_server._latest_session_id` — the most recently *started* session —
 which was left in place when `$privacy` moved off it, and that left one
@@ -120,7 +120,7 @@ import sys
 import time
 
 from .hud_snapshot import read_daemon_marker, read_snapshot
-from .local_ui_server import resolve_data_dir
+from .runtime import plugin_data_dir as resolve_data_dir
 from .matrix.loader import Matrix, load_matrix
 from . import render, runtime_messages
 from .render import hud_line
@@ -166,7 +166,7 @@ def _matrix() -> Matrix:
     """Load `tables.toml` once per process rather than once per resolution.
 
     Only `_resolve_session_id` still needs a `Matrix` (to construct the
-    `Ledger` it asks `mcp_tools.resolve_audit_session` with), and a `--watch`
+    `Ledger` it asks `session_services.resolve_audit_session` with), and a `--watch`
     loop calls that on `_SessionPin`'s slower cadence, not every redraw; the
     tables are a packaged, immutable-per-run data file regardless, so
     re-reading and re-parsing them on every resolve would still be pure waste.
@@ -180,13 +180,14 @@ def _matrix() -> Matrix:
 
 
 def _resolve_session_id() -> str | None:
-    """Which session this pane is about, per `mcp_tools.resolve_audit_session`.
+    """Which session this pane is about, per
+    `session_services.resolve_audit_session`.
 
     This is the ONLY place in this module that still touches a `Ledger` —
     everything else reads contract A's snapshot file instead (see the module
-    docstring's "Why reading a file..." paragraph). `mcp_tools` and `Ledger`
-    are imported locally, right here, rather than at module scope, so that
-    grepping this file for `Ledger`/`sqlite` finds exactly one hit and it is
+    docstring's "Why reading a file..." paragraph). `session_services` and
+    `Ledger` are imported locally, right here, rather than at module scope,
+    so that grepping this file for `Ledger`/`sqlite` finds exactly one hit and it is
     this one.
 
     Opens and closes its own `Ledger`, rather than sharing one with a reading
@@ -212,7 +213,7 @@ def _resolve_session_id() -> str | None:
         # `codex.ledger_path`, never `$PLUGIN_DATA/ledger.db` spelled out
         # here: after #66's storage transition that pathname is the
         # directory fence and the ledger is `ledger/active.db`.
-        from . import codex, mcp_tools
+        from . import codex, session_services
         path = codex.ledger_path(data_dir)
         if not path.is_file():
             return None
@@ -223,8 +224,8 @@ def _resolve_session_id() -> str | None:
             # The data directory, not the ledger's parent: once the
             # active store moved, that parent is `$PLUGIN_DATA/ledger/`
             # and the daemon socket is not in it.
-            return mcp_tools.resolve_audit_session(ledger,
-                                                   data_dir).session_id
+            return session_services.resolve_audit_session(
+                ledger, data_dir).session_id
         finally:
             if ledger is not None:
                 try:
@@ -247,7 +248,7 @@ class _SessionPin:
     the life of a pane would put the HUD back on that socket, the very path
     the redraw loop stays off of by reading contract A's snapshot file
     instead, and the daemon answers serially, so a query arriving mid-scan
-    waits (`daemon.QUERY_TIMEOUT`, 5 s) — a redraw loop is the wrong place to
+    waits (`runtime_client.QUERY_TIMEOUT`, 5 s) — a redraw loop is the wrong place to
     inherit that.
 
     The second is the surface itself. A HUD pane sits beside one Codex window

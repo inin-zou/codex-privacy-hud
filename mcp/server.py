@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # mcp/server.py
-"""Thin stdio MCP wrapper around `privacy_hud.mcp_tools` (Task 13).
+"""Thin stdio MCP wrapper around `privacy_hud`'s shared services (Task 13).
 
 Exposes exactly the five tools named in `EXPOSED_TOOLS`, below: the four
 reads (`privacy.get_session_summary`, `privacy.list_exposures`,
@@ -11,7 +11,7 @@ that carries a hard-blocked data type: the mask branch is skipped and the
 matrix default -- the deny -- stands. That is a property of the engine, not
 of the rules this tool is allowed to write; a rule whose selector is
 innocuous can still land on a call that carries a credential, which is the
-case a mint-site refusal cannot see. `mcp_tools.apply_policy` additionally
+case a mint-site refusal cannot see. `policy_services.apply_policy` additionally
 refuses a `mask` rule on a hard-blocked selector, now because such a rule is
 inert (see `_MASK_WOULD_DOWNGRADE` there). The behaviour test is
 `tests/test_mcp_surface.py::test_no_exposed_tool_can_turn_a_deny_into_an_allow`,
@@ -22,8 +22,10 @@ plugin enforces if the model called it, and an MCP tool is called by the
 model -- see `EXPOSED_TOOLS`'s docstring and
 `tests/test_mcp_surface.py`. `privacy.start_clean_session` was removed
 (#23): it opened a ledger row under an id Codex never sends, so nothing was
-ever recorded against it. Each is a direct call into the corresponding
-function in `src/privacy_hud/mcp_tools.py`. All the
+ever recorded against it. Each read is a direct call into the corresponding
+function in `src/privacy_hud/session_services.py` (re-exported by
+`mcp_tools`), and the write goes through `runtime_client.update_policy` to
+the daemon, which saves it with `policy_services.apply_policy`. All the
 real logic (I1's no-raw-value guarantee, the consent rule, the policy-table
 write) lives there and is unit-tested in `tests/test_mcp.py` without going
 through this file at all; this module's only job is the MCP transport.
@@ -69,7 +71,7 @@ connection); it does not open a second, divergent ledger.
 **Saving a rule and enforcing it are separate.** `privacy.update_policy`
 writes a session policy rule and returns `saved: true`,
 `enforcement: "conditional"`, and the conditions from
-`mcp_tools.rule_enforcement_note`. A saved rule can match only findings
+`policy_services.rule_enforcement_note`. A saved rule can match only findings
 produced on later outbound calls this plugin checks. Mask rules also
 yield to an outright block. Origin rules require the value to be detected
 on ingress and again on egress. Detection can miss values, and hosted
@@ -239,10 +241,10 @@ def _launch_through_bootstrap() -> int:
 
 def _data_dir() -> Path:
     """`$PLUGIN_DATA`, resolved the same way every other reader does
-    (`local_ui_server.resolve_data_dir`). No `/tmp` default (spec §6): a
+    (`runtime.plugin_data_dir`). No `/tmp` default (spec §6): a
     server with nowhere to read from exits with a message rather than
     inventing an empty ledger in a shared directory."""
-    from privacy_hud.local_ui_server import resolve_data_dir
+    from privacy_hud.runtime import plugin_data_dir as resolve_data_dir
     data_dir = resolve_data_dir()
     if data_dir is None:
         raise SystemExit("privacy-hud mcp: PLUGIN_DATA is not set and no "
@@ -269,7 +271,7 @@ def _read_guard_status() -> dict:
     lookup there finds nothing and reports the guard off for a user who
     turned it on.
     """
-    from privacy_hud import mcp_tools as tools
+    from privacy_hud import session_services as tools
     return tools.read_guard_status(_data_dir())
 
 
@@ -309,7 +311,7 @@ def _open_ledger() -> "Ledger":
 #:     what this tool accepts because it has to be: the branch matched on
 #:     every finding of the observation, so a mask rule on an innocuous type
 #:     that co-occurred with a credential skipped the block, and a refusal
-#:     keyed on the selector cannot see that call. `mcp_tools.apply_policy`
+#:     keyed on the selector cannot see that call. `policy_services.apply_policy`
 #:     does still refuse `mask` on a hard-blocked selector
 #:     (`_MASK_WOULD_DOWNGRADE`), keyed off the same
 #:     `HARD_BLOCKED_DATA_TYPES` the engine gates the block on so the two
@@ -372,7 +374,7 @@ def build_app():
 
     from mcp.server.mcpserver.exceptions import ToolError
 
-    from privacy_hud import mcp_tools
+    from privacy_hud import session_services
 
     # The connection is opened with a reader's open, which cannot create a
     # missing ledger. The daemon creates it on the first SessionStart, and
@@ -424,7 +426,7 @@ def build_app():
 
     app = MCPServer("privacy-hud", lifespan=lifespan)
 
-    # The three read tools below end in `.as_dict()`. `mcp_tools` returns
+    # The three read tools below end in `.as_dict()`. `session_services` returns
     # `ledger.py`'s summary variants and `LegacyExposureRow`, and this is the
     # wire boundary: `ledger._EXPOSURE_JSON_FIELDS` pins which keys an MCP
     # client sees and in what order, so the read tools' published
@@ -456,7 +458,7 @@ def build_app():
         subagent inheritance, or downstream forwarding.
         """
         with tool_access():
-            return mcp_tools.get_session_summary(
+            return session_services.get_session_summary(
                 ledger(), session_id).as_dict()
 
     @app.tool(name="privacy.list_exposures")
@@ -487,7 +489,7 @@ def build_app():
         """
         with tool_access():
             return [r.as_dict()
-                    for r in mcp_tools.list_exposures(ledger(), session_id,
+                    for r in session_services.list_exposures(ledger(), session_id,
                                                       tab)]
 
     @app.tool(name="privacy.get_exposure_detail")
@@ -515,7 +517,7 @@ def build_app():
         it does not save a policy rule.
         """
         with tool_access():
-            return mcp_tools.get_exposure_detail(
+            return session_services.get_exposure_detail(
                 ledger(), session_id, event_id).as_dict()
 
     @app.tool(name="privacy.update_policy")
@@ -542,7 +544,7 @@ def build_app():
         hard-blocked data type is also refused. Data already disclosed stays
         disclosed.
         """
-        from privacy_hud import runtime_commands
+        from privacy_hud import runtime_client
         from privacy_hud.runtime_contract import RuntimeRefusal, load_activation
         from privacy_hud.runtime_messages import (
             POLICY_OUTCOME_UNKNOWN,
@@ -558,7 +560,7 @@ def build_app():
         data_dir = _data_dir()
         try:
             activation = load_activation(data_dir)
-            result = runtime_commands.update_policy(
+            result = runtime_client.update_policy(
                 data_dir, activation=activation, session_id=session_id,
                 rule_type=rule_type, selector=selector)
         except ValueError as invalid:
@@ -568,12 +570,12 @@ def build_app():
             # Refused before transmission. Nothing was saved, and saying
             # so is a fact rather than a guess (§D).
             raise ToolError(POLICY_PREFLIGHT_REFUSAL) from None
-        except runtime_commands.PolicyOutcomeUnknown:
+        except runtime_client.PolicyOutcomeUnknown:
             # Sent, and no reply. Never "not saved", and never retried.
             raise ToolError(POLICY_OUTCOME_UNKNOWN) from None
         # `saved`, not `applied`. The rule is in the policy table; whether it
         # ever fires depends on a later call producing a finding it matches.
-        # For every type outside `mcp_tools.CHEAP_DATA_TYPES`, matching
+        # For every type outside `policy_services.CHEAP_DATA_TYPES`, matching
         # requires an accepted deep-scan result (#49 item 2, known limit 21). Report what happened, not what the
         # user hopes will happen.
         return result

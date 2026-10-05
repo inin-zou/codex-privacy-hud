@@ -319,7 +319,7 @@ def test_policy_endpoint_refuses_a_mask_rule_on_a_hard_blocked_type(state, ui):
     while the ledger still recorded `prevented`. Clicking "Protect future
     occurrences" on a credential exposure did that.
 
-    The refusal lives in `mcp_tools.apply_policy`, so it covers this button
+    The refusal lives in `policy_services.apply_policy`, so it covers this button
     and the model-callable `privacy.update_policy` tool with one rule.
     """
     _hook(state, "SessionStart")

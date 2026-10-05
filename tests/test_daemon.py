@@ -22,7 +22,7 @@ import pytest
 
 import privacy_hud.daemon as daemon_mod
 import privacy_hud.dispatch as dispatch_mod
-from privacy_hud import engine
+from privacy_hud import codex, engine
 from privacy_hud import doctor
 from privacy_hud.daemon import (
     EXIT_ALREADY_RUNNING,
@@ -1868,11 +1868,11 @@ def test_an_event_after_session_end_re_registers_the_session(tmp_path):
 from privacy_hud.daemon import (  # noqa: E402
     OP_ACTIVE_SESSIONS,
     OP_EVENT,
-    query_active_sessions,
 )
 from privacy_hud.dispatch import active_sessions  # noqa: E402
 from privacy_hud.matrix.loader import load_matrix  # noqa: E402
-from privacy_hud.mcp_tools import resolve_audit_session  # noqa: E402
+from privacy_hud.runtime_client import query_active_sessions  # noqa: E402
+from privacy_hud.session_services import resolve_audit_session  # noqa: E402
 
 
 def _raw_request(sock_path, request: dict, timeout: float = 5.0):
@@ -2139,7 +2139,8 @@ def _handler_socket_literal() -> str:
 
 
 def test_the_socket_name_is_the_same_in_all_three_places():
-    """`daemon.sock` is written by `_default_socket_path`, restated as a
+    """`daemon.sock` is named by `codex.socket_path` (which the daemon,
+    doctor and the session-query client all call), restated as a
     literal by the hook client (stdlib-only, it can import nothing from this
     package) and restated again by `doctor.SOCKET_NAME` (which must be able
     to name the file when the package is too broken to import).
@@ -2152,7 +2153,9 @@ def test_the_socket_name_is_the_same_in_all_three_places():
     """
     literal = _handler_socket_literal()
     assert literal == doctor.SOCKET_NAME
-    assert daemon_mod._default_socket_path(Path("/any/plugin/data")).name == literal
+    any_dir = Path("/any/plugin/data")
+    assert codex.socket_path(any_dir).name == literal
+    assert doctor._socket_path(any_dir) == codex.socket_path(any_dir)
 
 
 def _handler_latch_fields() -> set[str]:

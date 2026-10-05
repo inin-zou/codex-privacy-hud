@@ -281,7 +281,7 @@ def test_no_raw_value_survives_json_round_trip(led):
 # over a real socket.
 # --------------------------------------------------------------------- #
 
-import privacy_hud.mcp_tools as mcp_tools  # noqa: E402
+import privacy_hud.session_services as session_services  # noqa: E402
 from privacy_hud.mcp_tools import CONCURRENT_WITHIN, resolve_audit_session  # noqa: E402
 
 
@@ -299,7 +299,8 @@ def two_sessions(tmp_path):
 
 
 def _daemon_says(monkeypatch, sessions):
-    monkeypatch.setattr(mcp_tools, "_ask_daemon", lambda data_dir: sessions)
+    monkeypatch.setattr(session_services, "_ask_daemon",
+                        lambda data_dir: sessions)
 
 
 def test_explicit_id_wins_and_is_never_second_guessed(two_sessions, monkeypatch):

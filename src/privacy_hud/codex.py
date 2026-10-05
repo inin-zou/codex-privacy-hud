@@ -370,9 +370,8 @@ def ledger_path(data_dir) -> Path:
 def socket_path(data_dir) -> Path:
     """`$PLUGIN_DATA/daemon.sock`, given an already-resolved data directory.
 
-    `daemon._default_socket_path` stays the canonical helper for the daemon
-    itself (it is what `daemon.main` calls, and `doctor` prefers it when
-    `daemon` imports); this is the same derivation for callers that must not
-    depend on `daemon` importing at all.
+    The one derivation: `daemon.main`, `doctor` and the session-query client
+    (`session_services`, via `runtime_client.query_active_sessions`) all call
+    this, so none of them depends on `daemon` importing.
     """
     return Path(data_dir) / SOCKET_NAME

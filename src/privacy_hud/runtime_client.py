@@ -31,7 +31,7 @@ import socket
 import time
 from pathlib import Path
 
-from . import codex
+from . import codex, policy_services
 from .runtime_contract import (
     PROTOCOL_VERSION,
     STORAGE_GENERATION,
@@ -39,6 +39,7 @@ from .runtime_contract import (
     JSONObject,
     RuntimeRefusal,
     is_int,
+    load_activation,
 )
 
 HELLO_FRAME_LIMIT = 16 * 1024
@@ -274,3 +275,124 @@ def connect_runtime(
     """Connect to `$PLUGIN_DATA/daemon.sock` and complete the hello."""
     return connect_socket(codex.socket_path(Path(data_dir)),
                           activation=activation, timeout=timeout)
+
+
+# --------------------------------------------------------------------- #
+# the session query client
+# --------------------------------------------------------------------- #
+
+#: Client-side bound for `query_active_sessions`. Deliberately generous
+#: compared with the hook client's 2 s: the caller is a human running
+#: `$privacy`, not a hook with a 5 s budget, and the daemon answers requests
+#: serially — so a query that arrives while a tier-3 ingress scan is in
+#: flight (~3 s measured) should wait for the true answer rather than
+#: degrade to the ledger's wrong one. Still bounded, because a wedged daemon
+#: must not hang the skill: expiring reads as "no answer", which the caller
+#: already has an honest fallback for.
+QUERY_TIMEOUT = 5.0
+
+
+def query_active_sessions(socket_path, *, timeout: float = QUERY_TIMEOUT,
+                          activation: Activation | None = None
+                          ) -> list[dict] | None:
+    """Ask the daemon at `socket_path` which sessions are alive right now.
+
+    Returns the reply's `sessions` list — dicts of `session_id` and `age`
+    (seconds since that session's last hook event), most recently active
+    first — or `None` when there was **no usable answer**: no selected
+    runtime, nothing listening, a daemon of another build or epoch, a
+    timeout, a truncated or unparseable reply, a reply for a different op.
+    `None` and `[]` are different facts and callers must keep them apart:
+    `[]` is a daemon that is up and believes no session is live, while
+    `None` is not knowing.
+
+    `activation` defaults to the one receipt v2 records in the socket's own
+    directory (`$PLUGIN_DATA`).
+
+    Never raises. Every caller of this is a surface that must still work with
+    no daemon at all — the honest fallback is the caller's business, but it
+    has to be reachable, so a broken socket cannot arrive here as an
+    exception.
+    """
+    try:
+        if activation is None:
+            activation = load_activation(Path(socket_path).parent)
+        with connect_socket(Path(socket_path), activation=activation,
+                            timeout=timeout) as connection:
+            reply = connection.request(OP_ACTIVE_SESSIONS, {})
+    except Exception:
+        return None
+    sessions = reply.get("sessions")
+    if not isinstance(sessions, list):
+        return None
+    return [s for s in sessions
+            if isinstance(s, dict) and isinstance(s.get("session_id"), str)
+            and s["session_id"] and isinstance(s.get("age"), (int, float))]
+
+
+# --------------------------------------------------------------------- #
+# the policy client (#66, Pair 6)
+# --------------------------------------------------------------------- #
+
+#: How long a policy mutation may take end to end. Generous compared with
+#: a hook's two seconds: nobody is waiting on a tool call here, and the
+#: daemon may be holding its state lock for another session's write.
+POLICY_TIMEOUT = 10.0
+
+#: The fields a successful policy result carries, unchanged from the
+#: shape the MCP tool and the browser already return.
+POLICY_RESULT_FIELDS = ("saved", "enforcement", "rule_type", "selector",
+                        "conditions")
+
+
+class PolicyOutcomeUnknown(RuntimeError):
+    """The request was transmitted and no reply came back.
+
+    Whether the rule was saved is not knowable from here. It is not
+    retried: a retry risks writing a second time something that already
+    happened, and the honest answer is the one the caller can act on.
+    """
+
+
+def update_policy(data_dir: Path, *, activation: Activation,
+                  session_id: str, rule_type: str, selector: str
+                  ) -> JSONObject:
+    """Ask the selected daemon to save a policy rule.
+
+    Raises, and which exception it is says what is known:
+
+    * `ValueError` — the rule is one no engine could ever match. Checked
+      here, before anything is sent, so the refusal is about the request
+      rather than about the runtime.
+    * `RuntimeRefusal` — no compatible daemon answered. Nothing was
+      transmitted, so nothing was saved.
+    * `PolicyOutcomeUnknown` — the request went out and no valid reply
+      came back. The outcome is unknown and it is not retried.
+    """
+    policy_services.validate_policy_rule(rule_type=rule_type, selector=selector)
+    connection = connect_runtime(data_dir, activation=activation,
+                                 timeout=POLICY_TIMEOUT)
+    try:
+        reply = connection.request(OP_POLICY_UPDATE, {
+            "session_id": session_id, "rule_type": rule_type,
+            "selector": selector})
+    except RuntimeRefusal:
+        # `RuntimeConnection.request` hands the socket away as it sends,
+        # so every failure it reports is a failure after transmission.
+        raise PolicyOutcomeUnknown() from None
+    finally:
+        connection.close()
+    expected: JSONObject = {
+        "saved": True,
+        "enforcement": "conditional",
+        "rule_type": rule_type,
+        "selector": selector,
+        "conditions": policy_services.rule_enforcement_note(
+            rule_type, selector
+        ).strip(),
+    }
+    if (reply.get("saved") is not True
+            or any(reply.get(name) != value
+                   for name, value in expected.items())):
+        raise PolicyOutcomeUnknown()
+    return expected

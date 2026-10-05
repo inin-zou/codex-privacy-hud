@@ -77,10 +77,10 @@ from .matrix.loader import load_matrix
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .hud_snapshot import Snapshot
     # Type-only, and deliberately so: `audit()` reads three attributes off a
-    # `ResolvedSession` and needs none of `mcp_tools`' behaviour. A runtime
-    # import would give this module — which is meant to be a pure function of
+    # `ResolvedSession` and needs none of `session_services`' behaviour. A
+    # runtime import would give this module — which is meant to be a pure function of
     # ledger types — a dependency on the layer above it, for an annotation.
-    from .mcp_tools import ResolvedSession
+    from .session_services import ResolvedSession
 
 # Loaded once, at import time, the same way tests/test_ledger.py loads it —
 # deterministic, no I/O beyond reading the packaged tables.toml. Used only to
@@ -736,7 +736,7 @@ def _coverage_banner(coverage: SessionCoverage) -> str:
 #: Used only when the skill's resolution names one live session.
 _SUBTITLE_CURRENT = "Current session"
 
-#: Subtitle per `mcp_tools.ResolvedSession.basis`, for the bases whose copy
+#: Subtitle per `session_services.ResolvedSession.basis`, for the bases whose copy
 #: does not depend on anything else. `explicit` and `active` are decided in
 #: `_subtitle` because they need the id and the `certain` flag respectively.
 _SUBTITLE_BY_BASIS = {
@@ -817,7 +817,7 @@ def audit(summary: SessionSummary, rows: Sequence[ExposureRow],
     table, `empty_message()` for the line inside it. The browser asks the
     same two questions of the same functions.
 
-    **`resolved` is an `mcp_tools.ResolvedSession`, or `None` for "not
+    **`resolved` is a `session_services.ResolvedSession`, or `None` for "not
     asked".** It changes exactly one thing: the header subtitle. See
     `_subtitle`. Without `resolved`, a supplied `session_id` renders
     `Session <id>`; otherwise the subtitle is `Session ID unknown`.

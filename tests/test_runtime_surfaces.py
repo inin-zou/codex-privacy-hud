@@ -22,7 +22,14 @@ from urllib.request import Request, urlopen
 
 import pytest
 
-from privacy_hud import codex, mcp_tools, runtime_commands, runtime_messages
+from privacy_hud import (
+    codex,
+    mcp_tools,
+    runtime_client,
+    runtime_commands,
+    runtime_messages,
+    session_services,
+)
 from privacy_hud import runtime_storage as storage
 from privacy_hud.daemon import Daemon
 from privacy_hud.ledger import Ledger
@@ -185,7 +192,7 @@ def test_policy_update_requires_matching_daemon(surface):
     """
     with MismatchedRuntime(surface):
         with pytest.raises(RuntimeRefusal) as refusal:
-            runtime_commands.update_policy(
+            runtime_client.update_policy(
                 surface.data, activation=surface.activation,
                 session_id="s1", rule_type="mask", selector="email")
     assert refusal.value.code == "runtime_mismatch"
@@ -196,7 +203,7 @@ def test_policy_update_reaches_the_daemon_and_is_saved(surface):
     """The matching daemon applies the rule under its own serialized
     ledger access, and the successful result keeps its existing shape."""
     with RunningDaemon(surface):
-        result = runtime_commands.update_policy(
+        result = runtime_client.update_policy(
             surface.data, activation=surface.activation,
             session_id="s1", rule_type="mask", selector="email")
 
@@ -239,8 +246,8 @@ def test_policy_commit_lost_reply_reports_unknown_outcome(surface):
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
     try:
-        with pytest.raises(runtime_commands.PolicyOutcomeUnknown):
-            runtime_commands.update_policy(
+        with pytest.raises(runtime_client.PolicyOutcomeUnknown):
+            runtime_client.update_policy(
                 surface.data, activation=surface.activation,
                 session_id="s1", rule_type="mask", selector="email")
     finally:
@@ -381,14 +388,14 @@ def test_skill_audit_resolves_session_once(surface, monkeypatch):
     beside a browser showing another.
     """
     calls: list[dict] = []
-    original = mcp_tools.resolve_audit_session
+    original = session_services.resolve_audit_session
 
     def counting(ledger, data_dir, **kwargs):
         resolved = original(ledger, data_dir, **kwargs)
         calls.append({"resolved": resolved})
         return resolved
 
-    monkeypatch.setattr(mcp_tools, "resolve_audit_session", counting)
+    monkeypatch.setattr(session_services, "resolve_audit_session", counting)
     result = runtime_commands.audit(surface.data,
                                     activation=surface.activation)
 
@@ -477,11 +484,11 @@ def test_policy_invalid_acknowledgment_is_unknown_without_retry(
             calls.append("closed")
 
     monkeypatch.setattr(
-        runtime_commands, "connect_runtime", lambda *a, **k: Connection()
+        runtime_client, "connect_runtime", lambda *a, **k: Connection()
     )
 
-    with pytest.raises(runtime_commands.PolicyOutcomeUnknown):
-        runtime_commands.update_policy(
+    with pytest.raises(runtime_client.PolicyOutcomeUnknown):
+        runtime_client.update_policy(
             tmp_path,
             activation=activation(),
             session_id="s",
