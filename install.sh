@@ -792,9 +792,13 @@ if [ "${PRIVACY_HUD_FAKE:-0}" != "1" ]; then
   else
     log "skipping model weights: tier 3 (names, addresses) will be unavailable"
   fi
-  log "step 4/9: installing the Codex plugin"
-  codex plugin marketplace add "$REPO" >/dev/null 2>&1 || true
-  codex plugin add "codex-privacy-hud@codex-privacy-hud" ||
+  log "step 4/9: refreshing the Codex marketplace and installing the plugin"
+  UPGRADE_REMEDY="Run 'codex plugin marketplace upgrade codex-privacy-hud', then rerun the README installer one-liner. If 'codex' selects an old Privacy HUD forwarder, use your official Codex binary's absolute path for the refresh command."
+  "$OFFICIAL" plugin marketplace add "$REPO" ||
+    die "could not configure the codex-privacy-hud marketplace; plugin installation was not attempted. Correct the Codex error above, then rerun the README installer one-liner. The installer manifest and dependency environment were preserved."
+  "$OFFICIAL" plugin marketplace upgrade codex-privacy-hud ||
+    die "could not refresh the codex-privacy-hud Git marketplace; plugin installation was not attempted. Correct the Codex error above. $UPGRADE_REMEDY For a local-path marketplace, follow the local-checkout instructions in docs/installing-by-hand.md; this installer requires a Git marketplace. The installer manifest and dependency environment were preserved."
+  "$OFFICIAL" plugin add "codex-privacy-hud@codex-privacy-hud" ||
     die "Codex plugin installation failed; the installer manifest and dependency environment were preserved"
   log "step 5/9: selecting the installed plugin bundle and recording the interpreter"
   # The bundle Codex actually runs is the copy in its own plugin cache, and
@@ -806,17 +810,17 @@ sys.path.insert(0, os.environ["PRIVACY_HUD_BUNDLE_SRC"])
 from privacy_hud import runtime_repair
 sys.stdout.write(str(runtime_repair.resolve_installed_bundle(sys.argv[1])))' \
     "$RELEASE" 2>/dev/null)" ||
-    die "could not find exactly one installed plugin bundle for release $RELEASE; run: codex plugin list"
+    die "could not find exactly one installed plugin bundle for release $RELEASE; no runtime was selected by this run. $UPGRADE_REMEDY If this persists, the installed bundle may be missing or ambiguous; report this error without deleting plugin data."
 
   [ -n "$INSTALLED" ] && [ -f "$INSTALLED/scripts/runtime.py" ] ||
-    die "could not find exactly one installed plugin bundle for release $RELEASE; run: codex plugin list"
+    die "could not find exactly one installed plugin bundle for release $RELEASE; no runtime was selected by this run. $UPGRADE_REMEDY If this persists, the installed bundle may be missing or ambiguous; report this error without deleting plugin data."
 
   INSTALLED_BUILD_ID="$(validate_bundle "$SHARE/venv/bin/python" "$INSTALLED")" ||
-    die "installed plugin bundle does not match release $RELEASE; no runtime was selected"
+    die "installed plugin bundle does not match release $RELEASE; no runtime was selected by this run. $UPGRADE_REMEDY If this persists, report the release mismatch without deleting plugin data."
 
   if [ "$BOOTSTRAPPED" -eq 1 ] &&
      [ "$INSTALLED_BUILD_ID" != "$BUNDLE_BUILD_ID" ]; then
-    die "installed plugin bundle does not match release $RELEASE; no runtime was selected"
+    die "installed plugin bundle does not match release $RELEASE; no runtime was selected by this run. $UPGRADE_REMEDY If this persists, report the release mismatch without deleting plugin data."
   fi
   log "installed bundle: $INSTALLED"
   install_wrappers "$SHARE/venv/bin/python" "$PD" "$INSTALLED"
