@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.10.8
+
+- Refresh the configured codex-privacy-hud Git marketplace before installing the plugin, so rerunning the README installer can upgrade an existing installation.
+- Run marketplace and plugin installation commands through the discovered official Codex binary, bypassing Privacy HUD forwarders.
+- Stop on marketplace setup or refresh failure, preserve Codex diagnostics, and give actionable recovery instructions when the installed bundle does not match the pinned release.
+- Keep runtime repair and fake installation separate from marketplace upgrades, and document the manual workflow for local-path marketplaces.
+- Add hermetic coverage for stale snapshots, command ordering, failed and ineffective refreshes, bundle ambiguity, and forwarder bypass.
+
+Refs #103.
+
 ## 0.10.7
 
 - Resolve the Codex forwarder's identity and patched-build location independently of the caller's HOME, including relative paths and symlinked invocations.

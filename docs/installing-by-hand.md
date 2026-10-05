@@ -4,6 +4,10 @@ The [one-command installer](../README.md#install) runs the steps below itself. R
 
 Version bumps merged to `main` automatically start tagging and publishing the matching plugin release. Until that release is published and its downloads are available, the one-command installer can fail before persistent installation writes. Retry after publication completes; a failed release workflow can extend this window.
 
+**Upgrading an installer-managed installation:** rerun the [one-command installer](../README.md#install). Starting with Privacy HUD 0.10.8, it adds the marketplace if needed, refreshes only the configured `codex-privacy-hud` Git marketplace, and then installs the plugin through the official Codex binary found during prerequisite checks. Marketplace setup or refresh failure stops plugin installation and prints the Codex error; earlier dependency-installation steps may already have changed the installation.
+
+If the installed bundle still does not match the installer's pinned release, run `codex plugin marketplace upgrade codex-privacy-hud`, then rerun the one-command installer. If `codex` selects an old Privacy HUD forwarder, use your official Codex binary's absolute path for the refresh command. If the mismatch persists, report the error without deleting plugin data. `--repair-runtime` does not refresh marketplaces or install a newer plugin.
+
 Privacy HUD 0.10.0 retains snapshot version 2. New sessions observed from a genuine SessionStart use version-2 accounting; existing sessions and late attachments retain legacy accounting. Snapshot-v2 readers accept version 1 as explicitly legacy and version 2 with nullable accounting fields. Older snapshot-v1-only readers reject version 2 and show no Privacy item. Matching Codex version numbers do not establish snapshot compatibility.
 
 The snapshot-v2 patched Codex builds for 0.154.0, 0.155.0, and 0.155.1 were re-released on 2026-09-22. An earlier installation of one of those versions may still contain the older reader. Updating the plugin does not replace that binary. No additional patched-Codex release is required solely for Privacy HUD 0.10.0.
@@ -78,8 +82,11 @@ All three prerequisites fail quietly rather than loudly — an old `transformers
 
 ```bash
 codex plugin marketplace add inin-zou/codex-privacy-hud
+codex plugin marketplace upgrade codex-privacy-hud
 codex plugin add codex-privacy-hud@codex-privacy-hud
 ```
+
+For an existing Git marketplace, `marketplace add` alone does not refresh its snapshot. Run all three commands in order and stop if any command fails. After installing an updated plugin, set `PRIVACY_HUD_BUNDLE` to the newly installed bundle and perform step 2 to select its runtime.
 
 From a local checkout instead (what you want if you are editing the plugin — note that Codex installs a *copy*, so re-run these after changing anything under `hooks/`):
 
@@ -87,6 +94,8 @@ From a local checkout instead (what you want if you are editing the plugin — n
 codex plugin marketplace add /path/to/codex-privacy-hud --json
 codex plugin add codex-privacy-hud@codex-privacy-hud --json
 ```
+
+A local-path marketplace is a separate development workflow. Do not run `codex plugin marketplace upgrade codex-privacy-hud` for that configuration: the refresh command targets Git marketplaces. The normal installer requires a Git marketplace and stops if marketplace setup or refresh fails; it does not replace a local-path configuration. After reinstalling the local plugin, point `PRIVACY_HUD_BUNDLE` at the installed copy and run step 2 below with your dependency environment. This selects the bundle's runtime without refreshing the marketplace.
 
 The plugin manifest is `.codex-plugin/plugin.json` and the marketplace manifest is `.agents/plugins/marketplace.json`, the two paths Codex looks at first. (Codex also accepts the Claude Code layout, `.claude-plugin/`, as a fallback; this project used it until 2026-09-15. An earlier note here said Codex rejected `.codex-plugin/`: that was Codex 0.145 given a `.codex-plugin/plugin.json` with no marketplace manifest beside it, and the error was about the missing marketplace file. With both files in place, Codex 0.154 installs this layout; see `.claude/docs/architecture.md` §7.)
 
