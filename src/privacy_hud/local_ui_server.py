@@ -24,7 +24,7 @@ identical to `dispatch.new_state()` and `mcp/server.py`. SQLite's WAL mode
 connection against that file safe.
 
 No raw sensitive value is served by any endpoint here -- every JSON
-response is built from `privacy_hud.mcp_tools` functions, which is exactly
+response is built from `privacy_hud.session_services` functions, which is exactly
 where that guarantee is enforced and tested (`tests/test_mcp.py`). Those
 functions return `ledger.py`'s summary variants and `LegacyExposureRow`, so
 every handler below serializes with an explicit `.as_dict()` immediately
@@ -65,7 +65,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import mcp_tools, runtime, runtime_commands
+from . import policy_services, runtime, runtime_client, session_services
 from .ledger import Ledger, UnsupportedAccounting
 from .matrix.loader import load_matrix
 from .render import _ACRONYMS as _RENDER_ACRONYMS
@@ -92,8 +92,10 @@ _STATIC = {
 }
 
 
-# Both of these moved into `runtime.py` and are re-exported here under the
-# names `ambient`, `mcp/server.py` and the tests already use. The move is
+# Both of these moved into `runtime.py` and are kept here as this browser
+# module's compatibility names (its own callers and tests use them);
+# `ambient` and `mcp/server.py` import `runtime.plugin_data_dir` directly
+# rather than reaching through another surface. The move is
 # what lets `doctor.py` stop importing this module: a diagnostic that must
 # survive a broken install was pulling in `mcp_tools`, `render`, the matrix
 # and the ledger to learn where a file is, and that import closed a real
@@ -110,7 +112,7 @@ def _latest_session_id(ledger: Ledger) -> str | None:
 
     **Not the session the user is in**, and no longer this module's default:
     with two Codex windows open it names the one that started last, whoever is
-    asking. `mcp_tools.resolve_audit_session` is the resolution the request
+    asking. `session_services.resolve_audit_session` is the resolution the request
     handler uses now (`_session_id` below) — read its docstring for why the
     daemon has to be asked and why `MAX(events.ts)` is not the fix either.
 
@@ -119,10 +121,10 @@ def _latest_session_id(ledger: Ledger) -> str | None:
     `ambient` used to import this and resolve with it directly, which is how
     one machine ended up with an ambient line and a `$privacy` audit that could
     name two different sessions; `ambient` now goes through
-    `mcp_tools.resolve_audit_session` like everything else, and this is a
+    `session_services.resolve_audit_session` like everything else, and this is a
     one-line alias onto that function's own fallback so the two cannot drift
     back apart. Returns only an id, no session content."""
-    return mcp_tools._most_recently_started(ledger)
+    return session_services._most_recently_started(ledger)
 
 
 def _rule_confirmation(rule_type: str, selector: str) -> str:
@@ -133,7 +135,7 @@ def _rule_confirmation(rule_type: str, selector: str) -> str:
     being conflated** (#49 item 2). It used to end "Applies from the next
     tool call.", which reads as a promise about every later call. It is not
     one. A rule fires when some tier produces a finding its selector
-    matches. For every type outside `mcp_tools.CHEAP_DATA_TYPES` (`path`,
+    matches. For every type outside `policy_services.CHEAP_DATA_TYPES` (`path`,
     `credential`), matching requires an accepted deep-scan result. A scan
     gap means an applicable deep scan supplied no accepted result (known
     limit 21); on that call this rule has no matching deep-scan finding.
@@ -148,7 +150,7 @@ def _rule_confirmation(rule_type: str, selector: str) -> str:
     Matching is also on the whole value, normalised (known limit 10), so a
     model that summarizes what it read still sends it.
     """
-    conditions = mcp_tools.rule_enforcement_note(rule_type, selector)
+    conditions = policy_services.rule_enforcement_note(rule_type, selector)
     if rule_type in ("block_path", "block_command"):
         return (f"Rule saved: block values from {selector}, for this session. "
                 "It can cause Privacy HUD to issue a denial on a later "
@@ -209,7 +211,7 @@ class _Handler(BaseHTTPRequestHandler):
             print("privacy-hud local-ui: PLUGIN_DATA is not set and no "
                   "Codex plugin-data directory was found", file=sys.stderr)
             return None
-        return mcp_tools.resolve_audit_session(
+        return session_services.resolve_audit_session(
             ledger, data_dir).session_id
 
     def _read_json_body(self) -> dict:
@@ -281,9 +283,9 @@ class _Handler(BaseHTTPRequestHandler):
             # One read transaction: the summary and the coverage that
             # qualifies it are one reading.
             with ledger._read_transaction():
-                payload = mcp_tools.get_session_summary(ledger, sid).as_dict()
+                payload = session_services.get_session_summary(ledger, sid).as_dict()
                 payload["coverage"] = \
-                    mcp_tools.get_session_coverage(ledger, sid).as_dict()
+                    session_services.get_session_coverage(ledger, sid).as_dict()
             self._send_json(200, payload)
             return
 
@@ -295,7 +297,7 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             # The shared audit read includes the tab count in its snapshot.
             try:
-                reading = mcp_tools.read_audit(
+                reading = session_services.read_audit(
                     ledger, sid, tab, include_all_events_count=True,
                 )
             except ValueError as exc:
@@ -347,7 +349,7 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             try:
                 event_id = int(event_id_raw)
-                row = mcp_tools.get_exposure_detail(ledger, sid, event_id)
+                row = session_services.get_exposure_detail(ledger, sid, event_id)
             except (ValueError, LookupError) as exc:
                 self._send_json(404, {"error": str(exc)})
                 return
@@ -377,7 +379,7 @@ class _Handler(BaseHTTPRequestHandler):
                 # The mutation goes to the daemon that owns the ledger
                 # (#66 Pair 6). This process's connection is `mode=ro`.
                 activation = load_activation(data_dir)
-                runtime_commands.update_policy(
+                runtime_client.update_policy(
                     data_dir, activation=activation, session_id=sid,
                     rule_type=rule_type, selector=selector)
             except ValueError as exc:
@@ -390,7 +392,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(503, {"error": POLICY_PREFLIGHT_REFUSAL,
                                       "code": refusal.code})
                 return
-            except runtime_commands.PolicyOutcomeUnknown:
+            except runtime_client.PolicyOutcomeUnknown:
                 # Transmitted, and no reply. The rule may or may not have
                 # been saved; the one thing this must not do is claim it
                 # was not, and the one thing it must not try is again.

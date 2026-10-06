@@ -346,25 +346,18 @@ def _repo_root() -> Path | None:
 
 
 def _socket_path(data_dir: Path) -> Path:
-    """`$PLUGIN_DATA/daemon.sock`, via `daemon.py`'s helper when it imports.
+    """`$PLUGIN_DATA/daemon.sock`, from `codex.socket_path`, without
+    importing the daemon.
 
-    The lazy, guarded import is the point. `daemon.py` pulls in `dispatch`,
-    `engine`, `minimize` and the detector modules; a doctor is at its most
-    valuable exactly when something in that chain is broken, and a
-    module-level import would make an unrelated `ImportError` there take down
-    the one command that could have explained it. So: use the canonical
-    helper when it is available, and otherwise derive it from `codex.py`,
-    which is stdlib-only and imports nothing from this package — so the
-    fallback cannot be taken down by the same broken chain. `daemon`'s helper
-    now reads the name from there too; `hooks/handler.py` still hardcodes it
-    (it is stdlib-only and never imports this package, so that literal is
-    independently load-bearing regardless) and is compared against it.
+    `codex.py` is stdlib-only and imports nothing from this package, so a
+    broken `daemon` -> `dispatch` -> detector chain cannot take this down:
+    a doctor is at its most valuable exactly when something in that chain is
+    broken. The daemon reads the name from the same helper; `hooks/handler.py`
+    still hardcodes it (it is stdlib-only and never imports this package, so
+    that literal is independently load-bearing regardless) and is compared
+    against it.
     """
-    try:
-        from .daemon import _default_socket_path
-        return Path(_default_socket_path(data_dir))
-    except Exception:
-        return codex.socket_path(data_dir)
+    return codex.socket_path(data_dir)
 
 
 # --------------------------------------------------------------------- #

@@ -9,7 +9,7 @@ from privacy_hud.matrix.loader import load_matrix
 from privacy_hud.ledger import (SCHEMA, LegacyEventRow,
                                 LegacyExposureRow, LegacySessionSummary,
                                 SessionCoverage, UnrecordedSessionSummary)
-from privacy_hud.mcp_tools import _POLICY_RULE_TYPES
+from privacy_hud.policy_services import _POLICY_RULE_TYPES
 from runtime_helpers import writer_ledger
 
 REPO = Path(__file__).resolve().parents[1]

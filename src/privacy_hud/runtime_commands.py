@@ -15,19 +15,20 @@ One answer each, here:
   read-only and schema-validated first. History is a record; showing it
   never depends on the runtime matching, but it does depend on the
   schema being one this build understands (§A).
-* **Which session.** `mcp_tools.resolve_audit_session`, called once, and
+* **Which session.** `session_services.resolve_audit_session`, called once, and
   the resulting `ResolvedSession` is what reaches the renderer and the
   browser. Two separately timed resolutions can name two sessions.
 * **How to write a rule.** Over the socket, to the daemon that owns the
   ledger. A surface that opened its own writable connection would be
   writing behind the writer's back, which is what Pair 3 removed.
 
-The failure distinction in `update_policy` is the load-bearing part of
-this file. A refusal *before* the request is transmitted means nothing
-was saved, and that is a fact. A reply that never comes back *after*
-transmission means the outcome is unknown — the daemon may have written
-the rule and died on the way back — and claiming otherwise, or retrying,
-would each be a different way of lying about it (I5, §D).
+The failure distinction in `runtime_client.update_policy` is the
+load-bearing part of the policy client. A refusal *before* the request is
+transmitted means nothing was saved, and that is a fact. A reply that
+never comes back *after* transmission means the outcome is unknown — the
+daemon may have written the rule and died on the way back — and claiming
+otherwise, or retrying, would each be a different way of lying about it
+(I5, §D).
 
 I1: sessions, ids, rule types and selectors. No hook content, no ledger
 values beyond what the renderer already prints, and no peer text is ever
@@ -39,38 +40,18 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import codex, ledger_schema, mcp_tools, render, runtime_messages
+from . import codex, ledger_schema, render, runtime_messages, session_services
 from .ledger import Ledger
 from .matrix.loader import load_matrix
-from .runtime_client import OP_POLICY_UPDATE, connect_runtime
+from .runtime_client import connect_runtime
 from .runtime_contract import Activation, JSONObject, RuntimeRefusal
-
-#: How long a policy mutation may take end to end. Generous compared with
-#: a hook's two seconds: nobody is waiting on a tool call here, and the
-#: daemon may be holding its state lock for another session's write.
-POLICY_TIMEOUT = 10.0
 
 #: How long the alignment probe may take. Only a hello travels.
 ALIGNMENT_TIMEOUT = 2.0
 
-#: The fields a successful policy result carries, unchanged from the
-#: shape the MCP tool and the browser already return.
-POLICY_RESULT_FIELDS = ("saved", "enforcement", "rule_type", "selector",
-                        "conditions")
-
-
-class PolicyOutcomeUnknown(RuntimeError):
-    """The request was transmitted and no reply came back.
-
-    Whether the rule was saved is not knowable from here. It is not
-    retried: a retry risks writing a second time something that already
-    happened, and the honest answer is the one the caller can act on.
-    """
-
-
 @dataclass(frozen=True)
 class AuditResult:
-    resolved: mcp_tools.ResolvedSession
+    resolved: session_services.ResolvedSession
     text: str
     banner: str
     runtime_mismatch: bool
@@ -138,54 +119,6 @@ def runtime_matches(data_dir: Path, *, activation: Activation) -> bool:
 
 
 # --------------------------------------------------------------------- #
-# the policy client
-# --------------------------------------------------------------------- #
-
-def update_policy(data_dir: Path, *, activation: Activation,
-                  session_id: str, rule_type: str, selector: str
-                  ) -> JSONObject:
-    """Ask the selected daemon to save a policy rule.
-
-    Raises, and which exception it is says what is known:
-
-    * `ValueError` — the rule is one no engine could ever match. Checked
-      here, before anything is sent, so the refusal is about the request
-      rather than about the runtime.
-    * `RuntimeRefusal` — no compatible daemon answered. Nothing was
-      transmitted, so nothing was saved.
-    * `PolicyOutcomeUnknown` — the request went out and no valid reply
-      came back. The outcome is unknown and it is not retried.
-    """
-    mcp_tools.validate_policy_rule(rule_type=rule_type, selector=selector)
-    connection = connect_runtime(data_dir, activation=activation,
-                                 timeout=POLICY_TIMEOUT)
-    try:
-        reply = connection.request(OP_POLICY_UPDATE, {
-            "session_id": session_id, "rule_type": rule_type,
-            "selector": selector})
-    except RuntimeRefusal:
-        # `RuntimeConnection.request` hands the socket away as it sends,
-        # so every failure it reports is a failure after transmission.
-        raise PolicyOutcomeUnknown() from None
-    finally:
-        connection.close()
-    expected: JSONObject = {
-        "saved": True,
-        "enforcement": "conditional",
-        "rule_type": rule_type,
-        "selector": selector,
-        "conditions": mcp_tools.rule_enforcement_note(
-            rule_type, selector
-        ).strip(),
-    }
-    if (reply.get("saved") is not True
-            or any(reply.get(name) != value
-                   for name, value in expected.items())):
-        raise PolicyOutcomeUnknown()
-    return expected
-
-
-# --------------------------------------------------------------------- #
 # the audit
 # --------------------------------------------------------------------- #
 
@@ -201,14 +134,14 @@ def audit(data_dir: Path, *, activation: Activation,
     banner = runtime_messages.AUDIT_RUNTIME_MISMATCH if mismatch else ""
     ledger = open_reader(data_dir)
     try:
-        resolved = mcp_tools.resolve_audit_session(ledger, data_dir,
+        resolved = session_services.resolve_audit_session(ledger, data_dir,
                                                    explicit=session_id)
         chosen = resolved.session_id
         if chosen is None:
             return AuditResult(resolved=resolved,
                                text=render.empty_message(tab, None),
                                banner=banner, runtime_mismatch=mismatch)
-        reading = mcp_tools.read_audit(ledger, chosen, tab)
+        reading = session_services.read_audit(ledger, chosen, tab)
         text = render.audit(
             reading.summary, reading.rows, tab,
             coverage=reading.coverage, resolved=resolved,
@@ -223,7 +156,7 @@ def detail(data_dir: Path, *, session_id: str, event_id: int) -> str:
     """The L3 row detail, at the canonical path."""
     ledger = open_reader(data_dir)
     try:
-        row = mcp_tools.get_exposure_detail(ledger, session_id, event_id)
+        row = session_services.get_exposure_detail(ledger, session_id, event_id)
     finally:
         ledger.conn.close()
     return render.detail(row)
@@ -233,9 +166,9 @@ def hud(data_dir: Path, *, session_id: str, action: str) -> JSONObject:
     """`$privacy hud <id> on|off|status`. Display state, not accounting:
     it writes the HUD's own file and never the ledger."""
     if action == "status":
-        return mcp_tools.hud_status(data_dir, session_id)
+        return session_services.hud_status(data_dir, session_id)
     if action in ("on", "off"):
-        return mcp_tools.hud_set_hidden(data_dir, session_id, action == "off")
+        return session_services.hud_set_hidden(data_dir, session_id, action == "off")
     raise ValueError("action must be on, off or status")
 
 
@@ -243,7 +176,7 @@ def read_guard(data_dir: Path, *, action: str) -> JSONObject:
     """`$privacy read on|off|status`. `settings.json` in `$PLUGIN_DATA`,
     which is no longer the ledger's parent directory."""
     if action == "status":
-        return mcp_tools.read_guard_status(data_dir)
+        return session_services.read_guard_status(data_dir)
     if action in ("on", "off"):
-        return mcp_tools.read_guard_set(data_dir, action == "on")
+        return session_services.read_guard_set(data_dir, action == "on")
     raise ValueError("action must be on, off or status")

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from accounting_fakes import M, crossed, event, start_v2
-from privacy_hud import codex, local_ui_server, mcp_tools
+from privacy_hud import codex, local_ui_server, session_services
 from privacy_hud import ledger as ledger_module
 from privacy_hud import render, runtime_commands
 from runtime_helpers import activation, close_writer, writer_ledger
@@ -99,7 +99,7 @@ def test_browser_session_selection_uses_data_root(
                       lambda: float(older_started + 100))
         start_v2(writer, "newer")
 
-    assert mcp_tools._most_recently_started(writer) == "newer"
+    assert session_services._most_recently_started(writer) == "newer"
     asked = []
 
     def ask_daemon(data_dir):
@@ -109,7 +109,7 @@ def test_browser_session_selection_uses_data_root(
             return [{"session_id": "older", "age": 0.01}]
         return None
 
-    monkeypatch.setattr(mcp_tools, "_ask_daemon", ask_daemon)
+    monkeypatch.setattr(session_services, "_ask_daemon", ask_daemon)
     path = "/api/session"
     if explicit is not None:
         path += f"?session_id={explicit}"
@@ -128,21 +128,21 @@ def test_browser_session_selection_uses_data_root(
 def test_audit_keeps_one_snapshot_during_writer_commit(
         audit_store, monkeypatch, surface, after_read):
     data, writer = audit_store
-    before_summary = mcp_tools.get_session_summary(
+    before_summary = session_services.get_session_summary(
         writer, "older",
     ).as_dict()
     before_rows = [
         row.as_dict()
-        for row in mcp_tools.list_exposures(writer, "older", "Exposed")
+        for row in session_services.list_exposures(writer, "older", "Exposed")
     ]
-    before_coverage = mcp_tools.get_session_coverage(
+    before_coverage = session_services.get_session_coverage(
         writer, "older",
     ).as_dict()
     before_all = len(
-        mcp_tools.list_exposures(writer, "older", "All events")
+        session_services.list_exposures(writer, "older", "All events")
     )
 
-    original = getattr(mcp_tools, after_read)
+    original = getattr(session_services, after_read)
     committed = []
 
     def read_then_commit(ledger, *args, **kwargs):
@@ -156,7 +156,7 @@ def test_audit_keeps_one_snapshot_during_writer_commit(
             committed.append(True)
         return value
 
-    monkeypatch.setattr(mcp_tools, after_read, read_then_commit)
+    monkeypatch.setattr(session_services, after_read, read_then_commit)
 
     rendered = []
     real_render = render.audit
@@ -192,7 +192,7 @@ def test_audit_keeps_one_snapshot_during_writer_commit(
         assert fresh.summary("older").observations == (
             before_summary["observations"] + 1
         )
-        assert len(mcp_tools.list_exposures(
+        assert len(session_services.list_exposures(
             fresh, "older", "Exposed",
         )) == len(before_rows) + 1
         assert fresh.coverage("older").shallow_scans == (
@@ -207,8 +207,8 @@ def test_audit_keeps_one_snapshot_during_writer_commit(
 def test_audit_surfaces_use_public_read_boundary(
         audit_store, monkeypatch, surface, tab):
     data, _ = audit_store
-    original = mcp_tools.read_audit
-    original_list = mcp_tools.list_exposures
+    original = session_services.read_audit
+    original_list = session_services.list_exposures
     calls = []
     list_calls = []
 
@@ -225,8 +225,8 @@ def test_audit_surfaces_use_public_read_boundary(
         list_calls.append((session_id, tab))
         return original_list(ledger, session_id, tab)
 
-    monkeypatch.setattr(mcp_tools, "read_audit", tracked)
-    monkeypatch.setattr(mcp_tools, "list_exposures", tracked_list)
+    monkeypatch.setattr(session_services, "read_audit", tracked)
+    monkeypatch.setattr(session_services, "list_exposures", tracked_list)
     _invoke(surface, data, tab)
 
     assert len(calls) == 1

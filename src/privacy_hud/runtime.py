@@ -506,8 +506,9 @@ def plugin_data_dir() -> Path | None:
     directory, and "nothing to read" is a state every caller already renders
     as silence.
 
-    Re-exported as `local_ui_server.resolve_data_dir`, which is the name
-    `ambient`, `mcp/server.py` and the tests use for it.
+    `ambient` and `mcp/server.py` import this directly (as their local
+    `resolve_data_dir`). `local_ui_server.resolve_data_dir` is retained as
+    that browser module's compatibility alias, not a shared import location.
     """
     env = os.environ.get("PLUGIN_DATA")
     if env:

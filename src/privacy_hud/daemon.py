@@ -93,7 +93,6 @@ from .runtime_client import (
     HELLO_FRAME_LIMIT,
     OP_HELLO,
     OP_POLICY_UPDATE,
-    connect_socket,
     decode_frame,
     encode_frame,
     hello_matches,
@@ -133,16 +132,6 @@ OP_EVENT = "event"
 #: that knows — read `dispatch.active_sessions` before assuming the ledger
 #: could answer this instead.
 OP_ACTIVE_SESSIONS = "active_sessions"
-
-#: Client-side bound for `query_active_sessions`. Deliberately generous
-#: compared with the hook client's 2 s: the caller is a human running
-#: `$privacy`, not a hook with a 5 s budget, and the daemon answers requests
-#: serially — so a query that arrives while a tier-3 ingress scan is in
-#: flight (~3 s measured) should wait for the true answer rather than
-#: degrade to the ledger's wrong one. Still bounded, because a wedged daemon
-#: must not hang the skill: expiring reads as "no answer", which the caller
-#: already has an honest fallback for.
-QUERY_TIMEOUT = 5.0
 
 # -- daemon lifetime ---------------------------------------------------
 # Every number below is argued in `Daemon`'s "Lifetime policy" section.
@@ -464,12 +453,12 @@ class _Handler(socketserver.StreamRequestHandler):
         request this daemon could not complete: the client hands its
         socket away as it transmits, so it reports an unknown outcome
         rather than inventing one (#66 Pair 6). A *validation* failure
-        cannot reach here — `runtime_commands.update_policy` refuses a
-        malformed rule before it is sent, and `mcp_tools.apply_policy`
+        cannot reach here — `runtime_client.update_policy` refuses a
+        malformed rule before it is sent, and `policy_services.apply_policy`
         checks again below — so there is no error string to relay, which
         is also what keeps peer-chosen text off this wire (I1).
         """
-        from . import mcp_tools
+        from . import policy_services
 
         required = ("session_id", "rule_type", "selector")
         if set(body) != set(required) or not all(
@@ -482,7 +471,7 @@ class _Handler(socketserver.StreamRequestHandler):
         state = self.server.state
         try:
             with state.lock:
-                mcp_tools.apply_policy(state.ledger, session_id,
+                policy_services.apply_policy(state.ledger, session_id,
                                        rule_type=rule_type,
                                        selector=selector)
         except Exception:
@@ -494,7 +483,7 @@ class _Handler(socketserver.StreamRequestHandler):
             # finding it matches.
             "saved": True, "enforcement": "conditional",
             "rule_type": rule_type, "selector": selector,
-            "conditions": mcp_tools.rule_enforcement_note(
+            "conditions": policy_services.rule_enforcement_note(
                 rule_type, selector).strip(),
         }
 
@@ -1482,51 +1471,6 @@ class Daemon(socketserver.ThreadingUnixStreamServer):
                     self._release_startup_lock()
 
 
-def _default_socket_path(data_dir: Path) -> Path:
-    # The name is Codex-facing plumbing, not this daemon's choice: the hook
-    # client joins the same name onto the same `$PLUGIN_DATA`, so it lives in
-    # `codex.py` with the rest of the facts both ends must share.
-    return codex.socket_path(data_dir)
-
-
-def query_active_sessions(socket_path, *, timeout: float = QUERY_TIMEOUT,
-                          activation: Activation | None = None
-                          ) -> list[dict] | None:
-    """Ask the daemon at `socket_path` which sessions are alive right now.
-
-    Returns the reply's `sessions` list — dicts of `session_id` and `age`
-    (seconds since that session's last hook event), most recently active
-    first — or `None` when there was **no usable answer**: no selected
-    runtime, nothing listening, a daemon of another build or epoch, a
-    timeout, a truncated or unparseable reply, a reply for a different op.
-    `None` and `[]` are different facts and callers must keep them apart:
-    `[]` is a daemon that is up and believes no session is live, while
-    `None` is not knowing.
-
-    `activation` defaults to the one receipt v2 records in the socket's own
-    directory (`$PLUGIN_DATA`).
-
-    Never raises. Every caller of this is a surface that must still work with
-    no daemon at all — the honest fallback is the caller's business, but it
-    has to be reachable, so a broken socket cannot arrive here as an
-    exception.
-    """
-    try:
-        if activation is None:
-            activation = load_activation(Path(socket_path).parent)
-        with connect_socket(Path(socket_path), activation=activation,
-                            timeout=timeout) as connection:
-            reply = connection.request(OP_ACTIVE_SESSIONS, {})
-    except Exception:
-        return None
-    sessions = reply.get("sessions")
-    if not isinstance(sessions, list):
-        return None
-    return [s for s in sessions
-            if isinstance(s, dict) and isinstance(s.get("session_id"), str)
-            and s["session_id"] and isinstance(s.get("age"), (int, float))]
-
-
 def main(argv: list[str] | None = None, *,
          activation: Activation | None = None) -> int:
     """CLI entrypoint: `scripts/runtime.py --plugin-data DIR daemon` (which
@@ -1580,7 +1524,7 @@ def main(argv: list[str] | None = None, *,
         except RuntimeRefusal:
             print(DAEMON_STARTUP_REFUSAL, file=sys.stderr)
             return EXIT_FAILURE
-    socket_path = _default_socket_path(data_dir)
+    socket_path = codex.socket_path(data_dir)
     try:
         daemon = Daemon(socket_path, data_dir, activation=activation)
     except AlreadyRunning as exc:

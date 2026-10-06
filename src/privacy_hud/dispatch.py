@@ -737,7 +737,7 @@ def active_sessions(state: State, *, stale_after: float
     monotonic clock has an unrelated origin, and a wall clock would drag in
     NTP steps for no benefit. An age in seconds is comparable anywhere, which
     is what a client needs to decide whether two sessions were active in the
-    same moment (see `mcp_tools.resolve_audit_session`).
+    same moment (see `session_services.resolve_audit_session`).
 
     **Does not sweep.** Unlike `live_session_count`, this deliberately
     filters stale entries without deleting them: answering a question must

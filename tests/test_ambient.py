@@ -23,7 +23,7 @@ import json
 
 import pytest
 
-from privacy_hud import ambient, mcp_tools
+from privacy_hud import ambient, mcp_tools, session_services
 from privacy_hud import hud_snapshot as hs
 from privacy_hud.ledger import Ledger
 from privacy_hud.matrix.loader import load_matrix
@@ -71,7 +71,7 @@ def no_hud_line(monkeypatch):
 def daemon_says(monkeypatch):
     """Stub the one socket call session resolution makes, and count it.
 
-    Same seam `tests/test_mcp.py` uses (`mcp_tools._ask_daemon`), for the same
+    Same seam `tests/test_mcp.py` uses (`session_services._ask_daemon`), for the same
     reason: these tests are about the POLICY — which session this pane shows,
     and how often it asks — not about socket plumbing, which
     `tests/test_daemon.py` exercises against a real daemon. Returns the call
@@ -83,7 +83,7 @@ def daemon_says(monkeypatch):
         def _fake(data_dir):
             calls.append(data_dir)
             return sessions
-        monkeypatch.setattr(mcp_tools, "_ask_daemon", _fake)
+        monkeypatch.setattr(session_services, "_ask_daemon", _fake)
         return calls
 
     return _install
@@ -557,7 +557,7 @@ def test_watch_does_not_hop_between_sessions_between_redraws(
         answer = list(live)
         live[:] = [{"session_id": "s2", "age": 0.01}]  # the other window acts
         return answer
-    monkeypatch.setattr(mcp_tools, "_ask_daemon", _fake)
+    monkeypatch.setattr(session_services, "_ask_daemon", _fake)
     _stub_sleep(monkeypatch, 3)
 
     ambient.main(["--watch"])
@@ -600,7 +600,7 @@ def test_resolution_failure_is_silence_not_a_traceback(data_dir, monkeypatch,
 
     def _boom(ledger, data_dir_arg, **kwargs):
         raise RuntimeError("resolution exploded")
-    monkeypatch.setattr(mcp_tools, "resolve_audit_session", _boom)
+    monkeypatch.setattr(session_services, "resolve_audit_session", _boom)
 
     assert ambient.main(["--once"]) == 0
     assert capsys.readouterr().out == ""

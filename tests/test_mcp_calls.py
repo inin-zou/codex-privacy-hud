@@ -31,7 +31,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 import server  # `mcp/` is on sys.path via conftest
-from privacy_hud import mcp_tools
+from privacy_hud import mcp_tools, session_services
 from privacy_hud.ledger import Ledger
 from privacy_hud.matrix.loader import load_matrix
 from privacy_hud.runtime_messages import (
@@ -220,7 +220,7 @@ def test_mcp_serializes_concurrent_tool_bodies(app_env, monkeypatch):
     app, data_dir, _event_id = app_env
     state = {"active": 0, "max": 0}
     guard = threading.Lock()
-    real = mcp_tools.get_session_summary
+    real = session_services.get_session_summary
 
     def instrumented(ledger, session_id):
         with guard:
@@ -233,7 +233,7 @@ def test_mcp_serializes_concurrent_tool_bodies(app_env, monkeypatch):
             with guard:
                 state["active"] -= 1
 
-    monkeypatch.setattr(mcp_tools, "get_session_summary", instrumented)
+    monkeypatch.setattr(session_services, "get_session_summary", instrumented)
 
     async def many():
         return await asyncio.gather(*[
@@ -271,12 +271,12 @@ def test_mcp_database_error_is_explicit_and_sanitized(app_env, monkeypatch,
                                                       caplog, capsys):
     app, _data_dir, _event_id = app_env
     sentinel = "SENTINEL-raw-db-text-4f1c"
-    real = mcp_tools.get_session_summary
+    real = session_services.get_session_summary
 
     def failing(ledger, session_id):
         raise sqlite3.OperationalError(sentinel)
 
-    monkeypatch.setattr(mcp_tools, "get_session_summary", failing)
+    monkeypatch.setattr(session_services, "get_session_summary", failing)
     with pytest.raises(ToolError) as caught:
         _call(app, "privacy.get_session_summary", {"session_id": SID})
     assert str(caught.value).endswith(FIXED_ERROR)
@@ -287,7 +287,7 @@ def test_mcp_database_error_is_explicit_and_sanitized(app_env, monkeypatch,
     assert sentinel not in caplog.text
     assert sentinel not in captured.out + captured.err
 
-    monkeypatch.setattr(mcp_tools, "get_session_summary", real)
+    monkeypatch.setattr(session_services, "get_session_summary", real)
     again = _call(app, "privacy.get_session_summary", {"session_id": SID})
     assert _payload(again)["legacy_permitted_crossing_rows"] == 1, "the lock was not released"
 
@@ -437,7 +437,7 @@ def test_mcp_shutdown_closes_connection(tmp_path, monkeypatch):
     led.conn = _Conn()  # type: ignore[assignment]
 
     finished: list[float] = []
-    real_summary = mcp_tools.get_session_summary
+    real_summary = session_services.get_session_summary
 
     def slow(ledger, session_id):
         time.sleep(0.3)
@@ -445,7 +445,7 @@ def test_mcp_shutdown_closes_connection(tmp_path, monkeypatch):
         finished.append(time.monotonic())
         return out
 
-    monkeypatch.setattr(mcp_tools, "get_session_summary", slow)
+    monkeypatch.setattr(session_services, "get_session_summary", slow)
 
     async def scenario():
         async with app.settings.lifespan(app):
@@ -628,5 +628,5 @@ def test_mcp_all_events_includes_permitted(tmp_path, monkeypatch):
     finally:
         _close(opened)
     # The legacy tab map is unchanged.
-    assert mcp_tools._TAB_KINDS["All events"] == (
+    assert session_services._TAB_KINDS["All events"] == (
         "exposed", "prevented", "local_access", "detected", "retention")

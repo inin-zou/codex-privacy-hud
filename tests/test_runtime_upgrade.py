@@ -409,7 +409,7 @@ def test_upgrade_071_running_daemon_wal_then_old_restart(upgrade):
     assert audit.text
     ambient = upgrade.bootstrap("ambient", "--once")
     assert ambient.returncode == 0, ambient.stderr
-    saved = runtime_commands.update_policy(
+    saved = runtime_client.update_policy(
         data, activation=activation, session_id=OLD_SESSION,
         rule_type="block_path", selector="/etc/hosts")
     assert saved.get("saved") is True
