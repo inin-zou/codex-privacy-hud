@@ -36,6 +36,7 @@ WORD_COUNTS = {
     "eighteen": 18, "nineteen": 19, "twenty": 20, "twenty-one": 21,
     "十八": 18, "十九": 19, "二十": 20, "二十一": 21,
     "twenty-two": 22, "二十二": 22,
+    "twenty-three": 23, "二十三": 23,
 }
 
 

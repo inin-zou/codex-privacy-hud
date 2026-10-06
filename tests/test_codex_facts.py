@@ -192,3 +192,98 @@ def test_ambiguous_mcp_name_is_unresolved():
         assert codex.mcp_server_namespace(name) is None, name
         # The broad egress predicate is unchanged by this narrower one.
     assert codex.is_mcp_tool("mcp__a__b__c")
+
+
+def test_hook_trust_keys_and_hashes_match_the_shipped_bundle():
+    from hook_trust_helpers import VECTORS, expected_trust
+
+    document = json.loads(HOOKS_JSON.read_text(encoding="utf-8"))
+    assert set(document["hooks"]) == set(VECTORS) == codex.KNOWN_EVENTS
+    assert sum(
+        len(group["hooks"])
+        for groups in document["hooks"].values()
+        for group in groups
+    ) == 8
+    assert codex.plugin_hook_hashes(REPO, codex.MARKETPLACE_NAME) == (
+        expected_trust()
+    )
+
+
+def test_hook_keys_include_marketplace_and_both_indices(tmp_path):
+    from hook_trust_helpers import copy_hooks
+
+    copy_hooks(tmp_path)
+    path = tmp_path / "hooks" / "hooks.json"
+    document = json.loads(path.read_text())
+    group = document["hooks"]["PreToolUse"][0]
+    group["hooks"].append(dict(group["hooks"][0]))
+    document["hooks"]["PreToolUse"].append(group)
+    path.write_text(json.dumps(document))
+
+    actual = codex.plugin_hook_hashes(tmp_path, "another-market")
+    prefix = "codex-privacy-hud@another-market:hooks/hooks.json:pre_tool_use"
+    assert {key for key in actual if key.startswith(prefix)} == {
+        f"{prefix}:0:0", f"{prefix}:0:1",
+        f"{prefix}:1:0", f"{prefix}:1:1",
+    }
+    assert len(actual) == 11
+
+
+def test_hook_hash_uses_normalized_timeout_and_literal_command(tmp_path):
+    import hashlib
+
+    from hook_trust_helpers import copy_hooks
+
+    copy_hooks(tmp_path)
+    path = tmp_path / "hooks" / "hooks.json"
+    document = json.loads(path.read_text())
+    document["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"] = 999
+    document["hooks"]["UserPromptSubmit"][0]["matcher"] = "ignored"
+    path.write_text(json.dumps(document))
+
+    from hook_trust_helpers import expected_trust
+
+    assert codex.plugin_hook_hashes(tmp_path, codex.MARKETPLACE_NAME) == (
+        expected_trust()
+    )
+
+    document["hooks"]["SessionStart"][0]["hooks"][0].pop("timeout")
+    path.write_text(json.dumps(document))
+    canonical = (
+        '{"event_name":"session_start","hooks":[{"async":false,'
+        '"command":"$PLUGIN_ROOT/hooks/handler.py","timeout":600,'
+        '"type":"command"}]}'
+    )
+    key = (
+        "codex-privacy-hud@codex-privacy-hud:"
+        "hooks/hooks.json:session_start:0:0"
+    )
+    assert codex.plugin_hook_hashes(tmp_path, codex.MARKETPLACE_NAME)[key] == (
+        "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+    )
+
+
+def test_unsupported_hook_identity_is_never_guessed(tmp_path):
+    import pytest
+
+    from hook_trust_helpers import copy_hooks
+
+    copy_hooks(tmp_path)
+    path = tmp_path / "hooks" / "hooks.json"
+    document = json.loads(path.read_text())
+    document["hooks"]["PreToolUse"][0]["hooks"][0][
+        "additionalContextLimit"
+    ] = 100
+    path.write_text(json.dumps(document))
+    with pytest.raises(ValueError):
+        codex.plugin_hook_hashes(tmp_path, codex.MARKETPLACE_NAME)
+
+
+def test_codex_user_config_path_honors_home_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "override"))
+    assert codex.user_config_path() == tmp_path / "override" / "config.toml"
+    monkeypatch.delenv("CODEX_HOME")
+    assert codex.user_config_path() == (
+        tmp_path / "home" / ".codex" / "config.toml"
+    )

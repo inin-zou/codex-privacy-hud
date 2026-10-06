@@ -40,8 +40,8 @@ def test_prompt_limit_and_reviewed_chinese_are_present():
         "fail open", "not a live TUI test",
     ):
         assert phrase in limits
-    assert "All twenty-two limits" in english
-    assert "二十二条限制" in chinese
+    assert "All twenty-three limits" in english
+    assert "二十三条限制" in chinese
     assert (
         "守护进程没有响应时，包括冷启动期间，提示词仍会放行，并显示未经验证的提示。"
     ) in chinese

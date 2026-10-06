@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.10
+
+- Make doctor fail when a selected installed plugin hook lacks matching persisted trust or is explicitly disabled. Verify normalized hook-definition hashes without printing configuration values, state keys or hashes.
+- Report unreadable configuration and unsupported hook definitions as verification failures, and state the cache-selection and invocation-layer limits of the check.
+- Explain the required interactive hook-trust step in installer output and both READMEs. Document that untrusted hooks can leave an entire `codex exec` session unobserved, independently of daemon startup delays.
+- Add hermetic trust-state, hash-vector, report-privacy and documentation coverage.
+
+Refs #99.
+
 ## 0.10.9
 
 - Extract shared policy and session services below the daemon and user-facing adapters, and move session-query and policy-update clients into the runtime client layer.
