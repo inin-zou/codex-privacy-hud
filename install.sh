@@ -4,7 +4,7 @@
 set -eu
 
 REPO="inin-zou/codex-privacy-hud"
-RELEASE="0.10.9"
+RELEASE="0.10.10"
 BASE_URL="${PRIVACY_HUD_RELEASE_BASE_URL:-https://github.com/$REPO/releases/download}"
 SHARE="$HOME/.local/share/codex-privacy-hud"
 BIN="$HOME/.local/bin"
@@ -968,6 +968,8 @@ fi
 # only matters when nothing did.
 write_manifest
 log "done. restart codex to load the installed plugin and PATH changes"
+log "      hooks run only after trust is granted in an interactive codex session: choose \"Trust all and continue\""
+log "      codex exec sessions are unmonitored until then (with default hook-trust checks)"
 log "      the native Privacy item requires a snapshot-v2-compatible patched Codex build"
 log "      matching Codex versions and successful installation do not establish snapshot compatibility"
 log "      until compatibility is verified, use: $SHARE/bin/privacy-hud-ambient --watch"

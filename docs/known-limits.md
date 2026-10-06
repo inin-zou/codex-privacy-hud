@@ -221,6 +221,20 @@ A hold returns only decision and reason. Additional context returned alongside a
 
 Version-2 accounting records an issued denial as prevented with zero points, while host enforcement remains unresolved. Resubmission authorization does not establish model-context admission. Legacy held rows use no deduplication hash so a later permitted crossing can be recorded separately. Other legacy deduplication limitations remain.
 
+## 23. Untrusted hooks mean no observation at all.
+
+With Codex's default hook-trust checks, an installed plugin is not enough. Each handler needs a persisted trusted hash matching its current normalized hook definition. A missing hash leaves that hook untrusted; a different hash marks it modified. Neither runs by default. If none of Privacy HUD's hooks is trusted, the whole session has no observation at all, even when the daemon is already running. Partial trust leaves the affected events unobserved. There may be no plugin-generated warning because the hook that would produce it never runs. An empty ledger is not evidence of no disclosure.
+
+Open `codex` interactively once and choose **Trust all and continue** when **Hooks need review** appears. `codex exec` does not present that interactive review, so ordinary non-interactive sessions remain unmonitored until trust is granted. Changed hook definitions need review again. Trust is for the normalized hook definition, not a checksum of every file the command may execute.
+
+A hook with `enabled = false` also does not run. Trusting it does not change that setting: set `enabled = true` for the affected plugin hook-state entry in the Codex user config, then rerun doctor.
+
+Doctor's `Hook trust` check compares exact hashes for the supported command-hook schema in one selected cached bundle per marketplace. It uses the existing Plugin install version-selection convention; cache selection is not proof of the bundle loaded by an already-running session. Missing, different or disabled trust state fails the check. Unreadable configuration or unsupported hook definitions fail verification rather than passing on the presence of a hash-shaped string.
+
+The check reads the default user config at `$CODEX_HOME/config.toml`, or `~/.codex/config.toml` when `CODEX_HOME` is unset. It reports counts, never configuration values, state keys or hashes. The inspected Codex 0.155.1 source accepts hook state from user configuration and session flags, not project `.codex/config.toml`. Doctor does not reproduce invocation-specific session flags or alternate user-config selection. Codex 0.155.1 also exposes `--dangerously-bypass-hook-trust` for an invocation; this does not establish persisted trust and does not override `enabled = false`. Doctor does not recommend or assume that bypass.
+
+This is separate from limit 1: granting trust permits hooks to run, but it does not eliminate daemon startup delays or any other observation gap. The 0.154.0 failure was observed in sandbox verification; the 0.155.1 behavior described here is based on source inspection, not a new live-session test.
+
 ## Note on tests
 
 `cargo test -p codex-tui` and the upstream `insta` picker snapshots have not been run anywhere.

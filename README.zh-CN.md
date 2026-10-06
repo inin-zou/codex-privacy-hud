@@ -110,6 +110,8 @@ python3 "$PRIVACY_HUD_BUNDLE/scripts/runtime.py" \
 curl -fsSL https://raw.githubusercontent.com/inin-zou/codex-privacy-hud/main/install.sh | sh
 ```
 
+**安装后必须完成：**以交互方式启动一次 `codex`，出现 **Hooks need review**（需要审核 hook）时，选择 **Trust all and continue**（信任全部并继续）。在 Codex 默认的 hook 信任检查下，完成此步骤前，插件的 hook 不会运行，`codex exec` 会话也完全没有监控。因此，安装程序运行 doctor 时，`Hook trust` 可能显示为 `FAIL`；请先授予信任，再重新运行 `privacy-hud-doctor`。
+
 通过管道运行，或脚本旁没有插件包时，安装脚本会下载脚本内固定版本对应的完整插件包，并使用同一发布版本提供的校验文件验证 SHA-256。下载失败、校验失败、压缩包无效或插件包版本不符时，脚本会在创建安装清单、依赖环境、命令包装脚本或修改 Codex 配置之前退出。临时插件包会在脚本退出时删除。SHA-256 可以检测下载损坏；脚本和校验文件仍依赖对本仓库发布者的信任。
 
 版本更新合并到 `main` 后，工作流会自动开始创建对应标签并发布插件。在该版本发布完成且下载文件可用之前，一键安装命令可能会在写入持久化安装文件之前失败。请在发布完成后重试；如果发布工作流失败，这段等待时间可能会延长。
@@ -132,7 +134,7 @@ curl -fsSL https://raw.githubusercontent.com/inin-zou/codex-privacy-hud/main/ins
 | 6 | 下载与**你的版本完全一致**的补丁版 Codex 构建，校验 SHA-256 并解压，再将官方 `codex-code-mode-host` 链接到同一目录。压缩包只包含 `codex`；Code Mode 需要同目录下的这个程序，应使用相同版本的官方程序。 | `~/.local/share/codex-privacy-hud/<version>/` |
 | 7 | 写入名为 `codex` 的小型转发脚本（forwarder）。如果需要，则将 `~/.local/bin` 加入 shell 的 `PATH`。 | `~/.local/bin/codex` |
 | 8 | 在 Codex 配置的 `[tui].status_line` 中加入 `privacy`。如果你从未设置过这个键，则以 Codex 默认值创建。 | `~/.codex/config.toml` |
-| 9 | 运行 `privacy-hud-doctor` 并输出检查表。每一行都应为 `OK` 或 `WARN`，不应出现 `FAIL`。 | — |
+| 9 | 运行 `privacy-hud-doctor` 并输出检查表。已安装的 hook 尚未获得信任时，`Hook trust` 会显示为 `FAIL`；请完成交互式信任步骤后重新运行 doctor。其他失败项也需要处理。 | — |
 
 CI 发布的二进制**未经签名，也未经公证**。安装脚本会自行移除隔离属性。SHA-256 校验只能防止下载损坏，无法防范发布内容遭篡改。
 
@@ -173,7 +175,7 @@ codex plugin add codex-privacy-hud@codex-privacy-hud
 
 接下来，请按以下步骤操作：
 
-1. 运行 `codex`。Codex 0.154 启动时会显示 **Hooks need review**（需要审核 hook），提示你审核插件的八个 hook。选择 **Trust all and continue**（信任全部并继续）。在此之前，插件中的任何内容都不会运行。
+1. 以交互方式运行 `codex`。出现 **Hooks need review**（需要审核 hook），要求审核插件的八个 hook 时，选择 **Trust all and continue**（信任全部并继续）。在默认信任检查下，获得信任前，这些 hook 都不会运行。`codex exec` 不会显示此交互式审核界面，因此在完成信任步骤前，其会话完全没有监控。
 2. 发送任意消息。第一轮交互会显示一行提醒。输入 `$privacy setup`，让 Codex 运行插件缓存中的安装脚本（`sh ~/.codex/plugins/cache/codex-privacy-hud/codex-privacy-hud/<version>/install.sh --yes`）。脚本需要向你的主目录写入文件并下载内容，因此 Codex 会请求一次在沙箱外运行的权限。批准请求后，等待安装完成。模型下载需要几分钟。提醒中也会显示同一路径，你可以在另一个终端中运行该命令。缓存中的安装脚本固定使用该插件的发布版本。要升级已有安装，请使用上方获取当前安装脚本的一键安装命令。`--yes` 会直接下载模型，不再询问。`--no-model` 会跳过模型下载。
 3. 重启 Codex，让补丁版 Codex 和状态行项生效。
 
@@ -375,6 +377,7 @@ flowchart TD
 20. 只有 hook 和受支持的解析器提供明确身份时，才区分具体接收方。其他接收方保留为未解析状态。知道身份本身不能证明数据已送达或继续转发。（[详情](docs/known-limits.md#20-a-destination-is-a-boundary-category-not-a-recipient)）
 21. **出站调用的深度扫描尽力而为。** 模型串行执行，而出站调用一旦错过 hook 时限就会被判为拒绝（I6）。出站扫描使用基于剩余预算的请求超时，并以完成时间不晚于截止点作为采纳结果的必要条件；两者都不保证实际耗时。详见 `engine.TIER3_EGRESS_BUDGET`。（实测：在 1.0 秒预算下，一次调用到 1.25 秒才返回。）同一时间最多允许一个出站扫描工作线程运行。准入是非阻塞的；工作线程会一直占用其名额直到退出，即使调用方已放弃等待也是如此。扫描缺口是指本应适用的深度扫描未提供被采纳的结果。此时调用仅依据快速检测层的结果继续处理，与引入这项功能之前的所有出站调用相同。扫描缺口可能漏掉原本会触发拦截或脱敏的发现。每次观测中的扫描缺口都会记录，并按会话计数，包括未产生事件行的观测。因此会话不再显示为已完全验证，但审计无法指出具体是哪些调用。（[详情](docs/known-limits.md#21-on-an-outbound-call-the-deep-scan-is-best-effort)）
 22. **提示词凭据暂缓的范围有限。** 只有提示词文本中受支持的凭据格式才会触发暂缓。等待至少 2 秒，并在 5 分钟内重新提交，即可确认。图片、附件、熵检测结果、私钥头部和第三级 NER 检测结果不会触发此暂缓。守护进程没有响应时，入站提示词仍会放行。（[详情](docs/known-limits.md#22-credential-prompt-holds-have-a-narrow-scope)）
+23. **未获信任的 hook 意味着完全没有观测。** 在默认信任检查下，如果插件的所有 hook 都未获信任，整个会话都没有监控，`codex exec` 也不例外；即使守护进程正在运行也无济于事。仅信任部分 hook 时，未获信任的 hook 所对应的事件不会被观测。请以交互方式启动 `codex`，选择 **Trust all and continue**（信任全部并继续）。hook 定义发生变化后，需要重新审核。这与限制 1 中的冷启动监控空档不同。（[详情](docs/known-limits.md#23-untrusted-hooks-mean-no-observation-at-all)）
 
 ## 配置
 
@@ -440,7 +443,7 @@ sh "$PRIVACY_HUD_BUNDLE/install.sh" --uninstall
 | 文档 | 内容 | 适用情况 |
 |---|---|---|
 | [`docs/installing-by-hand.md`](docs/installing-by-hand.md) | 手动执行各安装步骤，使用 `privacy-hud-setup` 和 `privacy-hud-doctor` 命令，以及使用伴随窗格。 | 无法使用 `install.sh`，或希望控制每一步。 |
-| [`docs/known-limits.md`](docs/known-limits.md) | 二十二条限制的完整说明，以及相应的测量依据。 | 判断 HUD 显示的数值在多大程度上可信。 |
+| [`docs/known-limits.md`](docs/known-limits.md) | 二十三条限制的完整说明，以及相应的测量依据。 | 判断 HUD 显示的数值在多大程度上可信。 |
 | [`patches/README.md`](patches/README.md) | 只增加一个 Codex 状态行项的补丁，以及如何针对新 tag 重新生成补丁。 | 审计或重新构建补丁版 Codex 二进制。 |
 | [`.claude/docs/architecture.md`](.claude/docs/architecture.md) | 组件关系、进程模型、账本结构、hook 分发，以及尚未提供的交互式授权流程及其限制。 | 开发插件本身。 |
 
