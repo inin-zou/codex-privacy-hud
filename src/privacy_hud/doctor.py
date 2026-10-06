@@ -1550,7 +1550,7 @@ def _plugin_enabled(marketplace: str) -> bool | None:
     worth reading. Only the one boolean is read; nothing else in that file is
     inspected or printed (it holds unrelated user configuration).
     """
-    config = _codex_home() / "config.toml"
+    config = codex.user_config_path()
     try:
         import tomllib
         with open(config, "rb") as handle:
@@ -1648,6 +1648,127 @@ def _installed_plugin_root() -> Path | None:
     return None if entry is None else entry[2]
 
 
+_HOOK_TRUST_REMEDY = (
+    'Open `codex` interactively once and choose "Trust all and continue".'
+)
+
+_HOOK_TRUST_SCOPE = (
+    "Checks the default Codex user config and one cached bundle per "
+    "marketplace, using the same version-selection convention as Plugin "
+    "install. This does not verify a running session's loaded bundle, "
+    "alternate user-config selection, session flags, or the invocation-only "
+    "--dangerously-bypass-hook-trust option."
+)
+
+
+def check_hook_trust() -> Check:
+    """Verify persisted admission state for this plugin's command hooks.
+
+    Hashes, keys, commands and parser diagnostics never enter the report.
+    A successful daemon or MCP probe cannot substitute for hook admission.
+    """
+    installed = _installed_plugin_dirs()
+    if not installed:
+        return Check(
+            "Hook trust", SKIP,
+            "no cached plugin bundle; see Plugin install",
+        )
+
+    chosen: list[tuple[str, str, Path]] = []
+    for marketplace in sorted({entry[0] for entry in installed}):
+        entries = [entry for entry in installed if entry[0] == marketplace]
+        entry = _installed_plugin_entry(entries)
+        if entry is None:
+            return Check(
+                "Hook trust", FAIL,
+                "cannot verify the cached plugin selection",
+                details=[_HOOK_TRUST_SCOPE],
+                fixes=[
+                    "Check Plugin install and rerun doctor.",
+                    _HOOK_TRUST_REMEDY,
+                ],
+            )
+        chosen.append(entry)
+
+    expected: dict[str, str] = {}
+    try:
+        for marketplace, _version, bundle in chosen:
+            expected.update(codex.plugin_hook_hashes(bundle, marketplace))
+    except (OSError, ValueError, UnicodeError, RecursionError):
+        return Check(
+            "Hook trust", FAIL,
+            "cannot verify the installed hook definitions",
+            details=[
+                "A selected bundle is missing, malformed, incomplete, or "
+                "uses a hook schema this doctor cannot verify.",
+                _HOOK_TRUST_SCOPE,
+            ],
+            fixes=[
+                "Check Plugin install and reinstall a supported bundle.",
+                _HOOK_TRUST_REMEDY,
+            ],
+        )
+
+    try:
+        states = codex.read_hook_states(set(expected))
+    except (OSError, ValueError, UnicodeError, RecursionError):
+        return Check(
+            "Hook trust", FAIL,
+            "cannot verify hook trust in the Codex user config",
+            details=[
+                "The config is unreadable or malformed. Its contents and "
+                "parser diagnostics are withheld.",
+                _HOOK_TRUST_SCOPE,
+            ],
+            fixes=[
+                "Make the Codex user config readable and valid TOML.",
+                _HOOK_TRUST_REMEDY,
+            ],
+        )
+
+    ready = 0
+    disabled = 0
+    untrusted = 0
+    for key, current_hash in expected.items():
+        trusted_hash, enabled = states.get(key, (None, None))
+        if enabled is False:
+            disabled += 1
+        if trusted_hash != current_hash:
+            untrusted += 1
+        if enabled is not False and trusted_hash == current_hash:
+            ready += 1
+
+    summary = (
+        f"{ready}/{len(expected)} hooks trusted and enabled "
+        f"across {len(chosen)} marketplace(s)"
+    )
+    if ready == len(expected):
+        return Check(
+            "Hook trust", OK, summary,
+            details=[_HOOK_TRUST_SCOPE],
+        )
+
+    fixes = [_HOOK_TRUST_REMEDY]
+    if disabled:
+        fixes.append(
+            "Set enabled = true for this plugin's disabled hooks.state "
+            "entries in the Codex user config, then rerun doctor. Trusting "
+            "a hook does not change enabled = false."
+        )
+    return Check(
+        "Hook trust", FAIL, summary,
+        details=[
+            f"{untrusted} missing or nonmatching trust hash(es); "
+            f"{disabled} disabled hook(s).",
+            "With default trust checks, affected hooks do not run. If all "
+            "plugin hooks are untrusted, there is no observation at all, "
+            "even when the daemon is running.",
+            _HOOK_TRUST_SCOPE,
+        ],
+        fixes=fixes,
+    )
+
+
 def check_plugin_install() -> Check:
     """Is a copy installed in Codex's cache, is it enabled, is it current?
 
@@ -1730,11 +1851,11 @@ def check_plugin_install() -> Check:
                 ".enabled = false, so no hook fires."],
             fixes=[f"codex plugin add {PLUGIN_NAME}@{marketplace}",
                    "or set enabled = true for that entry in "
-                   f"{_display_path(codex_home / 'config.toml')}"],
+                   f"{_display_path(codex.user_config_path())}"],
         )
     if enabled is None:
         details.append("Could not read an enabled flag from "
-                       f"{_display_path(codex_home / 'config.toml')}; "
+                       f"{_display_path(codex.user_config_path())}; "
                        "whether Codex has this plugin enabled is unverified.")
 
     if repo is None:
@@ -2474,7 +2595,7 @@ def _native_item_configured() -> bool:
     about one would be a permanent warning about something that is not in
     use — which is how a report teaches its reader to skip a line.
     """
-    config = _codex_home() / "config.toml"
+    config = codex.user_config_path()
     try:
         import tomllib
 
@@ -2641,6 +2762,7 @@ def run_checks(*, load_model: bool = False,
         ("Detector deps", check_detector_deps),
         ("Tier 3 model", lambda: check_tier3(load_model)),
         ("Plugin install", check_plugin_install),
+        ("Hook trust", check_hook_trust),
         ("MCP server", check_mcp_server),
         ("Native HUD compatibility", check_native_reader),
     ]
@@ -2693,8 +2815,8 @@ def format_report(checks: list[Check]) -> str:
     lines.append("Summary: " + ", ".join(tally) + ".")
 
     if counts[FAIL]:
-        lines.append("Setup is NOT usable — nothing will be recorded until "
-                     "the [FAIL] items above are fixed.")
+        lines.append("Setup is NOT usable — address the [FAIL] items above "
+                     "before relying on observation.")
     elif counts[WARN]:
         lines.append("Setup is usable, with the limitations noted above.")
     else:
