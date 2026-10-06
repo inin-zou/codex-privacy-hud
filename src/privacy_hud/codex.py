@@ -32,7 +32,8 @@ command means, what the doctor says about a missing directory — belongs in
 the module that owns the policy. The line matters: this file must stay
 readable as "what Codex does", not as a second copy of the daemon.
 
-**I1.** Nothing here touches session content. Names, paths and event labels.
+**I1.** Delegation helpers inspect transient arguments without persisting
+content. Other platform facts are names, paths and event labels.
 """
 from __future__ import annotations
 
@@ -174,6 +175,9 @@ STRING_COMMAND_TOOLS = frozenset({SHELL_TOOL, PATCH_TOOL})
 # core/src/tools/handlers/multi_agents/{spawn,send_input}.rs,
 # core/src/tools/handlers/multi_agents_v2/{spawn,message_tool}.rs,
 # core/src/tools/{hook_names,mod}.rs.
+# Codex 0.154.0 and 0.159.3 also flatten the collaboration namespace by
+# concatenating it with the tool name. V2 message encryption is declared in
+# multi_agents_spec.rs; hook argument parsing does not decrypt it.
 # Agent is a matcher alias, not a serialized tool name.
 SUBAGENT_TOOLS = frozenset({
     "spawn_agent",

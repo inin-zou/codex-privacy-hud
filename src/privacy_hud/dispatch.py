@@ -26,10 +26,12 @@ task-10 brief, both consistent with `hooks/handler.py`'s own
   when it can name a path or a program the output came from (#40); `None`
   keeps `tool_name`, exactly as before origins existed.
 
-  Supported delegation PreToolUse hooks scan explicit message/text-item
-  content as B2 propagation. They do not enter egress policy or rewrite
-  handling. Legacy findings classify as detected; V2 outcomes follow the
-  delivered evidence.
+  Supported delegation PreToolUse hooks scan visible plaintext as B2
+  propagation. Recognized encrypted message fields are excluded and mark
+  scanning unavailable; their plaintext is unobservable. Remaining supported
+  plaintext fields still scan. This path does not enter egress policy or
+  rewrite handling. Legacy findings classify as detected; V2 outcomes follow
+  delivered evidence. PostToolUse scans the result, not echoed input.
 
   Recognized local shell reads use the local read guard. Other local
   commands and unsupported non-shell tools have no content observation;

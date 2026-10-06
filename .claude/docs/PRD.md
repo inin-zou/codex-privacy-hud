@@ -14,7 +14,7 @@ Runtime selection, writer ownership, read-only readers, daemon policy RPC, and t
 
 > **Codex Privacy HUD is a local-first plugin that maintains a live disclosure ledger for every Codex session, minimizes sensitive context before tool execution, and lets users inspect exactly what data reached the model, subagents, MCP tools, or external services.**
 
-*(Product intent, not a statement of current coverage. Current hooks do not confirm model admission or transmission. Version-2 accounting separates intended recipients from boundary categories where supported identity evidence exists. Explicit parent delegation text is scanned as B2, but subagent recipients remain unresolved and inherited content is not observed. Delegation scanning does not deny or rewrite the call. See `docs/known-limits.md` #19 and #20 for the shipped limits.)*
+*(Product intent, not a statement of current coverage. Current hooks do not confirm model admission or transmission. Version-2 accounting separates intended recipients from boundary categories where supported identity evidence exists. Visible plaintext parent delegation text is scanned as B2. Recognized encrypted messages record incomplete scan coverage because their plaintext is unavailable. Subagent recipients remain unresolved and inherited content is not observed. Delegation scanning does not deny or rewrite the call. See `docs/known-limits.md` #19 and #20 for the shipped limits.)*
 
 **Tagline:** See what your agent knows. Control where it goes.
 
