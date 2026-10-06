@@ -36,6 +36,8 @@ readable as "what Codex does", not as a second copy of the daemon.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import os
 import re
 from pathlib import Path
@@ -178,6 +180,9 @@ SUBAGENT_TOOLS = frozenset({
     "multi_agent_v1send_input",
     "send_message",
     "followup_task",
+    "collaborationspawn_agent",
+    "collaborationsend_message",
+    "collaborationfollowup_task",
 })
 
 
@@ -191,16 +196,54 @@ def is_b2_delegation(payload: dict) -> bool:
     )
 
 
+def encrypted_delegation_fields(tool_name: str, tool_input: dict) -> tuple[str, ...]:
+    """Recognize an opaque V2 message by tool, envelope and complete format.
+
+    This checks a Fernet-shaped transport value, not its authenticity or
+    plaintext. Never apply this exemption to arbitrary detector input.
+    V1 text items and other fields remain outside the exemption.
+    """
+    if tool_name in ("spawn_agent", "collaborationspawn_agent"):
+        if not isinstance(tool_input.get("task_name"), str):
+            return ()
+    elif tool_name in (
+        "send_message", "followup_task",
+        "collaborationsend_message", "collaborationfollowup_task",
+    ):
+        if not isinstance(tool_input.get("target"), str):
+            return ()
+    else:
+        return ()
+
+    message = tool_input.get("message")
+    if not isinstance(message, str):
+        return ()
+    if re.fullmatch(r"[A-Za-z0-9_-]+={0,2}", message) is None:
+        return ()
+    try:
+        raw = base64.b64decode(message, altchars=b"-_", validate=True)
+    except binascii.Error:
+        return ()
+    # Version + timestamp + IV + at least one ciphertext block + HMAC.
+    if len(raw) < 73 or raw[0] != 0x80 or (len(raw) - 57) % 16:
+        return ()
+    if base64.urlsafe_b64encode(raw).decode("ascii") != message:
+        return ()
+    return ("message",)
+
+
 def delegated_text(tool_name: str, tool_input: dict) -> str:
-    """Extract only explicitly supplied text; never serialize metadata.
+    """Extract visible delegated text, excluding recognized opaque messages.
 
     V1 supports message or UserInput text items. V2 supports message.
-    A spawn hook name alone does not identify which tool family supplied
-    it. Observing arguments does not establish that the host accepts them.
+    A recognized encrypted message is unavailable to every detector.
+    Recognition does not authenticate the token or establish delivery.
+    Other metadata is never serialized into delegated text.
     """
     parts: list[str] = []
+    excluded = encrypted_delegation_fields(tool_name, tool_input)
     message = tool_input.get("message")
-    if isinstance(message, str):
+    if isinstance(message, str) and "message" not in excluded:
         parts.append(message)
     if tool_name in ("spawn_agent", "multi_agent_v1send_input"):
         items = tool_input.get("items")
