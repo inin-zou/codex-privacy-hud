@@ -36,8 +36,11 @@ readable as "what Codex does", not as a second copy of the daemon.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
+import tomllib
 from pathlib import Path
 
 # --------------------------------------------------------------------- #
@@ -261,6 +264,177 @@ def codex_home() -> Path:
     if override:
         return Path(override).expanduser()
     return Path.home() / ".codex"
+
+
+CONFIG_FILENAME = "config.toml"
+PLUGIN_HOOKS_FILE = "hooks/hooks.json"
+
+HOOK_EVENT_LABELS = {
+    "SessionStart": "session_start",
+    "UserPromptSubmit": "user_prompt_submit",
+    "PreToolUse": "pre_tool_use",
+    "PostToolUse": "post_tool_use",
+    "SubagentStart": "subagent_start",
+    "SubagentStop": "subagent_stop",
+    "PreCompact": "pre_compact",
+    "SessionEnd": "session_end",
+}
+
+
+def user_config_path() -> Path:
+    """The default user config; invocation-specific layers are not resolved."""
+    return codex_home() / CONFIG_FILENAME
+
+
+def _normalized_command_identity(
+        event: str, group: dict, handler: dict) -> dict:
+    """Codex rust-v0.155.1 identity for the command schema we ship.
+
+    See hooks/src/engine/discovery.rs and config/src/fingerprint.rs.
+    Unsupported schema is refused, never approximated.
+    """
+    if set(group) - {"matcher", "hooks"}:
+        raise ValueError("unsupported hook group")
+    allowed = {"type", "command", "timeout", "async", "statusMessage"}
+    if set(handler) - allowed or handler.get("type") != "command":
+        raise ValueError("unsupported hook handler")
+
+    command = handler.get("command")
+    if not isinstance(command, str) or not command.strip():
+        raise ValueError("invalid hook command")
+
+    timeout = handler.get("timeout")
+    if timeout is not None and (
+        type(timeout) is not int or not 0 <= timeout <= 2**63 - 1
+    ):
+        raise ValueError("invalid hook timeout")
+    if event == "SessionEnd":
+        timeout = min(3, max(1, 1 if timeout is None else timeout))
+    else:
+        timeout = max(1, 600 if timeout is None else timeout)
+
+    asynchronous = handler.get("async", False)
+    if type(asynchronous) is not bool:
+        raise ValueError("invalid hook async field")
+    status = handler.get("statusMessage")
+    if status is not None and not isinstance(status, str):
+        raise ValueError("invalid hook status message")
+
+    matcher = group.get("matcher")
+    if matcher is not None and not isinstance(matcher, str):
+        raise ValueError("invalid hook matcher")
+    if event == "UserPromptSubmit":
+        matcher = None
+    elif matcher not in (None, ".*"):
+        raise ValueError("unsupported hook matcher")
+
+    normalized = {
+        "type": "command",
+        "command": command,
+        "timeout": timeout,
+        "async": asynchronous,
+    }
+    if status is not None:
+        normalized["statusMessage"] = status
+    identity = {
+        "event_name": HOOK_EVENT_LABELS[event],
+        "hooks": [normalized],
+    }
+    if matcher is not None:
+        identity["matcher"] = matcher
+    return identity
+
+
+def plugin_hook_hashes(bundle: Path, marketplace: str) -> dict[str, str]:
+    """Expected persisted keys and exact hashes for one installed bundle.
+
+    This deliberately supports our command-hook schema, not arbitrary Codex
+    hooks. Empty, incomplete and unsupported bundles cannot pass doctor.
+    Nothing is executed and no command or digest is logged.
+    """
+    with (bundle / PLUGIN_HOOKS_FILE).open(
+            "r", encoding="utf-8") as handle:
+        document = json.load(handle)
+    if not isinstance(document, dict):
+        raise ValueError("invalid hook document")
+    if set(document) - {"description", "hooks"}:
+        raise ValueError("unsupported hook document")
+    if (
+        document.get("description") is not None
+        and not isinstance(document["description"], str)
+    ):
+        raise ValueError("invalid hook description")
+    events = document.get("hooks")
+    if not isinstance(events, dict) or set(events) != KNOWN_EVENTS:
+        raise ValueError("incomplete hook event set")
+
+    expected: dict[str, str] = {}
+    source = f"{PLUGIN_NAME}@{marketplace}:{PLUGIN_HOOKS_FILE}"
+    for event, groups in events.items():
+        if not isinstance(groups, list) or not groups:
+            raise ValueError("invalid hook groups")
+        for group_index, group in enumerate(groups):
+            if not isinstance(group, dict):
+                raise ValueError("invalid hook group")
+            handlers = group.get("hooks")
+            if not isinstance(handlers, list) or not handlers:
+                raise ValueError("invalid hook handlers")
+            for handler_index, handler in enumerate(handlers):
+                if not isinstance(handler, dict):
+                    raise ValueError("invalid hook handler")
+                identity = _normalized_command_identity(event, group, handler)
+                canonical = json.dumps(
+                    identity,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+                key = (
+                    f"{source}:{HOOK_EVENT_LABELS[event]}:"
+                    f"{group_index}:{handler_index}"
+                )
+                expected[key] = "sha256:" + hashlib.sha256(canonical).hexdigest()
+    return expected
+
+
+def read_hook_states(
+        expected_keys: set[str],
+) -> dict[str, tuple[str | None, bool | None]]:
+    """Project only our exact expected keys' trust hash and enabled field.
+
+    TOML parsing is transient. No unrelated values or exception text leave
+    this function. Missing state is untrusted; unreadable or invalid config
+    raises for the caller to report using fixed copy.
+    """
+    try:
+        with user_config_path().open("rb") as handle:
+            document = tomllib.load(handle)
+    except FileNotFoundError:
+        return {}
+
+    hooks = document.get("hooks", {})
+    if not isinstance(hooks, dict):
+        raise ValueError("invalid hook state")
+    states = hooks.get("state", {})
+    if not isinstance(states, dict):
+        raise ValueError("invalid hook state")
+
+    selected: dict[str, tuple[str | None, bool | None]] = {}
+    for key in expected_keys:
+        entry = states.get(key)
+        if entry is None:
+            continue
+        if not isinstance(entry, dict):
+            raise ValueError("invalid hook state")
+        trusted_hash = entry.get("trusted_hash")
+        enabled = entry.get("enabled")
+        if trusted_hash is not None and not isinstance(trusted_hash, str):
+            raise ValueError("invalid hook state")
+        if enabled is not None and type(enabled) is not bool:
+            raise ValueError("invalid hook state")
+        selected[key] = (trusted_hash, enabled)
+    return selected
 
 
 def plugin_data_root() -> Path:
