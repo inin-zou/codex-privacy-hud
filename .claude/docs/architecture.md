@@ -123,7 +123,7 @@ Delivered hooks expose selected inputs and results. These are observation points
 |---|---|---|---|
 | Ingress | User's own text | `UserPromptSubmit` | `prompt` |
 | Ingress | Tool results (file reads, command output, MCP responses) | `PostToolUse` | `tool_response` |
-| Propagation | Explicit delegation arguments | Parent `PreToolUse` for supported delegation tools | String `message` and supported V1 text items |
+| Propagation | Visible delegation arguments | Parent `PreToolUse` for supported delegation tools | Plaintext `message` and supported V1 text items; recognized encrypted messages produce unavailable scan coverage |
 | Lifecycle | Subagent starts | `SubagentStart` | Lifecycle identity and references; no delegated or inherited text |
 | Egress | Arguments leaving to a tool or the network | `PreToolUse` | `tool_input` |
 
@@ -302,7 +302,7 @@ CREATE TABLE policy_tokens (              -- one-shot consent, §8
 
 The legacy `flows` table is retained unchanged for compatibility. No production code writes it, and event-detail retrieval does not populate hops from it. It is not the storage contract for version-2 subject associations. Current requirements do not include reconstructed causal multi-hop chains. Any future same-subject observation history should be derived read-only from version-2 records without strengthening their evidence or changing accounting.
 
-**Persistence constraint:** raw content is not stored. The absence of a content column is insufficient by itself: source labels, exemplars, identities, and other metadata must also satisfy I1. Delegation text is scanned transiently; task names, targets, roles, fork arguments, and transcript references are not added to persisted metadata.
+**Persistence constraint:** raw content is not stored. The absence of a content column is insufficient by itself: source labels, exemplars, identities, and other metadata must also satisfy I1. Visible plaintext delegation text is scanned transiently; recognized encrypted messages are excluded and record incomplete coverage without persisting the token; task names, targets, roles, fork arguments, and transcript references are not added to persisted metadata.
 
 At `SessionEnd`: `UPDATE events SET value_hash = NULL WHERE session_id = ?` and the in-memory salt is destroyed. After the Phase 2 rebuild the same update targets `events_legacy_v1`.
 

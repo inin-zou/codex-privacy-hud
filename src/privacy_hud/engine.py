@@ -257,17 +257,18 @@ EGRESS_BOUNDARIES = ("B3", "B4")
 #: payloads return `GAP_OVERSIZE` before admission.
 _TIER3_EGRESS_SLOT = threading.BoundedSemaphore(1)
 
-#: Scan-gap reasons. A scan gap: an applicable deep scan supplied no accepted
-#: result. Each reason names a specific, recorded history — the same
+#: Scan-gap reasons. A scan gap means applicable content scanning was
+#: incomplete. This includes unavailable encrypted delegation plaintext.
+#: Each reason names a specific, recorded history — the same
 #: discipline `ledger.COVERAGE_*` holds itself to. `None` means no scan gap,
 #: not necessarily "the scan ran": an out-of-scope scan has no gap either.
 #: An accepted empty result is a clean scan, not a scan gap.
 #:
 #: oversize    — applicable payload exceeds `MAX_TIER3_CHARS`; inference is
 #:               not attempted.
-#: unavailable — no expensive detector supplies a successful available
-#:               result, including missing weights and a detector becoming
-#:               unavailable during inference.
+#: unavailable — encrypted delegation plaintext is unavailable, or no
+#:               expensive detector supplies a successful available result,
+#:               including missing weights or failure during inference.
 #: busy        — nonblocking egress admission fails.
 #: timeout     — egress only, three histories: the worker cannot start
 #:               inference within its deadline (including model-lock
@@ -453,6 +454,9 @@ class Observation:
     #: identity only; never persisted, displayed or kept in origin state.
     evaluated_path: str | None = None
     cwd: str = ""
+    #: A recognized encrypted delegation field was excluded from text.
+    #: Only this boolean crosses the scan boundary; no token is persisted.
+    delegation_unobservable: bool = False
 
 
 @dataclass(frozen=True)
@@ -471,8 +475,8 @@ class ScanResult:
     dest_kind: str
     boundary: str
     findings: tuple[Finding, ...]
-    # Ruling 4: a scan gap — an applicable deep scan supplied no accepted
-    # result (see the `GAP_*` reasons for the histories that covers).
+    # A scan gap: applicable scanning is incomplete, including unavailable
+    # delegation plaintext (see the `GAP_*` reasons).
     degraded: bool
     # Which `GAP_*` reason it was; None means no scan gap, not necessarily
     # that the scan ran. The bool above is `degraded_reason is not None` and is kept because every
@@ -501,8 +505,8 @@ class Decision:
     # real, non-None value here; a caller that ever sees rewrite+None has
     # found a bug, not a no-op.
     updated_input: str | dict | None = None
-    # Ruling 4: True when this observation had a scan gap: an applicable
-    # deep scan supplied no accepted result. The histories are the `GAP_*`
+    # True when applicable scanning was incomplete, including unavailable
+    # delegation plaintext. The histories are the `GAP_*`
     # reasons above. An accepted empty result is a clean scan, not a scan
     # gap. NOT set when the deep scan was out of scope (a local destination,
     # or no configured expensive detector): claiming a gap there would tell
@@ -976,6 +980,10 @@ class Engine:
             file_rules = network_file_rules(obs.text)
 
         findings, gap = self._scan(obs, dest_kind, boundary)
+        if obs.delegation_unobservable:
+            # Visible plaintext was still scanned. Missing delegated
+            # plaintext is unavailable coverage, never a clean result.
+            gap = gap or GAP_UNAVAILABLE
         return ScanResult(
             dest_kind=dest_kind, boundary=boundary,
             findings=tuple(findings), degraded=gap is not None,
@@ -1397,6 +1405,12 @@ class Engine:
                              budget_percent=pct, updated_input=updated_input,
                              degraded=degraded)
 
+        if obs.delegation_unobservable:
+            warning = (
+                "Privacy HUD: encrypted delegation message is unobservable; "
+                "coverage is incomplete."
+            )
+            notice = warning if notice is None else notice + "\n\n" + warning
         return Decision("allow", system_message=notice, budget_percent=pct,
                          degraded=degraded)
 
