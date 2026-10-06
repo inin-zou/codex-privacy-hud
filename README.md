@@ -111,6 +111,8 @@ Verified end-to-end against a real Codex CLI install on 0.145.0 and 0.153.0.
 curl -fsSL https://raw.githubusercontent.com/inin-zou/codex-privacy-hud/main/install.sh | sh
 ```
 
+**Required after installation:** open `codex` interactively once and choose **Trust all and continue** when **Hooks need review** appears. With Codex's default trust checks, the plugin's hooks do not run before this step, and `codex exec` sessions are unmonitored until then. The installer's doctor run can therefore report `Hook trust` as `FAIL`; grant trust, then rerun `privacy-hud-doctor`.
+
 When run through a pipe or without an adjacent plugin bundle, the installer downloads the complete bundle for the release pinned inside the script and verifies its SHA-256 against that release’s checksum file. Download, checksum, archive, or bundle-version failures stop before the installer creates its manifest, dependency environment, wrappers, or Codex configuration. The temporary bundle is removed when the installer exits. SHA-256 detects a corrupted download; the script and checksum still trust this repository’s publisher.
 
 Version bumps merged to `main` automatically start tagging and publishing the matching plugin release. Until that release is published and its downloads are available, the one-command installer can fail before persistent installation writes. Retry after publication completes; a failed release workflow can extend this window.
@@ -133,7 +135,7 @@ This is what it does, in the order it prints:
 | 6 | Downloads the patched Codex build for **your exact version**, verifies its SHA-256, unpacks it, and links your official `codex-code-mode-host` beside it (the tarball carries only `codex`; Code Mode needs that sibling, and the official one of the same version is the right one) | `~/.local/share/codex-privacy-hud/<version>/` |
 | 7 | Writes a small forwarder named `codex` and, if needed, adds `~/.local/bin` to your shell `PATH` | `~/.local/bin/codex` |
 | 8 | Adds `privacy` to `[tui].status_line` in your Codex config, creating the key with Codex's defaults if you never set one | `~/.codex/config.toml` |
-| 9 | Runs `privacy-hud-doctor` and prints its table — every line should read `OK` or `WARN`, never `FAIL` | — |
+| 9 | Runs `privacy-hud-doctor` and prints its table. `Hook trust` reports `FAIL` until the installed hooks are trusted; complete the interactive trust step and rerun doctor. Other failures also need attention. | — |
 
 The binary CI publishes is **unsigned and unnotarized**; the installer removes
 the quarantine attribute itself, and the SHA-256 it verifies protects against
@@ -177,9 +179,7 @@ daemon.
 
 From here:
 
-1. Run `codex`. Codex 0.154 opens with **Hooks need review** for the
-   plugin's eight hooks; choose **Trust all and continue**. Nothing from
-   the plugin runs before that.
+1. Run `codex` interactively. When **Hooks need review** appears for the plugin's eight hooks, choose **Trust all and continue**. With default trust checks, none of these hooks runs before trust is granted. `codex exec` does not present this interactive review, so its sessions are unmonitored until then.
 2. Send any message. The first turn shows a one-line reminder. Type
    `$privacy setup`: Codex runs the installer from the plugin cache
    (`sh ~/.codex/plugins/cache/codex-privacy-hud/codex-privacy-hud/<version>/install.sh --yes`)
@@ -421,6 +421,7 @@ Stated up front, because a privacy tool that overclaims is worse than none:
 20. Concrete recipients are identified only where the hook and supported parser provide an unambiguous identity. Other recipients remain unresolved. Identity alone does not establish delivery or forwarding. ([details](docs/known-limits.md#20-a-destination-is-a-boundary-category-not-a-recipient))
 21. **On an outbound call, the deep scan is best-effort.** The model is serial, and a missed hook deadline on an outbound call becomes a deny (I6). Egress uses a requested timeout based on the remaining budget and an inclusive completion cutoff; neither guarantees elapsed time. See `engine.TIER3_EGRESS_BUDGET`. Measured: a call under the 1.0 s budget returned at 1.25 s. At most one egress scan worker is admitted at a time. Admission is nonblocking; the worker retains its slot until it exits, including after caller abandonment. A scan gap means an applicable deep scan supplied no accepted result; the call then proceeds on the fast tiers, the same as every outbound call before this existed. A scan gap can omit findings that would otherwise cause blocking or masking. Each observed scan gap is recorded per observation and counted per session, including observations with no event row, so the session stops reading as fully verified — but the audit cannot tell you which calls they were. ([details](docs/known-limits.md#21-on-an-outbound-call-the-deep-scan-is-best-effort))
 22. **Credential prompt holds have a narrow scope.** Only supported credential formats in prompt text can hold a submission. Confirm by resubmitting after 2 seconds and within 5 minutes. Images, attachments, entropy findings, private-key headers, and tier-3 NER findings do not trigger this hold. No daemon reply means ingress fails open. ([details](docs/known-limits.md#22-credential-prompt-holds-have-a-narrow-scope))
+23. **Untrusted hooks mean no observation at all.** With default trust checks, if none of the plugin's hooks is trusted, the whole session is unmonitored, including `codex exec`; a running daemon does not help. Partial trust leaves the affected events unobserved. Open `codex` interactively and choose **Trust all and continue**. Changed hook definitions require review again. This is separate from the cold-start gap in limit 1. ([details](docs/known-limits.md#23-untrusted-hooks-mean-no-observation-at-all))
 
 ## Configuration
 
@@ -518,7 +519,7 @@ You want this if there is no `install.sh` for your platform, if you are on Linux
 | doc | what it covers | read it when |
 |---|---|---|
 | [`docs/installing-by-hand.md`](docs/installing-by-hand.md) | Each install step run by hand, the `privacy-hud-setup` and `privacy-hud-doctor` commands, and the fallback pane. | You cannot use `install.sh`, or you want to control each step. |
-| [`docs/known-limits.md`](docs/known-limits.md) | All twenty-two limits in full, with the measurements behind them. | You are deciding how far to trust a number the HUD shows. |
+| [`docs/known-limits.md`](docs/known-limits.md) | All twenty-three limits in full, with the measurements behind them. | You are deciding how far to trust a number the HUD shows. |
 | [`patches/README.md`](patches/README.md) | The one-item Codex status-line patch and how to regenerate it against a new tag. | You want to audit or rebuild the patched Codex binary. |
 | [`.claude/docs/architecture.md`](.claude/docs/architecture.md) | Component map, process model, ledger schema, hook dispatch, and the limits of the unshipped consent workflow. | You are working on the plugin itself. |
 
