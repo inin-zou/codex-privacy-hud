@@ -56,6 +56,7 @@ import pytest
 
 from privacy_hud import doctor, runtime
 from privacy_hud.matrix.loader import load_matrix
+from hook_trust_helpers import copy_hooks, expected_trust, write_trust
 from runtime_helpers import writer_ledger
 
 M = load_matrix()
@@ -1375,7 +1376,7 @@ def test_a_check_that_raises_becomes_a_failure_not_a_traceback(monkeypatch,
     assert "RuntimeError" in ledger.summary
     text = doctor.format_report(checks)
     assert "something private" not in text
-    assert len(checks) == 14
+    assert len(checks) == 15
 
 
 def test_report_is_plain_text_with_no_escape_sequences(isolated_env):
@@ -1472,6 +1473,7 @@ def test_healthy_setup_reports_healthy_and_exits_zero(isolated_env, monkeypatch,
     _seed_weights(tmp_path, doctor.MODEL_FILES)
     monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
     repo = _fake_repo(tmp_path)
+    copy_hooks(repo)
     # Declare and ship a real (fake) MCP server so the new "MCP server" check
     # also comes back OK in this all-green scenario, exactly as it would for
     # an installed copy that Codex can actually launch.
@@ -1488,6 +1490,7 @@ def test_healthy_setup_reports_healthy_and_exits_zero(isolated_env, monkeypatch,
     (repo / "mcp" / "server.py").write_text(
         _fake_mcp_server_body(list(doctor.MCP_TOOLS)), encoding="utf-8")
     dest = _install(tmp_path, repo)
+    write_trust(tmp_path / "codex-home" / "config.toml")
     # `mcp/server.py` is not one of the tracked files `_install` copies (it
     # is compared for staleness no more than any other untracked file), so
     # it is copied into the installed copy by hand here.
@@ -2144,3 +2147,230 @@ def test_doctor_validates_v2_summary_strictly(tmp_path):
     ]
     for case in invalid:
         assert not doctor._is_summary(case), case
+
+
+TRUST_REMEDY = (
+    'Open `codex` interactively once and choose "Trust all and continue".'
+)
+
+
+@pytest.fixture
+def hook_install(isolated_env, tmp_path, monkeypatch):
+    repo = _fake_repo(tmp_path)
+    copy_hooks(repo)
+    dest = _install(tmp_path, repo)
+    monkeypatch.setattr(doctor, "_repo_root", lambda: repo)
+    return repo, dest, tmp_path / "codex-home" / "config.toml"
+
+
+def _trust_failure(check):
+    report = doctor.format_report([check])
+    assert check.name == "Hook trust"
+    assert check.status == doctor.FAIL
+    assert doctor.exit_code([check]) == 1
+    assert "Setup is NOT usable" in report
+    assert "Setup is usable" not in report
+    assert TRUST_REMEDY in report
+    return report
+
+
+def test_hook_trust_all_eight_current_hashes_pass(hook_install):
+    _repo, _dest, config = hook_install
+    write_trust(config)
+    before = config.read_bytes()
+    check = doctor.check_hook_trust()
+    assert check.status == doctor.OK
+    assert "8/8" in check.summary
+    assert doctor.exit_code([check]) == 0
+    assert config.read_bytes() == before
+
+
+@pytest.mark.parametrize("mode", ["missing-file", "no-state", "partial"])
+def test_hook_trust_missing_or_partial_fails(hook_install, mode):
+    _repo, _dest, config = hook_install
+    if mode == "missing-file":
+        config.unlink()
+    elif mode == "partial":
+        hashes = expected_trust()
+        hashes.pop(next(iter(hashes)))
+        write_trust(config, hashes)
+    report = _trust_failure(doctor.check_hook_trust())
+    if mode == "partial":
+        assert "7/8" in report
+
+
+@pytest.mark.parametrize("value", [
+    "sha256:" + "0" * 64,
+    "sha256:short",
+    "not-a-hash",
+])
+def test_hook_trust_rejects_wrong_or_invalid_hash(hook_install, value):
+    _repo, _dest, config = hook_install
+    hashes = expected_trust()
+    hashes[next(iter(hashes))] = value
+    write_trust(config, hashes)
+    report = _trust_failure(doctor.check_hook_trust())
+    assert value not in report
+
+
+def test_hook_trust_detects_changed_installed_definition(hook_install):
+    _repo, dest, config = hook_install
+    write_trust(config)
+    path = dest / "hooks" / "hooks.json"
+    document = json.loads(path.read_text())
+    document["hooks"]["PreToolUse"][0]["hooks"][0]["command"] += " changed"
+    path.write_text(json.dumps(document))
+    report = _trust_failure(doctor.check_hook_trust())
+    assert "7/8" in report
+    assert "changed" not in report
+
+
+def test_hook_trust_disabled_is_failure_even_with_matching_hash(hook_install):
+    _repo, _dest, config = hook_install
+    key = next(iter(expected_trust()))
+    write_trust(config, disabled={key})
+    report = _trust_failure(doctor.check_hook_trust())
+    assert "1 disabled" in report
+    assert "enabled = true" in report
+
+
+@pytest.mark.parametrize("content", [
+    'api_key = "SENTINEL-private-config"\n[broken',
+    '[hooks]\nstate = "SENTINEL-private-config"\n',
+])
+def test_hook_trust_bad_config_is_failure_without_content(
+        hook_install, content):
+    _repo, _dest, config = hook_install
+    config.write_text(content)
+    report = _trust_failure(doctor.check_hook_trust())
+    assert "SENTINEL-private-config" not in report
+
+
+def test_hook_trust_unreadable_config_is_failure(
+        hook_install, monkeypatch):
+    _repo, _dest, config = hook_install
+    original = Path.open
+
+    def guarded_open(path, *args, **kwargs):
+        if path == config:
+            raise PermissionError("SENTINEL-private-config")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", guarded_open)
+    report = _trust_failure(doctor.check_hook_trust())
+    assert "SENTINEL-private-config" not in report
+
+
+def test_hook_trust_report_withholds_all_config_values(hook_install):
+    _repo, _dest, config = hook_install
+    other = "OTHER-PLUGIN-PRIVATE-KEY:pre_tool_use:0:0"
+    config.write_text(
+        'api_key = "SENTINEL-fake-api-key"\n'
+        f'[hooks.state."{other}"]\n'
+        'trusted_hash = "SENTINEL-other-hash"\n'
+    )
+    write_trust(config)
+    before = config.read_bytes()
+    check = doctor.check_hook_trust()
+    assert check.status == doctor.OK
+    report = doctor.format_report([check])
+    for value in (
+        other, "SENTINEL-fake-api-key", "SENTINEL-other-hash",
+        *expected_trust(), *expected_trust().values(),
+    ):
+        assert value not in report
+    assert config.read_bytes() == before
+
+
+def test_hook_trust_missing_plugin_skips_without_reading_config(
+        isolated_env, monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("config must not be read")
+
+    monkeypatch.setattr(doctor.codex, "read_hook_states", forbidden)
+    assert doctor.check_hook_trust().status == doctor.SKIP
+
+
+def test_hook_trust_checks_each_marketplace(hook_install, tmp_path):
+    repo, _dest, config = hook_install
+    _install(tmp_path, repo, marketplace="second-market")
+    write_trust(config)
+    report = _trust_failure(doctor.check_hook_trust())
+    assert "8/16" in report
+    write_trust(config, expected_trust("second-market"))
+    check = doctor.check_hook_trust()
+    assert check.status == doctor.OK
+    assert "16/16" in check.summary
+
+
+def test_hook_trust_ignores_historical_version_when_declared_is_cached(
+        hook_install, tmp_path):
+    repo, _dest, config = hook_install
+    old = _install(tmp_path, repo, version="0.0.9")
+    (old / "hooks" / "hooks.json").write_text('{"hooks": {}}')
+    write_trust(config)
+    assert doctor.check_hook_trust().status == doctor.OK
+
+
+def test_hook_trust_project_state_cannot_grant_or_disable_trust(
+        hook_install, tmp_path, monkeypatch):
+    _repo, _dest, config = hook_install
+    project = tmp_path / "project"
+    project.mkdir()
+    project_config = project / ".codex" / "config.toml"
+    write_trust(project_config, disabled=set(expected_trust()))
+    monkeypatch.chdir(project)
+    _trust_failure(doctor.check_hook_trust())
+    write_trust(config)
+    assert doctor.check_hook_trust().status == doctor.OK
+
+
+@pytest.mark.parametrize("content", [
+    "{not json",
+    '{"hooks": {}}',
+])
+def test_hook_trust_unverifiable_bundle_fails(hook_install, content):
+    _repo, dest, _config = hook_install
+    (dest / "hooks" / "hooks.json").write_text(content)
+    report = _trust_failure(doctor.check_hook_trust())
+    assert "cannot verify" in report
+
+
+@pytest.mark.parametrize("trusted", [False, True])
+def test_main_includes_real_hook_trust_check(
+        hook_install, monkeypatch, capsys, trusted):
+    _repo, _dest, config = hook_install
+    if trusted:
+        write_trust(config)
+    names = (
+        "check_python", "check_codex_forwarder", "check_plugin_data",
+        "check_runtime_source", "check_read_guard", "check_ledger",
+        "check_runtime_pin", "check_daemon", "check_runtime_alignment",
+        "check_detector_deps", "check_tier3", "check_plugin_install",
+        "check_mcp_server", "check_native_reader",
+    )
+    for name in names:
+        monkeypatch.setattr(
+            doctor, name,
+            lambda *args, _name=name, **kwargs:
+            doctor.Check(_name, doctor.OK, "synthetic"),
+        )
+    assert doctor.main([]) == (0 if trusted else 1)
+    report = capsys.readouterr().out
+    assert "Hook trust" in report
+    assert ("Setup is NOT usable" in report) is (not trusted)
+
+
+@pytest.mark.parametrize("field", [
+    'enabled = "false"',
+    'trusted_hash = 123',
+])
+def test_hook_trust_rejects_invalid_state_field_types(hook_install, field):
+    _repo, _dest, config = hook_install
+    hashes = expected_trust()
+    key = next(iter(hashes))
+    hashes.pop(key)
+    write_trust(config, hashes)
+    with config.open("a", encoding="utf-8") as handle:
+        handle.write(f'\n[hooks.state.{json.dumps(key)}]\n{field}\n')
+    _trust_failure(doctor.check_hook_trust())
