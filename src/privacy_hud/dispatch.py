@@ -537,7 +537,9 @@ def _build_observation(event: str, session_id: str, payload: dict) -> Observatio
                 direction="propagate", source="tool input",
                 destination="subagent",
                 text=codex.delegated_text(tool_name, tool_input),
-                tool_name=tool_name, tool_input=tool_input)
+                tool_name=tool_name, tool_input=tool_input,
+                delegation_unobservable=bool(
+                    codex.encrypted_delegation_fields(tool_name, tool_input)))
         if tool_name == codex.SHELL_TOOL:
             command = tool_input.get("command", "") or ""
             dests = extract_destinations(command)

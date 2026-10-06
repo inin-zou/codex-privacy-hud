@@ -189,16 +189,12 @@ class SessionCoverage:
     observers: int
     attached: bool
     unobserved_hooks: bool
-    #: How many observations in this session had a scan gap: an applicable
-    #: deep scan supplied no accepted result (`engine.GAP_*` has the
-    #: histories). Each observed scan gap is recorded per observation and
-    #: counted per session, including observations with no event row;
-    #: written by `record_scan_gap`. Unlike the three fields above, this one does not
-    #: say a stretch of the session went unwatched: the hooks fired, the
-    #: cheap tiers ran, and the row (if any) is in `events`. What is missing
-    #: is the tier-3 finding types on those specific calls, which is why it
-    #: is the least severe entry in `reason` and still enough to make
-    #: `verified` false.
+    #: Number of observations with incomplete content scanning.
+    #: `engine.GAP_*` describes the causes, including unavailable encrypted
+    #: delegation plaintext and deep scans without an accepted result.
+    #: Hooks can arrive while some content remains unobservable. Visible
+    #: content can still produce findings. No finding is required for a
+    #: gap, and any recorded gap makes `verified` false.
     shallow_scans: int = 0
 
     @property
@@ -407,8 +403,8 @@ class LegacyExposureRow:
     is not a base of any future accounting type.
 
     `degraded` is not a ledger column. It is a render-time flag -- True when
-    the row's observation had a scan gap: an applicable deep scan supplied no
-    accepted result -- set by a caller that has the `Decision` in hand, and
+    the row's observation had incomplete content scanning, including
+    unavailable plaintext -- set by a caller with the `Decision` in hand, and
     it is deliberately absent from `_EXPOSURE_JSON_FIELDS`.
 
     Frozen: a row is a record of something that already happened.
@@ -1630,8 +1626,8 @@ class Ledger:
 
     def record_scan_gap(self, session_id: str, *, boundary: str,
                         reason: str, ts: float | None = None) -> None:
-        """Write down one scan gap: an applicable deep scan supplied no
-        accepted result. Each observed scan gap is recorded per observation
+        """Write down incomplete content scanning, including unavailable
+        delegation plaintext. Each observed scan gap is recorded per observation
         and counted per session, including observations with no event row.
         Append-only; never deduped.
 
