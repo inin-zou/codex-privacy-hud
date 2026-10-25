@@ -1,4 +1,7 @@
+import hashlib
 import json
+import os
+import stat
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,8 +57,81 @@ def copy_hooks(bundle):
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes((ROOT / "hooks" / "hooks.json").read_bytes())
 
+HOOKS_ONLY_CONTENT = (
+    "sha256:"
+    "394ca2da683d43fbf5b8cdf60cac6edf90fafe62560e28efb9ee420e957a68c4"
+)
+TREE_CONTENT = (
+    "sha256:"
+    "5754b5e069df68420e4491d568c9dd30b2a4fbf53c34b67c98cb9b2314cd1d59"
+)
+LEGACY_FILENAME = (
+    "45a4f356800f937df8557bd4c117cfd5257a95706a36d9392ded0b68dde51125"
+)
 
-def write_trust(config, hashes=None, *, disabled=()):
+
+def reference_content_hash(root):
+    """Independent fixture encoder: materialize records in tuple-path order."""
+    records = []
+    paths = [root, *root.rglob("*")]
+    paths.sort(key=lambda p: tuple(
+        os.fsencode(part) for part in p.relative_to(root).parts
+    ))
+    for path in paths:
+        relative = path.relative_to(root)
+        excluded = False
+        for part in relative.parts:
+            try:
+                name = os.fsencode(part).decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            if (
+                name in {"__pycache__", ".venv"}
+                or name.endswith(".pyc")
+                or name.endswith(".egg-info")
+            ):
+                excluded = True
+                break
+        if excluded:
+            continue
+
+        name = b"" if path == root else os.fsencode(str(relative))
+        mode = path.lstat().st_mode
+        record = len(name).to_bytes(8, "little") + name
+        if stat.S_ISDIR(mode):
+            record += b"directory"
+        elif stat.S_ISREG(mode):
+            data = path.read_bytes()
+            record += b"file" + len(data).to_bytes(8, "little") + data
+        else:
+            raise ValueError("unsupported synthetic entry")
+        records.append(record)
+
+    stream = b"codex-plugin-bundle-v1" + b"".join(records)
+    return "sha256:" + hashlib.sha256(stream).hexdigest()
+
+
+def reference_legacy_path(config, marketplace=MARKETPLACE):
+    parts = (
+        os.fsencode(str(config)),
+        f"{PLUGIN}@{marketplace}".encode("utf-8"),
+    )
+    stream = b"".join(
+        len(part).to_bytes(8, "little") + part for part in parts
+    )
+    return config.parent / ".hook-trust" / hashlib.sha256(stream).hexdigest()
+
+
+def seed_legacy(config, bundle, marketplace=MARKETPLACE):
+    path = reference_legacy_path(config, marketplace)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(reference_content_hash(bundle).encode("ascii"))
+    return path
+
+
+def write_trust(
+    config, hashes=None, *, disabled=(), content_hash=None,
+):
     if hashes is None:
         hashes = expected_trust()
     config.parent.mkdir(parents=True, exist_ok=True)
@@ -65,6 +141,10 @@ def write_trust(config, hashes=None, *, disabled=()):
             f"[hooks.state.{json.dumps(key)}]",
             f"trusted_hash = {json.dumps(value)}",
         ])
+        if content_hash is not None:
+            lines.append(
+                f"trusted_content_hash = {json.dumps(content_hash)}"
+            )
         if key in disabled:
             lines.append("enabled = false")
     with config.open("a", encoding="utf-8") as handle:

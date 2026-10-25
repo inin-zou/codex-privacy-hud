@@ -1490,13 +1490,22 @@ def test_healthy_setup_reports_healthy_and_exits_zero(isolated_env, monkeypatch,
     (repo / "mcp" / "server.py").write_text(
         _fake_mcp_server_body(list(doctor.MCP_TOOLS)), encoding="utf-8")
     dest = _install(tmp_path, repo)
-    write_trust(tmp_path / "codex-home" / "config.toml")
     # `mcp/server.py` is not one of the tracked files `_install` copies (it
     # is compared for staleness no more than any other untracked file), so
     # it is copied into the installed copy by hand here.
     (dest / "mcp").mkdir(parents=True, exist_ok=True)
     (dest / "mcp" / "server.py").write_bytes(
         (repo / "mcp" / "server.py").read_bytes())
+    from hook_trust_helpers import reference_content_hash
+
+    write_trust(
+        tmp_path / "codex-home" / "config.toml",
+        content_hash=reference_content_hash(dest),
+    )
+    monkeypatch.setattr(
+        doctor.codex, "official_codex_version", lambda: "0.164.0",
+        raising=False,
+    )
     monkeypatch.setattr(doctor, "_repo_root", lambda: repo)
 
     try:
@@ -2156,11 +2165,19 @@ TRUST_REMEDY = (
 
 @pytest.fixture
 def hook_install(isolated_env, tmp_path, monkeypatch):
+    from hook_trust_helpers import seed_legacy
+
     repo = _fake_repo(tmp_path)
     copy_hooks(repo)
     dest = _install(tmp_path, repo)
+    config = tmp_path / "codex-home" / "config.toml"
     monkeypatch.setattr(doctor, "_repo_root", lambda: repo)
-    return repo, dest, tmp_path / "codex-home" / "config.toml"
+    monkeypatch.setattr(
+        doctor.codex, "official_codex_version", lambda: "0.164.0",
+        raising=False,
+    )
+    seed_legacy(config, dest)
+    return repo, dest, config
 
 
 def _trust_failure(check):
@@ -2174,7 +2191,9 @@ def _trust_failure(check):
     return report
 
 
-def test_hook_trust_all_eight_current_hashes_pass(hook_install):
+def test_hook_trust_all_eight_legacy_approvals_with_baseline_pass(
+    hook_install,
+):
     _repo, _dest, config = hook_install
     write_trust(config)
     before = config.read_bytes()
@@ -2221,7 +2240,8 @@ def test_hook_trust_detects_changed_installed_definition(hook_install):
     document["hooks"]["PreToolUse"][0]["hooks"][0]["command"] += " changed"
     path.write_text(json.dumps(document))
     report = _trust_failure(doctor.check_hook_trust())
-    assert "7/8" in report
+    # The declaration changes for one hook, but bundle content changes for all.
+    assert "0/8" in report
     assert "changed" not in report
 
 
@@ -2293,7 +2313,10 @@ def test_hook_trust_missing_plugin_skips_without_reading_config(
 
 def test_hook_trust_checks_each_marketplace(hook_install, tmp_path):
     repo, _dest, config = hook_install
-    _install(tmp_path, repo, marketplace="second-market")
+    from hook_trust_helpers import seed_legacy
+
+    second = _install(tmp_path, repo, marketplace="second-market")
+    seed_legacy(config, second, "second-market")
     write_trust(config)
     report = _trust_failure(doctor.check_hook_trust())
     assert "8/16" in report
@@ -2364,6 +2387,7 @@ def test_main_includes_real_hook_trust_check(
 @pytest.mark.parametrize("field", [
     'enabled = "false"',
     'trusted_hash = 123',
+    'trusted_content_hash = 123',
 ])
 def test_hook_trust_rejects_invalid_state_field_types(hook_install, field):
     _repo, _dest, config = hook_install
