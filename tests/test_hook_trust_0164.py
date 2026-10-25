@@ -274,7 +274,10 @@ def test_sorted_dfs_not_breadth_first(tmp_path):
 
 def test_non_utf8_filename_is_not_excluded_by_suffix(tmp_path):
     path = tmp_path / os.fsdecode(b"\xff.pyc")
-    path.write_bytes(b"one")
+    try:
+        path.write_bytes(b"one")
+    except OSError:
+        pytest.skip("this filesystem rejects non-UTF-8 file names")
     first = codex.plugin_content_hash(tmp_path)
     path.write_bytes(b"two")
     assert codex.plugin_content_hash(tmp_path) != first

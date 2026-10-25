@@ -1653,25 +1653,46 @@ _HOOK_TRUST_REMEDY = (
 )
 
 _HOOK_TRUST_SCOPE = (
-    "Checks the default Codex user config and one cached bundle per "
-    "marketplace, using the same version-selection convention as Plugin "
-    "install. This does not verify a running session's loaded bundle, "
-    "alternate user-config selection, session flags, or the invocation-only "
-    "--dangerously-bypass-hook-trust option."
+    "Checks persisted trust for the default Codex user config and one "
+    "cached bundle per marketplace, using Plugin install's selection "
+    "convention. This does not verify a running session's loaded bundle, "
+    "alternate user-config selection, profiles, session flags, managed-only "
+    "policy, or --dangerously-bypass-hook-trust. Codex scans content again "
+    "inside each hook's timeout: 5 seconds for this bundle, except "
+    "SessionEnd at 3 seconds. Matching persisted trust does not guarantee "
+    "runtime completion or successful creation of a missing legacy baseline. "
+    "Doctor never creates or migrates hook trust state."
 )
 
 
 def check_hook_trust() -> Check:
-    """Verify persisted admission state for this plugin's command hooks.
-
-    Hashes, keys, commands and parser diagnostics never enter the report.
-    A successful daemon or MCP probe cannot substitute for hook admission.
-    """
     installed = _installed_plugin_dirs()
     if not installed:
         return Check(
             "Hook trust", SKIP,
             "no cached plugin bundle; see Plugin install",
+        )
+
+    version = codex.official_codex_version()
+    if codex.hook_trust_scheme(version) is None:
+        summary = (
+            f"hook trust cannot be verified for Codex {version}"
+            if version is not None else
+            "hook trust cannot be verified: official Codex version "
+            "could not be determined"
+        )
+        return Check(
+            "Hook trust", WARN, summary,
+            details=[
+                "This doctor implements Codex 0.164.0 trust on POSIX only.",
+                _HOOK_TRUST_SCOPE,
+            ],
+            fixes=[
+                "Use a doctor release that explicitly supports your "
+                "official Codex version. Ensure the official executable "
+                "is reachable on PATH after any Privacy HUD forwarders.",
+                _HOOK_TRUST_REMEDY,
+            ],
         )
 
     chosen: list[tuple[str, str, Path]] = []
@@ -1691,16 +1712,31 @@ def check_hook_trust() -> Check:
         chosen.append(entry)
 
     expected: dict[str, str] = {}
+    owners: dict[str, str] = {}
+    contents: dict[str, str] = {}
     try:
         for marketplace, _version, bundle in chosen:
-            expected.update(codex.plugin_hook_hashes(bundle, marketplace))
+            declarations = codex.plugin_hook_hashes(bundle, marketplace)
+            expected.update(declarations)
+            owners.update({key: marketplace for key in declarations})
+            contents[marketplace] = codex.plugin_content_hash(bundle)
+    except TimeoutError:
+        return Check(
+            "Hook trust", WARN,
+            "hook trust cannot be verified: bundle scan budget exceeded",
+            details=[_HOOK_TRUST_SCOPE],
+            fixes=[
+                "Check the selected bundle and rerun doctor.",
+                _HOOK_TRUST_REMEDY,
+            ],
+        )
     except (OSError, ValueError, UnicodeError, RecursionError):
         return Check(
             "Hook trust", FAIL,
-            "cannot verify the installed hook definitions",
+            "cannot verify the installed hook definitions or bundle contents",
             details=[
-                "A selected bundle is missing, malformed, incomplete, or "
-                "uses a hook schema this doctor cannot verify.",
+                "The selected bundle is unreadable, malformed, incomplete, "
+                "changing, or contains unsupported entries.",
                 _HOOK_TRUST_SCOPE,
             ],
             fixes=[
@@ -1711,17 +1747,26 @@ def check_hook_trust() -> Check:
 
     try:
         states = codex.read_hook_states(set(expected))
+        config_file = codex.trust_config_path()
+        baselines = {
+            marketplace: codex.read_legacy_baseline(
+                config_file, f"{codex.PLUGIN_NAME}@{marketplace}",
+            )
+            for marketplace, _version, _bundle in chosen
+        }
     except (OSError, ValueError, UnicodeError, RecursionError):
         return Check(
             "Hook trust", FAIL,
-            "cannot verify hook trust in the Codex user config",
+            "cannot verify hook trust in the Codex user config or "
+            "this plugin's legacy baseline",
             details=[
-                "The config is unreadable or malformed. Its contents and "
-                "parser diagnostics are withheld.",
+                "Trust state is unreadable or malformed. Configuration "
+                "values, paths, hashes and parser diagnostics are withheld.",
                 _HOOK_TRUST_SCOPE,
             ],
             fixes=[
-                "Make the Codex user config readable and valid TOML.",
+                "Make the Codex user config and this plugin's existing "
+                "legacy baseline readable and valid.",
                 _HOOK_TRUST_REMEDY,
             ],
         )
@@ -1729,24 +1774,46 @@ def check_hook_trust() -> Check:
     ready = 0
     disabled = 0
     untrusted = 0
-    for key, current_hash in expected.items():
-        trusted_hash, enabled = states.get(key, (None, None))
-        if enabled is False:
-            disabled += 1
-        if trusted_hash != current_hash:
+    pending_baseline = 0
+    for key, declaration in expected.items():
+        state = states.get(key, codex.HookState())
+        marketplace = owners[key]
+        content = contents[marketplace]
+        is_disabled = state.enabled is False
+        disabled += int(is_disabled)
+
+        if state.trusted_hash != declaration:
             untrusted += 1
-        if enabled is not False and trusted_hash == current_hash:
+            continue
+
+        if state.trusted_content_hash is not None:
+            matches = state.trusted_content_hash == content
+        else:
+            baseline = baselines[marketplace]
+            if baseline is None:
+                pending_baseline += 1
+                continue
+            matches = baseline == content
+
+        if not matches:
+            untrusted += 1
+        elif not is_disabled:
             ready += 1
 
     summary = (
         f"{ready}/{len(expected)} hooks trusted and enabled "
         f"across {len(chosen)} marketplace(s)"
     )
+    details = [
+        f"{untrusted} missing or nonmatching trust approval(s); "
+        f"{disabled} disabled hook(s); "
+        f"{pending_baseline} legacy approval(s) without a persisted "
+        "content baseline.",
+        _HOOK_TRUST_SCOPE,
+    ]
+
     if ready == len(expected):
-        return Check(
-            "Hook trust", OK, summary,
-            details=[_HOOK_TRUST_SCOPE],
-        )
+        return Check("Hook trust", OK, summary, details=details)
 
     fixes = [_HOOK_TRUST_REMEDY]
     if disabled:
@@ -1755,17 +1822,30 @@ def check_hook_trust() -> Check:
             "entries in the Codex user config, then rerun doctor. Trusting "
             "a hook does not change enabled = false."
         )
-    return Check(
-        "Hook trust", FAIL, summary,
-        details=[
-            f"{untrusted} missing or nonmatching trust hash(es); "
-            f"{disabled} disabled hook(s).",
-            "With default trust checks, affected hooks do not run. If all "
-            "plugin hooks are untrusted, there is no observation at all, "
+    if untrusted or disabled:
+        details.insert(
+            0,
+            "With default trust checks, mismatched, unapproved or disabled "
+            "hooks do not run. If none runs, there is no observation at all, "
             "even when the daemon is running.",
-            _HOOK_TRUST_SCOPE,
-        ],
-        fixes=fixes,
+        )
+        return Check(
+            "Hook trust", FAIL, summary, details=details, fixes=fixes,
+        )
+
+    details.insert(
+        0,
+        "Legacy declaration approval exists, but persisted content trust "
+        "cannot be verified. Codex may pin current content during review "
+        "or execution; doctor does not perform that migration.",
+    )
+    fixes.append(
+        "Review the plugin in interactive Codex, then rerun doctor. "
+        "A matching declaration alone does not establish persisted "
+        "content approval."
+    )
+    return Check(
+        "Hook trust", WARN, summary, details=details, fixes=fixes,
     )
 
 
@@ -2818,7 +2898,10 @@ def format_report(checks: list[Check]) -> str:
         lines.append("Setup is NOT usable — address the [FAIL] items above "
                      "before relying on observation.")
     elif counts[WARN]:
-        lines.append("Setup is usable, with the limitations noted above.")
+        lines.append(
+            "Setup has warnings — address the [WARN] items before relying "
+            "on the affected checks."
+        )
     else:
         lines.append("Setup is healthy.")
 
@@ -2830,14 +2913,7 @@ def format_report(checks: list[Check]) -> str:
 
 
 def exit_code(checks: list[Check]) -> int:
-    """0 when the setup is usable, 1 when something is genuinely broken.
-
-    Only `FAIL` is non-zero. `WARN` covers degraded-but-working — no model
-    weights, an old `transformers`, a stale installed copy — and exiting
-    non-zero for those would make the command useless in the setup script or
-    CI job that is the obvious place to put it, and would misdescribe a
-    plugin that is, in those states, still catching credentials and paths.
-    """
+    """Return 1 for FAIL; WARN and SKIP do not establish verification."""
     return 1 if any(c.status == FAIL for c in checks) else 0
 
 
@@ -2848,8 +2924,8 @@ def _build_parser() -> argparse.ArgumentParser:
                     "PLUGIN_DATA, ledger, the pinned runtime the hooks spawn "
                     "the daemon from, the daemon round trip, the detector "
                     "stack, and the copy of the plugin Codex actually runs.",
-        epilog="Exit code 0 when the setup is usable (warnings included), "
-               "1 when something is genuinely broken.",
+        epilog="Exit code 1 when a check fails; 0 otherwise. "
+               "Warnings may mean a check could not be verified.",
     )
     parser.add_argument(
         "--check-model", action="store_true",
