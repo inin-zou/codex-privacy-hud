@@ -2,10 +2,10 @@
 
 ## 0.10.12
 
-- Make doctor fail when a selected installed plugin hook lacks matching persisted trust or is explicitly disabled. Verify normalized hook-definition hashes without printing configuration values, state keys or hashes.
-- Report unreadable configuration and unsupported hook definitions as verification failures, and state the cache-selection and invocation-layer limits of the check.
-- Explain the required interactive hook-trust step in installer output and both READMEs. Document that untrusted hooks can leave an entire `codex exec` session unobserved, independently of daemon startup delays.
-- Add hermetic trust-state, hash-vector, report-privacy and documentation coverage.
+- Verify persisted hook declaration and cached-bundle content approval for Codex 0.164.0 on POSIX, including this plugin's existing legacy content baseline. Missing or mismatched approval and disabled hooks fail the check.
+- Report unsupported or undetermined Codex versions and legacy approval without a persisted content baseline as warnings rather than verified trust. Resolve the official executable without executing Privacy HUD forwarders.
+- Keep trust diagnosis read-only: never create or migrate host trust state, and never print configuration values, state keys, hashes or baseline paths.
+- Explain interactive review after hook-definition or fingerprinted bundle-content changes, fingerprint exclusions, and runtime scan timeouts. Add synthetic content vectors, version-probe, legacy-state and report-privacy coverage.
 
 Refs #99.
 

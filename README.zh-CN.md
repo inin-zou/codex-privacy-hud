@@ -110,7 +110,7 @@ python3 "$PRIVACY_HUD_BUNDLE/scripts/runtime.py" \
 curl -fsSL https://raw.githubusercontent.com/inin-zou/codex-privacy-hud/main/install.sh | sh
 ```
 
-**安装后必须完成：**以交互方式启动一次 `codex`，出现 **Hooks need review**（需要审核 hook）时，选择 **Trust all and continue**（信任全部并继续）。在 Codex 默认的 hook 信任检查下，完成此步骤前，插件的 hook 不会运行，`codex exec` 会话也完全没有监控。因此，安装程序运行 doctor 时，`Hook trust` 可能显示为 `FAIL`；请先授予信任，再重新运行 `privacy-hud-doctor`。
+**安装后必须完成：**以交互方式启动一次 `codex`，出现 **Hooks need review**（需要审核 hook）时，选择 **Trust all and continue**（信任全部并继续）。在 Codex 默认的信任检查下，未获批准的 hook 不会运行，而 `codex exec` 不会显示此交互式审核界面。doctor 在 POSIX 平台上验证 Codex 0.164.0 持久化的 hook 定义信任和插件包内容信任。批准记录缺失或不匹配，以及 hook 被禁用时，显示 `FAIL`；Codex 版本不受支持或无法确定，或者旧版批准记录没有持久化的内容基线时，显示 `WARN`。请通过 Codex 授予信任，然后重新运行 `privacy-hud-doctor`。doctor 从不创建或迁移 hook 信任状态。
 
 通过管道运行，或脚本旁没有插件包时，安装脚本会下载脚本内固定版本对应的完整插件包，并使用同一发布版本提供的校验文件验证 SHA-256。下载失败、校验失败、压缩包无效或插件包版本不符时，脚本会在创建安装清单、依赖环境、命令包装脚本或修改 Codex 配置之前退出。临时插件包会在脚本退出时删除。SHA-256 可以检测下载损坏；脚本和校验文件仍依赖对本仓库发布者的信任。
 
@@ -134,7 +134,7 @@ curl -fsSL https://raw.githubusercontent.com/inin-zou/codex-privacy-hud/main/ins
 | 6 | 下载与**你的版本完全一致**的补丁版 Codex 构建，校验 SHA-256 并解压，再将官方 `codex-code-mode-host` 链接到同一目录。压缩包只包含 `codex`；Code Mode 需要同目录下的这个程序，应使用相同版本的官方程序。 | `~/.local/share/codex-privacy-hud/<version>/` |
 | 7 | 写入名为 `codex` 的小型转发脚本（forwarder）。如果需要，则将 `~/.local/bin` 加入 shell 的 `PATH`。 | `~/.local/bin/codex` |
 | 8 | 在 Codex 配置的 `[tui].status_line` 中加入 `privacy`。如果你从未设置过这个键，则以 Codex 默认值创建。 | `~/.codex/config.toml` |
-| 9 | 运行 `privacy-hud-doctor` 并输出检查表。已安装的 hook 尚未获得信任时，`Hook trust` 会显示为 `FAIL`；请完成交互式信任步骤后重新运行 doctor。其他失败项也需要处理。 | — |
+| 9 | 运行 `privacy-hud-doctor` 并输出检查表。在受支持的 Codex 版本上，hook 批准记录缺失或不匹配，以及 hook 被禁用时，显示 `FAIL`。版本不受支持或无法确定，以及旧版批准记录没有内容基线时，显示 `WARN`。请完成交互式审核后重新运行 doctor，并处理其他失败项。 | — |
 
 CI 发布的二进制**未经签名，也未经公证**。安装脚本会自行移除隔离属性。SHA-256 校验只能防止下载损坏，无法防范发布内容遭篡改。
 
@@ -377,7 +377,7 @@ flowchart TD
 20. 只有 hook 和受支持的解析器提供明确身份时，才区分具体接收方。其他接收方保留为未解析状态。知道身份本身不能证明数据已送达或继续转发。（[详情](docs/known-limits.md#20-a-destination-is-a-boundary-category-not-a-recipient)）
 21. **出站调用的深度扫描尽力而为。** 模型串行执行，而出站调用一旦错过 hook 时限就会被判为拒绝（I6）。出站扫描使用基于剩余预算的请求超时，并以完成时间不晚于截止点作为采纳结果的必要条件；两者都不保证实际耗时。详见 `engine.TIER3_EGRESS_BUDGET`。（实测：在 1.0 秒预算下，一次调用到 1.25 秒才返回。）同一时间最多允许一个出站扫描工作线程运行。准入是非阻塞的；工作线程会一直占用其名额直到退出，即使调用方已放弃等待也是如此。扫描缺口是指本应适用的深度扫描未提供被采纳的结果。此时调用仅依据快速检测层的结果继续处理，与引入这项功能之前的所有出站调用相同。扫描缺口可能漏掉原本会触发拦截或脱敏的发现。每次观测中的扫描缺口都会记录，并按会话计数，包括未产生事件行的观测。因此会话不再显示为已完全验证，但审计无法指出具体是哪些调用。（[详情](docs/known-limits.md#21-on-an-outbound-call-the-deep-scan-is-best-effort)）
 22. **提示词凭据暂缓的范围有限。** 只有提示词文本中受支持的凭据格式才会触发暂缓。等待至少 2 秒，并在 5 分钟内重新提交，即可确认。图片、附件、熵检测结果、私钥头部和第三级 NER 检测结果不会触发此暂缓。守护进程没有响应时，入站提示词仍会放行。（[详情](docs/known-limits.md#22-credential-prompt-holds-have-a-narrow-scope)）
-23. **未获信任的 hook 意味着完全没有观测。** 在默认信任检查下，如果插件的所有 hook 都未获信任，整个会话都没有监控，`codex exec` 也不例外；即使守护进程正在运行也无济于事。仅信任部分 hook 时，未获信任的 hook 所对应的事件不会被观测。请以交互方式启动 `codex`，选择 **Trust all and continue**（信任全部并继续）。hook 定义发生变化后，需要重新审核。这与限制 1 中的冷启动监控空档不同。（[详情](docs/known-limits.md#23-untrusted-hooks-mean-no-observation-at-all)）
+23. **未获信任的 hook 意味着完全没有观测。** 在默认信任检查下，如果插件的所有 hook 都未通过运行许可检查，整个会话都没有监控，`codex exec` 也不例外；即使守护进程正在运行也无济于事。仅批准部分 hook 时，受影响的事件不会被观测。请以交互方式启动 `codex`，选择 **Trust all and continue**（信任全部并继续）。在 Codex 0.164.0 中，hook 定义或参与指纹计算的插件包内容发生变化后，需要重新审核。doctor 仅对明确支持的版本验证持久化信任，并且不会创建旧版信任基线。批准记录匹配并不保证运行时的内容扫描和命令能在 hook 超时期限内完成。这与限制 1 中的冷启动监控空档不同。（[详情](docs/known-limits.md#23-untrusted-hooks-mean-no-observation-at-all)）
 
 ## 配置
 
