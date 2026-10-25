@@ -39,9 +39,16 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
+import json
 import os
 import re
+import stat
+import subprocess
+import time
+import tomllib
 from pathlib import Path
+from typing import NamedTuple
 
 # --------------------------------------------------------------------- #
 # Identity: the two manifests, and the directory name Codex derives
@@ -308,6 +315,401 @@ def codex_home() -> Path:
     if override:
         return Path(override).expanduser()
     return Path.home() / ".codex"
+
+
+CONFIG_FILENAME = "config.toml"
+PLUGIN_HOOKS_FILE = "hooks/hooks.json"
+
+HOOK_EVENT_LABELS = {
+    "SessionStart": "session_start",
+    "UserPromptSubmit": "user_prompt_submit",
+    "PreToolUse": "pre_tool_use",
+    "PostToolUse": "post_tool_use",
+    "SubagentStart": "subagent_start",
+    "SubagentStop": "subagent_stop",
+    "PreCompact": "pre_compact",
+    "SessionEnd": "session_end",
+}
+
+
+def user_config_path() -> Path:
+    """The default user config; invocation-specific layers are not resolved."""
+    return codex_home() / CONFIG_FILENAME
+
+
+def _normalized_command_identity(
+        event: str, group: dict, handler: dict) -> dict:
+    """Codex 0.155.1 and 0.164.0 identity for the command schema we ship.
+
+    Only 0.164.0 is admitted by the doctor's version-to-scheme table.
+    See hooks/src/engine/discovery.rs and config/src/fingerprint.rs.
+    Unsupported schema is refused, never approximated.
+    """
+    if set(group) - {"matcher", "hooks"}:
+        raise ValueError("unsupported hook group")
+    allowed = {"type", "command", "timeout", "async", "statusMessage"}
+    if set(handler) - allowed or handler.get("type") != "command":
+        raise ValueError("unsupported hook handler")
+
+    command = handler.get("command")
+    if not isinstance(command, str) or not command.strip():
+        raise ValueError("invalid hook command")
+
+    timeout = handler.get("timeout")
+    if timeout is not None and (
+        type(timeout) is not int or not 0 <= timeout <= 2**63 - 1
+    ):
+        raise ValueError("invalid hook timeout")
+    if event == "SessionEnd":
+        timeout = min(3, max(1, 1 if timeout is None else timeout))
+    else:
+        timeout = max(1, 600 if timeout is None else timeout)
+
+    asynchronous = handler.get("async", False)
+    if type(asynchronous) is not bool:
+        raise ValueError("invalid hook async field")
+    status = handler.get("statusMessage")
+    if status is not None and not isinstance(status, str):
+        raise ValueError("invalid hook status message")
+
+    matcher = group.get("matcher")
+    if matcher is not None and not isinstance(matcher, str):
+        raise ValueError("invalid hook matcher")
+    if event == "UserPromptSubmit":
+        matcher = None
+    elif matcher not in (None, ".*"):
+        raise ValueError("unsupported hook matcher")
+
+    normalized = {
+        "type": "command",
+        "command": command,
+        "timeout": timeout,
+        "async": asynchronous,
+    }
+    if status is not None:
+        normalized["statusMessage"] = status
+    identity = {
+        "event_name": HOOK_EVENT_LABELS[event],
+        "hooks": [normalized],
+    }
+    if matcher is not None:
+        identity["matcher"] = matcher
+    return identity
+
+
+def plugin_hook_hashes(bundle: Path, marketplace: str) -> dict[str, str]:
+    """Expected persisted keys and exact hashes for one installed bundle.
+
+    This deliberately supports our command-hook schema, not arbitrary Codex
+    hooks. Empty, incomplete and unsupported bundles cannot pass doctor.
+    Nothing is executed and no command or digest is logged.
+    """
+    with (bundle / PLUGIN_HOOKS_FILE).open(
+            "r", encoding="utf-8") as handle:
+        document = json.load(handle)
+    if not isinstance(document, dict):
+        raise ValueError("invalid hook document")
+    if set(document) - {"description", "hooks"}:
+        raise ValueError("unsupported hook document")
+    if (
+        document.get("description") is not None
+        and not isinstance(document["description"], str)
+    ):
+        raise ValueError("invalid hook description")
+    events = document.get("hooks")
+    if not isinstance(events, dict) or set(events) != KNOWN_EVENTS:
+        raise ValueError("incomplete hook event set")
+
+    expected: dict[str, str] = {}
+    source = f"{PLUGIN_NAME}@{marketplace}:{PLUGIN_HOOKS_FILE}"
+    for event, groups in events.items():
+        if not isinstance(groups, list) or not groups:
+            raise ValueError("invalid hook groups")
+        for group_index, group in enumerate(groups):
+            if not isinstance(group, dict):
+                raise ValueError("invalid hook group")
+            handlers = group.get("hooks")
+            if not isinstance(handlers, list) or not handlers:
+                raise ValueError("invalid hook handlers")
+            for handler_index, handler in enumerate(handlers):
+                if not isinstance(handler, dict):
+                    raise ValueError("invalid hook handler")
+                identity = _normalized_command_identity(event, group, handler)
+                canonical = json.dumps(
+                    identity,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+                key = (
+                    f"{source}:{HOOK_EVENT_LABELS[event]}:"
+                    f"{group_index}:{handler_index}"
+                )
+                expected[key] = "sha256:" + hashlib.sha256(canonical).hexdigest()
+    return expected
+
+
+# Exact verified release, not a compatibility range.
+HOOK_TRUST_SCHEMES = {
+    "0.164.0": "declaration-and-content-v1",
+}
+
+CODEX_VERSION_TIMEOUT = 2.0
+PLUGIN_FINGERPRINT_BUDGET = 5.0
+FORWARDER_MARKER = b"# codex-privacy-hud forwarder"
+
+
+def hook_trust_scheme(version: str | None) -> str | None:
+    if os.name != "posix":
+        return None
+    return HOOK_TRUST_SCHEMES.get(version or "")
+
+
+def _official_codex_candidate() -> Path | None:
+    seen: set[Path] = set()
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        candidate = Path(directory or ".") / "codex"
+        try:
+            resolved = candidate.resolve(strict=True)
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+
+            # Known installer-owned patched binary layout.
+            parts = resolved.parts
+            if any(
+                parts[index:index + 2] == ("share", PLUGIN_NAME)
+                for index in range(len(parts) - 1)
+            ):
+                continue
+            if not os.access(resolved, os.X_OK):
+                continue
+
+            fd = os.open(
+                resolved,
+                os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+            )
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    continue
+                header = os.read(fd, 512)
+            finally:
+                os.close(fd)
+            if any(
+                line.startswith(FORWARDER_MARKER)
+                for line in header.splitlines()[:2]
+            ):
+                continue
+            return resolved
+        except (OSError, RuntimeError, ValueError):
+            continue
+    return None
+
+
+def _probe_official_codex_version() -> str | None:
+    if os.name != "posix":
+        return None
+    executable = _official_codex_candidate()
+    if executable is None:
+        return None
+    try:
+        result = subprocess.run(
+            [str(executable), "--version"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=CODEX_VERSION_TIMEOUT,
+            check=False,
+            cwd="/",
+            env={
+                "PATH": "/usr/bin:/bin",
+                "HOME": "/dev/null",
+                "CODEX_HOME": "/dev/null",
+                "LC_ALL": "C",
+                "LANG": "C",
+            },
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0 or len(result.stdout) > 256:
+        return None
+    match = re.fullmatch(
+        rb"codex-cli ((?:0|[1-9][0-9]*)\."
+        rb"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))\r?\n?",
+        result.stdout,
+    )
+    return match.group(1).decode("ascii") if match else None
+
+
+def official_codex_version() -> str | None:
+    """Probe the selected non-forwarder executable; never cache across runs."""
+    return _probe_official_codex_version()
+
+
+def trust_config_path() -> Path:
+    """Match 0.164's default user-layer identity, without resolving the file."""
+    override = os.environ.get("CODEX_HOME")
+    if override:
+        # Codex checks the literal override; it does not expand '~' here.
+        directory = Path(override).resolve(strict=True)
+        if not directory.is_dir():
+            raise ValueError("invalid Codex home")
+    else:
+        directory = Path(os.path.abspath(Path.home() / ".codex"))
+    return directory / CONFIG_FILENAME
+
+
+def legacy_trust_path(config_file: Path, plugin_id: str) -> Path:
+    if os.name != "posix" or not config_file.is_absolute():
+        raise ValueError("unsupported config path identity")
+    digest = hashlib.sha256()
+    for part in (
+        os.fsencode(str(config_file)),
+        plugin_id.encode("utf-8"),
+    ):
+        digest.update(len(part).to_bytes(8, "little"))
+        digest.update(part)
+    return config_file.parent / ".hook-trust" / digest.hexdigest()
+
+
+def read_legacy_baseline(config_file: Path, plugin_id: str) -> str | None:
+    path = legacy_trust_path(config_file, plugin_id)
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read()
+    except FileNotFoundError:
+        return None
+    # Rust read_to_string is strict UTF-8 and does not strip whitespace.
+    return raw.decode("utf-8")
+
+
+def _excluded_bundle_name(name: str) -> bool:
+    try:
+        text = os.fsencode(name).decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return (
+        text in {"__pycache__", ".venv"}
+        or text.endswith(".pyc")
+        or text.endswith(".egg-info")
+    )
+
+
+def plugin_content_hash(
+    root: Path, *, budget: float = PLUGIN_FINGERPRINT_BUDGET,
+) -> str:
+    """Codex 0.164 POSIX fingerprint; cancellation is cooperative."""
+    if os.name != "posix":
+        raise ValueError("unsupported path encoding")
+
+    deadline = time.monotonic() + budget
+
+    def check_deadline() -> None:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("bundle fingerprint budget exceeded")
+
+    check_deadline()
+    if not stat.S_ISDIR(root.lstat().st_mode):
+        raise ValueError("plugin root is not a directory")
+
+    digest = hashlib.sha256(b"codex-plugin-bundle-v1")
+    pending = [root]
+    while pending:
+        check_deadline()
+        path = pending.pop()
+        relative = path.relative_to(root)
+        if relative.parts and _excluded_bundle_name(path.name):
+            continue
+
+        name = b"" if path == root else os.fsencode(str(relative))
+        digest.update(len(name).to_bytes(8, "little"))
+        digest.update(name)
+        metadata = path.lstat()
+
+        if stat.S_ISDIR(metadata.st_mode):
+            digest.update(b"directory")
+            entries = []
+            with os.scandir(path) as iterator:
+                for entry in iterator:
+                    check_deadline()
+                    entries.append(Path(entry.path))
+            entries.sort(key=lambda entry: os.fsencode(entry.name))
+            pending.extend(reversed(entries))
+        elif stat.S_ISREG(metadata.st_mode):
+            digest.update(b"file")
+            length = metadata.st_size
+            digest.update(length.to_bytes(8, "little"))
+            check_deadline()
+            fd = os.open(
+                path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+            )
+            try:
+                opened = os.fstat(fd)
+                if not stat.S_ISREG(opened.st_mode):
+                    raise ValueError("unsupported plugin entry")
+                remaining = length + 1
+                total = 0
+                while remaining:
+                    check_deadline()
+                    chunk = os.read(fd, min(65536, remaining))
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    remaining -= len(chunk)
+                    digest.update(chunk)
+                if total != length:
+                    raise ValueError("plugin file changed while fingerprinting")
+            finally:
+                os.close(fd)
+        else:
+            raise ValueError("unsupported plugin entry")
+
+    check_deadline()
+    return "sha256:" + digest.hexdigest()
+
+
+class HookState(NamedTuple):
+    trusted_hash: str | None = None
+    trusted_content_hash: str | None = None
+    enabled: bool | None = None
+
+
+def read_hook_states(
+    expected_keys: set[str],
+) -> dict[str, HookState]:
+    """Project only this plugin's exact expected keys; never return raw TOML."""
+    try:
+        with trust_config_path().open("rb") as handle:
+            document = tomllib.load(handle)
+    except FileNotFoundError:
+        return {}
+
+    hooks = document.get("hooks", {})
+    if not isinstance(hooks, dict):
+        raise ValueError("invalid hook state")
+    states = hooks.get("state", {})
+    if not isinstance(states, dict):
+        raise ValueError("invalid hook state")
+
+    selected: dict[str, HookState] = {}
+    for key in expected_keys:
+        entry = states.get(key)
+        if entry is None:
+            continue
+        if not isinstance(entry, dict):
+            raise ValueError("invalid hook state")
+        declaration = entry.get("trusted_hash")
+        content = entry.get("trusted_content_hash")
+        enabled = entry.get("enabled")
+        if declaration is not None and not isinstance(declaration, str):
+            raise ValueError("invalid hook state")
+        if content is not None and not isinstance(content, str):
+            raise ValueError("invalid hook state")
+        if enabled is not None and type(enabled) is not bool:
+            raise ValueError("invalid hook state")
+        selected[key] = HookState(declaration, content, enabled)
+    return selected
 
 
 def plugin_data_root() -> Path:

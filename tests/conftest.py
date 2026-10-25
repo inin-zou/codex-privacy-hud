@@ -118,3 +118,12 @@ def pytest_collection_modifyitems(items):
     from tier_policy import mark_slow_items
 
     mark_slow_items(items)
+
+
+@pytest.fixture(autouse=True)
+def stub_official_codex_version(monkeypatch):
+    from privacy_hud import codex
+
+    monkeypatch.setattr(
+        codex, "official_codex_version", lambda: None, raising=False,
+    )

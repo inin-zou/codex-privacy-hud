@@ -227,6 +227,28 @@ A hold returns only decision and reason. Additional context returned alongside a
 
 Version-2 accounting records an issued denial as prevented with zero points, while host enforcement remains unresolved. Resubmission authorization does not establish model-context admission. Legacy held rows use no deduplication hash so a later permitted crossing can be recorded separately. Other legacy deduplication limitations remain.
 
+## 23. Untrusted hooks mean no observation at all.
+
+With Codex's default hook-trust checks, installing the plugin is not enough. If none of Privacy HUD's hooks is admitted, the whole session has no observation at all, even when the daemon is already running. Partial approval leaves affected events unobserved. There may be no plugin-generated warning because the hook that would produce it never runs. An empty ledger is not evidence of no disclosure.
+
+Open `codex` interactively and choose **Trust all and continue** when **Hooks need review** appears. `codex exec` does not present that interactive review. In Codex 0.164.0, changed normalized hook definitions or fingerprinted bundle contents require review again. Approval stores the declaration hash and content hash separately.
+
+Codex fingerprints the cached plugin bundle, including relative entry names, directories and regular-file contents. It excludes entries named `__pycache__` or `.venv`, and names ending in `.pyc` or `.egg-info`, at any depth. These exclusions also prune directories. Other symlinks and unsupported entry types fail fingerprinting. This is not a checksum of every external file or runtime artifact the command may execute.
+
+Legacy declaration-only approvals use a persistent bundle baseline under the user config directory's `.hook-trust` directory. Codex can create that baseline from current content during review or execution. Doctor reads only this plugin's exact baseline file when inspecting that state; it never creates, updates or migrates trust state. A missing legacy baseline therefore reports `WARN`, not verified trust. A mismatched legacy baseline reports `FAIL`. A matching modern content approval takes precedence over an older baseline's differing value, although Codex still accesses the baseline during verification.
+
+A hook with `enabled = false` does not run. Trusting it does not change that setting: set `enabled = true` for the affected plugin hook-state entry in the Codex user config, then rerun doctor.
+
+Doctor implements the Codex 0.164.0 trust scheme on POSIX. Other versions, including 0.154.0 and unverified newer releases, report `WARN`: hook trust cannot be verified for that version. An undetermined official executable version also reports `WARN`. Doctor selects an executable from PATH while skipping Privacy HUD forwarders, then runs a bounded `--version` probe with a fixed environment. It does not execute a Privacy HUD forwarder for this probe.
+
+On a supported version, doctor compares declaration and content approval for one selected cached bundle per marketplace. It uses the existing Plugin install version-selection convention; that is not proof of the bundle loaded by an already-running session. Missing approval, mismatched approval, disabled hooks, unreadable state and unsupported bundle entries report `FAIL`. Exhausting the diagnostic scan budget reports `WARN`. Exit code zero does not mean that a warning was verified.
+
+The check reads the default user config at `$CODEX_HOME/config.toml`, or `~/.codex/config.toml` when `CODEX_HOME` is unset. An explicit Codex home is canonicalized as Codex does; the config file itself is not canonicalized for the legacy baseline identity. Reports contain counts and version information, never configuration values, state keys, hashes or baseline paths. Project configuration cannot grant hook trust. Doctor does not reproduce alternate user-config selection, profiles, session flags, managed-only policy or invocation-only `--dangerously-bypass-hook-trust`. It does not recommend or assume bypass.
+
+Codex scans bundle contents again before each hook executes, using the hook's timeout budget. Privacy HUD's hooks allow 5 seconds, except SessionEnd at 3 seconds; scanning leaves less time for the command. Matching persisted trust does not guarantee runtime completion, unchanged files after diagnosis, or successful creation of a missing baseline. The diagnostic scan budget is cooperative and does not bound a blocked filesystem operation.
+
+This is separate from limit 1: granting trust permits hooks to run but does not eliminate daemon startup delays or other observation gaps. The 0.164.0 behavior described here is based on source inspection and synthetic verification, not a new live-session test.
+
 ## Note on tests
 
 `cargo test -p codex-tui` and the upstream `insta` picker snapshots have not been run anywhere.
