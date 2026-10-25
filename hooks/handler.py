@@ -55,6 +55,9 @@ SUBAGENT_TOOLS = (
     "multi_agent_v1send_input",
     "send_message",
     "followup_task",
+    "collaborationspawn_agent",
+    "collaborationsend_message",
+    "collaborationfollowup_task",
 )
 
 # --- lazy daemon start ------------------------------------------------------

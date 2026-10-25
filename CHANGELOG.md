@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.10.11
+
+- Recognize Fernet-format encrypted message fields in supported delegation envelopes, including flattened collaboration hook names.
+- Exclude only the recognized encrypted message field from detection. Continue scanning supported plaintext delegation content without changing credential detector rules.
+- Record incomplete B2 scan coverage through the existing unavailable state and return an explicit warning. Do not create findings or persist tokens for excluded fields.
+- Correct delegation coverage claims using Codex 0.154.0 and 0.159.3 source evidence. Inherited history and delivery remain unobserved.
+- Document that PostToolUse scans results rather than echoed arguments. The synthetic canonical task name `/root/filename_check` independently triggers the credential entropy heuristic; this release does not claim to eliminate that separate false positive.
+
+Refs #105, #47.
+
 ## 0.10.9
 
 - Extract shared policy and session services below the daemon and user-facing adapters, and move session-query and policy-update clients into the runtime client layer.
@@ -85,7 +95,7 @@ Refs #44, #54.
 
 ## 0.9.5
 
-- Scan explicit parent delegation text from supported spawn, send-input, message, and follow-up PreToolUse hooks in Codex 0.154.0, 0.155.0, and 0.155.1.
+- Add scanning of explicit parent delegation fields from supported spawn, send-input, message, and follow-up PreToolUse hooks. Correction in 0.10.11: this observes plaintext fields only; encrypted V2 message transport was not inspectable as delegated text.
 - Record B2 observations and findings with unresolved intended recipients in version-2 accounting, without confirmed disclosure charges. Record legacy findings as zero-cost detections.
 - Keep delegation observation-only: no denial, rewrite, or application of saved mask or origin rules. Preserve fail-open B2 failure handling, including messages containing URLs.
 - Leave SubagentStart content and child accounting activation unchanged. Defer fork-mode storage, lifecycle identity storage, post-result identity correlation, and stop-message scanning; inherited content and actual delivery remain unobserved.

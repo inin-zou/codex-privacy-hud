@@ -160,6 +160,8 @@ record what was read, or what was mentioned?), and burying that decision
 inside a fixture would settle it without anyone noticing. It belongs in the
 accounting work, not here.
 
+The delegation transport tests in `tests/test_encrypted_delegation.py` use generated, non-cryptographic Fernet-format values and temporary ledgers. They test field-scoped exclusion, incomplete coverage, unchanged plaintext credential detection, and absence of token persistence. They do not expand this committed detector corpus or change its zero tolerance and strict expected failures. A separate synthetic characterization shows that the quoted task name `/root/filename_check` triggers the credential entropy heuristic; the encrypted-input change does not address that metadata false positive.
+
 ## Re-running the session-level check
 
 Still by hand: it needs a live Codex session, which CI has neither the
